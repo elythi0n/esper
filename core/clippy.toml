@@ -1,0 +1,8 @@
+# The no-panic rule exists because a panic reachable from the network is a
+# denial of service. That reasoning does not apply to test code, where a failed
+# assertion is the entire point, so unwrap/expect/panic are permitted there.
+#
+# Build scripts are exempted individually at the top of the file, with a reason.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

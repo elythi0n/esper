@@ -1,0 +1,26 @@
+# build artifacts
+/build/
+/dist/
+/core/target/
+
+# Rust
+**/*.rs.bk
+/core/fuzz/target/
+/core/fuzz/corpus/
+/core/fuzz/artifacts/
+
+# Go
+*.test
+*.out
+
+# editor/OS noise
+*.swp
+*~
+.DS_Store
+
+# Arch packaging (makepkg) outputs
+/pkg/
+/src/
+*.pkg.tar.zst
+*.pkg.tar.xz
+ownview-*.tar.gz

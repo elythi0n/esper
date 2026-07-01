@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The full build and test suite on every platform OwnView targets. All three
+  # are real targets, so all three are tested from the first commit rather than
+  # bolted on when the port happens.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Rust — format
+        working-directory: core
+        run: cargo fmt --all -- --check
+
+      - name: Rust — clippy
+        working-directory: core
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust — test
+        working-directory: core
+        run: cargo test --workspace
+
+      - name: Go — format
+        shell: bash
+        run: test -z "$(gofmt -s -l . | tee /dev/stderr)"
+
+      - name: Go — vet
+        run: go vet ./...
+
+      - name: Go — test
+        run: go test ./...
+
+      # The cross-language contract. Both implementations decode the same
+      # committed fixtures and must re-encode them byte-identically; the reason
+      # codes are parsed out of the Rust source and compared to Go's. Two
+      # independent implementations of one protocol drift silently, and this is
+      # the mechanism that stops it.
+      - name: Cross-language wire compatibility
+        run: go test ./internal/proto/ -run 'Fixture|Wire|FieldOrder|ReasonCodesMatchRust' -v
+
+  # Race detector and coverage, Linux only — it is slow and platform-independent.
+  race:
+    name: race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race -cover ./...
+
+  golangci:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  # Licences, advisories, banned crates and unknown sources. A malicious
+  # dependency reaches everything silently, so this gates every change.
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: core/Cargo.toml
+
+  # This repository must be self-contained: it is developed inside a planning
+  # tree that is never published, and a public repo linking into a private
+  # folder is a broken link at best.
+  isolation:
+    name: repository is self-contained
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-isolation.sh
+
+  # Both halves are built by different toolchains from one VERSION file. If they
+  # disagree about the release or the protocol, the seam is broken in a way no
+  # unit test catches — each half passes its own suite.
+  smoke:
+    name: build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make build
+      - run: ./scripts/smoke.sh
+
+  # Memory-safety checks. There is no FFI yet, so these are cheap now and in
+  # place before the crates that need them arrive — adding them after the code
+  # is written is dramatically harder.
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: miri test
+        working-directory: core
+        run: cargo miri test --workspace
+
+  # The frame decoder is the first parser attacker-controlled bytes reach. A
+  # short run on every change catches a regression; long runs happen out of band.
+  fuzz:
+    name: fuzz (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - run: cargo install cargo-fuzz --locked
+      - name: frame_decode, 60s
+        working-directory: core
+        run: cargo fuzz run frame_decode -- -max_total_time=60

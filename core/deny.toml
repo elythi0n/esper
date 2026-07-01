@@ -1,0 +1,57 @@
+# Supply-chain policy for the Rust dependency tree.
+#
+# A malicious or abandoned dependency is the most under-defended threat in most
+# open-source projects, and it reaches everything silently. This file is the
+# mechanical half of the answer; `cargo vet` is the other half.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# No ignores. An advisory we are choosing to live with must be argued for here,
+# in writing, with an expiry — not silenced quietly.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only. OwnView is MIT; a copyleft dependency would change
+# what downstream users may do, which is not a decision a transitive dependency
+# gets to make for them.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace-internal path dependencies have no version by design. They are our
+# own code, so they are not the supply-chain risk `wildcards` exists to catch.
+allow-wildcard-paths = true
+# Two crates doing the same job means two parsers, two sets of bugs, and a
+# question about which one is actually in the path. Crypto is the case where
+# that matters most, so it is banned outright rather than warned about:
+# ownview-crypto is the only crate permitted to bring one in, and having a
+# second implementation of a primitive in the tree is a bug by definition.
+deny = [
+    # Unmaintained or superseded, and easy to acquire transitively.
+    { name = "openssl", reason = "we use rustls; a second TLS stack is a second attack surface" },
+    { name = "openssl-sys", reason = "as above" },
+    { name = "time", version = "<0.3", reason = "RUSTSEC-2020-0071" },
+]
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,20 @@
+[package]
+name = "ownview-proto"
+description = "OwnView wire types, CBOR framing, and error codes. Depends on nothing else in the workspace."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ciborium.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json = "1"

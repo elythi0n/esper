@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+ownview-proto = { path = "crates/ownview-proto" }
+ownview-buildinfo = { path = "crates/ownview-buildinfo" }
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# A panic reachable from the network is a denial of service. These are the
+# panicking constructs that matter; see docs on the engine's error policy.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+# Deliberately NOT enabled: clippy::integer_division. It fires on every
+# legitimate integer `/` — bitrate math, frame timing, buffer sizing, calendar
+# arithmetic — so it would live permanently behind `allow`, and a lint that is
+# always allowed teaches you to allow lints. Truncation risk is covered by
+# release overflow checks and by reviewing the arithmetic that matters.
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+# Overflow checks stay ON in release: arithmetic on attacker-influenced values
+# must trap rather than wrap. The cost is a branch; the alternative is a class
+# of silent bugs in a security product.
+[profile.release]
+overflow-checks = true
+debug = 1

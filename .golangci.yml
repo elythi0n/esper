@@ -1,0 +1,92 @@
+# golangci-lint configuration for ownview.
+#
+# The intent is to enforce the standard Go hygiene linters without picking
+# stylistic fights. If a check turns into noise, prefer fixing the code or
+# disabling at the call site (//nolint:linter-name // reason) over relaxing
+# the config.
+#
+# Run locally:
+#   golangci-lint run
+#
+# Schema: golangci-lint v2.
+
+version: "2"
+
+run:
+  timeout: 3m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck       # unchecked errors are silent bugs
+    - govet          # the standard `go vet` checks
+    - ineffassign    # detect assignments whose value is never read
+    - staticcheck    # the big one — bugs, performance, idioms
+    - unused         # unused vars, funcs, types, fields
+    - misspell       # common typos in comments and strings
+    - gocritic       # extra checks (mostly correctness-focused)
+    - revive         # successor to golint, configurable
+
+  settings:
+    misspell:
+      # Use US locale: third-party APIs we depend on (e.g. lipgloss.Color)
+      # are American-spelled, so a UK locale would generate hundreds of false
+      # positives we can't fix. Keep our own prose American to match.
+      locale: US
+
+    revive:
+      # Note: the `exported` rule (requires godoc on every exported symbol)
+      # is deliberately omitted. This project has no public Go API — all
+      # packages live under internal/, so exported symbols are only consumed
+      # by sibling internal packages. Doc-comment churn there isn't worth it.
+      rules:
+        - name: var-naming
+        - name: error-return
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: errorf
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+
+    gocritic:
+      # Disable a few overly opinionated checks. Reuse of the same variable name
+      # for shadowing is sometimes the clearest thing.
+      disabled-checks:
+        - ifElseChain
+        - singleCaseSwitch
+
+  exclusions:
+    rules:
+      # Test files routinely have less-strict expectations around docs and
+      # ignored returns. Mute the most noisy of those there.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - revive
+
+formatters:
+  enable:
+    - gofmt          # enforce gofmt
+    - goimports      # enforce import grouping
+  settings:
+    goimports:
+      # Group local imports under the module path separately from third-party.
+      local-prefixes:
+        - github.com/elythi0n/ownview
+
+issues:
+  # Don't hide issues just because they appear many times.
+  max-issues-per-linter: 0
+  max-same-issues: 0
