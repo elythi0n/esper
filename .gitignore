@@ -24,3 +24,6 @@
 *.pkg.tar.zst
 *.pkg.tar.xz
 ownview-*.tar.gz
+
+# handshake spike: throwaway, deleted when its ADR lands
+/core/spikes/*/target/

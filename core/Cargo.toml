@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["fuzz"]
+exclude = ["fuzz", "spikes/handshake"]
 
 [workspace.package]
 version = "0.0.0"
@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 ownview-proto = { path = "crates/ownview-proto" }
 ownview-crypto = { path = "crates/ownview-crypto" }
+ownview-transport = { path = "crates/ownview-transport" }
 ownview-buildinfo = { path = "crates/ownview-buildinfo" }
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
