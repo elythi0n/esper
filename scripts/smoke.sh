@@ -40,9 +40,9 @@ check "broker agrees with the control plane on the protocol version" "$brk_proto
 set +e; "$BIN/ownview" definitely-not-a-command >/dev/null 2>&1; rc=$?; set -e
 check "ownview rejects an unknown command with exit 1" "$rc" "1"
 
-# ADR 0002 made mechanical: OwnView operates no infrastructure, so a shipped
-# binary must contain nothing it could phone home to. This is the claim's proof,
-# and it is the reason the claim is checkable rather than merely stated.
+# OwnView operates no infrastructure, so a shipped binary must contain nothing
+# it could phone home to. This check is that claim's proof, and the reason the
+# claim is checkable rather than merely stated.
 #
 # What counts as an endpoint is deliberately narrow: a scheme-prefixed URL, or a
 # routable IP literal. A bare domain does not, because Go embeds every module

@@ -6,8 +6,8 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
-# A spike, not shipped code. It exists to answer the question in
-# docs/decisions/0010 empirically and is deleted once the ADR lands.
+# A spike, not shipped code. It measures whether hybrid post-quantum key
+# agreement engages over QUIC, and is deleted once that is settled.
 [lints.clippy]
 unwrap_used = "allow"
 expect_used = "allow"

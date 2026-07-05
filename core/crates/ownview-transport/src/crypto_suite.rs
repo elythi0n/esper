@@ -1,9 +1,8 @@
 //! The cryptographic configuration of every OwnView connection.
 //!
-//! There is one key exchange group and there is no list. See
-//! [ADR 0012](../../../../docs/decisions/0012-one-key-exchange-group.md) — or
-//! rather, see the reasoning restated below, because this crate ships and that
-//! document does not.
+//! There is one key exchange group and there is no list. The reasoning is
+//! stated here in full rather than referenced, because this is the file someone
+//! reads when they are about to add a second group.
 //!
 //! # Why one group
 //!
@@ -54,7 +53,7 @@ pub fn provider() -> CryptoProvider {
 mod tests {
     use super::*;
 
-    /// The property ADR 0012 exists to guarantee. Configuration drifts; a
+    /// The property this module exists to guarantee. Configuration drifts; a
     /// failing test does not.
     #[test]
     fn exactly_one_key_exchange_group_is_offered() {
@@ -62,8 +61,9 @@ mod tests {
         assert_eq!(
             p.kx_groups.len(),
             1,
-            "offering more than one group reintroduces the downgrade path that \
-             ADR 0012 removed; the extra groups are: {:?}",
+            "offering more than one group reintroduces a silent downgrade path; \
+             read this module's documentation before changing it. \
+             Extra groups: {:?}",
             p.kx_groups.iter().map(|g| g.name()).collect::<Vec<_>>()
         );
     }
@@ -91,7 +91,7 @@ mod tests {
         assert_eq!(
             format!("{:?}", KX_GROUP.name()),
             "X25519MLKEM768",
-            "the key exchange group changed; ADR 0012 pins this deliberately"
+            "the key exchange group changed; it is pinned deliberately"
         );
     }
 

@@ -59,7 +59,10 @@ done < <(files)
 
 # 2. Filenames that only exist in the planning tree. Mentioning one means a
 #    reader is being sent somewhere they cannot go.
-planning_only='TRACKER\.md|docs/decisions/|docs/design/|docs/findings/|tracker-sync'
+# Names that only exist in the planning tree. A path is the obvious case; a
+# bare "ADR 0012" is the same failure with no slash in it — the reader is still
+# being sent somewhere they cannot go.
+planning_only='TRACKER\.md|docs/decisions/|docs/design/|docs/findings/|tracker-sync|ADR [0-9]{4}'
 while IFS= read -r f; do
   [ -f "$f" ] || continue
   case "$f" in scripts/check-isolation.sh) continue ;; esac

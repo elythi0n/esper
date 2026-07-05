@@ -1,9 +1,8 @@
 //! Handshake spike: does QUIC + TLS 1.3 give us a hybrid post-quantum key
 //! agreement, and does it actually engage?
 //!
-//! [ADR 0010](../../docs/decisions/0010-hybrid-post-quantum.md) requires hybrid
-//! PQ key agreement from v1. This measures whether the TLS path delivers it in
-//! practice, because a handshake that *configures* X25519MLKEM768 and then
+//! OwnView requires hybrid post-quantum key agreement from its first release.
+//! This measures whether the TLS path delivers it in practice, because a handshake that *configures* X25519MLKEM768 and then
 //! silently negotiates classical X25519 is worse than no PQ at all — it buys a
 //! claim without the property.
 //!

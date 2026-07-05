@@ -19,7 +19,7 @@ tracing.workspace = true
 # `prefer-post-quantum` is a rustls *default* feature. It is named explicitly
 # because a `default-features = false` anywhere in the tree would silently move
 # X25519MLKEM768 to last place in the offer list and hand us classical key
-# agreement — see ADR 0012 and the handshake spike finding.
+# agreement. See the documentation in src/crypto_suite.rs.
 rustls = { version = "0.23", default-features = false, features = [
     "aws-lc-rs",
     "prefer-post-quantum",
