@@ -21,6 +21,13 @@ fn main() -> ExitCode {
             print_version();
             ExitCode::SUCCESS
         }
+        Some("identity") => match print_identity() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ownview-engine: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some("serve") => match serve::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -40,6 +47,37 @@ fn main() -> ExitCode {
     }
 }
 
+/// Load or create this device's identity and print its fingerprint.
+///
+/// The fingerprint is what a person reads aloud to confirm two machines are
+/// looking at the same device, so it is printed as words rather than hex.
+fn print_identity() -> Result<(), Box<dyn std::error::Error>> {
+    let path = identity_path()?;
+    let id = ownview_crypto::Identity::load_or_create(&path)?;
+
+    println!("device fingerprint");
+    println!();
+    for line in id.fingerprint().display().lines() {
+        println!("    {line}");
+    }
+    println!();
+    println!("  key   {}", id.fingerprint().hex());
+    println!("  file  {}", path.display());
+    Ok(())
+}
+
+/// Where the identity key lives. `$OWNVIEW_HOME` overrides, which is what makes
+/// the two-process pairing test possible on one machine.
+fn identity_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    if let Ok(home) = std::env::var("OWNVIEW_HOME") {
+        return Ok(std::path::PathBuf::from(home).join("identity.key"));
+    }
+    let home = std::env::var("HOME").map_err(|_| "neither OWNVIEW_HOME nor HOME is set")?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".ownview")
+        .join("identity.key"))
+}
+
 fn print_version() {
     println!("ownview-engine {VERSION}");
     println!("  built     {BUILD_TIME}");
@@ -54,6 +92,7 @@ fn print_help() {
          Running it directly is for diagnostics.\n\
          \n\
          Commands:\n  \
+           identity   print this device's fingerprint\n  \
            serve      speak the control protocol on stdin/stdout\n  \
            version    print version, build time and protocol version\n  \
            help       this text"

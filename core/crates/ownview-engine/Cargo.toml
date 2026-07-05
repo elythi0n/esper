@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 ownview-proto.workspace = true
+ownview-crypto.workspace = true
 ownview-buildinfo.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

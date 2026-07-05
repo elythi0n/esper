@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 ownview-proto = { path = "crates/ownview-proto" }
+ownview-crypto = { path = "crates/ownview-crypto" }
 ownview-buildinfo = { path = "crates/ownview-buildinfo" }
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
