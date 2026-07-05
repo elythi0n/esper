@@ -7,9 +7,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"time"
 
+	"github.com/elythi0n/ownview/internal/engine"
 	"github.com/elythi0n/ownview/internal/proto"
 )
 
@@ -36,6 +39,8 @@ func run(args []string) int {
 		return 0
 	case "-v", "--version", "version":
 		return cmdVersion(args[1:])
+	case "doctor":
+		return cmdDoctor(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "ownview: unknown command %q\n\n", args[0])
 		printHelp()
@@ -64,6 +69,57 @@ func displayOrDash(s string) string {
 	return s
 }
 
+// cmdDoctor answers "why doesn't it work". Failure in this product has a dozen
+// causes, so the diagnostic grows with each phase; today it covers the seam
+// between the control plane and the engine, which is the only moving part.
+func cmdDoctor(_ []string) int {
+	fmt.Println("🩺  ownview doctor")
+	fmt.Println()
+
+	fmt.Println("Control plane")
+	fmt.Printf("  version   %s\n", version)
+	fmt.Printf("  built     %s\n", displayOrDash(buildTime))
+	fmt.Printf("  protocol  %d\n", proto.ProtocolVersion)
+	fmt.Println()
+
+	fmt.Println("Engine")
+	sup, err := engine.New(engine.Options{})
+	if err != nil {
+		fmt.Printf("  ✗ %v\n", err)
+		fmt.Println()
+		fmt.Println("⚠  the engine does the realtime work; without it ownview can only")
+		fmt.Println("   report its own version.")
+		return 1
+	}
+	fmt.Printf("  path      %s\n", sup.Path())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	local := proto.NewHello(proto.RoleController, nil, hostname(), version)
+	if err := sup.Start(ctx, local); err != nil {
+		fmt.Printf("  ✗ handshake failed: %v\n", err)
+		return 1
+	}
+	defer func() { _ = sup.Stop() }()
+
+	h := sup.Hello()
+	fmt.Printf("  version   %s\n", h.Engine)
+	fmt.Printf("  protocol  %d\n", h.Proto)
+	fmt.Printf("  ✓ handshake ok over the control socket\n")
+	fmt.Println()
+	fmt.Println("✓ ready")
+	return 0
+}
+
+func hostname() string {
+	n, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return n
+}
+
 func printHelp() {
 	fmt.Print(`ownview — secure, private remote desktop
 
@@ -72,6 +128,7 @@ Usage:
 
 Commands:
   version [--json]   print the release, build time and protocol version
+  doctor             check the engine is present and the seam works
   help               this text
 
 OwnView operates no infrastructure. There is no account, no password, and no

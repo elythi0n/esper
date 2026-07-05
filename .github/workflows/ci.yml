@@ -103,6 +103,23 @@ jobs:
         with:
           manifest-path: core/Cargo.toml
 
+  # Every dependency is either audited by us or covered by a published audit
+  # set we trust. The 36 exemptions are the tree we inherited on day one; they
+  # shrink as they are reviewed, and a new dependency cannot be added silently.
+  vet:
+    name: cargo-vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - run: cargo install cargo-vet --locked
+      - name: vet
+        working-directory: core
+        run: cargo vet check
+
   # This repository must be self-contained: it is developed inside a planning
   # tree that is never published, and a public repo linking into a private
   # folder is a broken link at best.

@@ -146,6 +146,11 @@ fuzz:
 smoke:
 	@./scripts/smoke.sh
 
+## Supply-chain audit: every dependency audited or explicitly exempted
+.PHONY: vet-deps
+vet-deps:
+	@cd $(CORE) && cargo vet check
+
 ## License and advisory audit of the Rust dependency tree
 .PHONY: deny
 deny:
@@ -157,7 +162,7 @@ ci: check-isolation fmt-check lint test build smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full
-ci-full: ci test-race deny miri fuzz
+ci-full: ci test-race deny vet-deps miri fuzz
 
 ## Install both binaries to $(PREFIX)/bin (may need sudo)
 .PHONY: install

@@ -8,6 +8,8 @@
 //! At this stage it reports its own identity and exits. Everything else is
 //! built on top of that.
 
+mod serve;
+
 use std::process::ExitCode;
 
 use ownview_buildinfo::{BUILD_TIME, VERSION};
@@ -19,6 +21,13 @@ fn main() -> ExitCode {
             print_version();
             ExitCode::SUCCESS
         }
+        Some("serve") => match serve::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ownview-engine: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some("help" | "--help" | "-h") => {
             print_help();
             ExitCode::SUCCESS
@@ -45,6 +54,7 @@ fn print_help() {
          Running it directly is for diagnostics.\n\
          \n\
          Commands:\n  \
+           serve      speak the control protocol on stdin/stdout\n  \
            version    print version, build time and protocol version\n  \
            help       this text"
     );
