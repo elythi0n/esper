@@ -44,20 +44,34 @@ check "ownview rejects an unknown command with exit 1" "$rc" "1"
 # it could phone home to. This check is that claim's proof, and the reason the
 # claim is checkable rather than merely stated.
 #
-# What counts as an endpoint is deliberately narrow: a scheme-prefixed URL, or a
-# routable IP literal. A bare domain does not, because Go embeds every module
-# path and source filename in its build info — `github.com/elythi0n/ownview` is
-# in every binary we will ever ship and is not something the program can
-# connect to. Matching bare domains would fire on every build and be switched
-# off within a week, which is worse than not checking.
+# What counts as an endpoint is deliberately narrow, and has been narrowed twice
+# after false positives — because a check that cries wolf gets switched off,
+# which is worse than not having one:
+#
+#   1. Bare domains do not count. Go embeds every module path and source
+#      filename in its build info, so `github.com/elythi0n/ownview` is in every
+#      binary we will ever ship and is not something the program can connect to.
+#   2. Documentation hosts do not count. `getrandom` carries the error string
+#      "Node.js ES modules are not directly supported, see https://docs.rs/..."
+#      — a pointer for a human reading a diagnostic, not an address the program
+#      dials.
+#
+# What does count: a scheme-prefixed URL to a host that could serve data, and
+# any routable IP literal. Every allowlist entry below names why it is there;
+# adding one without a reason is how this check stops meaning anything.
 echo "  — scanning binaries for anything connectable"
+
+# Hosts that exist only to be read by a person, never dialled by the program.
+doc_hosts='docs\.rs|doc\.rust-lang\.org|rust-lang\.github\.io|www\.w3\.org|(www\.)?rfc-editor\.org|datatracker\.ietf\.org|tools\.ietf\.org'
 
 # Loopback, link-local, multicast, broadcast, unspecified, and the RFC 5737
 # documentation ranges are not endpoints anyone can phone home to.
 harmless_ip='^(0\.|127\.|169\.254\.|22[4-9]\.|23[0-9]\.|24[0-9]\.|25[0-5]\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|255\.255\.255\.255)'
 
 for b in ownview ownview-engine ownview-broker; do
-  urls=$(strings "$BIN/$b" | grep -oEi '(https?|wss?|quic|ftp)://[a-z0-9.-]+' | sort -u || true)
+  urls=$(strings "$BIN/$b" \
+         | grep -oEi '(https?|wss?|quic|ftp)://[a-z0-9.-]+' \
+         | grep -vEi "://($doc_hosts)" | sort -u || true)
   ips=$(strings "$BIN/$b" \
         | grep -oE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' \
         | grep -vE "$harmless_ip" | sort -u || true)
@@ -67,7 +81,9 @@ for b in ownview ownview-engine ownview-broker; do
     [ -n "$urls" ] && printf '%s\n' "$urls" | sed 's/^/      url: /'
     [ -n "$ips" ]  && printf '%s\n' "$ips"  | sed 's/^/      ip:  /'
     echo "      OwnView ships no default endpoint. If this is a dependency's,"
-    echo "      that dependency needs justifying or replacing."
+    echo "      that dependency needs justifying or replacing. If it is a"
+    echo "      documentation link in a diagnostic string, add it to doc_hosts"
+    echo "      above WITH A REASON."
     fail=1
   else
     printf '  ✓ %s has no URL and no routable IP literal\n' "$b"

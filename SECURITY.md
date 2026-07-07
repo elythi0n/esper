@@ -37,6 +37,26 @@ What we do claim:
 stated plainly, until one happens and its report is published. Anyone deploying
 OwnView in a high-risk setting should weigh that.
 
+Nor are all of its cryptographic dependencies. Every dependency is either
+covered by a published third-party audit we import, or recorded as an
+exemption — and the exemptions include things that matter:
+
+| Crate | Status |
+|---|---|
+| `sha2`, `subtle` | covered by an imported audit |
+| **`curve25519-dalek`** | **exemption — no audit we import covers it** |
+| **`ed25519-dalek`** | **exemption** |
+| **`spake2`** | **exemption — and its own README states it has never been audited** |
+
+The curve arithmetic, the signature scheme and the password-authenticated key
+exchange that OwnView's entire trust model rests on are therefore unreviewed by
+us and uncovered by the audit sets we trust. There is no audited Rust
+alternative to any of them today; we chose the best-provenance option in each
+case and are telling you which they are.
+
+Those three are the first thing an external audit should look at — ahead of any
+code we wrote ourselves. `make vet-deps` reproduces this list.
+
 ## What the design removes
 
 The strongest thing about OwnView's posture is architectural rather than

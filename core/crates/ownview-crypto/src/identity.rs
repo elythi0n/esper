@@ -17,6 +17,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use rand_core::RngCore as _;
 use zeroize::Zeroize;
 
 use crate::Fingerprint;
@@ -108,7 +109,7 @@ impl Identity {
     /// predictable. The seed is zeroized as soon as the key is derived from it.
     pub fn generate() -> Result<Self, IdentityError> {
         let mut seed = [0u8; KEY_LEN];
-        let filled = getrandom::fill(&mut seed);
+        let filled = rand_core::OsRng.try_fill_bytes(&mut seed);
         if let Err(e) = filled {
             seed.zeroize();
             return Err(IdentityError::Entropy(e.to_string()));
@@ -344,7 +345,7 @@ mod tests {
     fn tmpdir() -> PathBuf {
         let mut p = std::env::temp_dir();
         let mut n = [0u8; 8];
-        getrandom::fill(&mut n).expect("test entropy");
+        rand_core::OsRng.fill_bytes(&mut n);
         p.push(format!("ownview-test-{}", u64::from_le_bytes(n)));
         fs::create_dir_all(&p).expect("mkdir");
         p

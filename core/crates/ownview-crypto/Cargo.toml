@@ -12,13 +12,29 @@ workspace = true
 
 [dependencies]
 ownview-proto.workspace = true
+# The stable line, deliberately, and unified on one copy of every primitive.
+#
+# ed25519-dalek 3 / curve25519-dalek 5 / sha2 0.11 are the bleeding edge, and
+# the only stable Rust SPAKE2 (`spake2` 0.4) is built on curve25519-dalek 4.
+# Taking both would put two versions of the same curve arithmetic in the tree,
+# which the project's own rule calls a bug — and the alternative, `spake2`
+# 0.5.0-pre.0, depends on a tree of release candidates (sha2 0.11.0-rc.4,
+# hkdf 0.13.0-rc.4, rand_core 0.10.0-rc-6).
+#
+# So: ed25519-dalek 2 + spake2 0.4 + curve25519-dalek 4 + rand_core 0.6 +
+# sha2 0.10. All stable releases, one copy of each, and the versions the
+# ecosystem actually runs rather than the ones released last month.
+#
 # No `pkcs8` feature: it pulls in der, pkcs8, spki and base64ct — a
 # general-purpose ASN.1 parser in the handshake path — to produce two
 # fixed-length encodings. See src/der.rs.
-ed25519-dalek = { version = "3", features = ["rand_core", "zeroize"] }
-rand_core = "0.10"
-getrandom = "0.4"
-sha2 = "0.11"
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+# The only stable Rust SPAKE2. RustCrypto, authored by SPAKE2's Python
+# reference implementer, and production-exposed through magic-wormhole — but
+# explicitly unaudited. See the pairing design notes.
+spake2 = "0.4"
 subtle = "2.6"
 zeroize = { version = "1.8", features = ["derive"] }
 serde.workspace = true

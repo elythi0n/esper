@@ -70,9 +70,15 @@ CDLA-Permissive-2.0, which is not on the allowlist.
 
 ## Priorities for reducing exemptions
 
-Not all exemptions are equal. Review in this order:
+Checked on 2026-09-01, and the answer was worse than expected: `sha2` and
+`subtle` are covered by imported audits, but **`curve25519-dalek`,
+`ed25519-dalek`, `spake2`, `zeroize` and `hkdf` are all exemptions.** The curve
+arithmetic, the signature scheme and the PAKE the trust model rests on are
+reviewed by nobody we trust.
 
-1. **Anything in the handshake path** — `aws-lc-rs`, `rustls`, `ed25519-dalek`, `curve25519-dalek`. A bug here is a broken security guarantee, not a crash.
+Review in this order:
+
+1. **`spake2`, `ed25519-dalek`, `curve25519-dalek`** — in that order. `spake2`'s own README says it has never been audited; the other two carry the trust model. A bug in any of the three is an authentication bypass, not a crash.
 2. **Anything parsing untrusted input** — `ciborium` and its tail. This is where a real vulnerability is most likely.
 3. **Build-time only** (`cc`, `cmake`, `jobserver`) — lower consequence at runtime, but they execute on developer and CI machines.
 4. Everything else.

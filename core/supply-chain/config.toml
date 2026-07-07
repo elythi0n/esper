@@ -34,8 +34,8 @@ criteria = "safe-to-deploy"
 version = "0.44.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.block-buffer]]
-version = "0.12.1"
+[[exemptions.base64ct]]
+version = "1.8.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.bytes]]
@@ -63,7 +63,11 @@ version = "0.1.58"
 criteria = "safe-to-deploy"
 
 [[exemptions.const-oid]]
-version = "0.10.2"
+version = "0.9.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.cpufeatures]]
+version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.cpufeatures]]
@@ -71,11 +75,11 @@ version = "0.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.crypto-common]]
-version = "0.2.2"
+version = "0.1.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.curve25519-dalek]]
-version = "5.0.0"
+version = "4.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.curve25519-dalek-derive]]
@@ -83,15 +87,15 @@ version = "0.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.digest]]
-version = "0.11.3"
+version = "0.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ed25519]]
-version = "3.0.0"
+version = "2.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.ed25519-dalek]]
-version = "3.0.0"
+version = "2.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.find-msvc-tools]]
@@ -114,6 +118,10 @@ criteria = "safe-to-deploy"
 version = "0.3.34"
 criteria = "safe-to-deploy"
 
+[[exemptions.generic-array]]
+version = "0.14.5"
+criteria = "safe-to-deploy"
+
 [[exemptions.getrandom]]
 version = "0.2.17"
 criteria = "safe-to-deploy"
@@ -126,8 +134,8 @@ criteria = "safe-to-deploy"
 version = "2.7.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.hybrid-array]]
-version = "0.4.14"
+[[exemptions.hkdf]]
+version = "0.12.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.itoa]]
@@ -168,6 +176,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pin-project-lite]]
 version = "0.2.17"
+criteria = "safe-to-deploy"
+
+[[exemptions.pkcs8]]
+version = "0.10.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.pkg-config]]
@@ -258,10 +270,6 @@ criteria = "safe-to-deploy"
 version = "1.0.151"
 criteria = "safe-to-run"
 
-[[exemptions.sha2]]
-version = "0.11.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.shlex]]
 version = "2.0.1"
 criteria = "safe-to-deploy"
@@ -270,16 +278,20 @@ criteria = "safe-to-deploy"
 version = "1.4.8"
 criteria = "safe-to-deploy"
 
-[[exemptions.signature]]
-version = "3.0.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.slab]]
 version = "0.4.12"
 criteria = "safe-to-deploy"
 
 [[exemptions.socket2]]
 version = "0.6.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.spake2]]
+version = "0.4.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.spki]]
+version = "0.7.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.syn]]
@@ -344,6 +356,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.valuable]]
 version = "0.1.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.version_check]]
+version = "0.9.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasi]]
