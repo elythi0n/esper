@@ -9,6 +9,6 @@ pub mod fingerprint;
 pub mod identity;
 mod wordlist;
 
-pub use device::{Device, DeviceStore, Permission};
+pub use device::{Device, DeviceStore, Permission, StoreError};
 pub use fingerprint::Fingerprint;
 pub use identity::{Identity, IdentityError, KEY_LEN};

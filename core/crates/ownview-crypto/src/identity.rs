@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use zeroize::Zeroize;
 
 use crate::Fingerprint;
@@ -48,6 +48,18 @@ pub enum IdentityError {
     /// The file exists but does not contain a usable key.
     #[error("{path} is not a valid identity key: {reason}")]
     Malformed { path: PathBuf, reason: String },
+
+    /// The key is a small-order point.
+    ///
+    /// Such a key decompresses successfully, so it looks valid, but it cannot
+    /// serve as an identity: a weak key admits a signature valid for almost any
+    /// message. Refused at the boundary rather than stored and puzzled over.
+    #[error("the key is a small-order point and cannot be used as an identity")]
+    WeakKey,
+
+    /// Key material could not be encoded to or decoded from DER.
+    #[error("key encoding failed: {0}")]
+    Encoding(String),
 
     /// The operating system's random source was unavailable.
     ///
@@ -126,16 +138,41 @@ impl Identity {
 
     /// Verify a signature against a peer's public key.
     ///
-    /// Returns `false` for a malformed key or signature rather than an error:
-    /// to a caller, "this did not verify" is the only actionable outcome, and a
-    /// separate error path invites treating one case as less severe.
+    /// Uses **`verify_strict`**, not `verify`. The difference is not cosmetic.
+    /// The ordinary `verify` accepts *weak* public keys — small-order points —
+    /// and dalek's own documentation notes that a weak key can produce a single
+    /// signature valid for almost any message. `verify_strict` refuses them, and
+    /// additionally rejects non-canonical `R` values, closing the malleability
+    /// gap that lets one signature be re-encoded into a different-looking valid
+    /// one.
+    ///
+    /// Returns `false` for a malformed key, a weak key, or a bad signature
+    /// without distinguishing them: to a caller, "this did not verify" is the
+    /// only actionable outcome, and separate error paths invite treating one
+    /// case as less severe than another.
     #[must_use]
     pub fn verify(public_key: &[u8; KEY_LEN], message: &[u8], signature: &[u8; 64]) -> bool {
         let Ok(key) = VerifyingKey::from_bytes(public_key) else {
             return false;
         };
-        key.verify(message, &Signature::from_bytes(signature))
+        key.verify_strict(message, &Signature::from_bytes(signature))
             .is_ok()
+    }
+
+    /// Whether a public key is usable as a peer identity.
+    ///
+    /// A key must decompress to a curve point **and not be of small order**.
+    /// `VerifyingKey::from_bytes` performs only the first check, so a
+    /// small-order point is accepted by it and stores perfectly well — then
+    /// silently authenticates nothing, or, if any code path ever used
+    /// non-strict verification, authenticates everything.
+    ///
+    /// Checked where a key enters the device store, so a useless or dangerous
+    /// key is refused when offered rather than discovered at 3am when a session
+    /// will not open.
+    #[must_use]
+    pub fn public_key_is_usable(public_key: &[u8; KEY_LEN]) -> bool {
+        VerifyingKey::from_bytes(public_key).is_ok_and(|k| !k.is_weak())
     }
 
     /// Load an identity from disk, creating one if the file does not exist.
@@ -255,6 +292,55 @@ fn check_permissions(path: &Path, meta: &fs::Metadata) -> Result<(), IdentityErr
 #[cfg(not(unix))]
 fn check_permissions(_path: &Path, _meta: &fs::Metadata) -> Result<(), IdentityError> {
     Ok(())
+}
+
+impl Identity {
+    /// This device's public key as a DER `SubjectPublicKeyInfo`.
+    ///
+    /// This is the exact byte string a peer presents in a TLS 1.3 handshake
+    /// under RFC 7250, so it is what a stored peer key is compared against.
+    /// Producing it here rather than in the transport keeps every encoding of
+    /// key material in one crate.
+    pub fn public_key_spki(&self) -> Result<Vec<u8>, IdentityError> {
+        use ed25519_dalek::pkcs8::EncodePublicKey;
+        self.signing
+            .verifying_key()
+            .to_public_key_der()
+            .map(|d| d.as_bytes().to_vec())
+            .map_err(|e| IdentityError::Encoding(e.to_string()))
+    }
+
+    /// This device's private key as DER PKCS#8, for handing to a TLS provider.
+    ///
+    /// The caller receives secret material and is responsible for zeroizing it.
+    /// It is returned rather than held because rustls wants ownership, and
+    /// keeping a second copy alive here would be a second thing to wipe.
+    pub fn private_key_pkcs8(&self) -> Result<Vec<u8>, IdentityError> {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        self.signing
+            .to_pkcs8_der()
+            .map(|d| d.as_bytes().to_vec())
+            .map_err(|e| IdentityError::Encoding(e.to_string()))
+    }
+
+    /// The DER `SubjectPublicKeyInfo` for a peer's raw public key.
+    ///
+    /// Used to turn a stored 32-byte peer key into the form presented on the
+    /// wire, so the comparison happens on identical encodings rather than on
+    /// something reconstructed differently at each call site.
+    pub fn spki_for(public_key: &[u8; KEY_LEN]) -> Result<Vec<u8>, IdentityError> {
+        use ed25519_dalek::pkcs8::EncodePublicKey;
+        let vk = VerifyingKey::from_bytes(public_key)
+            .map_err(|e| IdentityError::Encoding(format!("not a valid Ed25519 key: {e}")))?;
+        // A small-order point decompresses fine and is useless or dangerous as
+        // an identity. Refuse it here so it can never reach a device store.
+        if vk.is_weak() {
+            return Err(IdentityError::WeakKey);
+        }
+        vk.to_public_key_der()
+            .map(|d| d.as_bytes().to_vec())
+            .map_err(|e| IdentityError::Encoding(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -517,6 +603,114 @@ mod tests {
             .collect();
         assert!(strays.is_empty(), "save left {strays:?} behind");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The SPKI a peer sees must be the SPKI we would compare against. If
+    /// these ever diverge, every connection fails with a confusing certificate
+    /// error rather than a key mismatch.
+    #[test]
+    fn our_spki_matches_what_spki_for_produces_from_our_public_key() {
+        let id = Identity::generate().expect("generate");
+        let ours = id.public_key_spki().expect("spki");
+        let derived = Identity::spki_for(&id.public_key()).expect("spki_for");
+        assert_eq!(ours, derived);
+    }
+
+    /// An Ed25519 SPKI is 44 bytes: a 12-byte header plus the 32-byte key. This
+    /// pins the encoding so a dependency change that alters it is caught.
+    #[test]
+    fn the_spki_is_the_expected_shape() {
+        let id = Identity::generate().expect("generate");
+        let spki = id.public_key_spki().expect("spki");
+        assert_eq!(spki.len(), 44, "Ed25519 SPKI should be 44 bytes");
+        assert_eq!(
+            spki.get(..12).expect("header"),
+            &[
+                0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00
+            ],
+            "SPKI algorithm identifier changed"
+        );
+        assert_eq!(
+            spki.get(12..).expect("key"),
+            id.public_key().as_slice(),
+            "the raw key must appear verbatim after the header"
+        );
+    }
+
+    #[test]
+    fn two_devices_have_different_spkis() {
+        let a = Identity::generate()
+            .expect("a")
+            .public_key_spki()
+            .expect("spki");
+        let b = Identity::generate()
+            .expect("b")
+            .public_key_spki()
+            .expect("spki");
+        assert_ne!(a, b);
+    }
+
+    /// The weak keys dalek accepts from `from_bytes` but that must never become
+    /// an identity. A weak key admits a signature valid for almost any message.
+    ///
+    /// These byte strings were confirmed weak against `VerifyingKey::is_weak`
+    /// rather than copied from memory.
+    fn weak_keys() -> Vec<(&'static str, [u8; KEY_LEN])> {
+        let mut identity_point = [0u8; KEY_LEN];
+        identity_point[0] = 1;
+        let mut high_bit = [0u8; KEY_LEN];
+        high_bit[KEY_LEN - 1] = 0x80;
+        vec![
+            ("all zeros (order 4)", [0u8; KEY_LEN]),
+            ("identity point", identity_point),
+            ("zeros with high bit set", high_bit),
+        ]
+    }
+
+    #[test]
+    fn weak_keys_are_refused_as_identities() {
+        for (label, key) in weak_keys() {
+            assert!(
+                !Identity::public_key_is_usable(&key),
+                "{label} should be refused as a peer identity"
+            );
+            assert!(
+                Identity::spki_for(&key).is_err(),
+                "{label} should not produce an SPKI"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_generated_key_is_usable() {
+        for _ in 0..16 {
+            let id = Identity::generate().expect("generate");
+            assert!(Identity::public_key_is_usable(&id.public_key()));
+        }
+    }
+
+    /// The security property that motivated `verify_strict`: a weak key must not
+    /// authenticate anything, even a signature that the non-strict path would
+    /// have accepted.
+    #[test]
+    fn a_weak_key_verifies_nothing() {
+        for (label, key) in weak_keys() {
+            for sig in [[0u8; 64], [0xFFu8; 64], [0x5Au8; 64]] {
+                assert!(
+                    !Identity::verify(&key, b"anything", &sig),
+                    "{label} accepted a signature"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pkcs8_key_round_trips_to_the_same_identity() {
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        let id = Identity::generate().expect("generate");
+        let der = id.private_key_pkcs8().expect("pkcs8");
+        let back = SigningKey::from_pkcs8_der(&der).expect("decode");
+        assert_eq!(back.verifying_key().to_bytes(), id.public_key());
     }
 
     /// Debug must never print key material — a leaked key in a log is a classic
