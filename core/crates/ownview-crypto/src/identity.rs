@@ -301,13 +301,9 @@ impl Identity {
     /// under RFC 7250, so it is what a stored peer key is compared against.
     /// Producing it here rather than in the transport keeps every encoding of
     /// key material in one crate.
-    pub fn public_key_spki(&self) -> Result<Vec<u8>, IdentityError> {
-        use ed25519_dalek::pkcs8::EncodePublicKey;
-        self.signing
-            .verifying_key()
-            .to_public_key_der()
-            .map(|d| d.as_bytes().to_vec())
-            .map_err(|e| IdentityError::Encoding(e.to_string()))
+    #[must_use]
+    pub fn public_key_spki(&self) -> [u8; crate::der::SPKI_LEN] {
+        crate::der::spki(&self.public_key())
     }
 
     /// This device's private key as DER PKCS#8, for handing to a TLS provider.
@@ -315,12 +311,9 @@ impl Identity {
     /// The caller receives secret material and is responsible for zeroizing it.
     /// It is returned rather than held because rustls wants ownership, and
     /// keeping a second copy alive here would be a second thing to wipe.
-    pub fn private_key_pkcs8(&self) -> Result<Vec<u8>, IdentityError> {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
-        self.signing
-            .to_pkcs8_der()
-            .map(|d| d.as_bytes().to_vec())
-            .map_err(|e| IdentityError::Encoding(e.to_string()))
+    #[must_use]
+    pub fn private_key_pkcs8(&self) -> [u8; crate::der::PKCS8_LEN] {
+        crate::der::pkcs8(&self.signing.to_bytes())
     }
 
     /// The DER `SubjectPublicKeyInfo` for a peer's raw public key.
@@ -328,18 +321,19 @@ impl Identity {
     /// Used to turn a stored 32-byte peer key into the form presented on the
     /// wire, so the comparison happens on identical encodings rather than on
     /// something reconstructed differently at each call site.
-    pub fn spki_for(public_key: &[u8; KEY_LEN]) -> Result<Vec<u8>, IdentityError> {
-        use ed25519_dalek::pkcs8::EncodePublicKey;
-        let vk = VerifyingKey::from_bytes(public_key)
-            .map_err(|e| IdentityError::Encoding(format!("not a valid Ed25519 key: {e}")))?;
-        // A small-order point decompresses fine and is useless or dangerous as
-        // an identity. Refuse it here so it can never reach a device store.
-        if vk.is_weak() {
-            return Err(IdentityError::WeakKey);
+    pub fn spki_for(
+        public_key: &[u8; KEY_LEN],
+    ) -> Result<[u8; crate::der::SPKI_LEN], IdentityError> {
+        // Validate before encoding: a key that cannot authenticate must not get
+        // as far as being formatted for a handshake.
+        if !Self::public_key_is_usable(public_key) {
+            return Err(if VerifyingKey::from_bytes(public_key).is_ok() {
+                IdentityError::WeakKey
+            } else {
+                IdentityError::Encoding("not a point on the curve".to_owned())
+            });
         }
-        vk.to_public_key_der()
-            .map(|d| d.as_bytes().to_vec())
-            .map_err(|e| IdentityError::Encoding(e.to_string()))
+        Ok(crate::der::spki(public_key))
     }
 }
 
@@ -611,7 +605,7 @@ mod tests {
     #[test]
     fn our_spki_matches_what_spki_for_produces_from_our_public_key() {
         let id = Identity::generate().expect("generate");
-        let ours = id.public_key_spki().expect("spki");
+        let ours = id.public_key_spki();
         let derived = Identity::spki_for(&id.public_key()).expect("spki_for");
         assert_eq!(ours, derived);
     }
@@ -621,7 +615,7 @@ mod tests {
     #[test]
     fn the_spki_is_the_expected_shape() {
         let id = Identity::generate().expect("generate");
-        let spki = id.public_key_spki().expect("spki");
+        let spki = id.public_key_spki();
         assert_eq!(spki.len(), 44, "Ed25519 SPKI should be 44 bytes");
         assert_eq!(
             spki.get(..12).expect("header"),
@@ -639,14 +633,8 @@ mod tests {
 
     #[test]
     fn two_devices_have_different_spkis() {
-        let a = Identity::generate()
-            .expect("a")
-            .public_key_spki()
-            .expect("spki");
-        let b = Identity::generate()
-            .expect("b")
-            .public_key_spki()
-            .expect("spki");
+        let a = Identity::generate().expect("a").public_key_spki();
+        let b = Identity::generate().expect("b").public_key_spki();
         assert_ne!(a, b);
     }
 
@@ -702,15 +690,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn the_pkcs8_key_round_trips_to_the_same_identity() {
-        use ed25519_dalek::pkcs8::DecodePrivateKey;
-        let id = Identity::generate().expect("generate");
-        let der = id.private_key_pkcs8().expect("pkcs8");
-        let back = SigningKey::from_pkcs8_der(&der).expect("decode");
-        assert_eq!(back.verifying_key().to_bytes(), id.public_key());
     }
 
     /// Debug must never print key material — a leaked key in a log is a classic

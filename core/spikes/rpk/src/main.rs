@@ -17,7 +17,6 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
-use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use quinn::{ClientConfig, Endpoint, ServerConfig};
 use rustls::client::AlwaysResolvesClientRawPublicKeys;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
@@ -33,13 +32,10 @@ fn keypair() -> SigningKey {
 
 /// Build the rustls `CertifiedKey` that presents a bare Ed25519 public key.
 fn certified(key: &SigningKey) -> Arc<rustls::sign::CertifiedKey> {
-    let spki = key
-        .verifying_key()
-        .to_public_key_der()
-        .expect("spki")
-        .as_bytes()
-        .to_vec();
-    let pkcs8 = key.to_pkcs8_der().expect("pkcs8").as_bytes().to_vec();
+    // Our own hand-built encodings, not a DER library. This spike is now also
+    // the test that a TLS provider accepts them.
+    let spki = ownview_crypto::der::spki(&key.verifying_key().to_bytes()).to_vec();
+    let pkcs8 = ownview_crypto::der::pkcs8(&key.to_bytes()).to_vec();
 
     let signer = rustls::crypto::aws_lc_rs::default_provider()
         .key_provider
@@ -54,11 +50,7 @@ fn certified(key: &SigningKey) -> Arc<rustls::sign::CertifiedKey> {
 
 /// The SPKI bytes a peer will present for this key — what we compare against.
 fn spki_of(key: &SigningKey) -> Vec<u8> {
-    key.verifying_key()
-        .to_public_key_der()
-        .expect("spki")
-        .as_bytes()
-        .to_vec()
+    ownview_crypto::der::spki(&key.verifying_key().to_bytes()).to_vec()
 }
 
 #[tokio::main]

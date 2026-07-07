@@ -12,7 +12,10 @@ workspace = true
 
 [dependencies]
 ownview-proto.workspace = true
-ed25519-dalek = { version = "3", features = ["rand_core", "zeroize", "pkcs8", "alloc"] }
+# No `pkcs8` feature: it pulls in der, pkcs8, spki and base64ct — a
+# general-purpose ASN.1 parser in the handshake path — to produce two
+# fixed-length encodings. See src/der.rs.
+ed25519-dalek = { version = "3", features = ["rand_core", "zeroize"] }
 rand_core = "0.10"
 getrandom = "0.4"
 sha2 = "0.11"

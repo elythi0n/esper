@@ -17,6 +17,7 @@ rustls = { version = "0.23", default-features = false, features = [
     "aws-lc-rs", "prefer-post-quantum", "std", "logging",
 ] }
 rustls-pki-types = "1"
-ed25519-dalek = { version = "3", features = ["pkcs8", "alloc"] }
+ed25519-dalek = "3"
+ownview-crypto = { path = "../../crates/ownview-crypto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 getrandom = "0.4"

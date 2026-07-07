@@ -4,6 +4,7 @@
 //! is enforced by `deny.toml`. Everything else in the workspace receives keys
 //! and verified results through these types.
 
+pub mod der;
 pub mod device;
 pub mod fingerprint;
 pub mod identity;
