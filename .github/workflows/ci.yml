@@ -149,9 +149,11 @@ jobs:
       - run: make build
       - run: ./scripts/smoke.sh
 
-  # Memory-safety checks. There is no FFI yet, so these are cheap now and in
-  # place before the crates that need them arrive — adding them after the code
-  # is written is dramatically harder.
+  # Memory-safety checks over the fast crates. ownview-crypto is excluded here
+  # and covered by the nightly workflow: interpreting Ed25519 costs ~200s
+  # against ~13s for everything else, and dalek's unsafe is audited upstream.
+  # The FFI crates land in Phase 3 and belong in *this* set, because that is
+  # where undefined behavior actually lives.
   miri:
     name: miri
     runs-on: ubuntu-latest
@@ -165,7 +167,7 @@ jobs:
           workspaces: core
       - name: miri test
         working-directory: core
-        run: cargo miri test --workspace
+        run: cargo miri test --workspace --exclude ownview-crypto
 
   # The frame decoder is the first parser attacker-controlled bytes reach. A
   # short run on every change catches a regression; long runs happen out of band.

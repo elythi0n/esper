@@ -4,9 +4,15 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::print_stdout)]
 
 fn main() {
-    for (label, key) in [("all zeros", [0u8; 32]), ("all 0xAB", [0xABu8; 32]), ("0x01..", {
-        let mut k = [0u8; 32]; k[0] = 1; k
-    })] {
+    for (label, key) in [
+        ("all zeros", [0u8; 32]),
+        ("all 0xAB", [0xABu8; 32]),
+        ("0x01..", {
+            let mut k = [0u8; 32];
+            k[0] = 1;
+            k
+        }),
+    ] {
         let f = ownview_crypto::Fingerprint::of(&key);
         println!("{label}:\n{}\n  hex {}\n", f.display(), f.hex());
     }

@@ -165,7 +165,10 @@ mod tests {
 
     #[test]
     fn hex_is_sixteen_characters() {
-        assert_eq!(Fingerprint::of(&[7u8; 32]).hex().len(), FINGERPRINT_WORDS * 2);
+        assert_eq!(
+            Fingerprint::of(&[7u8; 32]).hex().len(),
+            FINGERPRINT_WORDS * 2
+        );
     }
 
     /// The domain separator must actually separate: a fingerprint must not equal
@@ -192,6 +195,10 @@ mod tests {
             k[..2].copy_from_slice(&i.to_le_bytes());
             seen.insert(Fingerprint::of(&k));
         }
-        assert_eq!(seen.len(), 512, "fingerprints collided across 512 distinct keys");
+        assert_eq!(
+            seen.len(),
+            512,
+            "fingerprints collided across 512 distinct keys"
+        );
     }
 }

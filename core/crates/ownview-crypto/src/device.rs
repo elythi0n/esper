@@ -293,7 +293,10 @@ mod tests {
         d.grant(Permission::Audio);
         d.grant(Permission::Audio);
         assert_eq!(
-            d.permissions.iter().filter(|p| **p == Permission::Audio).count(),
+            d.permissions
+                .iter()
+                .filter(|p| **p == Permission::Audio)
+                .count(),
             1
         );
     }
@@ -304,7 +307,10 @@ mod tests {
         d.revoke(Permission::Control);
         d.revoke(Permission::Control);
         assert!(!d.may(Permission::Control));
-        assert!(d.may(Permission::View), "revoking one must not remove others");
+        assert!(
+            d.may(Permission::View),
+            "revoking one must not remove others"
+        );
     }
 
     #[test]
@@ -320,7 +326,10 @@ mod tests {
         let mut store = DeviceStore::new();
         store.insert(device(3));
         assert!(store.is_paired(&key(3)));
-        assert_eq!(store.get(&key(3)).map(|d| d.name.as_str()), Some("device-3"));
+        assert_eq!(
+            store.get(&key(3)).map(|d| d.name.as_str()),
+            Some("device-3")
+        );
         assert_eq!(store.len(), 1);
     }
 
@@ -339,7 +348,11 @@ mod tests {
         assert!(removed.is_some());
 
         assert!(!store.is_paired(&key(4)));
-        for p in [Permission::View, Permission::Unattended, Permission::FilesIn] {
+        for p in [
+            Permission::View,
+            Permission::Unattended,
+            Permission::FilesIn,
+        ] {
             assert!(!store.may(&key(4), p), "{p:?} survived revocation");
         }
     }

@@ -11,7 +11,10 @@
 fn main() {
     let id = ownview_crypto::Identity::generate().expect("generate");
     let pk = id.public_key();
-    println!("public key      {}", pk.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    println!(
+        "public key      {}",
+        pk.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    );
     println!("fingerprint     {}", id.fingerprint());
     drop(id);
     println!("dropped; ed25519-dalek's zeroize feature wipes the scalar on drop");

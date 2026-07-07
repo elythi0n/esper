@@ -131,9 +131,20 @@ fmt:
 tidy:
 	go mod tidy
 
-## Memory-safety check over the Rust crates (needs nightly + miri)
+## Memory-safety check over the fast crates (needs nightly + miri)
+##
+## Excludes ownview-crypto: interpreting Ed25519 under MIRI takes ~200s against
+## ~13s for everything else, and dalek's unsafe is heavily audited upstream. The
+## value is in the parsers and, from Phase 3, the FFI crates — which go in this
+## set, because that is where undefined behavior actually lives. The full run is
+## `miri-full`, on a nightly schedule.
 .PHONY: miri
 miri:
+	@cd $(CORE) && cargo +nightly miri test --workspace --exclude ownview-crypto
+
+## Memory-safety check over every crate, including the slow crypto one
+.PHONY: miri-full
+miri-full:
 	@cd $(CORE) && cargo +nightly miri test --workspace
 
 ## Fuzz the frame decoder for 60s (needs nightly + cargo-fuzz)
@@ -162,7 +173,7 @@ ci: check-isolation fmt-check lint test build smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full
-ci-full: ci test-race deny vet-deps miri fuzz
+ci-full: ci test-race deny vet-deps miri-full fuzz
 
 ## Install both binaries to $(PREFIX)/bin (may need sudo)
 .PHONY: install

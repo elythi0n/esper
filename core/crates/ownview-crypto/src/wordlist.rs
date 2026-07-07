@@ -28,6 +28,12 @@ pub const FINGERPRINT_WORDS: usize = 8;
 pub const WORDLIST_LEN: usize = 256;
 
 /// Words used to render fingerprints. Frozen — see the module docs.
+///
+/// The six-per-line layout is pinned rather than left to rustfmt. rustfmt packs
+/// as many as fit, so changing one word reflows several lines and buries the
+/// actual change in a large diff. For a frozen list where every edit invalidates
+/// fingerprints, a one-line-per-change diff is worth the annotation.
+#[rustfmt::skip]
 pub(crate) const WORDS: [&str; WORDLIST_LEN] = [
     "absurd", "actor", "adopt", "agree", "album", "almond",
     "amuse", "animal", "anvil", "april", "armor", "aspect",

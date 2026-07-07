@@ -1,0 +1,61 @@
+name: Nightly
+
+# The checks that are too slow to run on every push but too valuable to skip.
+# A regression here is found within a day rather than at release.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The full MIRI run, including ownview-crypto — ~200s of interpreting Ed25519
+  # that is not worth a per-push wait but is worth knowing about daily.
+  miri-full:
+    name: miri (all crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - working-directory: core
+        run: cargo miri test --workspace
+
+  # A long fuzz run. The 60s smoke run on each push catches regressions; this is
+  # the one that finds something new.
+  fuzz-long:
+    name: fuzz (30 min)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - run: cargo install cargo-fuzz --locked
+      - working-directory: core
+        run: cargo fuzz run frame_decode -- -max_total_time=1800
+      - name: Upload any crash found
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: core/fuzz/artifacts/
+
+  # Advisories are published continuously, so a tree that was clean yesterday
+  # may not be today. This is the check that notices without a code change.
+  advisories:
+    name: advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: core/Cargo.toml
+          command: check advisories

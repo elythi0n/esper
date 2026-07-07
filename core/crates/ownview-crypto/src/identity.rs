@@ -134,7 +134,8 @@ impl Identity {
         let Ok(key) = VerifyingKey::from_bytes(public_key) else {
             return false;
         };
-        key.verify(message, &Signature::from_bytes(signature)).is_ok()
+        key.verify(message, &Signature::from_bytes(signature))
+            .is_ok()
     }
 
     /// Load an identity from disk, creating one if the file does not exist.
@@ -273,7 +274,11 @@ mod tests {
     fn generates_a_usable_keypair() {
         let id = Identity::generate().expect("generate");
         assert_eq!(id.public_key().len(), KEY_LEN);
-        assert_ne!(id.public_key(), [0u8; KEY_LEN], "public key must not be zero");
+        assert_ne!(
+            id.public_key(),
+            [0u8; KEY_LEN],
+            "public key must not be zero"
+        );
     }
 
     #[test]
@@ -334,6 +339,7 @@ mod tests {
         assert!(!Identity::verify(&[0u8; KEY_LEN], b"x", &sig));
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn round_trips_through_disk() {
         let dir = tmpdir();
@@ -351,6 +357,7 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn load_or_create_is_stable_across_calls() {
         let dir = tmpdir();
@@ -365,6 +372,7 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn load_or_create_makes_the_parent_directory() {
         let dir = tmpdir();
@@ -377,12 +385,16 @@ mod tests {
     /// The identity key is the entire trust model. A file others can read is
     /// refused, not warned about — a warning is something a user scrolls past.
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn a_group_or_world_readable_key_is_refused() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tmpdir();
         let path = dir.join("identity.key");
-        Identity::generate().expect("generate").save(&path).expect("save");
+        Identity::generate()
+            .expect("generate")
+            .save(&path)
+            .expect("save");
 
         for bad_mode in [0o644, 0o640, 0o604, 0o666, 0o777] {
             fs::set_permissions(&path, fs::Permissions::from_mode(bad_mode)).expect("chmod");
@@ -397,15 +409,22 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn owner_only_modes_are_accepted() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tmpdir();
         let path = dir.join("identity.key");
-        Identity::generate().expect("generate").save(&path).expect("save");
+        Identity::generate()
+            .expect("generate")
+            .save(&path)
+            .expect("save");
         for ok_mode in [0o600, 0o400] {
             fs::set_permissions(&path, fs::Permissions::from_mode(ok_mode)).expect("chmod");
-            assert!(Identity::load(&path).is_ok(), "mode {ok_mode:o} should load");
+            assert!(
+                Identity::load(&path).is_ok(),
+                "mode {ok_mode:o} should load"
+            );
         }
         fs::remove_dir_all(&dir).ok();
     }
@@ -413,22 +432,30 @@ mod tests {
     /// A key created by `save` must already be owner-only. Creating it wide and
     /// narrowing afterwards would leave a window in which it is exposed.
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn a_saved_key_is_owner_only_from_the_moment_it_exists() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tmpdir();
         let path = dir.join("identity.key");
-        Identity::generate().expect("generate").save(&path).expect("save");
+        Identity::generate()
+            .expect("generate")
+            .save(&path)
+            .expect("save");
         let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode, REQUIRED_MODE, "saved key has mode {mode:o}");
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn a_truncated_key_file_is_reported_not_silently_accepted() {
         let dir = tmpdir();
         let path = dir.join("identity.key");
-        Identity::generate().expect("generate").save(&path).expect("save");
+        Identity::generate()
+            .expect("generate")
+            .save(&path)
+            .expect("save");
 
         let full = fs::read(&path).expect("read");
         let short = full.get(..16).expect("key is 32 bytes").to_vec();
@@ -436,13 +463,17 @@ mod tests {
 
         match Identity::load(&path) {
             Err(IdentityError::Malformed { reason, .. }) => {
-                assert!(reason.contains("16"), "reason should name the length: {reason}");
+                assert!(
+                    reason.contains("16"),
+                    "reason should name the length: {reason}"
+                );
             }
             other => panic!("a truncated key must be reported, got {other:?}"),
         }
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn an_empty_key_file_is_reported() {
         let dir = tmpdir();
@@ -455,6 +486,7 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn a_missing_key_reports_not_found_rather_than_something_confusing() {
         let dir = tmpdir();
@@ -468,11 +500,15 @@ mod tests {
     }
 
     /// A save must not leave a stray temporary file behind holding the key.
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
     #[test]
     fn save_leaves_no_temporary_file() {
         let dir = tmpdir();
         let path = dir.join("identity.key");
-        Identity::generate().expect("generate").save(&path).expect("save");
+        Identity::generate()
+            .expect("generate")
+            .save(&path)
+            .expect("save");
         let strays: Vec<_> = fs::read_dir(&dir)
             .expect("readdir")
             .filter_map(Result::ok)
@@ -495,7 +531,13 @@ mod tests {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        assert!(!rendered.contains(&secret_hex), "Debug leaked the signing key");
-        assert!(rendered.contains("fingerprint"), "Debug should show the fingerprint");
+        assert!(
+            !rendered.contains(&secret_hex),
+            "Debug leaked the signing key"
+        );
+        assert!(
+            rendered.contains("fingerprint"),
+            "Debug should show the fingerprint"
+        );
     }
 }
