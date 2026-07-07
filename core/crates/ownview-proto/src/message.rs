@@ -5,6 +5,7 @@
 //! one without a flag day — that is why nothing here is `deny_unknown_fields`.
 
 use serde::{Deserialize, Serialize};
+use serde_bytes;
 
 /// Which side of a session a peer is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +108,93 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
         end -= 1;
     }
     s.get(..end).unwrap_or("")
+}
+
+/// A SPAKE2 message, sent once in each direction during pairing.
+///
+/// Carries the sender's public key alongside the PAKE message. The key is a
+/// *claim* at this point — pairing is what establishes whether to believe it,
+/// and the confirmation MAC covers it so it cannot be swapped afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairSpake {
+    /// The SPAKE2 message.
+    #[serde(with = "serde_bytes")]
+    pub spake: Vec<u8>,
+    /// The sender's Ed25519 public key.
+    #[serde(with = "serde_bytes_array")]
+    pub device: [u8; DEVICE_KEY_LEN],
+}
+
+/// Longest SPAKE2 message accepted.
+///
+/// An Ed25519-group SPAKE2 message is 33 bytes. The cap is generous enough for
+/// a future group and small enough that a peer cannot make us allocate: this is
+/// pairing, so the peer is unauthenticated by definition.
+pub const MAX_SPAKE_LEN: usize = 256;
+
+impl PairSpake {
+    /// Whether this message is within its bounds.
+    ///
+    /// Checked before the message reaches any cryptography. A peer at this
+    /// stage has proven nothing at all.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.spake.is_empty() && self.spake.len() <= MAX_SPAKE_LEN
+    }
+}
+
+/// A key confirmation MAC, proving the sender derived the same SPAKE2 key.
+///
+/// Without this step a wrong code is indistinguishable from success: SPAKE2
+/// returns a key either way. See the pairing module in `ownview-crypto`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairConfirm {
+    /// HMAC-SHA-256 over the pairing transcript.
+    #[serde(with = "serde_bytes_array")]
+    pub mac: [u8; 32],
+}
+
+/// The host's reply to the controller's opening message.
+///
+/// Tagged, because the host has two honest answers and the controller must be
+/// able to read either. It can continue — supplying its own SPAKE2 message — or
+/// refuse before the exchange begins, which is what an expired or exhausted
+/// code produces.
+///
+/// Without the tag the controller would be waiting for a [`PairSpake`] while
+/// the host sent a [`PairResult`], and the mismatch would surface as a decode
+/// failure rather than the reason the host actually gave.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairResponse {
+    /// Continuing. Here is the host's SPAKE2 message and public key.
+    Spake(PairSpake),
+    /// Refusing before the exchange starts — an expired or exhausted code.
+    Refused(PairResult),
+}
+
+/// The outcome the host reports, so the controller can tell a typo from a dead
+/// code without guessing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairResult {
+    /// The host's confirmation verified, and here is the host's own MAC.
+    ///
+    /// **The MAC is the point, not the variant.** A man in the middle can send
+    /// `Ok` as easily as the host can; only a MAC over a transcript covering
+    /// this connection's channel binding proves the sender knew the code. The
+    /// controller must verify it before storing anything.
+    Ok {
+        #[serde(with = "serde_bytes_array")]
+        mac: [u8; 32],
+    },
+    /// The confirmation did not verify — a wrong code, or interference.
+    /// Deliberately does not distinguish, because nothing can.
+    Failed { attempts_remaining: u8 },
+    /// The code's sixty seconds elapsed.
+    Expired,
+    /// The attempt budget is spent; the host must show a new code.
+    Exhausted,
 }
 
 /// CBOR-encodes a fixed-size byte array as a byte string rather than an array

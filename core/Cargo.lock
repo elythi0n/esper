@@ -488,6 +488,8 @@ version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "hkdf",
+ "hmac",
  "ownview-proto",
  "rand_core 0.6.4",
  "serde",

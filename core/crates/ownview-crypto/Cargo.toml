@@ -35,6 +35,10 @@ sha2 = "0.10"
 # reference implementer, and production-exposed through magic-wormhole — but
 # explicitly unaudited. See the pairing design notes.
 spake2 = "0.4"
+# HMAC and HKDF for key confirmation. Same versions spake2 already pulls, so
+# no new copy of anything enters the tree.
+hmac = "0.12"
+hkdf = "0.12"
 subtle = "2.6"
 zeroize = { version = "1.8", features = ["derive"] }
 serde.workspace = true

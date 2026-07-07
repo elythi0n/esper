@@ -4,10 +4,12 @@ pub mod auth;
 pub mod control;
 pub mod crypto_suite;
 pub mod endpoint;
+pub mod pair;
 pub mod session;
 
 pub use auth::{AnyOf, NoPeers, OnlyPeer, PeerAuthority};
 pub use control::{Control, ControlError};
 pub use crypto_suite::{KX_GROUP, TLS_VERSIONS, provider};
 pub use endpoint::{ALPN, Endpoint, IDLE_TIMEOUT, KEEPALIVE, TransportError};
+pub use pair::{AnyKeyForPairingOnly, PairError, pairing_authority};
 pub use session::{HELLO_TIMEOUT, Session, SessionError, Stats};

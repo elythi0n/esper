@@ -9,9 +9,13 @@ pub mod der;
 pub mod device;
 pub mod fingerprint;
 pub mod identity;
+pub mod pairing;
 mod wordlist;
 
 pub use code::{CODE_LEN, CodeError, PairingCode};
 pub use device::{Device, DeviceStore, Permission, StoreError};
 pub use fingerprint::Fingerprint;
 pub use identity::{Identity, IdentityError, KEY_LEN};
+pub use pairing::{
+    Confirming, Exchange, MAX_ATTEMPTS, Offer, OfferError, PAIRING_TTL, Paired, PairingError, Side,
+};
