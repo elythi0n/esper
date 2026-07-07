@@ -1,0 +1,22 @@
+[workspace]
+
+[package]
+name = "rpk-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lints.clippy]
+unwrap_used = "allow"
+expect_used = "allow"
+panic = "allow"
+
+[dependencies]
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = [
+    "aws-lc-rs", "prefer-post-quantum", "std", "logging",
+] }
+rustls-pki-types = "1"
+ed25519-dalek = { version = "3", features = ["pkcs8", "alloc"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+getrandom = "0.4"
