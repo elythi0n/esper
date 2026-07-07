@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+bytes = "1"
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "prefer-post-quantum", "std"] }
+
 [lints]
 workspace = true
 
@@ -15,6 +20,32 @@ ownview-proto.workspace = true
 ownview-crypto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# default-features = false is deliberate and load-bearing. quinn's defaults
+# enable `platform-verifier`, which pulls in rustls-platform-verifier and a
+# bundled Mozilla root certificate store.
+#
+# OwnView has no certificate authority in its trust model. Peers are
+# authenticated by raw public key (RFC 7250) against keys stored at pairing;
+# there is no chain to build and no root to trust. A platform CA verifier and a
+# root store are therefore not merely unnecessary — they are a general-purpose
+# trust mechanism sitting at a boundary that deliberately does not want one, and
+# `cargo deny` rejected the root bundle's licence, which is how it was noticed.
+#
+# `rustls-ring` is also dropped: the crypto provider is aws-lc-rs, and two
+# implementations of the same primitives in one tree is a question about which
+# one is actually running.
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-aws-lc-rs",
+    "rustls-log",
+    "log",
+] }
+rustls-pki-types = "1"
+tokio = { workspace = true }
+bytes = "1"
+serde.workspace = true
+subtle = "2.6"
+zeroize = "1.8"
 
 # `prefer-post-quantum` is a rustls *default* feature. It is named explicitly
 # because a `default-features = false` anywhere in the tree would silently move

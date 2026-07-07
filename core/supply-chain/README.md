@@ -40,6 +40,34 @@ We trust these publishers' audits rather than repeating their work:
 Importing a set is itself a trust decision. These are organizations that publish
 audits as a practice and stake a reputation on them.
 
+## What the transport cost
+
+Recorded because the number moved a lot in one commit, and a jump in exemptions
+should be explainable rather than absorbed.
+
+Adding `quinn` and `tokio` brought **27 new crates**: the QUIC implementation
+itself (`quinn`, `quinn-proto`, `quinn-udp`), the async runtime (`tokio`, `mio`,
+`socket2`, `slab`, `futures-*`), and support crates (`bytes`, `rustc-hash`,
+`lru-slab`, `chacha20`, `rand`).
+
+Four of them — `js-sys`, `wasm-bindgen*`, `web-time` — are WASM-target crates
+that appear in the dependency graph but are **not linked on any target OwnView
+builds for**. Verified with `cargo tree --target x86_64-unknown-linux-gnu`
+rather than assumed.
+
+What did *not* come in, deliberately: `quinn`'s default features enable
+`platform-verifier`, which pulls in `rustls-platform-verifier`, a bundled
+Mozilla root certificate store, and `jni`. OwnView has **no certificate
+authority in its trust model** — peers are authenticated by raw public key
+against keys stored at pairing — so a platform CA verifier is a general-purpose
+trust mechanism at a boundary that deliberately does not want one.
+`default-features = false` removes all of it, along with `ring` (the crypto
+provider is `aws-lc-rs`, and two implementations of the same primitives is a
+question about which one is running).
+
+`cargo deny` is how it was noticed: the root bundle's licence is
+CDLA-Permissive-2.0, which is not on the allowlist.
+
 ## Priorities for reducing exemptions
 
 Not all exemptions are equal. Review in this order:

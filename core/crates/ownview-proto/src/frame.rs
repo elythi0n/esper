@@ -69,6 +69,43 @@ impl FrameError {
     }
 }
 
+/// Decode a bare CBOR payload — a frame body with its length prefix already
+/// removed.
+///
+/// Exists separately from [`read_frame`] because an async transport reads the
+/// length and the payload in two steps and then has only the body. Handing that
+/// body to `read_frame` would make it read the first four bytes of CBOR as a
+/// length, which fails with a wildly wrong number and sends you looking at the
+/// wrong layer.
+///
+/// # Errors
+/// Returns [`FrameError::Malformed`] if the bytes are not valid CBOR of the
+/// expected shape.
+pub fn decode<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T, FrameError> {
+    ciborium::from_reader(payload).map_err(|e| FrameError::Malformed(e.to_string()))
+}
+
+/// Encode a value to a bare CBOR payload, with no length prefix.
+///
+/// The counterpart to [`decode`], for a transport that writes its own framing.
+///
+/// # Errors
+/// Returns [`FrameError::Encode`] if the value cannot be serialised, or
+/// [`FrameError::TooLarge`] if the encoding exceeds [`MAX_FRAME_LEN`].
+pub fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, FrameError> {
+    let mut payload = Vec::new();
+    ciborium::into_writer(value, &mut payload).map_err(|e| FrameError::Encode(e.to_string()))?;
+
+    let len = u32::try_from(payload.len()).map_err(|_| FrameError::TooLarge { len: u32::MAX })?;
+    if len == 0 {
+        return Err(FrameError::Empty);
+    }
+    if len > MAX_FRAME_LEN {
+        return Err(FrameError::TooLarge { len });
+    }
+    Ok(payload)
+}
+
 /// Read one frame and decode it as `T`.
 ///
 /// Reads exactly the declared number of bytes and no more, so the reader is
@@ -97,7 +134,7 @@ where
     let mut payload = vec![0u8; len as usize];
     read_exact_counted(reader, &mut payload)?;
 
-    ciborium::from_reader(payload.as_slice()).map_err(|e| FrameError::Malformed(e.to_string()))
+    decode(&payload)
 }
 
 /// Encode `value` as CBOR and write it with its length prefix.
@@ -111,16 +148,9 @@ where
     T: serde::Serialize,
     W: std::io::Write,
 {
-    let mut payload = Vec::new();
-    ciborium::into_writer(value, &mut payload).map_err(|e| FrameError::Encode(e.to_string()))?;
-
+    let payload = encode(value)?;
+    // `encode` has already bounded the length, so this cannot truncate.
     let len = u32::try_from(payload.len()).map_err(|_| FrameError::TooLarge { len: u32::MAX })?;
-    if len == 0 {
-        return Err(FrameError::Empty);
-    }
-    if len > MAX_FRAME_LEN {
-        return Err(FrameError::TooLarge { len });
-    }
 
     writer.write_all(&len.to_be_bytes())?;
     writer.write_all(&payload)?;

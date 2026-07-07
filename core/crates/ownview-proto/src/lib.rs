@@ -13,7 +13,7 @@ pub mod frame;
 pub mod message;
 
 pub use codes::Reason;
-pub use frame::{FrameError, MAX_FRAME_LEN, read_frame, write_frame};
+pub use frame::{FrameError, MAX_FRAME_LEN, decode, encode, read_frame, write_frame};
 pub use message::{Hello, Role};
 
 /// The wire protocol version. Must match exactly between peers; a mismatch is a

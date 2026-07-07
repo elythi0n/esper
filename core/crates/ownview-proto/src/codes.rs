@@ -99,6 +99,17 @@ impl Reason {
     }
 }
 
+impl std::fmt::Display for Reason {
+    /// The human description, or a note that this build does not know the code.
+    ///
+    /// Mirrors the Go implementation's `String()` exactly, including the
+    /// fallback text: the two are compared by a cross-language test, and a
+    /// close reason that differs between the halves is a confusing bug report.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.describe().unwrap_or("unrecognized reason code"))
+    }
+}
+
 /// The class of a reason code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
@@ -130,6 +141,14 @@ mod tests {
         assert_eq!(future.class(), Class::Unknown);
         assert_eq!(future.describe(), None);
         assert_eq!(future.0, 999, "the raw code survives for display");
+    }
+
+    /// The fallback text must match the Go implementation's, because a close
+    /// reason that differs between the two halves is a confusing bug report.
+    #[test]
+    fn display_matches_the_go_implementation() {
+        assert_eq!(Reason::MALFORMED_FRAME.to_string(), "malformed frame");
+        assert_eq!(Reason(9999).to_string(), "unrecognized reason code");
     }
 
     #[test]
