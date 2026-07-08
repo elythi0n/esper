@@ -528,6 +528,7 @@ name = "ownview-transport"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "ed25519-dalek",
  "ownview-crypto",
  "ownview-proto",
  "quinn",

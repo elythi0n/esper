@@ -13,9 +13,10 @@ pub mod pairing;
 mod wordlist;
 
 pub use code::{CODE_LEN, CodeError, PairingCode};
-pub use device::{Device, DeviceStore, Permission, StoreError};
+pub use device::{Device, DeviceStore, StoreError};
 pub use fingerprint::Fingerprint;
 pub use identity::{Identity, IdentityError, KEY_LEN};
+pub use ownview_proto::Permission;
 pub use pairing::{
     Confirming, Exchange, MAX_ATTEMPTS, Offer, OfferError, PAIRING_TTL, Paired, PairingError, Side,
 };

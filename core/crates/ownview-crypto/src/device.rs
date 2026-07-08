@@ -9,59 +9,15 @@
 //! reason about, and only one of them is safe to copy between machines.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use ownview_proto::Permission;
+
 use crate::{Fingerprint, Identity, identity::KEY_LEN};
-
-/// What a paired device is allowed to do.
-///
-/// Each is granted separately, and each direction of a two-way capability is
-/// its own permission: a device permitted to read this machine's clipboard is
-/// not thereby permitted to write to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Permission {
-    /// See the screen.
-    View,
-    /// Inject keyboard and mouse.
-    Control,
-    /// Read this machine's clipboard.
-    ClipboardOut,
-    /// Write to this machine's clipboard.
-    ClipboardIn,
-    /// Receive files from this machine.
-    FilesOut,
-    /// Send files to this machine.
-    FilesIn,
-    /// Hear this machine's audio.
-    Audio,
-    /// Open a terminal session.
-    Terminal,
-    /// Connect with nobody present to approve.
-    Unattended,
-    /// Record the session locally.
-    Record,
-}
-
-impl Permission {
-    /// Permissions a freshly paired device receives.
-    ///
-    /// View and control, prompt on connect, nothing else — and emphatically not
-    /// [`Permission::Unattended`], which is the dangerous one and is granted
-    /// only by a human at the host.
-    #[must_use]
-    pub fn defaults() -> Vec<Self> {
-        vec![Self::View, Self::Control]
-    }
-
-    /// Whether granting this permission should require explicit confirmation at
-    /// the host rather than a checkbox.
-    #[must_use]
-    pub const fn is_sensitive(self) -> bool {
-        matches!(self, Self::Unattended | Self::FilesIn | Self::Record)
-    }
-}
 
 /// A device this machine has paired with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,7 +74,10 @@ impl Device {
     }
 }
 
-/// What can go wrong changing the store.
+/// The store format version this build writes and accepts.
+const CURRENT_VERSION: u32 = 1;
+
+/// What can go wrong reading, writing or changing the store.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// The key cannot serve as an identity: not a curve point, or small order.
@@ -127,6 +86,33 @@ pub enum StoreError {
          (not a valid curve point, or a small-order point)"
     )]
     UnusableKey { fingerprint: String },
+
+    /// The file could not be parsed.
+    #[error("{path} is not a valid device store: {reason}")]
+    Malformed { path: PathBuf, reason: String },
+
+    /// The file was written by a different version of OwnView.
+    ///
+    /// Refused rather than guessed at. A store from a future version may hold
+    /// permissions this build does not understand, and silently dropping them
+    /// would quietly widen or narrow what a device may do.
+    #[error(
+        "{path} was written by a different version of OwnView (format {found}, this build \
+         understands {supported}); it is not being modified"
+    )]
+    UnknownVersion {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+    },
+
+    /// Filesystem failure.
+    #[error("{path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 /// Every device this machine trusts, keyed by public key.
@@ -147,7 +133,7 @@ pub struct DeviceStore {
 }
 
 const fn one() -> u32 {
-    1
+    CURRENT_VERSION
 }
 
 impl DeviceStore {
@@ -155,7 +141,7 @@ impl DeviceStore {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            version: 1,
+            version: CURRENT_VERSION,
             devices: BTreeMap::new(),
         }
     }
@@ -261,6 +247,116 @@ impl DeviceStore {
     pub fn may(&self, public_key: &[u8; KEY_LEN], p: Permission) -> bool {
         self.get(public_key).is_some_and(|d| d.may(p))
     }
+}
+
+impl DeviceStore {
+    /// Load the store from disk, normalizing it.
+    ///
+    /// A missing file is an **empty store, not an error**: a machine with no
+    /// paired devices is the normal state on first run, and treating it as a
+    /// failure would make every caller special-case it.
+    ///
+    /// The file is normalized on load ([`DeviceStore::normalize`]), so a
+    /// hand-edited entry with an unusable key or a mismatched index is
+    /// corrected here rather than surfacing later as a session that will not
+    /// open. What was removed is returned so the caller can tell the user.
+    pub fn load(path: &Path) -> Result<(Self, Vec<String>), StoreError> {
+        let text = match fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok((Self::new(), Vec::new()));
+            }
+            Err(source) => {
+                return Err(StoreError::Io {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        };
+
+        let mut store: Self = serde_json::from_str(&text).map_err(|e| StoreError::Malformed {
+            path: path.to_owned(),
+            reason: e.to_string(),
+        })?;
+
+        if store.version != CURRENT_VERSION {
+            return Err(StoreError::UnknownVersion {
+                path: path.to_owned(),
+                found: store.version,
+                supported: CURRENT_VERSION,
+            });
+        }
+
+        let removed = store.normalize();
+        Ok((store, removed))
+    }
+
+    /// Write the store to disk, atomically and owner-only.
+    ///
+    /// Atomic because a half-written device store is worse than none: a
+    /// truncated file would drop trusted devices silently, and the user would
+    /// discover it the next time they tried to connect to something.
+    ///
+    /// Owner-only because the store is what this machine trusts. It holds no
+    /// secrets — public keys are public — but a file another user can *write*
+    /// is a file another user can add themselves to.
+    pub fn save(&self, path: &Path) -> Result<(), StoreError> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|source| StoreError::Io {
+                path: dir.to_owned(),
+                source,
+            })?;
+        }
+
+        // Pretty-printed on purpose. The file is meant to be readable by
+        // someone deciding whether to delete a line from it.
+        let text = serde_json::to_string_pretty(self).map_err(|e| StoreError::Malformed {
+            path: path.to_owned(),
+            reason: e.to_string(),
+        })?;
+
+        let tmp = path.with_extension("tmp");
+        write_owner_only(&tmp, text.as_bytes()).map_err(|source| StoreError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+
+        fs::rename(&tmp, path).map_err(|source| {
+            let _ = fs::remove_file(&tmp);
+            StoreError::Io {
+                path: path.to_owned(),
+                source,
+            }
+        })
+    }
+}
+
+/// Write `bytes` to `path` with owner-only permissions, set at creation.
+///
+/// The mode is applied by `OpenOptions` rather than by a `chmod` afterwards:
+/// creating a world-writable file and narrowing it leaves a window in which
+/// another user could add a device, and on a shared machine that window is
+/// enough.
+#[cfg(unix)]
+fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+#[cfg(not(unix))]
+fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // Windows ACLs are not mode bits; the platform work lands in Phase 6 and
+    // `doctor` reports that the store is not protected until then.
+    fs::write(path, bytes)
 }
 
 /// Lowercase hex of a public key, used as the store's map key.
@@ -592,6 +688,180 @@ mod tests {
         assert!(removed.is_empty(), "nothing should be removed");
         assert!(store.is_paired(&key(4)));
         assert_eq!(store.get(&key(4)).map(|d| d.name.as_str()), Some("laptop"));
+    }
+
+    fn tmpdir() -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        let mut n = [0u8; 8];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut n);
+        p.push(format!("ownview-store-{}", u64::from_le_bytes(n)));
+        fs::create_dir_all(&p).expect("mkdir");
+        p
+    }
+
+    /// A machine with no paired devices is the normal state on first run, not
+    /// an error every caller has to special-case.
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+    #[test]
+    fn a_missing_file_loads_as_an_empty_store() {
+        let dir = tmpdir();
+        let (store, removed) =
+            DeviceStore::load(&dir.join("absent.json")).expect("a missing store is not an error");
+        assert!(store.is_empty());
+        assert!(removed.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+    #[test]
+    fn round_trips_through_disk() {
+        let dir = tmpdir();
+        let path = dir.join("devices.json");
+
+        let mut store = DeviceStore::new();
+        let mut d = device(5);
+        d.grant(Permission::Audio);
+        d.last_seen = Some(1_756_700_000);
+        store.insert(d).expect("valid key");
+        store.save(&path).expect("save");
+
+        let (back, removed) = DeviceStore::load(&path).expect("load");
+        assert!(removed.is_empty());
+        assert_eq!(back.len(), 1);
+        let got = back.get(&key(5)).expect("device present");
+        assert!(got.may(Permission::Audio));
+        assert!(got.may(Permission::View));
+        assert_eq!(got.last_seen, Some(1_756_700_000));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The store is what this machine trusts. It holds no secrets, but a file
+    /// another user can *write* is a file another user can add themselves to.
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+    #[test]
+    fn a_saved_store_is_owner_only_from_the_moment_it_exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir();
+        let path = dir.join("devices.json");
+        DeviceStore::new().save(&path).expect("save");
+        let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "store has mode {mode:o}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A half-written store would drop trusted devices silently, and the user
+    /// would find out the next time they tried to connect.
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+    #[test]
+    fn save_leaves_no_temporary_file() {
+        let dir = tmpdir();
+        let path = dir.join("devices.json");
+        DeviceStore::new().save(&path).expect("save");
+        let strays: Vec<_> = fs::read_dir(&dir)
+            .expect("readdir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "devices.json")
+            .collect();
+        assert!(strays.is_empty(), "save left {strays:?} behind");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Loading normalizes, so a hand-edited file is corrected at load rather
+    /// than surfacing later as a session that will not open.
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+    #[test]
+    fn loading_corrects_a_hand_edited_file_and_reports_what_it_dropped() {
+        let dir = tmpdir();
+        let path = dir.join("devices.json");
+        let json = format!(
+            r#"{{"version":1,"devices":{{
+                 "wrong-index":{{"public_key":"{}","name":"laptop","permissions":["view"],
+                                 "paired_at":0,"last_seen":null}},
+                 "bad":{{"public_key":"{}","name":"weak","permissions":["view"],
+                         "paired_at":0,"last_seen":null}}}}}}"#,
+            key(6)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+            "00".repeat(KEY_LEN),
+        );
+        fs::write(&path, json).expect("write");
+
+        let (store, removed) = DeviceStore::load(&path).expect("load");
+        assert_eq!(
+            removed.len(),
+            1,
+            "the weak key should be reported as dropped"
+        );
+        assert!(
+            removed.first().is_some_and(|r| !r.is_empty()),
+            "the report should name the key"
+        );
+        assert_eq!(store.len(), 1);
+        assert!(
+            store.is_paired(&key(6)),
+            "the good entry must be findable despite its wrong index"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+    #[test]
+    fn a_malformed_file_is_reported_not_silently_emptied() {
+        let dir = tmpdir();
+        let path = dir.join("devices.json");
+        fs::write(&path, "{ this is not json").expect("write");
+        match DeviceStore::load(&path) {
+            Err(StoreError::Malformed { .. }) => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A store from a future version may hold permissions this build does not
+    /// understand. Dropping them silently would quietly change what a device
+    /// may do, so the file is refused instead.
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+    #[test]
+    fn a_future_format_version_is_refused_rather_than_reinterpreted() {
+        let dir = tmpdir();
+        let path = dir.join("devices.json");
+        fs::write(&path, r#"{"version":99,"devices":{}}"#).expect("write");
+        match DeviceStore::load(&path) {
+            Err(StoreError::UnknownVersion {
+                found: 99,
+                supported,
+                ..
+            }) => {
+                assert_eq!(supported, CURRENT_VERSION);
+            }
+            other => panic!("expected UnknownVersion, got {other:?}"),
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Saving over an existing store must replace it, not append or corrupt.
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+    #[test]
+    fn saving_twice_replaces_rather_than_accumulates() {
+        let dir = tmpdir();
+        let path = dir.join("devices.json");
+
+        let mut a = DeviceStore::new();
+        a.insert(device(7)).expect("valid");
+        a.save(&path).expect("first save");
+
+        let mut b = DeviceStore::new();
+        b.insert(device(8)).expect("valid");
+        b.save(&path).expect("second save");
+
+        let (loaded, _) = DeviceStore::load(&path).expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.is_paired(&key(8)));
+        assert!(!loaded.is_paired(&key(7)), "the first save must be gone");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

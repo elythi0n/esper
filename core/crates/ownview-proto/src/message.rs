@@ -5,6 +5,8 @@
 //! one without a flag day — that is why nothing here is `deny_unknown_fields`.
 
 use serde::{Deserialize, Serialize};
+
+use crate::codes::Reason;
 use serde_bytes;
 
 /// Which side of a session a peer is.
@@ -110,6 +112,63 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
     s.get(..end).unwrap_or("")
 }
 
+/// What a paired device is allowed to do.
+///
+/// Each is granted separately, and each direction of a two-way capability is
+/// its own permission: a device permitted to *read* this machine's clipboard is
+/// not thereby permitted to *write* to it. Two-way capabilities that are one
+/// permission are how a feature nobody asked for gets enabled by a feature
+/// somebody did.
+///
+/// This lives in the protocol crate because it is both halves of the same
+/// thing: the wire vocabulary a controller uses to request access, and the
+/// policy vocabulary a host uses to grant it. Defining it twice would let the
+/// two drift, and a permission that means one thing on the wire and another in
+/// the store is a security bug waiting for a rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Permission {
+    /// See the screen.
+    View,
+    /// Inject keyboard and mouse.
+    Control,
+    /// Read this machine's clipboard.
+    ClipboardOut,
+    /// Write to this machine's clipboard.
+    ClipboardIn,
+    /// Receive files from this machine.
+    FilesOut,
+    /// Send files to this machine.
+    FilesIn,
+    /// Hear this machine's audio.
+    Audio,
+    /// Open a terminal session.
+    Terminal,
+    /// Connect with nobody present to approve.
+    Unattended,
+    /// Record the session locally.
+    Record,
+}
+
+impl Permission {
+    /// Permissions a freshly paired device receives.
+    ///
+    /// View and control, prompt on connect, nothing else — and emphatically not
+    /// [`Permission::Unattended`], which is the dangerous one and is granted
+    /// only by a human at the host.
+    #[must_use]
+    pub fn defaults() -> Vec<Self> {
+        vec![Self::View, Self::Control]
+    }
+
+    /// Whether granting this permission should require explicit confirmation at
+    /// the host rather than a checkbox.
+    #[must_use]
+    pub const fn is_sensitive(self) -> bool {
+        matches!(self, Self::Unattended | Self::FilesIn | Self::Record)
+    }
+}
+
 /// A SPAKE2 message, sent once in each direction during pairing.
 ///
 /// Carries the sender's public key alongside the PAKE message. The key is a
@@ -152,6 +211,101 @@ pub struct PairConfirm {
     /// HMAC-SHA-256 over the pairing transcript.
     #[serde(with = "serde_bytes_array")]
     pub mac: [u8; 32],
+}
+
+/// A controller asking to open a session.
+///
+/// Requests are a *maximum*, never a demand. The host grants some subset — see
+/// [`SessionGrant`] — and the controller renders what it was given rather than
+/// what it asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRequest {
+    /// The permissions the controller would like.
+    pub want: Vec<Permission>,
+    /// Video codecs the controller can decode, in preference order.
+    pub codecs: Vec<String>,
+    /// A short human reason, shown on the host's prompt. Peer-supplied and
+    /// untrusted: bounded, and never interpreted as markup.
+    pub reason: String,
+}
+
+/// Longest accepted session reason, in bytes.
+pub const MAX_REASON_LEN: usize = 120;
+
+/// Most permissions a single request may name.
+///
+/// The set is small and fixed, so a request naming more than all of them twice
+/// over is either broken or probing. Bounded because a request arrives from an
+/// authenticated peer but an authenticated peer is not a trusted one.
+pub const MAX_REQUESTED_PERMISSIONS: usize = 32;
+
+impl SessionRequest {
+    /// Whether this request is within its bounds.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.reason.len() <= MAX_REASON_LEN
+            && !self.reason.chars().any(char::is_control)
+            && self.want.len() <= MAX_REQUESTED_PERMISSIONS
+            && self.codecs.len() <= 16
+    }
+}
+
+/// The host opening a session, with the permissions it actually granted.
+///
+/// `granted` may be smaller than what was requested, and frequently is. **The
+/// controller must render what it holds, never what it asked for**: a client
+/// that assumes its request was honoured will offer a control cursor on a
+/// view-only session and confuse the person using it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionGrant {
+    /// An opaque identifier for this session, for logs and the audit trail.
+    #[serde(with = "serde_bytes_array")]
+    pub session_id: [u8; 16],
+    /// What the controller may actually do.
+    pub granted: Vec<Permission>,
+}
+
+impl SessionGrant {
+    /// Whether a permission was granted.
+    #[must_use]
+    pub fn allows(&self, p: Permission) -> bool {
+        self.granted.contains(&p)
+    }
+}
+
+/// The host refusing a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDeny {
+    /// Why, as a code the controller can branch on.
+    pub reason: Reason,
+    /// Why, as a sentence a person can act on.
+    pub detail: String,
+}
+
+/// The host narrowing or widening a live session.
+///
+/// Sent whenever policy changes mid-session — a human revoking control, a
+/// schedule ending. The controller must apply it immediately; there is no
+/// negotiation and no acknowledgement, because a permission the host has
+/// withdrawn is withdrawn whether or not the controller replies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionChange {
+    /// The complete new set, not a delta.
+    ///
+    /// A delta invites a controller and host that disagree about the current
+    /// state to drift further apart with every message. The full set cannot
+    /// drift.
+    pub granted: Vec<Permission>,
+}
+
+/// The host's response to a session request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionResponse {
+    /// Granted, with the permissions actually given.
+    Grant(SessionGrant),
+    /// Refused, with a reason.
+    Deny(SessionDeny),
 }
 
 /// The host's reply to the controller's opening message.

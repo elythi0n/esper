@@ -14,7 +14,11 @@ pub mod message;
 
 pub use codes::Reason;
 pub use frame::{FrameError, MAX_FRAME_LEN, decode, encode, read_frame, write_frame};
-pub use message::{Hello, MAX_SPAKE_LEN, PairConfirm, PairResponse, PairResult, PairSpake, Role};
+pub use message::{
+    Hello, MAX_REASON_LEN, MAX_REQUESTED_PERMISSIONS, MAX_SPAKE_LEN, PairConfirm, PairResponse,
+    PairResult, PairSpake, Permission, PermissionChange, Role, SessionDeny, SessionGrant,
+    SessionRequest, SessionResponse,
+};
 
 /// The wire protocol version. Must match exactly between peers; a mismatch is a
 /// clean close naming both versions, never a negotiation.
