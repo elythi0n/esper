@@ -147,10 +147,13 @@ miri:
 miri-full:
 	@cd $(CORE) && cargo +nightly miri test --workspace
 
-## Fuzz the frame decoder for 60s (needs nightly + cargo-fuzz)
+## Fuzz every target for 30s each (needs nightly + cargo-fuzz)
 .PHONY: fuzz
 fuzz:
-	@cd $(CORE) && cargo +nightly fuzz run frame_decode -- -max_total_time=60
+	@for t in frame_decode messages replay; do \
+		echo "fuzzing $$t..."; \
+		(cd $(CORE) && cargo +nightly fuzz run $$t -- -max_total_time=30) || exit 1; \
+	done
 
 ## Post-build smoke test: binaries agree and ship no endpoint
 .PHONY: smoke

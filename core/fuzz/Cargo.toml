@@ -14,6 +14,20 @@ libfuzzer-sys = "0.4"
 ownview-proto = { path = "../crates/ownview-proto" }
 
 [[bin]]
+name = "messages"
+path = "fuzz_targets/messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay"
+path = "fuzz_targets/replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "frame_decode"
 path = "fuzz_targets/frame_decode.rs"
 test = false

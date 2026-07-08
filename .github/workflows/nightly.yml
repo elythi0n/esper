@@ -30,7 +30,7 @@ jobs:
   # A long fuzz run. The 60s smoke run on each push catches regressions; this is
   # the one that finds something new.
   fuzz-long:
-    name: fuzz (30 min)
+    name: fuzz (10 min per target)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,8 +39,12 @@ jobs:
         with:
           workspaces: core
       - run: cargo install cargo-fuzz --locked
-      - working-directory: core
-        run: cargo fuzz run frame_decode -- -max_total_time=1800
+      - name: ten minutes per target
+        working-directory: core
+        run: |
+          for t in frame_decode messages replay; do
+            cargo fuzz run "$t" -- -max_total_time=600
+          done
       - name: Upload any crash found
         if: failure()
         uses: actions/upload-artifact@v4

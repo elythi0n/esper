@@ -181,6 +181,11 @@ jobs:
         with:
           workspaces: core
       - run: cargo install cargo-fuzz --locked
-      - name: frame_decode, 60s
+      # Every parser that touches untrusted input gets a target. A short run on
+      # each change catches a regression; the nightly workflow runs them long.
+      - name: fuzz each target, 30s
         working-directory: core
-        run: cargo fuzz run frame_decode -- -max_total_time=60
+        run: |
+          for t in frame_decode messages replay; do
+            cargo fuzz run "$t" -- -max_total_time=30
+          done

@@ -11,6 +11,7 @@
 pub mod codes;
 pub mod frame;
 pub mod message;
+pub mod replay;
 
 pub use codes::Reason;
 pub use frame::{FrameError, MAX_FRAME_LEN, decode, encode, read_frame, write_frame};
@@ -19,6 +20,7 @@ pub use message::{
     PairResult, PairSpake, Permission, PermissionChange, Role, SessionDeny, SessionGrant,
     SessionRequest, SessionResponse,
 };
+pub use replay::{Rejected, ReplayWindow, WINDOW};
 
 /// The wire protocol version. Must match exactly between peers; a mismatch is a
 /// clean close naming both versions, never a negotiation.
