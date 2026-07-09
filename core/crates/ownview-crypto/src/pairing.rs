@@ -171,6 +171,19 @@ pub struct Offer {
     code: PairingCode,
     created_at: Instant,
     attempts_used: u8,
+    /// Latched once expiry has been observed.
+    ///
+    /// **Deadness must be monotonic.** Without this latch, `remaining` is
+    /// recomputed from `created_at` on every call, so a `now` earlier than the
+    /// last one makes an expired offer live again — and `now` is supplied by
+    /// the caller, not read from a clock this type controls.
+    ///
+    /// `Instant` is monotonic by platform guarantee, so this is not reachable
+    /// through ordinary use. It is reachable through a caller that keeps a
+    /// stale `Instant`, or a test, or a future caller that derives `now` from
+    /// something less well behaved. Found by the state-machine property test on
+    /// seed 77, which is the kind of ordering nobody writes by hand.
+    expired: bool,
 }
 
 impl fmt::Debug for Offer {
@@ -191,6 +204,7 @@ impl Offer {
             code: PairingCode::generate(),
             created_at: Instant::now(),
             attempts_used: 0,
+            expired: false,
         }
     }
 
@@ -201,6 +215,7 @@ impl Offer {
             code,
             created_at,
             attempts_used: 0,
+            expired: false,
         }
     }
 
@@ -214,8 +229,14 @@ impl Offer {
     }
 
     /// How long remains, or `None` if it has expired.
+    ///
+    /// Returns `None` permanently once expiry has been observed, regardless of
+    /// what `now` says afterwards. See the note on [`Offer::expired`].
     #[must_use]
     pub fn remaining(&self, now: Instant) -> Option<Duration> {
+        if self.expired {
+            return None;
+        }
         PAIRING_TTL.checked_sub(now.saturating_duration_since(self.created_at))
     }
 
@@ -241,6 +262,8 @@ impl Offer {
         our_public_key: [u8; KEY_LEN],
     ) -> Result<(Exchange, Vec<u8>), OfferError> {
         if self.remaining(now).is_none() {
+            // Latch it, so a later call with an earlier `now` cannot revive it.
+            self.expired = true;
             return Err(OfferError::Expired);
         }
         if self.attempts_remaining() == 0 {
@@ -766,6 +789,48 @@ mod tests {
         assert!(!o.is_live(later));
         assert_eq!(o.remaining(later), None);
         assert_eq!(o.begin(later, key(1)).err(), Some(OfferError::Expired));
+    }
+
+    /// Deadness is monotonic. A clock that moves backwards must not revive an
+    /// expired offer.
+    ///
+    /// Found by the state-machine property test, not written by hand: the
+    /// sequence is "expire, then go back in time, then try again", which is not
+    /// an ordering anyone thinks to test. `remaining` recomputed from
+    /// `created_at` every call, so an earlier `now` made the offer live again —
+    /// and `now` is supplied by the caller.
+    #[test]
+    fn an_expired_offer_is_not_revived_by_the_clock_going_backwards() {
+        let created = Instant::now();
+        let mut o = Offer::with_created_at(PairingCode::generate(), created);
+
+        let after_expiry = created + PAIRING_TTL + Duration::from_secs(1);
+        assert_eq!(
+            o.begin(after_expiry, key(1)).err(),
+            Some(OfferError::Expired)
+        );
+
+        // Now go back to when it was live. It must stay dead.
+        assert!(!o.is_live(created), "an expired offer must not come back");
+        assert_eq!(o.remaining(created), None, "remaining must stay None");
+        assert_eq!(
+            o.begin(created, key(1)).err(),
+            Some(OfferError::Expired),
+            "an expired offer must refuse an attempt even at an earlier instant"
+        );
+    }
+
+    /// Exhaustion is monotonic too, and for the same reason: once dead, dead.
+    #[test]
+    fn an_exhausted_offer_is_not_revived_by_the_clock_going_backwards() {
+        let created = Instant::now();
+        let mut o = Offer::with_created_at(PairingCode::generate(), created);
+        let later = created + Duration::from_secs(1);
+        for _ in 0..MAX_ATTEMPTS {
+            assert!(o.begin(later, key(1)).is_ok());
+        }
+        assert_eq!(o.begin(created, key(1)).err(), Some(OfferError::Exhausted));
+        assert!(!o.is_live(created));
     }
 
     /// The boundary: valid at the last moment, dead just after.

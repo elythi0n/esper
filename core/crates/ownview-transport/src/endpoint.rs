@@ -162,6 +162,20 @@ impl Endpoint {
             .map_err(|source| TransportError::Connect { addr, source })
     }
 
+    /// Move to a different local socket, keeping every live connection.
+    ///
+    /// This is what makes a laptop survive moving from wifi to a tether: QUIC
+    /// identifies a connection by its connection ID, not by the four-tuple, so
+    /// the peer follows the new address without a reconnection.
+    ///
+    /// Two things are lost and both are expected: connections to peers not
+    /// reachable from the new address, and the ability to accept *new* inbound
+    /// connections on the old one. On error the old socket is retained, so a
+    /// failed rebind leaves a working endpoint rather than a dead one.
+    pub fn rebind(&self, socket: std::net::UdpSocket) -> Result<(), std::io::Error> {
+        self.inner.rebind(socket)
+    }
+
     /// Close the endpoint and every connection on it.
     pub fn close(&self, reason: ownview_proto::Reason) {
         self.inner
@@ -223,6 +237,15 @@ fn server_config(
     let quic = QuicServerConfig::try_from(tls).map_err(|e| TransportError::Tls(e.to_string()))?;
     let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(quic));
     cfg.transport_config(Arc::new(transport_config()));
+
+    // Enabled by default in quinn, and pinned here anyway.
+    //
+    // Migration is the reason a laptop moving from wifi to a tether keeps its
+    // session instead of reconnecting — one of the four properties QUIC was
+    // chosen for. A change to quinn's defaults must not be able to turn it off
+    // silently, the same reasoning that names `prefer-post-quantum` explicitly.
+    cfg.migration(true);
+
     Ok(cfg)
 }
 
