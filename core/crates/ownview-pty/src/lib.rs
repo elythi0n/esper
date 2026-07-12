@@ -25,6 +25,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod raw;
+
+pub use raw::RawMode;
+
 use std::ffi::OsString;
 
 use ownview_proto::{TerminalExit, TerminalOpen, TerminalResize};
