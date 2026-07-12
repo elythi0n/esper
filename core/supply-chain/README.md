@@ -24,6 +24,19 @@ The value is not in the exemptions. It is in what they make possible:
   between the exempted version and the new one.
 - **The list shrinks.** Every exemption removed is a crate someone read.
 
+## Publisher trust
+
+`cargo vet` also permits trusting a *publisher* rather than auditing each of
+their releases. `rustix` and `linux-raw-sys` are covered this way: Mozilla, ISRG
+and the Bytecode Alliance all record trust in their author, and inheriting that
+is strictly better than recording "unreviewed" against crates three
+organisations have vouched for.
+
+Trusting a publisher is a weaker statement than auditing a version — it says
+"we trust this person's future releases too". Reserved for authors with an
+established public record whose work several of the sets below already trust,
+and never used to clear a backlog.
+
 ## Imported audit sets
 
 We trust these publishers' audits rather than repeating their work:

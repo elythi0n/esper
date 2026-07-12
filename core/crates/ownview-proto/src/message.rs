@@ -213,6 +213,148 @@ pub struct PairConfirm {
     pub mac: [u8; 32],
 }
 
+/// A controller asking for a shell.
+///
+/// Terminal mode is not a lesser version of screen sharing. For a headless
+/// server it is the *correct* mode: no capture, no codec, no display anywhere
+/// in the path, and a few kilobytes per second.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOpen {
+    /// Initial window size, so the shell starts at the right width rather than
+    /// redrawing once the first resize arrives.
+    pub cols: u16,
+    pub rows: u16,
+    /// The controller's `TERM`, passed through **as the controller reported it**.
+    ///
+    /// Not rewritten and not upgraded. Claiming a terminal type the controller
+    /// cannot actually render produces a shell that emits escape sequences the
+    /// user sees as garbage — so a `TERM` we do not recognise is passed along
+    /// and left to the far side's terminfo, which knows more about it than we
+    /// do.
+    pub term: String,
+}
+
+/// Largest accepted `TERM` value.
+///
+/// `TERM` reaches a child process's environment, so it is bounded and screened
+/// before it gets there.
+pub const MAX_TERM_LEN: usize = 64;
+
+/// Largest window dimension accepted.
+///
+/// Generous — a very wide terminal is legitimate — but bounded, because the
+/// value reaches a `TIOCSWINSZ` ioctl and a shell's own line-wrapping
+/// arithmetic.
+pub const MAX_WINDOW: u16 = 10_000;
+
+impl TerminalOpen {
+    /// Whether this request is within its bounds and safe to act on.
+    ///
+    /// `TERM` is checked against a conservative character set rather than just
+    /// a length: it becomes an environment variable in a child process, and a
+    /// value containing a separator or a control character is not a terminal
+    /// name, it is an attempt.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.cols > 0
+            && self.rows > 0
+            && self.cols <= MAX_WINDOW
+            && self.rows <= MAX_WINDOW
+            && !self.term.is_empty()
+            && self.term.len() <= MAX_TERM_LEN
+            && self
+                .term
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    }
+}
+
+/// Bytes in either direction on a terminal session.
+///
+/// Deliberately opaque. **These bytes are never logged.** What a person types
+/// into a shell includes passwords, and a remote desktop that records its own
+/// terminal traffic is a keylogger with a licence. The audit log records that a
+/// terminal session happened, never what went through it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalData {
+    #[serde(with = "serde_bytes")]
+    pub bytes: Vec<u8>,
+}
+
+/// Largest terminal payload in one message.
+///
+/// 64 KiB is well above a screenful and well below the frame cap, so a `cat` of
+/// a large file is chunked rather than rejected, and a peer cannot make us
+/// buffer a megabyte per message.
+pub const MAX_TERMINAL_CHUNK: usize = 64 * 1024;
+
+impl TerminalData {
+    /// Whether this chunk is within its bounds.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.bytes.is_empty() && self.bytes.len() <= MAX_TERMINAL_CHUNK
+    }
+}
+
+/// The controller's window changed size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalResize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl TerminalResize {
+    /// Whether this resize is within bounds.
+    #[must_use]
+    pub const fn is_well_formed(&self) -> bool {
+        self.cols > 0 && self.rows > 0 && self.cols <= MAX_WINDOW && self.rows <= MAX_WINDOW
+    }
+}
+
+/// The shell ended.
+///
+/// Carries the real exit status, because a controller that always reports 0 is
+/// useless in a script — and terminal mode's whole point is being usable on a
+/// server, where things are scripted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalExit {
+    /// Exit code, if the process exited normally.
+    pub code: Option<i32>,
+    /// Signal number, if it was killed.
+    pub signal: Option<i32>,
+}
+
+impl TerminalExit {
+    /// The exit code a shell would report for this outcome.
+    ///
+    /// Follows the shell convention of `128 + signal` for a killed process, so
+    /// a script on the controller sees what it would have seen running locally.
+    #[must_use]
+    pub fn shell_code(&self) -> i32 {
+        match (self.code, self.signal) {
+            (Some(c), _) => c,
+            (None, Some(s)) => 128i32.saturating_add(s),
+            (None, None) => 1,
+        }
+    }
+}
+
+/// Anything that can travel on a terminal session, in either direction.
+///
+/// One tagged enum rather than separate streams: a resize that overtook the
+/// output it applies to would make the shell wrap at the wrong width, and a
+/// single ordered stream cannot reorder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalMessage {
+    /// Bytes to or from the shell.
+    Data(TerminalData),
+    /// The window changed size. Controller to host only.
+    Resize(TerminalResize),
+    /// The shell ended. Host to controller only.
+    Exit(TerminalExit),
+}
+
 /// A controller asking to open a session.
 ///
 /// Requests are a *maximum*, never a demand. The host grants some subset — see

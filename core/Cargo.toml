@@ -14,6 +14,7 @@ publish = false
 ownview-proto = { path = "crates/ownview-proto" }
 ownview-crypto = { path = "crates/ownview-crypto" }
 ownview-transport = { path = "crates/ownview-transport" }
+ownview-pty = { path = "crates/ownview-pty" }
 ownview-buildinfo = { path = "crates/ownview-buildinfo" }
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }

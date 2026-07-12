@@ -38,6 +38,10 @@ criteria = "safe-to-deploy"
 version = "1.8.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.bitflags]]
+version = "2.13.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.bytes]]
 version = "1.12.1"
 criteria = "safe-to-deploy"
@@ -188,6 +192,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.proc-macro2]]
 version = "1.0.107"
+criteria = "safe-to-deploy"
+
+[[exemptions.pty-process]]
+version = "0.5.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.quinn]]

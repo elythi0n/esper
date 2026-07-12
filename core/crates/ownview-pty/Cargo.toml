@@ -1,0 +1,46 @@
+[package]
+name = "ownview-pty"
+description = "Pseudo-terminal allocation and a shell attached to it, for terminal mode."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ownview-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "sync", "time", "rt"] }
+
+# `rustix` for termios and window size: two transitive crates (bitflags,
+# linux-raw-sys) and **no libc**, which is a smaller footprint than any
+# alternative surveyed.
+rustix = { version = "1", features = ["termios", "process", "stdio", "fs"] }
+
+# `pty-process` owns the one genuinely delicate part: the code between fork and
+# exec, which must be async-signal-safe. It adds nothing to the dependency tree
+# beyond rustix, carries fourteen unsafe blocks, and reasons about
+# async-signal-safety explicitly in comments.
+#
+# It is pre-1.0, and this project rejected `scap` (0.0.8) on exactly that
+# ground, so the difference is worth stating rather than glossing:
+#
+#  1. **It is outside the security boundary.** `scap` sat in the capture path,
+#     whose damage-rect output the whole software-encode decision depends on. A
+#     bug here is a broken shell, not an authentication bypass and not a
+#     viability question.
+#  2. **The alternative is not safer.** Declining it means writing the same
+#     unsafe `pre_exec` setup by hand, with the same async-signal-safety
+#     reasoning, reviewed by fewer people. There is no version of this that
+#     avoids the unsafe; there is only a choice about whose it is.
+#  3. **0.5.x is not 0.0.x.** A thin, focused wrapper at 0.5 with a stated API
+#     is a different proposition from a full capture stack at 0.0.8 that had
+#     already mis-declared a transitive dependency floor.
+pty-process = { version = "0.5", features = ["async"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util"] }
