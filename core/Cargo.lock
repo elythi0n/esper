@@ -567,9 +567,12 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "ed25519-dalek",
+ "ownview-audit",
  "ownview-crypto",
  "ownview-proto",
+ "ownview-pty",
  "quinn",
+ "rand_core 0.6.4",
  "rustls",
  "rustls-pki-types",
  "serde",

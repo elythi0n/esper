@@ -7,6 +7,7 @@ pub mod crypto_suite;
 pub mod endpoint;
 pub mod pair;
 pub mod session;
+pub mod terminal;
 
 pub use auth::{AnyOf, NoPeers, OnlyPeer, PeerAuthority};
 pub use authorize::{
@@ -17,3 +18,4 @@ pub use crypto_suite::{KX_GROUP, TLS_VERSIONS, provider};
 pub use endpoint::{ALPN, Endpoint, IDLE_TIMEOUT, KEEPALIVE, TransportError};
 pub use pair::{AnyKeyForPairingOnly, PairError, pairing_authority};
 pub use session::{HELLO_TIMEOUT, Session, SessionError, Stats};
+pub use terminal::{Ended, EscapeWatcher, TerminalError, Typed};
