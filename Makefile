@@ -70,6 +70,25 @@ build-rust:
 	@cp $(CORE)/target/release/ownview-broker $(BIN)/
 	@echo "  → $(BIN)/ownview-engine, $(BIN)/ownview-broker"
 
+## Build size-optimised release binaries → ./build/dist
+##
+## For scp'ing onto a server: LTO, one codegen unit, symbols stripped. Takes
+## noticeably longer than `build`, so it is not what `make` does by default.
+.PHONY: build-dist
+build-dist:
+	$(GUARD_ROOT)
+	@echo "building dist binaries $(VERSION) (lto, stripped)..."
+	@cd $(CORE) && cargo build --profile dist --quiet \
+		--bin ownview-engine --bin ownview-broker
+	@mkdir -p $(BIN)/dist
+	@cp $(CORE)/target/dist/ownview-engine $(BIN)/dist/
+	@cp $(CORE)/target/dist/ownview-broker $(BIN)/dist/
+	@go build -trimpath -ldflags='$(LDFLAGS)' -o $(BIN)/dist/$(BINARY) $(PKG)
+	@printf '  %-20s %s\n' \
+		ownview          "$$(du -h $(BIN)/dist/$(BINARY) | cut -f1)" \
+		ownview-engine   "$$(du -h $(BIN)/dist/ownview-engine | cut -f1)" \
+		ownview-broker   "$$(du -h $(BIN)/dist/ownview-broker | cut -f1)"
+
 ## Build the Go binary for every platform → ./dist
 .PHONY: build-all
 build-all:

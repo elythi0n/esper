@@ -90,5 +90,30 @@ for b in ownview ownview-engine ownview-broker; do
   fi
 done
 
+# Terminal mode's whole claim is that it works on a machine with no screen.
+# Checked rather than assumed: a dependency that pulled in a display library
+# would still build and still pass every test, and would fail on the first
+# server someone tried it on.
+echo "  — checking the engine needs no display"
+if ldd "$BIN/ownview-engine" 2>/dev/null \
+   | grep -qiE 'libX11|libwayland|libGL|libEGL|libdrm|libgbm|libxcb'; then
+  printf '  ✗ ownview-engine links a display library:\n'
+  ldd "$BIN/ownview-engine" | grep -iE 'libX11|libwayland|libGL|libEGL|libdrm|libgbm|libxcb' | sed 's/^/      /'
+  echo "      Terminal mode must run on a headless server. A display library"
+  echo "      here means it will not."
+  fail=1
+else
+  printf '  ✓ ownview-engine links no display library\n'
+fi
+
+# And it must actually run with the display environment stripped.
+if env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE -u XAUTHORITY \
+     "$BIN/ownview-engine" version >/dev/null 2>&1; then
+  printf '  ✓ ownview-engine runs with no display environment\n'
+else
+  printf '  ✗ ownview-engine failed with the display environment stripped\n'
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then echo; echo "  smoke test failed"; exit 1; fi
 echo "  ✓ smoke test passed"

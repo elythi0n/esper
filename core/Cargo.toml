@@ -56,3 +56,25 @@ missing_debug_implementations = "warn"
 [profile.release]
 overflow-checks = true
 debug = 1
+
+# The profile releases are built with. Optimised for size and startup, because
+# the engine is scp'd onto servers and run from a systemd unit.
+#
+# `panic = "abort"` is deliberately **not** set, despite being the single
+# biggest size win available. The controller puts the user's terminal into raw
+# mode and restores it in `Drop`; with `abort` that never runs, leaving a shell
+# that does not echo and a user who cannot see what they are typing to fix it.
+# `ownview-pty`'s panic hook does cover that case, but relying on one mechanism
+# where two exist is a poor trade for a few hundred kilobytes.
+[profile.dist]
+inherits = "release"
+# Overflow checks stay on. Arithmetic on attacker-influenced values must trap
+# rather than wrap, and that is not a debug-build nicety.
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+# No `opt-level = "z"`: the media pipeline arriving in Phase 3 is
+# latency-critical, and trading its speed for binary size would be optimising
+# the wrong number.
+panic = "unwind"
