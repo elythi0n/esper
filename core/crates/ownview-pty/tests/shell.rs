@@ -354,7 +354,7 @@ async fn a_clean_exit_leaves_no_zombie() {
     // exit and reports 129 (128 + SIGHUP) instead of 0 — which is what the
     // first version of this test measured.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let status = ownview_pty::Teardown::hang_up(child, read, write).await;
+    let status = ownview_pty::hang_up(child, read, write).await;
     assert_eq!(status.map(|e| e.shell_code()), Some(0));
 
     #[cfg(target_os = "linux")]
@@ -395,7 +395,7 @@ async fn teardown_kills_a_foreground_child() {
         .unwrap_or_else(|| panic!("could not read the pid from: {seen:?}"));
     assert!(alive(fg_pid), "the foreground child should be running");
 
-    let _ = ownview_pty::Teardown::hang_up(child, read, write).await;
+    let _ = ownview_pty::hang_up(child, read, write).await;
 
     for _ in 0..120 {
         if !alive(fg_pid) && !alive(shell_pid) {
@@ -432,7 +432,7 @@ async fn the_shell_itself_never_survives_teardown_even_ignoring_sighup() {
     let _ = read_until(&mut read, "READY").await;
 
     let started = std::time::Instant::now();
-    let _ = ownview_pty::Teardown::hang_up(child, read, write).await;
+    let _ = ownview_pty::hang_up(child, read, write).await;
 
     for _ in 0..200 {
         if !alive(shell_pid) {
@@ -480,7 +480,7 @@ async fn a_backgrounded_job_is_deliberately_left_running() {
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or_else(|| panic!("could not read the pid from: {seen:?}"));
 
-    let _ = ownview_pty::Teardown::hang_up(child, read, write).await;
+    let _ = ownview_pty::hang_up(child, read, write).await;
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     assert!(
@@ -517,7 +517,7 @@ async fn tearing_down_an_already_exited_shell_reports_its_exit() {
     // Now tear down. It must not panic, and must not hang.
     let again = tokio::time::timeout(
         Duration::from_secs(5),
-        ownview_pty::Teardown::hang_up(child, read, write),
+        ownview_pty::hang_up(child, read, write),
     )
     .await
     .expect("teardown must not hang on an exited child");

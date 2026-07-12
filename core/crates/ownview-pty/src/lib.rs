@@ -233,8 +233,6 @@ impl Terminal {
 /// So "no orphans" means: no orphaned **shell**, no leaked pseudo-terminal, and
 /// nothing left in the terminal's foreground group. It does not mean reaching
 /// into a process tree the user deliberately detached.
-pub struct Teardown;
-
 /// How long a session gets to respond to a hangup before `SIGKILL`.
 ///
 /// Short, because a user who closed their terminal is waiting, but not zero:
@@ -242,58 +240,56 @@ pub struct Teardown;
 /// something that is ignoring it.
 pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
-impl Teardown {
-    /// Hang up on the session, then kill anything that survived.
-    ///
-    /// Takes the pseudo-terminal halves **by value** so it can close the
-    /// master. That is not an API inconvenience, it is the point: a caller
-    /// holding the master open has not hung up, whatever else it signalled.
-    ///
-    /// Returns the shell's exit status where one is available. Safe to call on
-    /// a session that has already ended.
-    pub async fn hang_up(
-        mut child: tokio::process::Child,
-        read: ReadHalf,
-        write: WriteHalf,
-    ) -> Option<TerminalExit> {
-        // Already gone? Report it and stop.
-        if let Ok(Some(status)) = child.try_wait() {
-            drop(read);
-            drop(write);
-            return Some(exit_status(&status));
-        }
-
-        // **Close the master.** The kernel hangs up the terminal, which reaches
-        // the foreground process group — including jobs in their own groups,
-        // which a process-group signal from here would miss.
+/// Hang up on the session, then kill anything that survived.
+///
+/// Takes the pseudo-terminal halves **by value** so it can close the master.
+/// That is not an API inconvenience, it is the point: a caller still holding
+/// the master has not hung up, whatever else it signalled.
+///
+/// Returns the shell's exit status where one is available. Safe to call on a
+/// session that has already ended.
+pub async fn hang_up(
+    mut child: tokio::process::Child,
+    read: ReadHalf,
+    write: WriteHalf,
+) -> Option<TerminalExit> {
+    // Already gone? Report it and stop.
+    if let Ok(Some(status)) = child.try_wait() {
         drop(read);
         drop(write);
+        return Some(exit_status(&status));
+    }
 
-        if let Ok(Ok(status)) = tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
-            return Some(exit_status(&status));
-        }
+    // **Close the master.** The kernel hangs up the terminal, which reaches
+    // the foreground process group — including jobs in their own groups,
+    // which a process-group signal from here would miss.
+    drop(read);
+    drop(write);
 
-        // Something survived the hangup — it detached from the terminal, or is
-        // ignoring SIGHUP. Signal the group we do know about.
-        let Some(pid) = child.id() else {
-            return child.try_wait().ok().flatten().map(|s| exit_status(&s));
-        };
-        tracing::debug!(pid, "session survived the hangup; signalling its group");
-        signal_group(pid, Signal::Hangup);
+    if let Ok(Ok(status)) = tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
+        return Some(exit_status(&status));
+    }
 
-        if let Ok(Ok(status)) = tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
-            return Some(exit_status(&status));
-        }
+    // Something survived the hangup — it detached from the terminal, or is
+    // ignoring SIGHUP. Signal the group we do know about.
+    let Some(pid) = child.id() else {
+        return child.try_wait().ok().flatten().map(|s| exit_status(&s));
+    };
+    tracing::debug!(pid, "session survived the hangup; signalling its group");
+    signal_group(pid, Signal::Hangup);
 
-        tracing::debug!(pid, "session ignored SIGHUP; sending SIGKILL");
-        signal_group(pid, Signal::Kill);
+    if let Ok(Ok(status)) = tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
+        return Some(exit_status(&status));
+    }
 
-        // Bounded even after SIGKILL: an unreapable child must not hold a task
-        // open forever.
-        match tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
-            Ok(Ok(status)) => Some(exit_status(&status)),
-            _ => None,
-        }
+    tracing::debug!(pid, "session ignored SIGHUP; sending SIGKILL");
+    signal_group(pid, Signal::Kill);
+
+    // Bounded even after SIGKILL: an unreapable child must not hold a task
+    // open forever.
+    match tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
+        Ok(Ok(status)) => Some(exit_status(&status)),
+        _ => None,
     }
 }
 
