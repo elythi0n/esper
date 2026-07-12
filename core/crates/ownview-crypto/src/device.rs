@@ -441,6 +441,25 @@ mod tests {
         }
     }
 
+    /// A terminal is a shell, and a shell is not a lesser form of screen
+    /// viewing — it is unrestricted execution as the host's user. Granting
+    /// "view" must never imply it, and neither must "control".
+    #[test]
+    fn a_terminal_is_a_separate_permission_from_view_and_control() {
+        let d = device(1);
+        assert!(d.may(Permission::View));
+        assert!(d.may(Permission::Control));
+        assert!(
+            !d.may(Permission::Terminal),
+            "a freshly paired device must not get a shell; view and control are \
+             bounded by what is on screen, a shell is not"
+        );
+        assert!(
+            !Permission::defaults().contains(&Permission::Terminal),
+            "Terminal must never be a default"
+        );
+    }
+
     #[test]
     fn the_dangerous_permissions_are_marked_sensitive() {
         assert!(Permission::Unattended.is_sensitive());

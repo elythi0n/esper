@@ -481,6 +481,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "ownview-audit"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "ownview-crypto",
+ "ownview-proto",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-broker"
 version = "0.0.0"
 dependencies = [
