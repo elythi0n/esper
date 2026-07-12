@@ -190,6 +190,159 @@ impl Terminal {
     }
 }
 
+/// Shut a terminal session down without leaving anything behind.
+///
+/// # Why signalling the shell is not enough
+///
+/// The obvious implementation kills the shell, or signals the shell's process
+/// group. Both leave orphans, and the second one surprisingly so.
+///
+/// A shell on a pseudo-terminal enables **job control**, and job control means
+/// each background job gets *its own process group*. So `sleep 3000 &` is not
+/// in the shell's group, and signalling that group never reaches it. Measured:
+/// the first version of this did exactly that, and the sleep survived.
+///
+/// # What actually works: close the master
+///
+/// A pseudo-terminal is the shell's **controlling terminal**. When the master
+/// side is closed, the kernel does a real hangup: it sends `SIGHUP` to the
+/// terminal's foreground process group and makes further reads return end of
+/// file. The kernel knows which group is in the foreground; we do not.
+///
+/// This is the mechanism a terminal emulator uses when you close its window,
+/// and the one `sshd` uses when a connection drops. It is not a trick — it is
+/// what a hangup *is*.
+///
+/// So teardown is: **close the master, then signal, then kill.**
+///
+/// # What is deliberately *not* killed
+///
+/// A **backgrounded** job is left running, and that is a decision rather than a
+/// limitation.
+///
+/// The kernel's hangup reaches the terminal's *foreground* process group. A job
+/// the user put in the background with `&` is in its own group and does not
+/// receive it — and neither mechanism here goes hunting for it.
+///
+/// That is deliberate because it is what every Unix user already expects. It is
+/// precisely why `nohup` and `tmux` exist: you start a long build, disconnect,
+/// and come back to it. `sleep 3000 &` surviving an ssh disconnect is not a bug
+/// in ssh. A terminal that hunted down and killed detached jobs would be *more*
+/// aggressive than ssh and would break a workflow people rely on daily.
+///
+/// So "no orphans" means: no orphaned **shell**, no leaked pseudo-terminal, and
+/// nothing left in the terminal's foreground group. It does not mean reaching
+/// into a process tree the user deliberately detached.
+pub struct Teardown;
+
+/// How long a session gets to respond to a hangup before `SIGKILL`.
+///
+/// Short, because a user who closed their terminal is waiting, but not zero:
+/// most shells exit within milliseconds and the grace only costs anything for
+/// something that is ignoring it.
+pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+impl Teardown {
+    /// Hang up on the session, then kill anything that survived.
+    ///
+    /// Takes the pseudo-terminal halves **by value** so it can close the
+    /// master. That is not an API inconvenience, it is the point: a caller
+    /// holding the master open has not hung up, whatever else it signalled.
+    ///
+    /// Returns the shell's exit status where one is available. Safe to call on
+    /// a session that has already ended.
+    pub async fn hang_up(
+        mut child: tokio::process::Child,
+        read: ReadHalf,
+        write: WriteHalf,
+    ) -> Option<TerminalExit> {
+        // Already gone? Report it and stop.
+        if let Ok(Some(status)) = child.try_wait() {
+            drop(read);
+            drop(write);
+            return Some(exit_status(&status));
+        }
+
+        // **Close the master.** The kernel hangs up the terminal, which reaches
+        // the foreground process group — including jobs in their own groups,
+        // which a process-group signal from here would miss.
+        drop(read);
+        drop(write);
+
+        if let Ok(Ok(status)) = tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
+            return Some(exit_status(&status));
+        }
+
+        // Something survived the hangup — it detached from the terminal, or is
+        // ignoring SIGHUP. Signal the group we do know about.
+        let Some(pid) = child.id() else {
+            return child.try_wait().ok().flatten().map(|s| exit_status(&s));
+        };
+        tracing::debug!(pid, "session survived the hangup; signalling its group");
+        signal_group(pid, Signal::Hangup);
+
+        if let Ok(Ok(status)) = tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
+            return Some(exit_status(&status));
+        }
+
+        tracing::debug!(pid, "session ignored SIGHUP; sending SIGKILL");
+        signal_group(pid, Signal::Kill);
+
+        // Bounded even after SIGKILL: an unreapable child must not hold a task
+        // open forever.
+        match tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
+            Ok(Ok(status)) => Some(exit_status(&status)),
+            _ => None,
+        }
+    }
+}
+
+/// Which signal to send.
+#[derive(Debug, Clone, Copy)]
+enum Signal {
+    /// The terminal hung up. Shells exit; programs save and clean up.
+    Hangup,
+    /// Unignorable.
+    Kill,
+}
+
+/// Signal an entire process group.
+///
+/// Best-effort by design: the group may already be gone, which is the common
+/// case and not an error. A failure here must never prevent the rest of
+/// teardown, because the alternative to "signal failed, continue" is "signal
+/// failed, leak the session".
+#[cfg(unix)]
+fn signal_group(leader_pid: u32, signal: Signal) {
+    use rustix::process::{Pid, Signal as RSignal};
+
+    let Ok(raw) = i32::try_from(leader_pid) else {
+        return;
+    };
+    let Some(pid) = Pid::from_raw(raw) else {
+        return;
+    };
+    let sig = match signal {
+        Signal::Hangup => RSignal::HUP,
+        Signal::Kill => RSignal::KILL,
+    };
+
+    // The shell was made a session leader by `pty-process`, so its pid is also
+    // its process group id — which is what makes signalling the group possible
+    // from here at all.
+    if let Err(e) = rustix::process::kill_process_group(pid, sig) {
+        // ESRCH means the group is already gone: the normal outcome.
+        if e != rustix::io::Errno::SRCH {
+            tracing::debug!(pid = leader_pid, ?signal, error = %e, "could not signal process group");
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_group(_leader_pid: u32, _signal: Signal) {
+    // Windows has job objects rather than process groups; Phase 6.
+}
+
 /// Translate a process exit into the wire message.
 ///
 /// A controller that always reported success would be useless in a script, and

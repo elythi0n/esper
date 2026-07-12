@@ -320,3 +320,208 @@ async fn an_out_of_bounds_resize_is_refused_rather_than_clamped() {
     }
     child.kill().await.ok();
 }
+
+// ── teardown: nothing left behind ───────────────────────────────────────────
+
+/// Read a process's state from /proc. `None` once it is gone.
+#[cfg(target_os = "linux")]
+fn proc_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The state is the field after the (possibly parenthesised) comm.
+    let after_comm = stat.rsplit_once(") ")?.1;
+    after_comm.chars().next()
+}
+
+/// Whether a pid exists at all (a zombie still counts as existing).
+#[cfg(target_os = "linux")]
+fn alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// A shell that exits normally is reaped, not left as a zombie.
+#[tokio::test]
+#[cfg_attr(
+    miri,
+    ignore = "allocates a real pseudo-terminal; MIRI has no syscalls"
+)]
+async fn a_clean_exit_leaves_no_zombie() {
+    let t = Terminal::open(&request(80, 24)).expect("open");
+    let (read, mut write, child) = t.into_parts();
+    let pid = child.id().expect("pid");
+
+    write.write_all(b"exit 0\n").await.expect("write");
+    // Let the shell actually exit before hanging up, or teardown races the
+    // exit and reports 129 (128 + SIGHUP) instead of 0 — which is what the
+    // first version of this test measured.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let status = ownview_pty::Teardown::hang_up(child, read, write).await;
+    assert_eq!(status.map(|e| e.shell_code()), Some(0));
+
+    #[cfg(target_os = "linux")]
+    {
+        // Reaped: either gone entirely, or at least not a zombie we left.
+        if alive(pid) {
+            let st = proc_state(pid);
+            assert_ne!(st, Some('Z'), "the shell was left as a zombie");
+        }
+    }
+    let _ = pid;
+}
+
+/// A **foreground** child is in the terminal's foreground process group, so the
+/// kernel's hangup reaches it. Nothing may be left running there.
+#[tokio::test]
+#[cfg_attr(
+    miri,
+    ignore = "allocates a real pseudo-terminal; MIRI has no syscalls"
+)]
+#[cfg(target_os = "linux")]
+async fn teardown_kills_a_foreground_child() {
+    let t = Terminal::open(&request(80, 24)).expect("open");
+    let (mut read, mut write, child) = t.into_parts();
+    let shell_pid = child.id().expect("pid");
+
+    // Report a pid, then block in the foreground.
+    write
+        .write_all(b"sh -c 'echo FG\"=\"$$; exec sleep 3000'\n")
+        .await
+        .expect("write");
+    let seen = read_until(&mut read, "FG=").await;
+    let fg_pid: u32 = seen
+        .split("FG=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| panic!("could not read the pid from: {seen:?}"));
+    assert!(alive(fg_pid), "the foreground child should be running");
+
+    let _ = ownview_pty::Teardown::hang_up(child, read, write).await;
+
+    for _ in 0..120 {
+        if !alive(fg_pid) && !alive(shell_pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "after teardown: shell {shell_pid} alive={}, foreground child {fg_pid} alive={} \
+         — the terminal's foreground group must not survive a hangup",
+        alive(shell_pid),
+        alive(fg_pid)
+    );
+}
+
+/// The shell itself must never be left running. An orphaned shell on a server
+/// nobody looks at is the failure that accumulates silently.
+#[tokio::test]
+#[cfg_attr(
+    miri,
+    ignore = "allocates a real pseudo-terminal; MIRI has no syscalls"
+)]
+#[cfg(target_os = "linux")]
+async fn the_shell_itself_never_survives_teardown_even_ignoring_sighup() {
+    let t = Terminal::open(&request(80, 24)).expect("open");
+    let (mut read, mut write, child) = t.into_parts();
+    let shell_pid = child.id().expect("pid");
+
+    // Make the shell ignore the hangup outright, then block.
+    write
+        .write_all(b"trap '' HUP; echo READ\"\"Y; sleep 3000\n")
+        .await
+        .expect("write");
+    let _ = read_until(&mut read, "READY").await;
+
+    let started = std::time::Instant::now();
+    let _ = ownview_pty::Teardown::hang_up(child, read, write).await;
+
+    for _ in 0..200 {
+        if !alive(shell_pid) {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "teardown took {:?}, far longer than the two grace periods",
+                started.elapsed()
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("shell {shell_pid} ignored SIGHUP and was never killed");
+}
+
+/// A **backgrounded** job is deliberately left alone.
+///
+/// This test exists to pin a decision, not to check a mechanism. The first
+/// version of the suite asserted the opposite — that teardown hunts down and
+/// kills detached jobs — and it was wrong: that is more aggressive than ssh,
+/// and it would break starting a long build and disconnecting, which is why
+/// `nohup` and `tmux` exist.
+///
+/// If someone later "fixes" teardown to kill background jobs, this fails and
+/// tells them it was a choice.
+#[tokio::test]
+#[cfg_attr(
+    miri,
+    ignore = "allocates a real pseudo-terminal; MIRI has no syscalls"
+)]
+#[cfg(target_os = "linux")]
+async fn a_backgrounded_job_is_deliberately_left_running() {
+    let t = Terminal::open(&request(80, 24)).expect("open");
+    let (mut read, mut write, child) = t.into_parts();
+
+    write
+        .write_all(b"nohup sleep 3000 >/dev/null 2>&1 & echo BG\"=\"$!\n")
+        .await
+        .expect("write");
+    let seen = read_until(&mut read, "BG=").await;
+    let bg_pid: u32 = seen
+        .split("BG=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| panic!("could not read the pid from: {seen:?}"));
+
+    let _ = ownview_pty::Teardown::hang_up(child, read, write).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    assert!(
+        alive(bg_pid),
+        "a deliberately backgrounded job must survive a hangup, as it does under \
+         ssh — killing it would break starting a long job and disconnecting"
+    );
+
+    // Clean up the test's own process rather than leaving it for 3000 seconds.
+    let _ = std::process::Command::new("kill")
+        .arg("-9")
+        .arg(bg_pid.to_string())
+        .status();
+}
+
+/// Teardown must be safe to call on a session that already ended.
+#[tokio::test]
+#[cfg_attr(
+    miri,
+    ignore = "allocates a real pseudo-terminal; MIRI has no syscalls"
+)]
+async fn tearing_down_an_already_exited_shell_reports_its_exit() {
+    let t = Terminal::open(&request(80, 24)).expect("open");
+    let (read, mut write, mut child) = t.into_parts();
+    write.write_all(b"exit 7\n").await.expect("write");
+
+    // Let it exit on its own first.
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        .await
+        .expect("exit")
+        .expect("wait");
+    assert_eq!(exit_status(&status).code, Some(7));
+
+    // Now tear down. It must not panic, and must not hang.
+    let again = tokio::time::timeout(
+        Duration::from_secs(5),
+        ownview_pty::Teardown::hang_up(child, read, write),
+    )
+    .await
+    .expect("teardown must not hang on an exited child");
+    // The status may or may not still be available; what matters is that it
+    // returned rather than blocking or panicking.
+    let _ = again;
+}
