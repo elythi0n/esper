@@ -46,6 +46,10 @@ quinn = { version = "0.11", default-features = false, features = [
     "log",
 ] }
 rustls-pki-types = "1"
+# Named directly rather than reached through rand_core: this crate needs 16
+# random bytes for a session identifier and nothing else, and a random number
+# generator API would be a larger surface than the requirement.
+getrandom = "0.2"
 tokio = { workspace = true }
 bytes = "1"
 serde.workspace = true

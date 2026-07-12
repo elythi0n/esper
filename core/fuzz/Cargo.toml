@@ -12,6 +12,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 ownview-proto = { path = "../crates/ownview-proto" }
+ownview-transport = { path = "../crates/ownview-transport" }
 
 [[bin]]
 name = "messages"
@@ -30,6 +31,13 @@ bench = false
 [[bin]]
 name = "frame_decode"
 path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_frames"
+path = "fuzz_targets/control_frames.rs"
 test = false
 doc = false
 bench = false

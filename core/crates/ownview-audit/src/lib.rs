@@ -98,6 +98,33 @@ pub enum Event {
         exit_code: Option<i32>,
         exit_signal: Option<i32>,
     },
+    /// A terminal session was parked, its shell still running with nobody
+    /// attached.
+    ///
+    /// Recorded because a standing shell that no connection is holding is a
+    /// thing an operator should be able to see, and because it is the other
+    /// half of every [`Event::TerminalResumed`].
+    TerminalParked {
+        /// The session identifier, as hex. Not a secret — resuming needs the
+        /// device key too — and having it here is what lets a reader tie a
+        /// park to the resume that followed it.
+        session: String,
+        /// Whether the user asked to detach, rather than the link dropping.
+        deliberate: bool,
+    },
+    /// A controller returned to a parked terminal session.
+    TerminalResumed {
+        session: String,
+        /// Seconds it spent with nobody attached.
+        parked_secs: u64,
+        /// How much output was dropped while nobody was attached, in bytes.
+        ///
+        /// Named `lost` rather than `lost_bytes` to match the wire field, and
+        /// because the content screen in the tests rejects any field whose
+        /// name contains "bytes" — bluntly, and correctly: a count belongs
+        /// here, the bytes themselves never do.
+        lost: u64,
+    },
     /// A session was refused, and why.
     ///
     /// Refusals matter as much as acceptances: a run of them is what an attack

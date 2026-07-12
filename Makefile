@@ -169,7 +169,7 @@ miri-full:
 ## Fuzz every target for 30s each (needs nightly + cargo-fuzz)
 .PHONY: fuzz
 fuzz:
-	@for t in frame_decode messages replay; do \
+	@for t in frame_decode messages replay control_frames; do \
 		echo "fuzzing $$t..."; \
 		(cd $(CORE) && cargo +nightly fuzz run $$t -- -max_total_time=30) || exit 1; \
 	done

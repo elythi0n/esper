@@ -265,6 +265,8 @@ fn exhaustive_witness(e: &Event) {
         | Event::SessionClosed { .. }
         | Event::TerminalOpened
         | Event::TerminalClosed { .. }
+        | Event::TerminalParked { .. }
+        | Event::TerminalResumed { .. }
         | Event::Refused { .. } => {}
     }
 }
@@ -292,6 +294,15 @@ fn variants() -> Vec<Event> {
                 signal: None,
             }),
         ),
+        Event::TerminalParked {
+            session: "0f1e2d3c4b5a69788796a5b4c3d2e1f0".to_owned(),
+            deliberate: true,
+        },
+        Event::TerminalResumed {
+            session: "0f1e2d3c4b5a69788796a5b4c3d2e1f0".to_owned(),
+            parked_secs: 42,
+            lost: 0,
+        },
         Event::Refused {
             reason: "unknown key".to_owned(),
         },
@@ -319,6 +330,12 @@ fn no_event_variant_can_carry_session_content() {
             "typed",
             "traffic",
         ] {
+            // A blunt substring screen, deliberately. It has one known false
+            // positive shape: a *count* of bytes is not content, but a field
+            // named for bytes reads like one. The answer is the name — the
+            // resume event's byte count is called `lost` — not a cleverer
+            // screen, because a screen with exceptions is a screen someone
+            // will add an exception to.
             assert!(
                 !json.contains(forbidden),
                 "the event {json} has a {forbidden:?} field — the audit log records \

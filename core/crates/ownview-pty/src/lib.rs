@@ -237,6 +237,31 @@ impl Terminal {
 /// So "no orphans" means: no orphaned **shell**, no leaked pseudo-terminal, and
 /// nothing left in the terminal's foreground group. It does not mean reaching
 /// into a process tree the user deliberately detached.
+/// `EIO`. Linux reports the end of a terminal session with it rather than EOF.
+const EIO: i32 = 5;
+
+/// Whether a read of the pseudo-terminal master means the session ended.
+///
+/// Reading a master whose slave has been closed by its last process returns
+/// `EIO` on Linux, where BSD and macOS return 0. Both mean the same thing, and
+/// a reader that only understands one of them works on one platform and
+/// quietly loses the exit status on the other — which is most of what terminal
+/// mode is for on a server.
+///
+/// So `EIO` here is not a failure. It is how a shell exit is delivered, and it
+/// lives in this crate because it is a fact about pseudo-terminals rather than
+/// about any one caller. Two callers already need it: the session pump and the
+/// keeper that drains a session nobody is attached to.
+#[must_use]
+pub fn is_session_end(read: &std::io::Result<usize>) -> bool {
+    match read {
+        Ok(0) => true,
+        // Uncategorized on Linux; the raw code is what identifies it.
+        Err(e) => e.raw_os_error() == Some(EIO),
+        Ok(_) => false,
+    }
+}
+
 /// How long a session gets to respond to a hangup before `SIGKILL`.
 ///
 /// Short, because a user who closed their terminal is waiting, but not zero:
@@ -362,6 +387,39 @@ pub fn exit_status(status: &std::process::ExitStatus) -> TerminalExit {
         TerminalExit {
             code: status.code(),
             signal: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // This crate deliberately has no libc dependency, so the errno values the
+    // tests need are named here rather than imported.
+    const EINTR: i32 = 4;
+    const EBADF: i32 = 9;
+    const EAGAIN: i32 = 11;
+
+    /// The distinction that cost every Linux session its exit status.
+    #[test]
+    fn a_read_of_zero_and_an_eio_both_mean_the_session_ended() {
+        assert!(is_session_end(&Ok(0)), "BSD and macOS report EOF");
+        assert!(
+            is_session_end(&Err(std::io::Error::from_raw_os_error(EIO))),
+            "Linux reports EIO, and treating it as a failure loses the exit status"
+        );
+    }
+
+    #[test]
+    fn real_output_and_real_failures_are_not_the_session_ending() {
+        assert!(!is_session_end(&Ok(1)));
+        assert!(!is_session_end(&Ok(4096)));
+        for code in [EINTR, EAGAIN, EBADF] {
+            assert!(
+                !is_session_end(&Err(std::io::Error::from_raw_os_error(code))),
+                "errno {code} is not a session ending"
+            );
         }
     }
 }

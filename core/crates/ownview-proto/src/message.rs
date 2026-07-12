@@ -497,6 +497,150 @@ pub enum PairResult {
 /// of integers. Without this a 32-byte key costs ~33 bytes instead of ~34 as an
 /// array of 32 separately-tagged integers, and — more importantly — the Go side
 /// would have to agree on which representation was meant.
+/// Length of a terminal session identifier.
+///
+/// 16 bytes. The identifier is not a capability — resume is authorised by
+/// device key — but an enumerable identifier would let one paired device learn
+/// that another has a live session, and 128 random bits costs nothing.
+pub const SESSION_ID_LEN: usize = 16;
+
+/// Identifies a terminal session that can be resumed after a dropped link.
+///
+/// Opaque, compared whole, and printed as hex for logs. **Holding one grants
+/// nothing:** a session is looked up by identifier *and* owning device key, so
+/// a leaked identifier is not a way in.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SessionId(#[serde(with = "serde_bytes_array")] [u8; SESSION_ID_LEN]);
+
+impl SessionId {
+    /// Wrap raw bytes.
+    #[must_use]
+    pub const fn from_bytes(b: [u8; SESSION_ID_LEN]) -> Self {
+        Self(b)
+    }
+
+    /// The raw bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; SESSION_ID_LEN] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in &self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for SessionId {
+    /// Same as `Display`.
+    ///
+    /// The derived form prints sixteen decimal numbers inside a tuple struct,
+    /// which is unreadable in a log line and impossible to match against
+    /// another log line by eye.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SessionId({self})")
+    }
+}
+
+/// Return to a terminal session that is still running on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalResume {
+    /// Which session. Meaningless without the asking device's key.
+    pub session: SessionId,
+    /// The window size *now*, which may differ from when the link dropped —
+    /// the user may have resized, or be on a different machine entirely.
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl TerminalResume {
+    /// Whether this request is within its bounds.
+    #[must_use]
+    pub const fn is_well_formed(&self) -> bool {
+        self.cols > 0 && self.rows > 0 && self.cols <= MAX_WINDOW && self.rows <= MAX_WINDOW
+    }
+}
+
+/// How a controller asks for a terminal: a new one, or one it left behind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalStart {
+    /// Start a fresh shell.
+    Open(TerminalOpen),
+    /// Reattach to a shell still running from an earlier connection.
+    Resume(TerminalResume),
+}
+
+impl TerminalStart {
+    /// Whether this request is within its bounds.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Self::Open(o) => o.is_well_formed(),
+            Self::Resume(r) => r.is_well_formed(),
+        }
+    }
+}
+
+/// Why a terminal could not be started.
+///
+/// Note what is *not* here: there is no separate code for "that session
+/// belongs to another device" or "that session expired". Both are
+/// [`Refusal::Unknown`], because distinguishing them would confirm to the
+/// asking device that some other device has a live session — a fact it has no
+/// business learning. A resume finds a session only when the identifier and
+/// the asking device's key both match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Refusal {
+    /// The device does not hold [`Permission::Terminal`].
+    NotPermitted,
+    /// No resumable session for that identifier and this device.
+    Unknown,
+    /// The request was outside its bounds.
+    Malformed,
+    /// The host is already holding as many parked sessions as it will.
+    TooMany,
+}
+
+impl Refusal {
+    /// A sentence for a user, not a code for a machine.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotPermitted => "this device is not permitted to open a terminal on this machine",
+            Self::Unknown => "that terminal session is no longer available",
+            Self::Malformed => "the terminal request was malformed",
+            Self::TooMany => "the host is holding too many disconnected terminal sessions",
+        }
+    }
+}
+
+/// The host's answer to a [`TerminalStart`].
+///
+/// Sent before any terminal bytes, so a controller always knows whether it has
+/// a session and which one, and never has to infer it from the first output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalStarted {
+    /// A new shell is running.
+    Opened { session: SessionId },
+    /// Reattached to the shell that was already running.
+    Resumed {
+        session: SessionId,
+        /// Bytes of output dropped from the backlog while nobody was attached.
+        ///
+        /// Non-zero means there is a hole in what follows. The user is told
+        /// inline as well, at the point of the loss, because a hole in a
+        /// terminal transcript that is only reported in a status field is a
+        /// hole nobody notices.
+        lost: u64,
+    },
+    /// No session. The reason is deliberately coarse.
+    Refused(Refusal),
+}
+
 mod serde_bytes_array {
     use serde::{Deserialize, Deserializer, Serializer};
 

@@ -10,26 +10,42 @@
 //! from the pty, then wrote to the network would deadlock the first time the
 //! shell produced more output than a buffer holds while the user was mid-word.
 //!
+//! # A dropped link does not kill the shell
+//!
+//! When the connection goes away — or the user detaches on purpose — the
+//! pseudo-terminal is handed to [`crate::parked`], which keeps the shell alive
+//! and its output drained until the same device comes back for it. Terminal
+//! mode is for someone running a long job on a server from a laptop that will
+//! close, and a design where losing the network loses the work makes it a
+//! worse `ssh` rather than a better one.
+//!
 //! # The detach escape
 //!
-//! `~.` at the start of a line detaches without killing the shell — the same
-//! sequence `ssh` uses, deliberately, because a user who knows one knows the
-//! other. It is recognised **only** at a line start, so a `~` inside text
-//! passes through untouched, and `~~` sends a literal `~`.
+//! `~.` at the start of a line detaches, leaving the shell running. The
+//! sequence is `ssh`'s, deliberately, because a user who knows one knows the
+//! other — but the *outcome* is not: in `ssh` it drops the connection and the
+//! shell with it, and here the session is parked and can be returned to.
+//!
+//! It is recognised **only** at a line start, so a `~` inside text passes
+//! through untouched, and `~~` sends a literal `~`.
 //!
 //! The alternative to having an escape is that a session with a wedged remote
-//! can only be left by killing the client, which loses the shell too.
+//! can only be left by killing the client.
 
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ownview_audit::{Entry, Event, Log, terminal_closed};
 use ownview_crypto::identity::KEY_LEN;
 use ownview_proto::{
-    Permission, TerminalData, TerminalExit, TerminalMessage, TerminalOpen, TerminalResize,
+    Permission, Refusal, SessionId, TerminalData, TerminalExit, TerminalMessage, TerminalOpen,
+    TerminalResize, TerminalStart, TerminalStarted,
 };
-use ownview_pty::{ReadHalf, Terminal, WriteHalf, hang_up};
+use ownview_pty::{Terminal, hang_up, is_session_end};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+use crate::backlog::{RESYNC, loss_notice};
+use crate::parked::{self, LiveTerminal, Parked, ParkedSessions, Resumed};
 use crate::{Control, ControlError};
 
 /// How much to read from the pseudo-terminal at once.
@@ -44,17 +60,13 @@ const READ_CHUNK: usize = ownview_proto::MAX_TERMINAL_CHUNK;
 /// What can go wrong running a terminal session.
 #[derive(Debug, thiserror::Error)]
 pub enum TerminalError {
-    /// The peer does not hold [`Permission::Terminal`].
+    /// The host refused, and the peer has been told the same reason.
     ///
-    /// A separate permission from view and control, and refused separately: a
-    /// shell is unrestricted execution as the host's user, not a lesser form of
-    /// looking at a screen.
-    #[error("this device is not permitted to open a terminal on this machine")]
-    NotPermitted,
-
-    /// The request was outside its bounds.
-    #[error("the terminal request was malformed")]
-    Malformed,
+    /// One variant carrying the wire refusal rather than one Rust variant per
+    /// reason: the two would have to be kept in step by hand, and a mismatch
+    /// would mean telling the peer one thing and the log another.
+    #[error("{}", .0.message())]
+    Refused(Refusal),
 
     /// The pseudo-terminal or shell failed.
     #[error(transparent)]
@@ -76,172 +88,545 @@ impl From<ControlError> for TerminalError {
 pub enum Ended {
     /// The shell exited.
     ShellExited(TerminalExit),
-    /// The controller detached, leaving the shell running.
+    /// Nobody is attached and the shell is still running, waiting to be
+    /// resumed.
     ///
     /// Distinct from the shell exiting, because the two mean different things
     /// to whoever reads the log: one is a user finishing, the other is a user
     /// stepping away from something still running.
-    Detached,
-    /// The connection went away.
+    Parked {
+        session: SessionId,
+        /// Whether the user asked to detach, rather than the link dropping.
+        deliberate: bool,
+    },
+    /// The connection went away and the shell could not be kept.
     Disconnected,
+    /// Nothing happened for as long as the idle timeout allows.
+    Idle,
 }
 
-/// Run a terminal session as the **host**.
+/// Tunables for a terminal session.
 ///
-/// Checks the permission, starts a shell, and pumps until one end stops.
-/// Records the session's start and end in the audit log — never its content.
-pub async fn host(
-    control: &mut Control,
-    request: &TerminalOpen,
-    peer_key: &[u8; KEY_LEN],
-    granted: &[Permission],
-    log: &Log,
-) -> Result<Ended, TerminalError> {
-    if !granted.contains(&Permission::Terminal) {
-        // Recorded: a refusal is as interesting as an acceptance, and a run of
-        // them is what an attack looks like from this side.
-        let _ = log.append(&Entry::now(
+/// Separate from [`crate::parked::Limits`], which bounds what the host holds
+/// for everybody; this is about one session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalPolicy {
+    /// End a session after this long with **no input and no output**.
+    ///
+    /// `None` — the default — is off.
+    ///
+    /// Idle deliberately means neither direction. A build that prints nothing
+    /// for an hour is not idle, it is working, and a timeout that counted only
+    /// keystrokes would kill it. That is not a security feature, it is a
+    /// data-loss bug wearing one's clothes.
+    pub idle_timeout: Option<Duration>,
+}
+
+/// Serves terminal sessions for one host.
+///
+/// Holds the audit log, the parked-session registry and the policy, so the
+/// per-session call does not take seven arguments — and so the registry is
+/// shared, which is the whole point of it.
+#[derive(Debug)]
+pub struct TerminalService {
+    parked: Arc<ParkedSessions>,
+    policy: TerminalPolicy,
+    log: Log,
+}
+
+impl TerminalService {
+    /// A service with these limits and this policy.
+    #[must_use]
+    pub fn new(log: Log, limits: parked::Limits, policy: TerminalPolicy) -> Self {
+        Self {
+            parked: ParkedSessions::new(limits),
+            policy,
+            log,
+        }
+    }
+
+    /// The parked-session registry, for revocation and for reporting.
+    #[must_use]
+    pub fn parked(&self) -> &Arc<ParkedSessions> {
+        &self.parked
+    }
+
+    /// Kill every terminal session parked by a device, and say how many.
+    ///
+    /// Called when `terminal` permission is withdrawn. A device that could
+    /// return to a shell it opened while it was still trusted would make
+    /// revocation advisory.
+    pub fn revoke(&self, peer_key: &[u8; KEY_LEN]) -> usize {
+        let closed = self.parked.revoke(peer_key);
+        if closed > 0
+            && let Err(e) = self.log.append(&Entry::now(
+                peer_key,
+                Event::Revoked {
+                    sessions_closed: closed,
+                },
+            ))
+        {
+            tracing::warn!(error = %e, "could not record a revocation");
+        }
+        closed
+    }
+
+    /// Open a new terminal session, or return to one this device left behind.
+    ///
+    /// The peer is answered with a [`TerminalStarted`] before any terminal
+    /// bytes, so it always knows which session it has and never has to infer
+    /// it from the first output.
+    pub async fn serve(
+        &self,
+        control: &mut Control,
+        start: &TerminalStart,
+        peer_key: &[u8; KEY_LEN],
+        granted: &[Permission],
+    ) -> Result<Ended, TerminalError> {
+        // Permission is checked on **resume as well as open**. Returning to a
+        // shell opened while permitted must not survive losing the permission.
+        if !granted.contains(&Permission::Terminal) {
+            // Recorded: a refusal is as interesting as an acceptance, and a
+            // run of them is what an attack looks like from this side.
+            let _ = self.log.append(&Entry::now(
+                peer_key,
+                Event::Refused {
+                    reason: "terminal not permitted".to_owned(),
+                },
+            ));
+            return self.refuse(control, Refusal::NotPermitted).await;
+        }
+        if !start.is_well_formed() {
+            return self.refuse(control, Refusal::Malformed).await;
+        }
+
+        match start {
+            TerminalStart::Open(open) => self.open(control, open, peer_key, granted).await,
+            TerminalStart::Resume(r) => {
+                self.resume(control, r.session, r.cols, r.rows, peer_key, granted)
+                    .await
+            }
+        }
+    }
+
+    /// Tell the peer why, and fail with the same reason.
+    async fn refuse(&self, control: &mut Control, why: Refusal) -> Result<Ended, TerminalError> {
+        // Best-effort: a peer that has already gone cannot be told, and that
+        // is not a further failure.
+        let _ = control.send(&TerminalStarted::Refused(why)).await;
+        let _ = control.finish();
+        Err(TerminalError::Refused(why))
+    }
+
+    /// Start a fresh shell.
+    async fn open(
+        &self,
+        control: &mut Control,
+        open: &TerminalOpen,
+        peer_key: &[u8; KEY_LEN],
+        granted: &[Permission],
+    ) -> Result<Ended, TerminalError> {
+        // Checked here so a peer at the limit is told up front rather than
+        // finding out that its session was not kept. The binding check is
+        // still the one in `park`, which runs under the registry's lock.
+        if self.parked.len() >= self.parked.limits().total {
+            return self.refuse(control, Refusal::TooMany).await;
+        }
+
+        let terminal = Terminal::open(open)?;
+        let session = parked::new_session_id().map_err(|e| {
+            tracing::error!(error = %e, "no randomness for a session identifier");
+            // Reported to the peer as the host being full. It learns nothing
+            // either way, and the host genuinely cannot keep a session it
+            // cannot name.
+            TerminalError::Refused(Refusal::TooMany)
+        })?;
+        let started = Instant::now();
+
+        // Best-effort: an audit failure must not kill a session. A full disk
+        // should be a warning, not an outage.
+        if let Err(e) = self
+            .log
+            .append(&Entry::now(peer_key, Event::TerminalOpened))
+        {
+            tracing::warn!(error = %e, "could not record the start of a terminal session");
+        }
+
+        control
+            .send(&TerminalStarted::Opened { session })
+            .await
+            .map_err(TerminalError::from)?;
+
+        let (read, write, child) = terminal.into_parts();
+        self.run(
+            control,
+            LiveTerminal { read, write, child },
+            session,
+            started,
             peer_key,
-            Event::Refused {
-                reason: "terminal not permitted".to_owned(),
-            },
-        ));
-        return Err(TerminalError::NotPermitted);
-    }
-    if !request.is_well_formed() {
-        return Err(TerminalError::Malformed);
+            granted,
+        )
+        .await
     }
 
-    let terminal = Terminal::open(request)?;
-    let started = Instant::now();
-    // Best-effort: an audit failure must not kill a session. A full disk should
-    // be a warning, not an outage.
-    if let Err(e) = log.append(&Entry::now(peer_key, Event::TerminalOpened)) {
-        tracing::warn!(error = %e, "could not record the start of a terminal session");
+    /// Return to a shell that is still running from an earlier connection.
+    async fn resume(
+        &self,
+        control: &mut Control,
+        session: SessionId,
+        cols: u16,
+        rows: u16,
+        peer_key: &[u8; KEY_LEN],
+        granted: &[Permission],
+    ) -> Result<Ended, TerminalError> {
+        // Authorised by identifier **and** key, and every failure looks the
+        // same: an unknown identifier, another device's session and an elapsed
+        // window are all `Unknown`, so a peer cannot learn from the answer
+        // whether a session it does not own exists.
+        let Some(resumed) = self.parked.resume(session, peer_key).await else {
+            return self.refuse(control, Refusal::Unknown).await;
+        };
+        let started = Instant::now();
+
+        match resumed {
+            Resumed::Still {
+                terminal,
+                backlog,
+                lost,
+            } => {
+                // The controller may have been resized, or be a different
+                // terminal on a different machine, while it was away. Without
+                // this the shell keeps drawing to the old width.
+                parked::resize(&terminal, cols, rows);
+
+                if let Err(e) = self.log.append(&Entry::now(
+                    peer_key,
+                    Event::TerminalResumed {
+                        session: session.to_string(),
+                        parked_secs: 0,
+                        lost,
+                    },
+                )) {
+                    tracing::warn!(error = %e, "could not record a resumed terminal session");
+                }
+
+                control
+                    .send(&TerminalStarted::Resumed { session, lost })
+                    .await?;
+                replay(control, &backlog, lost).await?;
+
+                self.run(control, terminal, session, started, peer_key, granted)
+                    .await
+            }
+            Resumed::Exited {
+                backlog,
+                lost,
+                exit,
+            } => {
+                // The shell finished while nobody was attached. Its last
+                // output and its exit status are the reason someone detached
+                // from a long job rather than waiting for it.
+                control
+                    .send(&TerminalStarted::Resumed { session, lost })
+                    .await?;
+                replay(control, &backlog, lost).await?;
+                control.send(&TerminalMessage::Exit(exit)).await?;
+                let _ = control.finish();
+                Ok(Ended::ShellExited(exit))
+            }
+        }
     }
 
-    let (pty_read, pty_write, child) = terminal.into_parts();
-    let outcome = pump_host(control, pty_read, pty_write, child).await;
+    /// Pump the session, then park what is left of it.
+    async fn run(
+        &self,
+        control: &mut Control,
+        terminal: LiveTerminal,
+        session: SessionId,
+        started: Instant,
+        peer_key: &[u8; KEY_LEN],
+        granted: &[Permission],
+    ) -> Result<Ended, TerminalError> {
+        let outcome = pump(control, terminal, self.policy.idle_timeout).await;
 
-    let (ended, exit) = match &outcome {
-        Ok((e, x)) => (e.clone(), *x),
-        Err(_) => (Ended::Disconnected, None),
-    };
-    let secs = started.elapsed().as_secs();
-    if let Err(e) = log.append(&Entry::now(peer_key, terminal_closed(secs, exit.as_ref()))) {
-        tracing::warn!(error = %e, "could not record the end of a terminal session");
+        let (ended, exit) = match outcome {
+            Outcome::ShellExited(x) => {
+                let _ = control.send(&TerminalMessage::Exit(x)).await;
+                let _ = control.finish();
+                (Ended::ShellExited(x), Some(x))
+            }
+            Outcome::Orphaned {
+                terminal,
+                deliberate,
+            } => {
+                self.park(control, terminal, session, peer_key, granted, deliberate)
+                    .await
+            }
+            Outcome::Idle(x) => {
+                let _ = control.finish();
+                (Ended::Idle, x)
+            }
+            Outcome::Gone(x) => (Ended::Disconnected, x),
+        };
+
+        // A parked session has not closed, so it is not recorded as closed —
+        // it gets its own entry, and the close is recorded when it really
+        // ends. A log that said "closed" for a shell still running would be
+        // wrong in the direction that matters.
+        if !matches!(ended, Ended::Parked { .. }) {
+            let secs = started.elapsed().as_secs();
+            if let Err(e) = self
+                .log
+                .append(&Entry::now(peer_key, terminal_closed(secs, exit.as_ref())))
+            {
+                tracing::warn!(error = %e, "could not record the end of a terminal session");
+            }
+        }
+
+        Ok(ended)
     }
 
-    outcome.map(|_| ended)
+    /// Hand a live shell to the registry, or end it if it cannot be kept.
+    async fn park(
+        &self,
+        control: &mut Control,
+        terminal: LiveTerminal,
+        session: SessionId,
+        peer_key: &[u8; KEY_LEN],
+        granted: &[Permission],
+        deliberate: bool,
+    ) -> (Ended, Option<TerminalExit>) {
+        // Re-checked at the moment of parking, not only at the start. A
+        // session that began while permitted must not be *left standing* by a
+        // device whose permission was withdrawn mid-session.
+        if !granted.contains(&Permission::Terminal) {
+            let exit = hang_up(terminal.child, terminal.read, terminal.write).await;
+            return (Ended::Disconnected, exit);
+        }
+
+        match self.parked.park(*peer_key, session, terminal) {
+            Parked::Ok(session) => {
+                if let Err(e) = self.log.append(&Entry::now(
+                    peer_key,
+                    Event::TerminalParked {
+                        session: session.to_string(),
+                        deliberate,
+                    },
+                )) {
+                    tracing::warn!(error = %e, "could not record a parked terminal session");
+                }
+                (
+                    Ended::Parked {
+                        session,
+                        deliberate,
+                    },
+                    None,
+                )
+            }
+            Parked::Refused(why, terminal) => {
+                tracing::warn!(reason = ?why, "could not park a terminal session; ending it");
+                let exit = hang_up(terminal.child, terminal.read, terminal.write).await;
+                // A controller that detached on purpose is still connected, so
+                // it is told the truth: the shell ended. `Exit` is exactly
+                // that message, so no new one is needed — and a controller
+                // that showed "detached, come back later" for a shell that had
+                // in fact been killed would be lying to its user.
+                if let Some(x) = exit {
+                    let _ = control.send(&TerminalMessage::Exit(x)).await;
+                }
+                let _ = control.finish();
+                (Ended::Disconnected, exit)
+            }
+        }
+    }
+}
+
+/// Send a resumed session's missed output, telling the user about any gap.
+///
+/// The order matters. The resynchronise goes first because the link can drop
+/// in the middle of any escape sequence, and a terminal still parsing one will
+/// swallow whatever is printed next — including the notice explaining what
+/// happened.
+async fn replay(control: &mut Control, backlog: &[u8], lost: u64) -> Result<(), TerminalError> {
+    let mut out = Vec::with_capacity(
+        backlog
+            .len()
+            .saturating_add(RESYNC.len())
+            .saturating_add(96),
+    );
+    out.extend_from_slice(RESYNC);
+    if lost > 0 {
+        out.extend_from_slice(&loss_notice(lost));
+    }
+    out.extend_from_slice(backlog);
+
+    for chunk in out.chunks(READ_CHUNK) {
+        control
+            .send(&TerminalMessage::Data(TerminalData {
+                bytes: chunk.to_vec(),
+            }))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Why the pump stopped, and what is left of the session.
+enum Outcome {
+    /// The shell exited. Already hung up on.
+    ShellExited(TerminalExit),
+    /// The shell is alive with nobody attached. Park it or end it.
+    Orphaned {
+        terminal: LiveTerminal,
+        /// Whether the user asked to detach, rather than the link dropping.
+        deliberate: bool,
+    },
+    /// Nothing happened for as long as the idle timeout allows. Hung up on.
+    Idle(Option<TerminalExit>),
+    /// The session ended and must not be kept. Hung up on.
+    Gone(Option<TerminalExit>),
+}
+
+/// What ended a turn of the pump's loop.
+///
+/// Decided inside `tokio::select!` and acted on after it returns, because the
+/// branch reading the terminal borrows it while the branch that hands it back
+/// needs to move it. Once the `select!` has returned, every branch's future
+/// has been dropped and the borrow is over.
+enum Turn {
+    /// Output to forward.
+    Output(usize),
+    /// The shell exited.
+    ShellEnded,
+    /// Reading the terminal failed for another reason.
+    Broken,
+    /// Keystrokes to write.
+    Input(TerminalData),
+    /// A window resize.
+    Resize(TerminalResize),
+    /// The controller closed the stream cleanly.
+    Detached,
+    /// The connection failed.
+    LinkLost,
+    /// The peer sent something a controller never sends.
+    Misbehaved,
+    /// Neither side has done anything for too long.
+    Idle,
 }
 
 /// Pump both directions until one end stops.
-async fn pump_host(
+async fn pump(
     control: &mut Control,
-    mut pty_read: ReadHalf,
-    mut pty_write: WriteHalf,
-    child: tokio::process::Child,
-) -> Result<(Ended, Option<TerminalExit>), TerminalError> {
+    mut terminal: LiveTerminal,
+    idle_timeout: Option<Duration>,
+) -> Outcome {
     let mut buf = vec![0u8; READ_CHUNK];
+    // No timeout means a deadline that never arrives. Expressed as a very
+    // distant instant rather than as a branch, so the loop has one shape.
+    let far_future = Duration::from_secs(60 * 60 * 24 * 365);
+    let mut idle_at = tokio::time::Instant::now() + idle_timeout.unwrap_or(far_future);
 
     loop {
-        tokio::select! {
-            // Shell output -> controller.
-            read = pty_read.read(&mut buf) => match read {
-                // The session ended. **On Linux that is `EIO`, not end of
-                // file.**
-                //
-                // Reading a pseudo-terminal master whose slave has been closed
-                // by its last process returns `EIO` on Linux, where BSD and
-                // macOS return 0. Treating only `Ok(0)` as the end means the
-                // `Err` arm fires instead and every session on Linux reports
-                // `Disconnected` — losing the shell's exit status, which is
-                // most of what terminal mode is for on a server.
-                //
-                // So `EIO` here is not an error. It is the normal way a shell
-                // exit is delivered, and handling both keeps the two platform
-                // behaviours in one branch rather than one working and one
-                // silently wrong.
-                ref r if is_session_end(r) => {
-                    let exit = hang_up(child, pty_read, pty_write).await;
-                    match exit {
-                        Some(x) => {
-                            let _ = control.send(&TerminalMessage::Exit(x)).await;
-                            let _ = control.finish();
-                            return Ok((Ended::ShellExited(x), Some(x)));
+        let turn = tokio::select! {
+            read = terminal.read.read(&mut buf) => {
+                if is_session_end(&read) {
+                    Turn::ShellEnded
+                } else {
+                    match read {
+                        Ok(n) => Turn::Output(n),
+                        Err(e) => {
+                            tracing::debug!(error = %e, "pty read failed");
+                            Turn::Broken
                         }
-                        None => return Ok((Ended::Disconnected, None)),
                     }
-                }
-                Ok(n) => {
-                    let bytes = buf.get(..n).unwrap_or(&[]).to_vec();
-                    control
-                        .send(&TerminalMessage::Data(TerminalData { bytes }))
-                        .await?;
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "pty read failed");
-                    let exit = hang_up(child, pty_read, pty_write).await;
-                    return Ok((Ended::Disconnected, exit));
                 }
             },
-
-            // Controller -> shell, or a resize.
             msg = control.recv::<TerminalMessage>() => match msg {
-                Ok(TerminalMessage::Data(d)) => {
-                    if !d.is_well_formed() {
-                        let exit = hang_up(child, pty_read, pty_write).await;
-                        return Ok((Ended::Disconnected, exit));
-                    }
-                    if let Err(e) = pty_write.write_all(&d.bytes).await {
-                        tracing::debug!(error = %e, "pty write failed");
-                        let exit = hang_up(child, pty_read, pty_write).await;
-                        return Ok((Ended::Disconnected, exit));
-                    }
-                }
-                Ok(TerminalMessage::Resize(r)) => {
-                    // A malformed resize is ignored rather than fatal: the
-                    // session is otherwise fine and killing it over a bad
-                    // window size would be a worse outcome than the wrong wrap.
-                    if let Err(e) = Terminal::resize(&pty_write, &r) {
-                        tracing::debug!(error = %e, cols = r.cols, rows = r.rows, "ignoring a bad resize");
-                    }
-                }
-                Ok(TerminalMessage::Exit(_)) => {
-                    // Host-to-controller only. A controller sending it is
-                    // confused or probing; either way the session ends.
-                    let exit = hang_up(child, pty_read, pty_write).await;
-                    return Ok((Ended::Disconnected, exit));
-                }
-                Err(ControlError::Finished) => {
-                    // The controller detached cleanly.
-                    let exit = hang_up(child, pty_read, pty_write).await;
-                    return Ok((Ended::Detached, exit));
-                }
+                Ok(TerminalMessage::Data(d)) => Turn::Input(d),
+                Ok(TerminalMessage::Resize(r)) => Turn::Resize(r),
+                // Host to controller only. A controller sending it is confused
+                // or probing; either way the session ends and is not kept.
+                Ok(TerminalMessage::Exit(_)) => Turn::Misbehaved,
+                Err(ControlError::Finished) => Turn::Detached,
                 Err(e) => {
                     tracing::debug!(error = %e, "terminal control stream failed");
-                    let exit = hang_up(child, pty_read, pty_write).await;
-                    return Ok((Ended::Disconnected, exit));
+                    Turn::LinkLost
                 }
             },
-        }
-    }
-}
+            () = tokio::time::sleep_until(idle_at) => Turn::Idle,
+        };
 
-/// Whether a pseudo-terminal read result means the session ended.
-///
-/// `EIO` on a master whose slave has closed is Linux's way of saying the last
-/// process on the terminal exited; BSD and macOS return 0 instead. Both mean
-/// the same thing, and a reader that only understands one of them works on one
-/// platform and quietly loses the exit status on the other.
-fn is_session_end(read: &std::io::Result<usize>) -> bool {
-    match read {
-        Ok(0) => true,
-        Err(e) => {
-            // Uncategorized on Linux; the raw code is what identifies it.
-            e.raw_os_error() == Some(5) // EIO
+        // Both directions count. See `TerminalPolicy::idle_timeout`.
+        if matches!(turn, Turn::Output(_) | Turn::Input(_) | Turn::Resize(_)) {
+            idle_at = tokio::time::Instant::now() + idle_timeout.unwrap_or(far_future);
         }
-        Ok(_) => false,
+
+        match turn {
+            Turn::Output(n) => {
+                let bytes = buf.get(..n).unwrap_or(&[]).to_vec();
+                if let Err(e) = control
+                    .send(&TerminalMessage::Data(TerminalData { bytes }))
+                    .await
+                {
+                    tracing::debug!(error = %e, "could not forward terminal output");
+                    return Outcome::Orphaned {
+                        terminal,
+                        deliberate: false,
+                    };
+                }
+            }
+            Turn::Input(d) => {
+                if !d.is_well_formed() {
+                    return Outcome::Gone(
+                        hang_up(terminal.child, terminal.read, terminal.write).await,
+                    );
+                }
+                if let Err(e) = terminal.write.write_all(&d.bytes).await {
+                    tracing::debug!(error = %e, "pty write failed");
+                    return Outcome::Gone(
+                        hang_up(terminal.child, terminal.read, terminal.write).await,
+                    );
+                }
+            }
+            Turn::Resize(r) => {
+                // A malformed resize is ignored rather than fatal: the session
+                // is otherwise fine and killing it over a bad window size
+                // would be a worse outcome than the wrong wrap.
+                if let Err(e) = Terminal::resize(&terminal.write, &r) {
+                    tracing::debug!(error = %e, cols = r.cols, rows = r.rows, "ignoring a bad resize");
+                }
+            }
+            // The two ways a session is left standing. Both keep the shell:
+            // the difference is only what the log says about the user's
+            // intent.
+            Turn::Detached => {
+                return Outcome::Orphaned {
+                    terminal,
+                    deliberate: true,
+                };
+            }
+            Turn::LinkLost | Turn::Broken => {
+                return Outcome::Orphaned {
+                    terminal,
+                    deliberate: false,
+                };
+            }
+            Turn::ShellEnded => {
+                let exit = hang_up(terminal.child, terminal.read, terminal.write).await;
+                return match exit {
+                    Some(x) => Outcome::ShellExited(x),
+                    // The shell is gone but its status could not be collected.
+                    // Nothing to keep and nothing to report.
+                    None => Outcome::Gone(None),
+                };
+            }
+            Turn::Misbehaved => {
+                return Outcome::Gone(hang_up(terminal.child, terminal.read, terminal.write).await);
+            }
+            Turn::Idle => {
+                tracing::info!("ending an idle terminal session");
+                return Outcome::Idle(hang_up(terminal.child, terminal.read, terminal.write).await);
+            }
+        }
     }
 }
 
@@ -363,7 +748,7 @@ impl EscapeWatcher {
 pub async fn send_resize(control: &mut Control, cols: u16, rows: u16) -> Result<(), TerminalError> {
     let r = TerminalResize { cols, rows };
     if !r.is_well_formed() {
-        return Err(TerminalError::Malformed);
+        return Err(TerminalError::Refused(Refusal::Malformed));
     }
     control
         .send(&TerminalMessage::Resize(r))

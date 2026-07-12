@@ -12,9 +12,13 @@ use std::time::Duration;
 
 use ownview_audit::{Event, Log};
 use ownview_crypto::Identity;
-use ownview_proto::{Hello, Permission, Role, TerminalData, TerminalMessage, TerminalOpen};
+use ownview_proto::{
+    Hello, Permission, Refusal, Role, SessionId, TerminalData, TerminalMessage, TerminalOpen,
+    TerminalStart, TerminalStarted,
+};
 use ownview_transport::{
-    AnyOf, Control, Ended, Endpoint, NoPeers, OnlyPeer, Session, TerminalError, terminal,
+    AnyOf, Control, Ended, Endpoint, Limits, NoPeers, OnlyPeer, Session, TerminalError,
+    TerminalPolicy, TerminalService,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -46,11 +50,35 @@ fn tmpdir() -> std::path::PathBuf {
     p
 }
 
-fn open_request() -> TerminalOpen {
-    TerminalOpen {
+fn open_request() -> TerminalStart {
+    TerminalStart::Open(TerminalOpen {
         cols: 80,
         rows: 24,
         term: "xterm-256color".to_owned(),
+    })
+}
+
+/// A service with the shipping defaults.
+fn service(log: &Log) -> Arc<TerminalService> {
+    Arc::new(TerminalService::new(
+        log.clone(),
+        Limits::default(),
+        TerminalPolicy::default(),
+    ))
+}
+
+/// Read the host's answer, which always comes before any terminal bytes.
+async fn started(ctl: &mut Control) -> TerminalStarted {
+    ctl.recv::<TerminalStarted>()
+        .await
+        .expect("the host must answer a terminal request before sending output")
+}
+
+/// Read the answer and expect a new session, returning its identifier.
+async fn opened(ctl: &mut Control) -> SessionId {
+    match started(ctl).await {
+        TerminalStarted::Opened { session } => session,
+        other => panic!("expected a new session, got {other:?}"),
     }
 }
 
@@ -141,18 +169,23 @@ async fn a_usable_shell_over_a_real_connection() {
         let (_h_ep, _c_ep, mut host_ctl, mut ctrl_ctl, peer) = wire().await;
         let dir = tmpdir();
         let log = Log::at(dir.join("sessions.log"));
-        let log_for_host = log.clone();
+        let svc = service(&log);
+        let svc_for_host = Arc::clone(&svc);
 
         let host_task = tokio::spawn(async move {
-            terminal::host(
+            let svc = svc_for_host;
+            svc.serve(
                 &mut host_ctl,
                 &open_request(),
                 &peer,
                 &[Permission::View, Permission::Terminal],
-                &log_for_host,
             )
             .await
         });
+
+        // The host answers before any terminal bytes, so a controller always
+        // knows which session it has.
+        let session = opened(&mut ctrl_ctl).await;
 
         // Type a command and read its output back over the network. The marker
         // is assembled by the shell so it cannot match the pty's own echo.
@@ -168,6 +201,12 @@ async fn a_usable_shell_over_a_real_connection() {
             .expect("the host task should finish")
             .expect("join")
             .expect("the session should end cleanly");
+
+        assert_eq!(
+            session.to_string().len(),
+            32,
+            "a session identifier should print as 16 bytes of hex: {session}"
+        );
 
         match ended {
             Ended::ShellExited(x) => assert_eq!(x.shell_code(), 3, "exit status must survive"),
@@ -213,19 +252,23 @@ async fn a_device_without_the_terminal_permission_is_refused() {
         let (_h_ep, _c_ep, mut host_ctl, _ctrl_ctl, peer) = wire().await;
         let dir = tmpdir();
         let log = Log::at(dir.join("sessions.log"));
+        let svc = service(&log);
 
-        let err = terminal::host(
-            &mut host_ctl,
-            &open_request(),
-            &peer,
-            // View and control, but no terminal.
-            &[Permission::View, Permission::Control],
-            &log,
-        )
-        .await
-        .expect_err("a device without Terminal must be refused");
+        let err = svc
+            .serve(
+                &mut host_ctl,
+                &open_request(),
+                &peer,
+                // View and control, but no terminal.
+                &[Permission::View, Permission::Control],
+            )
+            .await
+            .expect_err("a device without Terminal must be refused");
 
-        assert!(matches!(err, TerminalError::NotPermitted), "got {err:?}");
+        assert!(
+            matches!(err, TerminalError::Refused(Refusal::NotPermitted)),
+            "got {err:?}"
+        );
 
         // And the refusal is recorded: a run of them is what an attack looks
         // like from this side.
@@ -241,29 +284,30 @@ async fn a_device_without_the_terminal_permission_is_refused() {
     .await;
 }
 
-/// Detaching leaves the shell's process alone as far as this side is concerned:
-/// the session ends as `Detached`, which reads differently in a log from a user
-/// finishing.
+/// Detaching parks the session: the shell keeps running, and the log says a
+/// user stepped away rather than that a user finished.
 #[tokio::test]
 #[cfg_attr(miri, ignore = "needs aws-lc-rs and a real pty; MIRI has neither")]
-async fn a_controller_that_detaches_ends_the_session_as_detached() {
+async fn a_controller_that_detaches_leaves_its_shell_running() {
     bounded("detach", async {
         let (_h_ep, _c_ep, mut host_ctl, mut ctrl_ctl, peer) = wire().await;
         let dir = tmpdir();
         let log = Log::at(dir.join("sessions.log"));
-        let log_for_host = log.clone();
+        let svc = service(&log);
+        let svc_for_host = Arc::clone(&svc);
 
         let host_task = tokio::spawn(async move {
-            terminal::host(
+            let svc = svc_for_host;
+            svc.serve(
                 &mut host_ctl,
                 &open_request(),
                 &peer,
                 &[Permission::Terminal],
-                &log_for_host,
             )
             .await
         });
 
+        let session = opened(&mut ctrl_ctl).await;
         send_keys(&mut ctrl_ctl, "echo READ\"\"Y\n").await;
         let _ = read_until(&mut ctrl_ctl, "READY").await;
 
@@ -278,10 +322,32 @@ async fn a_controller_that_detaches_ends_the_session_as_detached() {
             .expect("session");
         assert_eq!(
             ended,
-            Ended::Detached,
-            "a clean stream end is a detach, which reads differently in a log \
-             from a user finishing"
+            Ended::Parked {
+                session,
+                deliberate: true
+            },
+            "a clean stream end is a deliberate detach, and the session it \
+             leaves behind must be the one the controller was told about"
         );
+        assert_eq!(svc.parked().len(), 1, "the shell should still be running");
+
+        // The log distinguishes stepping away from finishing.
+        let entries = log.read().expect("read the log");
+        assert!(
+            entries.iter().any(
+                |e| matches!(&e.event, Event::TerminalParked { deliberate, .. } if *deliberate)
+            ),
+            "a deliberate detach should be recorded as one: {entries:?}"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e.event, Event::TerminalClosed { .. })),
+            "a parked session has not closed, and a log that said so would be \
+             wrong in the direction that matters: {entries:?}"
+        );
+
+        assert_eq!(svc.parked().revoke_all(), 1, "clean up the parked shell");
         std::fs::remove_dir_all(&dir).ok();
     })
     .await;
@@ -296,6 +362,7 @@ async fn several_terminal_sessions_run_concurrently() {
         let (_h_ep, _c_ep, host_ctl, ctrl_ctl, peer) = wire().await;
         let dir = tmpdir();
         let log = Log::at(dir.join("sessions.log"));
+        let svc = service(&log);
 
         // Three sessions, each on its own control stream over the same
         // connection — which is what QUIC's independent streams are for.
@@ -309,19 +376,16 @@ async fn several_terminal_sessions_run_concurrently() {
         let mut handles = Vec::new();
         let host_ctl = hosts.pop().expect("one host channel");
         let mut ctrl = ctrls.pop().expect("one controller channel");
-        let log_for_host = log.clone();
+        let svc_for_host = Arc::clone(&svc);
 
         handles.push(tokio::spawn(async move {
+            let svc = svc_for_host;
             let mut hc = host_ctl;
-            terminal::host(
-                &mut hc,
-                &open_request(),
-                &peer,
-                &[Permission::Terminal],
-                &log_for_host,
-            )
-            .await
+            svc.serve(&mut hc, &open_request(), &peer, &[Permission::Terminal])
+                .await
         }));
+
+        let _ = opened(&mut ctrl).await;
 
         // Interleave several commands, each producing distinct output, to prove
         // the pump handles input and output at the same time rather than
@@ -353,19 +417,21 @@ async fn a_large_burst_survives_the_network() {
         let (_h_ep, _c_ep, mut host_ctl, mut ctrl_ctl, peer) = wire().await;
         let dir = tmpdir();
         let log = Log::at(dir.join("sessions.log"));
-        let log_for_host = log.clone();
+        let svc = service(&log);
+        let svc_for_host = Arc::clone(&svc);
 
         let host_task = tokio::spawn(async move {
-            terminal::host(
+            let svc = svc_for_host;
+            svc.serve(
                 &mut host_ctl,
                 &open_request(),
                 &peer,
                 &[Permission::Terminal],
-                &log_for_host,
             )
             .await
         });
 
+        let _ = opened(&mut ctrl_ctl).await;
         send_keys(
             &mut ctrl_ctl,
             "i=0; while [ $i -lt 2000 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done; echo DON\"\"E\n",
@@ -381,6 +447,70 @@ async fn a_large_burst_survives_the_network() {
 
         send_keys(&mut ctrl_ctl, "exit 0\n").await;
         let _ = tokio::time::timeout(Duration::from_secs(20), host_task).await;
+        std::fs::remove_dir_all(&dir).ok();
+    })
+    .await;
+}
+
+/// Both directions busy at once, which is what makes a cancelled read matter.
+///
+/// The host's pump watches the pseudo-terminal and the control stream in one
+/// `tokio::select!`, so every time output wins the race the peer's half-read
+/// frame is dropped. Unless the reader keeps that progress somewhere that
+/// outlives the future, the stream desynchronises and the session dies with a
+/// malformed frame — a long way from the cause.
+///
+/// So: flood output while typing continuously, and require every keystroke to
+/// arrive intact.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs aws-lc-rs and a real pty; MIRI has neither")]
+async fn typing_while_output_floods_does_not_corrupt_the_stream() {
+    bounded("bidirectional storm", async {
+        let (_h_ep, _c_ep, mut host_ctl, mut ctrl_ctl, peer) = wire().await;
+        let dir = tmpdir();
+        let log = Log::at(dir.join("sessions.log"));
+        let svc = service(&log);
+        let svc_for_host = Arc::clone(&svc);
+
+        let host_task = tokio::spawn(async move {
+            let svc = svc_for_host;
+            svc.serve(
+                &mut host_ctl,
+                &open_request(),
+                &peer,
+                &[Permission::Terminal],
+            )
+            .await
+        });
+
+        let _ = opened(&mut ctrl_ctl).await;
+
+        // Start a flood, then keep typing into it. Each command's marker must
+        // come back, in order, which it cannot if a frame was lost or
+        // misaligned.
+        for round in 0..12u32 {
+            send_keys(
+                &mut ctrl_ctl,
+                "i=0; while [ $i -lt 300 ]; do echo \
+                 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; \
+                 i=$((i+1)); done\n",
+            )
+            .await;
+            send_keys(&mut ctrl_ctl, &format!("echo ROUND\"-\"{round}\n")).await;
+            let seen = read_until(&mut ctrl_ctl, &format!("ROUND-{round}")).await;
+            assert!(
+                seen.contains(&format!("ROUND-{round}")),
+                "round {round} was lost, which means a frame was"
+            );
+        }
+
+        send_keys(&mut ctrl_ctl, "exit 0\n").await;
+        let ended = tokio::time::timeout(Duration::from_secs(25), host_task)
+            .await
+            .expect("finish")
+            .expect("join")
+            .expect("the session must survive a storm in both directions");
+        assert!(matches!(ended, Ended::ShellExited(_)), "got {ended:?}");
         std::fs::remove_dir_all(&dir).ok();
     })
     .await;
