@@ -252,12 +252,18 @@ impl TerminalService {
             tracing::warn!(error = %e, "could not record the start of a terminal session");
         }
 
-        control
-            .send(&TerminalStarted::Opened { session })
-            .await
-            .map_err(TerminalError::from)?;
-
         let (read, write, child) = terminal.into_parts();
+
+        // The shell exists from here, so a failure must end it rather than
+        // drop it. Dropping the halves does close the master, which hangs the
+        // terminal up — but a shell ignoring `SIGHUP` would survive that, and
+        // relying on an implicit `Drop` for a process teardown is how orphans
+        // happen.
+        if let Err(e) = control.send(&TerminalStarted::Opened { session }).await {
+            let _ = hang_up(child, read, write).await;
+            return Err(TerminalError::from(e));
+        }
+
         self.run(
             control,
             LiveTerminal { read, write, child },
@@ -293,22 +299,14 @@ impl TerminalService {
                 terminal,
                 backlog,
                 lost,
+                parked_for,
             } => {
                 // The controller may have been resized, or be a different
                 // terminal on a different machine, while it was away. Without
                 // this the shell keeps drawing to the old width.
                 parked::resize(&terminal, cols, rows);
 
-                if let Err(e) = self.log.append(&Entry::now(
-                    peer_key,
-                    Event::TerminalResumed {
-                        session: session.to_string(),
-                        parked_secs: 0,
-                        lost,
-                    },
-                )) {
-                    tracing::warn!(error = %e, "could not record a resumed terminal session");
-                }
+                self.record_resume(peer_key, session, parked_for, lost);
 
                 control
                     .send(&TerminalStarted::Resumed { session, lost })
@@ -322,18 +320,62 @@ impl TerminalService {
                 backlog,
                 lost,
                 exit,
+                parked_for,
             } => {
                 // The shell finished while nobody was attached. Its last
                 // output and its exit status are the reason someone detached
                 // from a long job rather than waiting for it.
+                self.record_resume(peer_key, session, parked_for, lost);
                 control
                     .send(&TerminalStarted::Resumed { session, lost })
                     .await?;
                 replay(control, &backlog, lost).await?;
                 control.send(&TerminalMessage::Exit(exit)).await?;
                 let _ = control.finish();
+
+                // The close, which nothing else would record. This session
+                // ended while parked, so it never goes through `run` — and a
+                // session with an open record and no close is exactly the gap
+                // an audit log exists to not have.
+                self.record_close(peer_key, parked_for.as_secs(), Some(exit));
                 Ok(Ended::ShellExited(exit))
             }
+        }
+    }
+
+    /// Record a resume. Best-effort: an audit failure must not kill a session.
+    fn record_resume(
+        &self,
+        peer_key: &[u8; KEY_LEN],
+        session: SessionId,
+        parked_for: Duration,
+        lost: u64,
+    ) {
+        if let Err(e) = self.log.append(&Entry::now(
+            peer_key,
+            Event::TerminalResumed {
+                session: session.to_string(),
+                parked_secs: parked_for.as_secs(),
+                lost,
+            },
+        )) {
+            tracing::warn!(error = %e, "could not record a resumed terminal session");
+        }
+    }
+
+    /// Record the end of a session.
+    ///
+    /// `secs` is the length of *this* attachment, not of the whole session's
+    /// life. A session that was parked and resumed has a parked record and a
+    /// resumed record between its open and its close, and those carry the rest
+    /// — inventing a single total here would mean guessing at an open time
+    /// this connection never saw.
+    fn record_close(&self, peer_key: &[u8; KEY_LEN], secs: u64, exit: Option<TerminalExit>) {
+        if let Err(e) = self
+            .log
+            .append(&Entry::now(peer_key, terminal_closed(secs, exit.as_ref())))
+        {
+            tracing::warn!(error = %e, "could not record the end of a terminal session");
         }
     }
 
@@ -363,6 +405,12 @@ impl TerminalService {
                     .await
             }
             Outcome::Idle(x) => {
+                // Told, not merely disconnected. A controller whose stream
+                // just ends cannot tell an idle timeout from a crash, and the
+                // shell really did exit — `Exit` is that message.
+                if let Some(exit) = x {
+                    let _ = control.send(&TerminalMessage::Exit(exit)).await;
+                }
                 let _ = control.finish();
                 (Ended::Idle, x)
             }
@@ -374,13 +422,7 @@ impl TerminalService {
         // ends. A log that said "closed" for a shell still running would be
         // wrong in the direction that matters.
         if !matches!(ended, Ended::Parked { .. }) {
-            let secs = started.elapsed().as_secs();
-            if let Err(e) = self
-                .log
-                .append(&Entry::now(peer_key, terminal_closed(secs, exit.as_ref())))
-            {
-                tracing::warn!(error = %e, "could not record the end of a terminal session");
-            }
+            self.record_close(peer_key, started.elapsed().as_secs(), exit);
         }
 
         Ok(ended)

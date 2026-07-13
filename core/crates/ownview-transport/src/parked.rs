@@ -60,6 +60,8 @@ pub enum Resumed {
         backlog: Vec<u8>,
         /// Bytes dropped from that backlog because it was full.
         lost: u64,
+        /// How long it spent with nobody attached.
+        parked_for: Duration,
     },
     /// The shell exited while nobody was attached.
     ///
@@ -71,6 +73,7 @@ pub enum Resumed {
         backlog: Vec<u8>,
         lost: u64,
         exit: TerminalExit,
+        parked_for: Duration,
     },
 }
 
@@ -119,6 +122,12 @@ type Handover = oneshot::Sender<Resumed>;
 #[derive(Debug)]
 struct Slot {
     owner: [u8; KEY_LEN],
+    /// When it was parked, for the audit record.
+    ///
+    /// An `Instant`, not a wall clock: the only question asked of it is how
+    /// long ago, and a wall clock that stepped backwards would answer that
+    /// with a negative number.
+    at: std::time::Instant,
     /// Ordering for eviction. A counter rather than a clock: two sessions
     /// parked in the same millisecond still have an order, and a clock that
     /// steps backwards cannot make an old session look new.
@@ -272,6 +281,7 @@ impl ParkedSessions {
             id,
             Slot {
                 owner,
+                at: std::time::Instant::now(),
                 seq,
                 ask: ask_tx,
             },
@@ -296,12 +306,15 @@ impl ParkedSessions {
     /// `None`, so a caller cannot learn from the answer whether a session it
     /// does not own exists.
     pub async fn resume(&self, id: SessionId, owner: &[u8; KEY_LEN]) -> Option<Resumed> {
-        let ask = {
+        let (ask, parked_for) = {
             let mut state = self.state();
             // Checked under the lock and removed in the same step, so two
             // connections racing to resume cannot both be handed the shell.
             match state.slots.get(&id) {
-                Some(slot) if &slot.owner == owner => state.slots.remove(&id)?.ask,
+                Some(slot) if &slot.owner == owner => {
+                    let slot = state.slots.remove(&id)?;
+                    (slot.ask, slot.at.elapsed())
+                }
                 _ => return None,
             }
         };
@@ -310,7 +323,16 @@ impl ParkedSessions {
         // A keeper that has already ended — its window elapsed between the
         // lookup and now — makes this fail, which is the same `None`.
         ask.send(reply_tx).ok()?;
-        reply_rx.await.ok()
+        let mut resumed = reply_rx.await.ok()?;
+
+        // Filled in here rather than by the keeper, because the registry is
+        // what knows when the session was parked.
+        match &mut resumed {
+            Resumed::Still { parked_for: p, .. } | Resumed::Exited { parked_for: p, .. } => {
+                *p = parked_for;
+            }
+        }
+        Some(resumed)
     }
 
     /// Kill every session parked by a device.
@@ -427,6 +449,8 @@ async fn keep(
                     terminal,
                     backlog: bytes,
                     lost,
+                    // Overwritten by `resume`, which holds the clock.
+                    parked_for: Duration::ZERO,
                 }) {
                     let _ = hang_up(terminal.child, terminal.read, terminal.write).await;
                 }
@@ -481,7 +505,12 @@ async fn entomb(
     tokio::select! {
         asked = ask => {
             if let Ok(reply) = asked {
-                let _ = reply.send(Resumed::Exited { backlog, lost, exit });
+                let _ = reply.send(Resumed::Exited {
+                    backlog,
+                    lost,
+                    exit,
+                    parked_for: Duration::ZERO,
+                });
             }
         }
         () = tokio::time::sleep_until(deadline) => {}

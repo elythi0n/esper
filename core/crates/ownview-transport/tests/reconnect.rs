@@ -340,12 +340,14 @@ async fn a_dropped_link_leaves_the_same_shell_to_come_back_to() {
             )),
             "a dropped link should be recorded as not deliberate: {entries:?}"
         );
-        assert!(
-            entries
-                .iter()
-                .any(|e| matches!(e.event, Event::TerminalResumed { .. })),
-            "the resume should be recorded: {entries:?}"
-        );
+        let parked_secs = entries
+            .iter()
+            .find_map(|e| match &e.event {
+                Event::TerminalResumed { parked_secs, .. } => Some(*parked_secs),
+                _ => None,
+            })
+            .expect("the resume should be recorded");
+        let _ = parked_secs;
         std::fs::remove_dir_all(&dir).ok();
     })
     .await;
@@ -748,6 +750,62 @@ async fn a_session_can_only_be_resumed_once() {
     .await;
 }
 
+/// The audit record must say how long a session actually sat with nobody
+/// attached. A field that always reads zero is worse than no field: it looks
+/// like an answer.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs aws-lc-rs and a real pty; MIRI has neither")]
+async fn the_record_says_how_long_a_session_was_parked() {
+    bounded("parked duration is real", async {
+        let (host, [me]) = fleet();
+        let dir = tmpdir();
+        let log = Log::at(dir.join("sessions.log"));
+        let svc = service(&log, Limits::default(), TerminalPolicy::default());
+
+        let (h1, mut c1, ep1) = dial(&host, &me).await;
+        let first = serve(&svc, h1, open(), me.key, vec![Permission::Terminal]);
+        let session = opened(&mut c1).await;
+        send_keys(&mut c1, "echo SET\"\"UP\n").await;
+        let _ = read_until(&mut c1, "SETUP").await;
+        drop(c1);
+        drop(ep1);
+        let _ = ok(first).await;
+
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+
+        let (h2, mut c2, _ep2) = dial(&host, &me).await;
+        let second = serve(
+            &svc,
+            h2,
+            resume(session),
+            me.key,
+            vec![Permission::Terminal],
+        );
+        assert!(matches!(
+            started(&mut c2).await,
+            TerminalStarted::Resumed { .. }
+        ));
+        send_keys(&mut c2, "exit 0\n").await;
+        let _ = ok(second).await;
+
+        let entries = log.read().expect("read the log");
+        let parked_secs = entries
+            .iter()
+            .find_map(|e| match &e.event {
+                Event::TerminalResumed { parked_secs, .. } => Some(*parked_secs),
+                _ => None,
+            })
+            .expect("the resume should be recorded");
+        assert!(
+            parked_secs >= 2,
+            "it was parked for over two seconds, but the record says \
+             {parked_secs} — a duration that is always zero is not a duration"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    })
+    .await;
+}
+
 /// A session nobody comes back for is not kept for ever. A standing shell is a
 /// standing capability, and one left by a laptop that was thrown away should
 /// not still be there next week.
@@ -853,6 +911,25 @@ async fn a_shell_that_exits_while_detached_keeps_its_status_and_last_words() {
             matches!(ended, Ended::ShellExited(x) if x.shell_code() == 42),
             "the exit status of a job someone detached from is the point of \
              detaching from it, got {ended:?}"
+        );
+
+        // A session that ended while parked never goes through the ordinary
+        // pump, so its close record is easy to lose — and an open with no
+        // close is exactly the gap an audit log exists not to have.
+        let entries = log.read().expect("read the log");
+        let closed = entries
+            .iter()
+            .find_map(|e| match &e.event {
+                Event::TerminalClosed { exit_code, .. } => Some(*exit_code),
+                _ => None,
+            })
+            .expect("a session that ended while parked must still be recorded as closed");
+        assert_eq!(closed, Some(42), "with the status it ended with");
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e.event, Event::TerminalOpened)),
+            "and its open: {entries:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     })
