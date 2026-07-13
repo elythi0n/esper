@@ -152,14 +152,26 @@ tidy:
 
 ## Memory-safety check over the fast crates (needs nightly + miri)
 ##
-## Excludes ownview-crypto: interpreting Ed25519 under MIRI takes ~200s against
-## ~13s for everything else, and dalek's unsafe is heavily audited upstream. The
-## value is in the parsers and, from Phase 3, the FFI crates — which go in this
-## set, because that is where undefined behavior actually lives. The full run is
-## `miri-full`, on a nightly schedule.
+## Two crates are excluded, for the same reason stated two ways: MIRI's cost
+## here is measured and its value here is not.
+##
+## ownview-crypto: interpreting Ed25519 takes ~200s against ~13s for everything
+## else, and dalek's unsafe is heavily audited upstream.
+##
+## ownview-capture: 344s, and it forbids unsafe code and has no FFI, so there is
+## no undefined behavior for MIRI to find. Its tests are exhaustive sweeps over
+## pixels and rectangles — exactly what an interpreter is worst at.
+##
+## The value is in the parsers and in the FFI crates, which is why the platform
+## capture backends must be their own crates rather than modules of
+## ownview-capture: X11, PipeWire and DXGI bindings are precisely where
+## undefined behavior will actually live, and they have to stay in this set.
+##
+## The full run is `miri-full`, on a nightly schedule.
 .PHONY: miri
 miri:
-	@cd $(CORE) && cargo +nightly miri test --workspace --exclude ownview-crypto
+	@cd $(CORE) && cargo +nightly miri test --workspace \
+		--exclude ownview-crypto --exclude ownview-capture
 
 ## Memory-safety check over every crate, including the slow crypto one
 .PHONY: miri-full
@@ -169,7 +181,7 @@ miri-full:
 ## Fuzz every target for 30s each (needs nightly + cargo-fuzz)
 .PHONY: fuzz
 fuzz:
-	@for t in frame_decode messages replay control_frames; do \
+	@for t in frame_decode messages replay control_frames damage_coalesce; do \
 		echo "fuzzing $$t..."; \
 		(cd $(CORE) && cargo +nightly fuzz run $$t -- -max_total_time=30) || exit 1; \
 	done
@@ -246,7 +258,7 @@ clean:
 ## List targets
 .PHONY: help
 help:
-	@awk '/^## / { doc = substr($$0, 4); next } \
+	@awk '/^## / { if (doc == "") doc = substr($$0, 4); next } \
 	      /^[a-zA-Z0-9_-]+:/ && doc { \
 	          split($$1, a, ":"); printf "  %-16s %s\n", a[1], doc; doc = "" } \
-	      !/^(## |\.PHONY)/ { doc = "" }' $(MAKEFILE_LIST)
+	      !/^(##|\.PHONY)/ { doc = "" }' $(MAKEFILE_LIST)

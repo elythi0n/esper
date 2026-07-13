@@ -13,6 +13,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 ownview-proto = { path = "../crates/ownview-proto" }
 ownview-transport = { path = "../crates/ownview-transport" }
+ownview-capture = { path = "../crates/ownview-capture" }
 
 [[bin]]
 name = "messages"
@@ -38,6 +39,13 @@ bench = false
 [[bin]]
 name = "control_frames"
 path = "fuzz_targets/control_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "damage_coalesce"
+path = "fuzz_targets/damage_coalesce.rs"
 test = false
 doc = false
 bench = false

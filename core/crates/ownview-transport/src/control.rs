@@ -426,6 +426,10 @@ mod tests {
 
     /// The buffer must not grow without bound, whatever a peer sends.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "a randomised sweep: MIRI interprets rather than executes, so this costs minutes. The property it checks is fuzzed natively at hundreds of thousands of runs a minute, which is a better home for it; what MIRI is here for is undefined behavior, and the small deterministic tests exercise the same code paths"
+    )]
     fn arbitrary_input_never_panics_and_never_hoards() {
         let mut x = 0x243F_6A88_85A3_08D3u64;
         let mut r = FrameReader::new();

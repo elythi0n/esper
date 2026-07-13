@@ -338,6 +338,32 @@ fn alive(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// Wait until a pid is running the named program.
+///
+/// The barrier that makes the backgrounded-job test deterministic. A shell
+/// prints `$!` as soon as it has *forked*, which is before the child has
+/// execed — so between that print and the exec there is a window in which the
+/// child still has the default `SIGHUP` disposition and a hangup kills it.
+///
+/// `nohup` sets `SIGHUP` to ignored and then execs, and an ignored disposition
+/// survives exec. So the moment `comm` reads the target program, the ignore is
+/// in place and the window is closed. Sleeping instead of polling would only
+/// make the window smaller, which under a loaded machine running the whole
+/// suite in parallel is the difference between a test that passes and a test
+/// that passes usually.
+fn wait_until_running(pid: u32, program: &str) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            && comm.trim() == program
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
 /// A shell that exits normally is reaped, not left as a zombie.
 #[tokio::test]
 #[cfg_attr(
@@ -479,6 +505,15 @@ async fn a_backgrounded_job_is_deliberately_left_running() {
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or_else(|| panic!("could not read the pid from: {seen:?}"));
+
+    // Close the fork-to-exec window before hanging up. See
+    // `wait_until_running`: without this the test is a race that only loses
+    // under load, which is the worst kind.
+    assert!(
+        wait_until_running(bg_pid, "sleep"),
+        "the backgrounded job never reached its exec, so the test could not \
+         have measured what it meant to"
+    );
 
     let _ = ownview_pty::hang_up(child, read, write).await;
     tokio::time::sleep(Duration::from_millis(800)).await;

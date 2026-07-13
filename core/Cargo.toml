@@ -17,6 +17,7 @@ ownview-transport = { path = "crates/ownview-transport" }
 ownview-pty = { path = "crates/ownview-pty" }
 ownview-audit = { path = "crates/ownview-audit" }
 ownview-buildinfo = { path = "crates/ownview-buildinfo" }
+ownview-capture = { path = "crates/ownview-capture" }
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

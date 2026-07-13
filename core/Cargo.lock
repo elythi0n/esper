@@ -509,6 +509,14 @@ name = "ownview-buildinfo"
 version = "0.0.0"
 
 [[package]]
+name = "ownview-capture"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-crypto"
 version = "0.0.0"
 dependencies = [

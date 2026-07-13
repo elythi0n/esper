@@ -237,6 +237,10 @@ mod tests {
 
     /// The invariant that makes this safe to run for hours.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "a randomised sweep: MIRI interprets rather than executes, so this costs minutes. The property it checks is fuzzed natively at hundreds of thousands of runs a minute, which is a better home for it; what MIRI is here for is undefined behavior, and the small deterministic tests exercise the same code paths"
+    )]
     fn the_cap_is_never_exceeded_however_the_output_arrives() {
         for chunk in [1usize, 3, 7, 64, 1000, 4096] {
             let mut b = Backlog::new(1024);
@@ -307,6 +311,10 @@ mod tests {
     /// incomplete tail is normal and resolves itself; an orphaned front never
     /// does, because the bytes that would have completed it are gone.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "a randomised sweep: MIRI interprets rather than executes, so this costs minutes. The property it checks is fuzzed natively at hundreds of thousands of runs a minute, which is a better home for it; what MIRI is here for is undefined behavior, and the small deterministic tests exercise the same code paths"
+    )]
     fn whatever_the_cut_point_the_front_is_never_orphaned() {
         let text = "aé€𐍈bcdé€𐍈".repeat(8);
         for cap in 1..=48 {
@@ -405,6 +413,10 @@ mod tests {
 
     /// Arbitrary pushes must never panic and must always respect the cap.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "a randomised sweep: MIRI interprets rather than executes, so this costs minutes. The property it checks is fuzzed natively at hundreds of thousands of runs a minute, which is a better home for it; what MIRI is here for is undefined behavior, and the small deterministic tests exercise the same code paths"
+    )]
     fn arbitrary_pushes_never_panic_and_never_exceed_the_cap() {
         let mut x = 0x9E37_79B9_7F4A_7C15u64;
         for cap in [0usize, 1, 2, 5, 97, 1024] {

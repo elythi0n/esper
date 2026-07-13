@@ -470,6 +470,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-capture"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-crypto"
 version = "0.0.0"
 dependencies = [
@@ -492,6 +500,7 @@ name = "ownview-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "ownview-capture",
  "ownview-proto",
  "ownview-transport",
 ]
