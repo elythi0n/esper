@@ -83,10 +83,40 @@ rather than by hoping:
 | A fuzz target sits on its input path | continuously, not once |
 | It is a separate process | a crash is a dropped session, not a compromised machine |
 
-Both are Phase 3 items in the tracker, and neither is optional. Until they
-exist, OwnView's controller side should be considered to have an unreviewed C
-parser on its network input path — which is exactly why they are in the phase
-that introduces the codec rather than a later one.
+**The sandbox exists.** On Linux the decoder runs in its own process behind
+four layers, chosen because they fail differently:
+
+| Layer | Stops | Fails if |
+|---|---|---|
+| `RLIMIT_AS`, 768 MB | the decoder allocating for a picture a peer declared | the kernel ignores it, which it does not |
+| Landlock | reaching any file, by any path | the kernel is older than 5.13 |
+| seccomp-bpf, 18 syscalls | everything else — including all networking | the filter has a gap |
+| A separate process | a compromise reaching the session keys or the input injector | the parent trusts what the child sends it |
+
+Each is **verified by attempting the forbidden thing**, not by reporting that
+the layer was applied: a probe process tries to read a file, open a socket, and
+allocate past the cap, and the test asserts it is denied or killed. A fifth
+test drives thirty real frames through the jailed decoder, because a sandbox
+that breaks decoding is an outage rather than a sandbox.
+
+The fuzz target on the decoder's input path runs with openh264's C
+instrumented for both AddressSanitizer and coverage. That is not the default:
+`cargo fuzz` sets `RUSTFLAGS` and never `CFLAGS`, so left alone the C is built
+with neither — which means a heap overflow inside the decoder is triggered and
+not reported, and libFuzzer gets no feedback from inside the parser at all.
+Measured on this project's development machine, instrumenting the C and
+seeding the corpus took the coverage from 147 points to 1 759, and the
+original 147 were all in this project's own bounds checks rather than in
+openh264. `make fuzz` sets the flags; it needs clang, because gcc rejects them.
+
+Two new dependencies carry this, both exempted in `cargo-vet` and both worth
+naming for their provenance: `seccompiler` is AWS's, from Firecracker, and
+`landlock` is written by the maintainer of the Landlock kernel subsystem.
+
+**Windows and macOS have no sandbox yet.** `Sandbox::apply` returns an error
+there rather than an empty success, so a controller cannot be built that
+silently runs an unjailed decoder — AppContainer and the App Sandbox arrive
+before the decoder does.
 
 Also worth stating: the codec is built **from source**, not downloaded. Cisco
 distributes a prebuilt binary that carries their patent licence, and using it

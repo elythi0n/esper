@@ -102,6 +102,14 @@ criteria = "safe-to-deploy"
 version = "2.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.enumflags2]]
+version = "0.7.12"
+criteria = "safe-to-deploy"
+
+[[exemptions.enumflags2_derive]]
+version = "0.7.12"
+criteria = "safe-to-deploy"
+
 [[exemptions.find-msvc-tools]]
 version = "0.1.11"
 criteria = "safe-to-deploy"
@@ -152,6 +160,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
 version = "0.3.104"
+criteria = "safe-to-deploy"
+
+[[exemptions.landlock]]
+version = "0.4.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.libc]]
@@ -260,6 +272,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.safe_arch]]
 version = "1.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.seccompiler]]
+version = "0.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.serde]]
