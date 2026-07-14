@@ -517,6 +517,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-color"
+version = "0.0.0"
+dependencies = [
+ "ownview-capture",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-crypto"
 version = "0.0.0"
 dependencies = [
