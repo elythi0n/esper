@@ -50,7 +50,20 @@ persistent trust between two machines that belong to the same person.
 
 ## Building
 
-Needs Go 1.26+, Rust 1.98+, and `make`.
+Needs Go 1.26+, Rust 1.98+, `make`, and **`nasm`**.
+
+`nasm` is not optional and the build says so rather than working around it. The
+H.264 encoder is built from Cisco's source, and its x86 assembly needs an
+assembler; without one, openh264's build script *silently* falls back to a
+C-only path that is 37% slower. A host built that way would be slower than
+every number in this project's own measurements, with nothing to say why.
+
+```sh
+sudo pacman -S nasm       # Arch
+sudo apt install nasm     # Debian, Ubuntu
+brew install nasm         # macOS
+winget install nasm       # Windows
+```
 
 ```sh
 make            # check-isolation, build, test

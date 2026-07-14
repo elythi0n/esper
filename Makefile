@@ -158,33 +158,56 @@ tidy:
 ## ownview-crypto: interpreting Ed25519 takes ~200s against ~13s for everything
 ## else, and dalek's unsafe is heavily audited upstream.
 ##
-## ownview-capture: 344s, and it forbids unsafe code and has no FFI, so there is
-## no undefined behavior for MIRI to find. Its tests are exhaustive sweeps over
-## pixels and rectangles — exactly what an interpreter is worst at.
+## ownview-capture and ownview-color: forbid unsafe code, no FFI, so there is no
+## undefined behavior for MIRI to find. Their tests are exhaustive sweeps over
+## pixels, rectangles and colours — exactly what an interpreter is worst at.
 ##
-## The value is in the parsers and in the FFI crates, which is why the platform
-## capture backends must be their own crates rather than modules of
-## ownview-capture: X11, PipeWire and DXGI bindings are precisely where
-## undefined behavior will actually live, and they have to stay in this set.
+## ownview-encode: calls into Cisco's C. MIRI cannot execute foreign functions
+## at all, so every test that touches the encoder fails rather than passing —
+## which is not a finding about our code.
+##
+## The value is in the parsers, which is why the platform capture backends must
+## be their own crates rather than modules of ownview-capture: X11, PipeWire
+## and DXGI bindings are where undefined behavior in *our* unsafe code will
+## live, and they have to stay in this set.
 ##
 ## The full run is `miri-full`, on a nightly schedule.
 .PHONY: miri
 miri:
 	@cd $(CORE) && cargo +nightly miri test --workspace \
-		--exclude ownview-crypto --exclude ownview-capture
+		--exclude ownview-crypto --exclude ownview-capture \
+		--exclude ownview-color --exclude ownview-encode
 
 ## Memory-safety check over every crate, including the slow crypto one
+##
+## Still excludes ownview-encode: MIRI cannot call into C, so those tests
+## cannot run under it at all — the exclusion is a fact about the interpreter
+## rather than a judgement about the code.
 .PHONY: miri-full
 miri-full:
-	@cd $(CORE) && cargo +nightly miri test --workspace
+	@cd $(CORE) && cargo +nightly miri test --workspace --exclude ownview-encode
 
-## Fuzz every target for 30s each (needs nightly + cargo-fuzz)
+## Fuzz every target (needs nightly + cargo-fuzz). FUZZ_SECONDS=600 for a long run
+##
+## The target list lives here and nowhere else. It used to be duplicated in the
+## nightly workflow, which is how `control_frames` and `damage_coalesce` were
+## added and then not deep-fuzzed by anything: the push-time smoke run had them
+## and the ten-minute nightly run did not. A list in two places is a list that
+## disagrees with itself.
+FUZZ_SECONDS ?= 30
+FUZZ_TARGETS = frame_decode messages replay control_frames damage_coalesce
+
 .PHONY: fuzz
 fuzz:
-	@for t in frame_decode messages replay control_frames damage_coalesce; do \
-		echo "fuzzing $$t..."; \
-		(cd $(CORE) && cargo +nightly fuzz run $$t -- -max_total_time=30) || exit 1; \
+	@for t in $(FUZZ_TARGETS); do \
+		echo "fuzzing $$t for $(FUZZ_SECONDS)s..."; \
+		(cd $(CORE) && cargo +nightly fuzz run $$t -- -max_total_time=$(FUZZ_SECONDS)) || exit 1; \
 	done
+
+## List the fuzz targets, so CI never keeps its own copy of the list
+.PHONY: fuzz-targets
+fuzz-targets:
+	@echo $(FUZZ_TARGETS)
 
 ## Post-build smoke test: binaries agree and ship no endpoint
 .PHONY: smoke

@@ -57,6 +57,44 @@ case and are telling you which they are.
 Those three are the first thing an external audit should look at — ahead of any
 code we wrote ourselves. `make vet-deps` reproduces this list.
 
+### The video codec, which is 155 000 lines of exempted C
+
+`openh264-sys2` vendors Cisco's H.264 implementation and compiles it. That is
+by far the largest exemption in the tree and it will not be audited by this
+project, so here is the position rather than silence:
+
+**The two directions are not equally dangerous, and the difference is the whole
+argument.**
+
+- On a **host**, openh264 *encodes*. Its input is pixels this machine captured
+  from its own screen. A peer cannot reach it: there is no bitstream from
+  anyone else anywhere near the encoder. A memory-safety bug in the encoder is
+  reachable only by whatever is already on the host's own display.
+- On a **controller**, openh264 *decodes*. Its input is a bitstream a peer
+  sent. **That is a large C parser eating attacker-controlled input**, which is
+  the worst thing in the product to treat as trusted.
+
+So the decoder is the one that gets defended, and it is defended structurally
+rather than by hoping:
+
+| | |
+|---|---|
+| The decoder runs sandboxed | seccomp-bpf, AppContainer, App Sandbox — no filesystem, no network, no ability to reach the session |
+| A fuzz target sits on its input path | continuously, not once |
+| It is a separate process | a crash is a dropped session, not a compromised machine |
+
+Both are Phase 3 items in the tracker, and neither is optional. Until they
+exist, OwnView's controller side should be considered to have an unreviewed C
+parser on its network input path — which is exactly why they are in the phase
+that introduces the codec rather than a later one.
+
+Also worth stating: the codec is built **from source**, not downloaded. Cisco
+distributes a prebuilt binary that carries their patent licence, and using it
+would mean a product whose entire premise is that it contacts nobody fetching a
+shared library from a third party at run time. Building from source moves H.264
+patent licensing onto whoever ships the binary, which for a self-hosted
+open-source tool is the honest place for it to sit.
+
 ## What the design removes
 
 The strongest thing about OwnView's posture is architectural rather than

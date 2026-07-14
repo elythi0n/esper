@@ -24,8 +24,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
-      - working-directory: core
-        run: cargo miri test --workspace
+      # `make miri-full` rather than the cargo command, so the crate
+      # exclusions live in one place. ownview-encode cannot run under MIRI at
+      # all — MIRI cannot call into C — and duplicating that here would mean
+      # remembering it twice.
+      - run: make miri-full
 
   # A long fuzz run. The 60s smoke run on each push catches regressions; this is
   # the one that finds something new.
@@ -38,13 +41,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+      # openh264 compiles Cisco's C and needs nasm for its assembly; without
+      # it the encode crate's build script refuses to build at all.
+      - uses: ilammy/setup-nasm@v1
       - run: cargo install cargo-fuzz --locked
+      # `make fuzz` owns the target list. This job used to keep its own copy,
+      # which is how two targets ended up fuzzed for 30 seconds on every push
+      # and never for the ten minutes that actually finds something.
       - name: ten minutes per target
-        working-directory: core
-        run: |
-          for t in frame_decode messages replay; do
-            cargo fuzz run "$t" -- -max_total_time=600
-          done
+        run: make fuzz FUZZ_SECONDS=600
       - name: Upload any crash found
         if: failure()
         uses: actions/upload-artifact@v4

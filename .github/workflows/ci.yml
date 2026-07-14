@@ -38,6 +38,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # openh264 compiles Cisco's C, and its x86 assembly needs nasm. Without
+      # nasm the upstream build script silently falls back to the C-only path,
+      # which is 37% slower — 20.6 ms per 1080p frame against a target of 15.
+      #
+      # The encode crate's build script refuses to build without it, so this is
+      # not the safety net; it is what stops every CI run from hitting that
+      # refusal. The refusal is the safety net.
+      - name: Install nasm (openh264 assembly)
+        uses: ilammy/setup-nasm@v1
+
       - name: Rust — format
         working-directory: core
         run: cargo fmt --all -- --check

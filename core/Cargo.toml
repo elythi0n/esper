@@ -19,6 +19,7 @@ ownview-audit = { path = "crates/ownview-audit" }
 ownview-buildinfo = { path = "crates/ownview-buildinfo" }
 ownview-capture = { path = "crates/ownview-capture" }
 ownview-color = { path = "crates/ownview-color" }
+ownview-encode = { path = "crates/ownview-encode" }
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
