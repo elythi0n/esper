@@ -4,7 +4,7 @@
 // developer's own machine and has no other way to say no.
 #![allow(clippy::panic)]
 
-//! Refuse to build an encoder that is quietly slow.
+//! Notice, loudly, when the encoder is built without its assembly.
 //!
 //! `openh264-sys2` compiles Cisco's C, and the x86 parts of it have hand
 //! written assembly that needs `nasm`. When `nasm` is missing it **silently
@@ -15,31 +15,45 @@
 //! let Ok(object_files) = nasm_build.files(...).compile_objects()
 //! ```
 //!
-//! Measured on this project's development machine, that fallback costs
-//! **20.6 ms per 1080p frame against a target of 15**. Nothing reports it. A
-//! host built without `nasm` would encode 37% slower than every number in the
-//! project's own findings, and the first sign would be a user saying the
-//! session feels slow.
+//! # What that actually costs, measured
 //!
-//! That is not a warning-shaped problem. The product's central promise is that
-//! it does not take over someone else's machine, and a build that silently
-//! breaks the number that promise rests on should not succeed.
+//! **Between 2.5% and 6%**, on this project's development machine, at 1080p:
 //!
-//! Set `OWNVIEW_ALLOW_SLOW_ENCODER=1` to build anyway. It is deliberately
-//! wordy, and the binary reports the slow path at run time so a session that
-//! feels wrong can be explained rather than guessed at.
+//! | Tuning | Content | With assembly | C-only |
+//! |---|---|---:|---:|
+//! | camera | screen-like | 4.30 ms | 4.56 ms |
+//! | camera | high motion | 47.4 ms | 49.7 ms |
+//! | screen content | screen-like | 25.3 ms | 25.9 ms |
+//!
+//! Byte counts are identical, so it is purely a speed question.
+//!
+//! # This used to refuse to build, and that was wrong
+//!
+//! An earlier version of this script panicked, on the grounds that the C-only
+//! path is "37% slower — 20.6 ms per 1080p frame against a target of 15".
+//!
+//! **That claim was unfounded.** The 20.6 ms came from an early probe against
+//! a high-entropy synthetic gradient, and the slowness was a property of the
+//! *content*, not of the missing assembly — the same content measures 47 ms
+//! with the assembly present. Comparing like for like, on identical content
+//! and identical builds, the assembly is worth a few per cent.
+//!
+//! A hard build failure over 5% is disproportionate: it blocks anyone without
+//! an assembler from building at all, for a gain most users would not notice.
+//! So it warns instead. What has not changed is that the fallback must not be
+//! *silent* — the warning fires and the binary reports the slow path at run
+//! time, so a session that feels wrong can be explained rather than guessed at.
 
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=OWNVIEW_ALLOW_SLOW_ENCODER");
+    println!("cargo:rerun-if-env-changed=NASM");
     println!("cargo:rustc-check-cfg=cfg(slow_encoder)");
 
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     // Only x86 has the assembly. On anything else the C path is all there is,
-    // so demanding an assembler would be a build failure with no remedy.
-    let needs_nasm = arch == "x86" || arch == "x86_64";
-    if !needs_nasm {
+    // so complaining about an assembler would be noise with no remedy.
+    if arch != "x86" && arch != "x86_64" {
         return;
     }
 
@@ -47,47 +61,13 @@ fn main() {
         return;
     }
 
-    if std::env::var("OWNVIEW_ALLOW_SLOW_ENCODER").is_ok() {
-        println!("cargo:rustc-cfg=slow_encoder");
-        println!(
-            "cargo:warning=building without nasm: the H.264 encoder will use \
-             the C-only path, measured at 20.6 ms per 1080p frame against a \
-             target of 15. The binary will report this at run time."
-        );
-        return;
-    }
-
-    // A build script's only way to fail is to panic, and the message is what
-    // the developer sees, so it carries the whole explanation.
-    // A build script's only way to fail is to panic, and the message is what
-    // the developer sees, so it carries the whole explanation.
-    panic!(
-        "{}",
-        [
-            "",
-            "  nasm is not installed, and openh264 needs it.",
-            "",
-            "  Without nasm, openh264 silently compiles its C-only path. That is",
-            "  37% slower - 20.6 ms per 1080p frame against a target of 15 - and",
-            "  nothing at build time says so. A host built this way would be",
-            "  slower than every measurement in this project's findings.",
-            "",
-            "  Install it:",
-            "",
-            "    Arch      sudo pacman -S nasm",
-            "    Debian    sudo apt install nasm",
-            "    macOS     brew install nasm",
-            "    Windows   winget install nasm",
-            "",
-            "  Or, if you genuinely cannot, build the slow encoder on purpose:",
-            "",
-            "    OWNVIEW_ALLOW_SLOW_ENCODER=1 cargo build",
-            "",
-            "  The binary reports the slow path at run time, so a session that",
-            "  feels wrong can be explained rather than guessed at.",
-            "",
-        ]
-        .join("\n")
+    println!("cargo:rustc-cfg=slow_encoder");
+    println!(
+        "cargo:warning=nasm was not found, so openh264 is being built without \
+         its assembly. Measured cost: 2.5% to 6% slower encoding, with \
+         identical output size. Install nasm to get it back (pacman -S nasm, \
+         apt install nasm, brew install nasm, winget install nasm). The binary \
+         reports the slow path at run time."
     );
 }
 
@@ -95,7 +75,10 @@ fn main() {
 ///
 /// Runs it rather than looking for the file: a `nasm` that is present but
 /// cannot execute — the wrong architecture, a broken symlink, a shim — would
-/// pass a file check and fail the build later, or worse, fall back silently.
+/// pass a file check and then fall back silently anyway.
+///
+/// Reads the same `NASM` variable `nasm-rs` does, so this agrees with what
+/// openh264 will actually use rather than guessing.
 fn has_nasm() -> bool {
     Command::new(std::env::var("NASM").unwrap_or_else(|_| "nasm".to_owned()))
         .arg("-v")

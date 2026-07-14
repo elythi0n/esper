@@ -24,10 +24,16 @@ use ownview_color::space::ColorSpace;
 
 /// Whether this build has openh264's assembly.
 ///
-/// `false` means the C-only path, which is measured at 20.6 ms per 1080p frame
-/// against a target of 15. Reported rather than hidden: the design's honest
-/// signal is that the session HUD shows *cost*, and a host that is 37% slower
-/// than the published numbers should be able to say why.
+/// `false` means the C-only path, which is **2.5% to 6% slower** with
+/// identical output size — measured on identical content in both builds. An
+/// earlier version of this comment said 37%, which was wrong: that figure came
+/// from an early probe on high-entropy content and was a property of the
+/// content, not of the missing assembly.
+///
+/// Reported rather than hidden anyway, because the design's honest signal is
+/// that the session HUD shows *cost*, and a host should be able to say why it
+/// is a few per cent off the published numbers rather than leave a user
+/// guessing.
 #[must_use]
 pub const fn has_assembly() -> bool {
     !cfg!(slow_encoder)
@@ -41,37 +47,35 @@ pub const fn has_assembly() -> bool {
 /// is not camera video. It is mostly static, has hard edges and large flat
 /// areas, contains text, and has no sensor noise.
 ///
-/// Measured on this project's development machine at 1080p, against a
-/// deliberately screen-like test pattern:
+/// Measured on this project's development machine, with the assembly present,
+/// against a deliberately screen-like pattern — and it is **not a trade-off**:
 ///
-/// | Tuning | ms/frame | bytes/frame | Share of a core at 30 fps |
+/// | Tuning | ms/frame | bytes/frame | Luma PSNR |
 /// |---|---:|---:|---:|
-/// | Camera (openh264's default) | 4.2 | 2 660 | 13% |
-/// | Screen content | 25.0 | 1 592 | **75%** |
+/// | Camera (openh264's default) | 2.2 | 2 805 | **47.9 dB** |
+/// | Screen content | 11.8 | 1 773 | 44.6 dB |
 ///
-/// **Six times the CPU for 40% fewer bytes.** The design is explicit about how
-/// to resolve that: "pegging a colleague's CPU to show you their screen is a
-/// product failure even if the picture is perfect", and host cost is a
-/// correctness target rather than a benchmark. At around 600 kbit/s either way,
-/// the bandwidth saving buys nothing on any link worth supporting.
+/// **5.4 times the CPU, 37% fewer bytes, and 3.3 dB worse quality.** Camera
+/// tuning wins on cost *and* on picture, and loses only on bitrate — the one
+/// dimension with room to spare, since 2.8 KB a frame is under 700 kbit/s at
+/// 30 fps.
 ///
-/// So the default is the one the measurement supports, not the one the name
-/// suggests.
+/// The likely reason is in openh264's own startup warnings: screen-content
+/// mode auto-disables adaptive quantisation and background detection, and
+/// those are what were buying the quality.
 ///
-/// # What is not yet known
+/// # Why it is still configurable
 ///
-/// Two caveats, both stated because the decision may need revisiting:
+/// The measurement is one pattern on one processor. A real desktop — actual
+/// text rendering, large flat regions of interface, a specific compositor's
+/// output — may behave differently, and the honest position is that the
+/// default is well justified rather than that the question is closed for all
+/// content. The CPU budget governor degrades whichever is chosen rather than
+/// letting it take the machine.
 ///
-/// - The measurement was taken on a build **without openh264's assembly**.
-///   Screen-content mode may lean on assembly routines more heavily, in which
-///   case the gap narrows. This needs redoing with `nasm` installed.
-/// - Only CPU and bitrate were measured, **not quality**. Screen-content mode
-///   producing fewer bytes suggests it is more efficient, and its tools are
-///   designed for text. Comparing quality at equal bitrate needs a decoder,
-///   which does not exist yet.
-///
-/// Until both are settled this is configurable, and the CPU budget governor
-/// degrades whichever is chosen rather than letting it take the machine.
+/// Both earlier caveats on this decision are now resolved: the numbers above
+/// are with the assembly, and quality was measured once there was a decoder to
+/// measure it with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tuning {
     /// openh264's default. Six times cheaper on the measurement above.
@@ -458,7 +462,7 @@ mod tests {
     }
 
     /// Whether this build has the assembly must be knowable at run time, or a
-    /// host that is 37% slower than the published numbers cannot say why.
+    /// host that is a few per cent off the published numbers cannot say why.
     #[test]
     fn whether_the_build_has_assembly_is_reportable() {
         // Whichever it is, it must be a definite answer.

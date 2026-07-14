@@ -12,10 +12,10 @@
 //! cargo test --release -p ownview-encode -- --ignored --nocapture
 //! ```
 //!
-//! **The result depends on whether the build has openh264's assembly.** Every
-//! run prints which path it is on, because a number from the C-only path is
-//! 37% worse and quoting it as though it were the product's cost would be
-//! wrong.
+//! Every run prints whether the build has openh264's assembly, because a
+//! number should say which build it came from. Measured, that is worth 2.5% to
+//! 6% — small, but the label costs nothing and an unlabelled number is how a
+//! wrong claim gets repeated.
 
 use std::time::{Duration, Instant};
 
@@ -67,8 +67,7 @@ fn path() -> &'static str {
     if has_assembly() {
         "with openh264 assembly"
     } else {
-        "C-ONLY PATH — no nasm at build time, so these numbers are ~37% worse \
-         than the product's"
+        "C-only path — no nasm at build time, so about 2.5% to 6% slower"
     }
 }
 
@@ -200,6 +199,83 @@ fn measure_what_screen_content_tuning_buys() {
         );
     }
     println!("  (the pattern is deliberately screen-like: text, flat areas, hard edges)");
+}
+
+/// **How much the content matters, which is more than anything else here.**
+///
+/// This exists because getting it wrong produced a false claim that reached a
+/// build script, a README and a CI workflow. An early probe measured 20.6 ms
+/// for a 1080p frame on a high-entropy synthetic gradient, on a build without
+/// openh264's assembly, and the slowness was attributed to the missing
+/// assembly. It was the content: high-motion content measures 47 ms *with* the
+/// assembly, and screen-like content measures 4.
+///
+/// So both axes are measured together now, and neither gets quoted without the
+/// other.
+#[test]
+#[ignore = "a measurement, not an assertion: run it deliberately"]
+fn measure_how_much_the_content_matters() {
+    let (w, h) = (1920u32, 1080u32);
+    println!("\nencode cost by content and tuning at 1080p ({})", path());
+    println!(
+        "  {:>16}  {:>14}  {:>9}  {:>12}  {:>12}",
+        "tuning", "content", "ms/frame", "bytes/frame", "core @30fps"
+    );
+
+    for tuning in [
+        ownview_encode::encoder::Tuning::CameraVideo,
+        ownview_encode::encoder::Tuning::ScreenContent,
+    ] {
+        for (label, high_entropy) in [("screen-like", false), ("high motion", true)] {
+            let mut enc = OpenH264::new(&EncoderConfig {
+                fps: 30,
+                tuning,
+                ..EncoderConfig::for_size(w, h)
+            })
+            .expect("encoder");
+            let mut img = I420::new(w, h).expect("valid");
+
+            let mut samples = Vec::new();
+            let mut bytes = 0usize;
+            for f in 0..40u64 {
+                if high_entropy {
+                    fill_with_motion(&mut img, f);
+                } else {
+                    picture(w, h, f, &mut img);
+                }
+                let t = Instant::now();
+                let e = enc.encode(&img, f == 0).expect("encode");
+                samples.push(t.elapsed().as_secs_f64() * 1000.0);
+                bytes += e.len();
+            }
+            let ms = median(samples);
+            println!(
+                "  {:>16}  {label:>14}  {ms:>9.2}  {:>12}  {:>11.0}%",
+                tuning.name(),
+                bytes / 40,
+                ms * 3.0
+            );
+        }
+    }
+    println!(
+        "  (the design's ceiling is one core for full-motion 1080p30; high \
+         motion exceeds it, which is what the CPU budget governor is for)"
+    );
+}
+
+/// A picture that changes everywhere every frame: the worst case for an
+/// encoder, and what full-motion video actually looks like.
+fn fill_with_motion(out: &mut I420, frame: u64) {
+    let (y, u, v) = out.planes_mut();
+    for (n, p) in y.iter_mut().enumerate() {
+        *p = ((n / 7 + frame as usize * 3) % 256) as u8;
+    }
+    for (n, p) in u.iter_mut().enumerate() {
+        *p = ((n * 5 + frame as usize * 11) % 256) as u8;
+    }
+    for (n, p) in v.iter_mut().enumerate() {
+        *p = ((n * 3 + frame as usize * 7) % 256) as u8;
+    }
 }
 
 /// The pipeline as it will actually run: capture, damage gate, damage-driven
