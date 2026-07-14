@@ -325,6 +325,30 @@ async fn an_out_of_bounds_resize_is_refused_rather_than_clamped() {
 
 /// Read a process's state from /proc. `None` once it is gone.
 #[cfg(target_os = "linux")]
+/// Wait until a process has exited, without reaping it.
+///
+/// A process that has exited and not been waited on is a zombie, so state `Z`
+/// or the pid disappearing both mean "the shell is done". Deliberately does
+/// **not** call `try_wait`: that would reap the child and take its exit status
+/// with it, and the status is what the test is about.
+///
+/// This replaced a fixed sleep. The sleep was 300 ms, which is plenty on an
+/// idle machine and not always plenty with the rest of the suite compiling and
+/// running alongside it — so the test passed locally, passed in isolation
+/// fifteen times out of fifteen, and failed in a full run. A fixed sleep is a
+/// guess about someone else's machine.
+fn wait_until_exited(pid: u32) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        match proc_state(pid) {
+            None => return true,
+            Some('Z') => return true,
+            _ => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+    false
+}
+
 fn proc_state(pid: u32) -> Option<char> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The state is the field after the (possibly parenthesised) comm.
@@ -376,10 +400,14 @@ async fn a_clean_exit_leaves_no_zombie() {
     let pid = child.id().expect("pid");
 
     write.write_all(b"exit 0\n").await.expect("write");
-    // Let the shell actually exit before hanging up, or teardown races the
-    // exit and reports 129 (128 + SIGHUP) instead of 0 — which is what the
-    // first version of this test measured.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait for the shell to have actually exited before hanging up. Teardown
+    // that races the exit reports 129 (128 + SIGHUP) instead of 0, which is
+    // what the first version of this test measured — and a fixed sleep here
+    // measured it again under load. See `wait_until_exited`.
+    assert!(
+        wait_until_exited(pid),
+        "the shell never exited, so the test could not measure what it meant to"
+    );
     let status = ownview_pty::hang_up(child, read, write).await;
     assert_eq!(status.map(|e| e.shell_code()), Some(0));
 

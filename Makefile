@@ -162,9 +162,10 @@ tidy:
 ## undefined behavior for MIRI to find. Their tests are exhaustive sweeps over
 ## pixels, rectangles and colours — exactly what an interpreter is worst at.
 ##
-## ownview-encode: calls into Cisco's C. MIRI cannot execute foreign functions
-## at all, so every test that touches the encoder fails rather than passing —
-## which is not a finding about our code.
+## ownview-encode and ownview-decode: call into Cisco's C. MIRI cannot execute
+## foreign functions at all, so every test that touches the codec fails rather
+## than passing — which is not a finding about our code. The decoder's real
+## defence is a fuzz target with the C instrumented, plus a sandbox.
 ##
 ## The value is in the parsers, which is why the platform capture backends must
 ## be their own crates rather than modules of ownview-capture: X11, PipeWire
@@ -176,16 +177,18 @@ tidy:
 miri:
 	@cd $(CORE) && cargo +nightly miri test --workspace \
 		--exclude ownview-crypto --exclude ownview-capture \
-		--exclude ownview-color --exclude ownview-encode
+		--exclude ownview-color --exclude ownview-encode \
+		--exclude ownview-decode
 
 ## Memory-safety check over every crate, including the slow crypto one
 ##
-## Still excludes ownview-encode: MIRI cannot call into C, so those tests
+## Still excludes the two codec crates: MIRI cannot call into C, so those tests
 ## cannot run under it at all — the exclusion is a fact about the interpreter
 ## rather than a judgement about the code.
 .PHONY: miri-full
 miri-full:
-	@cd $(CORE) && cargo +nightly miri test --workspace --exclude ownview-encode
+	@cd $(CORE) && cargo +nightly miri test --workspace \
+		--exclude ownview-encode --exclude ownview-decode
 
 ## Fuzz every target (needs nightly + cargo-fuzz). FUZZ_SECONDS=600 for a long run
 ##
@@ -195,13 +198,57 @@ miri-full:
 ## and the ten-minute nightly run did not. A list in two places is a list that
 ## disagrees with itself.
 FUZZ_SECONDS ?= 30
-FUZZ_TARGETS = frame_decode messages replay control_frames damage_coalesce
+FUZZ_TARGETS = frame_decode messages replay control_frames damage_coalesce decode_bitstream
+
+# `cargo fuzz` sets RUSTFLAGS and **not** CFLAGS, so a C dependency is compiled
+# with neither sanitiser nor coverage instrumentation unless we say so. For the
+# decoder target that is the difference between fuzzing and pretending to:
+#
+#   No ASan on the C   -> a heap overflow inside openh264 is triggered and not
+#                         reported. The fuzzer finds the input and says nothing.
+#   No coverage on the C -> libFuzzer gets no feedback from inside the decoder,
+#                         so every mutation looks equally good and it never
+#                         learns to build a valid parameter set. That is the
+#                         gate every interesting path is behind: blind fuzzing,
+#                         a million executions that never clear the first
+#                         header check.
+#
+# Set for every target, not just the decoder. The pure-Rust ones have no C to
+# instrument, so it costs them nothing, and a per-target exception is a thing
+# someone would eventually get wrong.
+# **clang, not the default cc.** These flags need it:
+#
+#   gcc rejects -fsanitize-coverage=inline-8bit-counters and pc-table outright
+#   ("valid arguments are: trace-cmp trace-pc"), and rejects the whole option
+#   when handed an assembly file — which aws-lc-sys, also in this dependency
+#   graph, is full of. clang accepts all of it, including on assembly.
+FUZZ_CC = clang
+FUZZ_CFLAGS = -fsanitize=address -fno-omit-frame-pointer \
+	-fsanitize-coverage=inline-8bit-counters,pc-table,trace-cmp
+
+## Generate a seed corpus for the decoder from the encoder's own output
+##
+## A fuzzer starting from random bytes spends its budget learning that H.264
+## begins with a start code and a parameter set, and everything interesting is
+## behind that gate. Real bitstreams start it inside the parser rather than
+## outside. Generated rather than committed, so the seeds cannot drift out of
+## step with the encoder's settings.
+.PHONY: fuzz-corpus
+fuzz-corpus:
+	@cd $(CORE) && cargo test -p ownview-decode --test seed_corpus --release \
+		-- --ignored --nocapture
 
 .PHONY: fuzz
 fuzz:
+	@command -v $(FUZZ_CC) >/dev/null 2>&1 || { \
+		echo "fuzzing needs $(FUZZ_CC): the default cc rejects the coverage"; \
+		echo "flags the C dependencies have to be built with, and without them"; \
+		echo "the decoder target is blind. Install clang."; exit 1; }
 	@for t in $(FUZZ_TARGETS); do \
 		echo "fuzzing $$t for $(FUZZ_SECONDS)s..."; \
-		(cd $(CORE) && cargo +nightly fuzz run $$t -- -max_total_time=$(FUZZ_SECONDS)) || exit 1; \
+		(cd $(CORE) && CC="$(FUZZ_CC)" CXX="$(FUZZ_CC)++" \
+			CFLAGS="$(FUZZ_CFLAGS)" CXXFLAGS="$(FUZZ_CFLAGS)" \
+			cargo +nightly fuzz run $$t -- -max_total_time=$(FUZZ_SECONDS)) || exit 1; \
 	done
 
 ## List the fuzz targets, so CI never keeps its own copy of the list

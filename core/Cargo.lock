@@ -581,6 +581,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-decode"
+version = "0.0.0"
+dependencies = [
+ "openh264",
+ "ownview-capture",
+ "ownview-color",
+ "ownview-encode",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-encode"
 version = "0.0.0"
 dependencies = [
