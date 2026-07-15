@@ -650,6 +650,7 @@ dependencies = [
  "ownview-encode",
  "ownview-pipeline",
  "ownview-proto",
+ "ownview-scale",
  "tracing",
  "tracing-subscriber",
 ]
@@ -662,6 +663,7 @@ dependencies = [
  "ownview-color",
  "ownview-decode",
  "ownview-encode",
+ "ownview-scale",
  "rustix",
  "thiserror",
  "tracing",
@@ -687,6 +689,16 @@ dependencies = [
  "rustix",
  "thiserror",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ownview-scale"
+version = "0.0.0"
+dependencies = [
+ "ownview-capture",
+ "ownview-color",
+ "thiserror",
  "tracing",
 ]
 

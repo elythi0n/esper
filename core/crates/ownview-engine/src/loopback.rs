@@ -12,6 +12,15 @@
 //! and gets on with it, rather than pretending to enumerate monitors it cannot
 //! see.
 //!
+//! # The size it encodes is not always the size it captures
+//!
+//! A resolution ceiling caps the longer edge before any load is measured,
+//! defaulting to 1920, and the CPU budget's ladder can take a fraction of
+//! what is left. So the header reports both the display and the encode size,
+//! because a session quietly encoding a quarter of the pixels and a session
+//! encoding all of them are very different things to be measuring.
+//! `--max-resolution none` turns the cap off.
+//!
 //! # Why it decodes in-process
 //!
 //! The bitstream is this machine's own encoder's output, not a peer's, so the
@@ -32,6 +41,7 @@ use ownview_encode::budget::Budget;
 use ownview_encode::encoder::{EncodeError, EncoderConfig, VideoEncoder};
 use ownview_encode::openh264::OpenH264;
 use ownview_pipeline::pipeline::{Pipeline, Step};
+use ownview_scale::Ceiling;
 
 /// What the loopback was asked to do.
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +54,8 @@ pub struct Options {
     pub budget: f64,
     /// Decode and compare, which costs time but measures the whole path.
     pub verify: bool,
+    /// Cap on the longer edge, or `None` for no cap.
+    pub max_resolution: Option<u32>,
 }
 
 impl Default for Options {
@@ -55,6 +67,7 @@ impl Default for Options {
             seconds: 5,
             budget: Budget::default().cores,
             verify: true,
+            max_resolution: Ceiling::default().long_edge(),
         }
     }
 }
@@ -103,6 +116,17 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
                 let _ = value("--monitor")?;
                 i += 2;
             }
+            "--max-resolution" => {
+                let raw = value("--max-resolution")?;
+                o.max_resolution = if raw == "none" {
+                    None
+                } else {
+                    Some(raw.parse().map_err(|_| {
+                        "--max-resolution wants pixels on the long edge, or `none`".to_owned()
+                    })?)
+                };
+                i += 2;
+            }
             "--no-verify" => {
                 o.verify = false;
                 i += 1;
@@ -141,6 +165,9 @@ pub fn run(o: &Options) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
+    let ceiling = o.max_resolution.map_or_else(Ceiling::none, Ceiling::of);
+    pipeline = pipeline.with_ceiling(ceiling);
+
     if o.verify {
         let decoder = OpenH264Decoder::new(&DecoderConfig::default()).map_err(|e| e.to_string())?;
         pipeline = pipeline.with_decoder(Box::new(decoder));
@@ -173,6 +200,14 @@ pub fn run(o: &Options) -> Result<(), String> {
         None => println!("  decode    not attached (--no-verify)"),
     }
     println!("  budget    {:.2} cores", o.budget);
+    println!("  ceiling   {}", ceiling.describe());
+    let (nw, nh) = pipeline.native_size();
+    let (ew, eh) = pipeline.encode_size();
+    if (ew, eh) == (nw, nh) {
+        println!("  encoding  {ew}x{eh}, the whole display");
+    } else {
+        println!("  encoding  {ew}x{eh} from {nw}x{nh}, area averaged");
+    }
     println!();
 
     // The frame budget: how long each turn is allowed, so the loop paces

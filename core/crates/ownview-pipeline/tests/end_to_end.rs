@@ -21,7 +21,8 @@ use ownview_decode::openh264::OpenH264Decoder;
 use ownview_encode::budget::Budget;
 use ownview_encode::encoder::{EncodeError, EncoderConfig, VideoEncoder};
 use ownview_encode::openh264::OpenH264;
-use ownview_pipeline::pipeline::{Pipeline, Step, Unapplied};
+use ownview_pipeline::pipeline::{Pipeline, Step};
+use ownview_scale::Ceiling;
 
 fn encoder_for(config: &EncoderConfig) -> Result<Box<dyn VideoEncoder>, EncodeError> {
     Ok(Box::new(OpenH264::new(config)?))
@@ -67,7 +68,11 @@ fn the_whole_path_runs_with_no_display() {
             Step::Encoded { decoded: pic, .. } => {
                 encoded += 1;
                 if let Some(pic) = pic {
-                    assert_eq!((pic.width(), pic.height()), (320, 240));
+                    // Against what the pipeline says it is encoding, not
+                    // against the display: the governor may have taken a
+                    // resolution rung, and this test is about frames going in
+                    // and pictures coming out, not about a fixed size.
+                    assert_eq!((pic.width(), pic.height()), p.encode_size());
                     decoded += 1;
                 }
             }
@@ -102,7 +107,13 @@ fn the_whole_path_runs_with_no_display() {
 /// **The case for damage-driven conversion, measured through the real path.**
 #[test]
 fn only_the_damaged_part_of_each_frame_is_converted() {
-    let mut p = build(1280, 720, 60, 1.0);
+    // A budget large enough that the governor cannot move. With a tight one
+    // this measured two things at once: at a one-core budget the whole suite
+    // running in parallel is enough contention to push the ladder onto a
+    // resolution rung, and every size change forces one whole reconversion.
+    // The share then reflects ambient load on the machine rather than the
+    // damage in the picture.
+    let mut p = build(1280, 720, 60, 100.0);
     for _ in 0..60 {
         let _ = p.step(Duration::from_secs(1)).expect("a step");
     }
@@ -118,6 +129,116 @@ fn only_the_damaged_part_of_each_frame_is_converted() {
     );
     // And the first frame is necessarily whole, so it is not zero either.
     assert!(share > 0.0);
+}
+
+/// **The interaction, not either half.** Scaling widens every damage
+/// rectangle — a destination pixel averages several source pixels, so it has
+/// to be repainted if any of them moved, and the result is then aligned to
+/// even edges for the chroma planes. Widened enough, damage-driven conversion
+/// stops paying for itself.
+///
+/// Forced with a ceiling rather than a small budget, so this measures the
+/// geometry and not the load on the machine.
+#[test]
+fn scaling_does_not_destroy_damage_driven_conversion() {
+    let mut p = build(1280, 720, 60, 100.0).with_ceiling(Ceiling::of(640));
+    let mut reconfigured = 0;
+    for _ in 0..60 {
+        if matches!(
+            p.step(Duration::from_secs(1)).expect("a step"),
+            Step::Reconfigured { .. }
+        ) {
+            reconfigured += 1;
+        }
+    }
+    assert!(p.is_scaling(), "the ceiling should have engaged");
+    // The direct symptom of the bug this test found: the unannounced-resolution
+    // check compared the frame against the staging buffer, which a scaled
+    // session sizes below the display, so every single frame looked like the
+    // monitor had changed size.
+    assert_eq!(
+        reconfigured, 0,
+        "a steady display reconfigured {reconfigured} times while scaling"
+    );
+    assert_eq!(p.encode_size(), (640, 360));
+    let share = p.stats().conversion_share();
+    assert!(
+        share < 0.20,
+        "converted {:.1}% of a scaled frame; the pattern moves a small box and \
+         a counter, so widening the damage for the filter footprint must not \
+         turn that into most of the picture",
+        share * 100.0
+    );
+    assert!(
+        share > 0.0,
+        "the first frame is whole, so this cannot be zero"
+    );
+}
+
+/// **A scaler built mid-stream starts on a blank picture.** The pipeline
+/// converts the whole staging buffer whenever it cannot trust what is in it —
+/// and a scaler that was just built is exactly that case, because its own
+/// destination is blank too. If it is handed only the frame's small damage
+/// region while the conversion reads the whole thing, everything outside that
+/// region is converted from nothing.
+///
+/// Reached by turning the ceiling on a few frames in, once the gate has
+/// stopped reporting the whole frame as damaged. Starting with the ceiling on
+/// does not reach it: the first frame is whole damage anyway.
+#[test]
+fn a_scaler_built_mid_stream_repaints_the_whole_picture() {
+    fn mean_luma(p: &ownview_color::I420) -> f64 {
+        let y = p.y();
+        if y.is_empty() {
+            return 0.0;
+        }
+        y.iter().map(|&v| f64::from(v)).sum::<f64>() / y.len() as f64
+    }
+
+    // One pipeline capped from the start, one capped at frame five. The
+    // synthetic source is deterministic, so at the same frame index they are
+    // looking at the same picture and must agree about it.
+    let mut from_the_start =
+        with_decoder(build(1280, 720, 60, 100.0).with_ceiling(Ceiling::of(640)));
+    let mut switched = with_decoder(build(1280, 720, 60, 100.0));
+
+    let mut reference = None;
+    let mut after_switch = None;
+    for i in 0..8 {
+        if i == 5 {
+            switched.set_ceiling(Ceiling::of(640));
+        }
+        let a = from_the_start.step(Duration::from_secs(2)).expect("a step");
+        let b = switched.step(Duration::from_secs(2)).expect("a step");
+        if i == 5 {
+            if let Step::Encoded {
+                decoded: Some(p), ..
+            } = a
+            {
+                reference = Some(mean_luma(&p));
+            }
+            if let Step::Encoded {
+                decoded: Some(p), ..
+            } = b
+            {
+                after_switch = Some(mean_luma(&p));
+            }
+        }
+    }
+
+    assert_eq!(
+        switched.encode_size(),
+        (640, 360),
+        "the cap should have taken"
+    );
+    let reference = reference.expect("the capped pipeline decoded frame five");
+    let switched = after_switch.expect("the switched pipeline decoded frame five");
+    assert!(
+        (reference - switched).abs() < 6.0,
+        "the frame after the scaler was built averages {switched:.1} against \
+         {reference:.1} for the same picture — most of it was converted from a \
+         blank scaler buffer"
+    );
 }
 
 /// The first frame must be converted whole. Damage-driven conversion is only
@@ -249,23 +370,166 @@ fn the_governor_never_raises_the_frame_rate_above_what_was_asked() {
     );
 }
 
-/// **Reported rather than hidden.** The governor has a resolution lever and
-/// the pipeline cannot act on it, because there is no scaler. A pipeline that
-/// silently ignored it would make the bottom of the ladder look like it
-/// worked.
+/// **The lever that used to reach nothing.** The governor's bottom rungs cut
+/// resolution, and for a while the pipeline had no scaler, so it would report
+/// three quarter scale and encode exactly as many pixels as before. Dropping
+/// to a resolution rung has to shrink what is actually encoded.
 #[test]
-fn the_resolution_lever_is_declared_unapplied() {
+fn the_resolution_rung_shrinks_what_is_encoded() {
+    let mut p = build(640, 480, 60, 0.02);
+    assert_eq!(p.encode_size(), (640, 480), "it starts at the display size");
+    assert!(!p.is_scaling(), "and does not resample until it has to");
+
+    for _ in 0..400 {
+        let _ = p.step(Duration::from_secs(1)).expect("a step");
+        if p.encode_size() != (640, 480) {
+            break;
+        }
+    }
+
+    let level = p.governor().level();
+    assert!(
+        level.scale != (1, 1),
+        "a 2% budget should have reached a resolution rung: {}",
+        p.governor().describe()
+    );
+    let (w, h) = p.encode_size();
+    assert!(
+        w < 640 && h < 480,
+        "the rung says {:?} but the encoder is still being handed {w}x{h}",
+        level.scale
+    );
+    assert!(p.is_scaling(), "and the frames must actually be resampled");
+    assert_eq!(
+        (w, h),
+        level.size(640, 480),
+        "the encode size must be the rung's size, not something near it"
+    );
+}
+
+/// Every rung now lands somewhere, so there is nothing left to declare.
+#[test]
+fn no_lever_is_left_unapplied() {
     let p = build(320, 240, 60, 1.0);
-    let unapplied = p.unapplied_levers();
     assert!(
-        unapplied.contains(&Unapplied::Resolution),
-        "the pipeline must admit it cannot scale"
+        p.unapplied_levers().is_empty(),
+        "a lever the pipeline cannot honour has to be declared, and there are none"
     );
-    assert!(
-        Unapplied::Resolution.reason().contains("scaler"),
-        "and say why: {}",
-        Unapplied::Resolution.reason()
+}
+
+/// **The prior, not the reaction.** On a large display the extra pixels were
+/// never affordable, and discovering that through the governor costs the first
+/// seconds of every session.
+#[test]
+fn the_ceiling_caps_a_large_display_before_any_load_is_seen() {
+    let mut p = build(2560, 1440, 60, 100.0);
+    assert_eq!(
+        p.native_size(),
+        (2560, 1440),
+        "the display is still what it is"
     );
+    assert_eq!(
+        p.encode_size(),
+        (1920, 1080),
+        "but a generous budget must still not encode 1440p"
+    );
+    assert!(p.is_scaling());
+    let _ = p.step(Duration::from_secs(1)).expect("a step");
+    assert_eq!(p.staging_size(), (1920, 1080), "and the buffer agrees");
+}
+
+/// A host with cores to spare should be able to say so — and be told the
+/// truth about it straight away.
+///
+/// The loopback prints the encode size in its header, before any frame has
+/// run. Read off the staging buffer that reported a `--max-resolution none`
+/// session as scaling to 1080p, because the buffer was sized in the
+/// constructor from the default ceiling and only resized on the first frame.
+#[test]
+fn the_ceiling_can_be_lifted() {
+    let mut p = build(2560, 1440, 60, 100.0).with_ceiling(Ceiling::none());
+    assert_eq!(p.ceiling().long_edge(), None);
+    assert_eq!(
+        p.encode_size(),
+        (2560, 1440),
+        "lifting the cap has to be visible before the first frame"
+    );
+    assert!(!p.is_scaling());
+    // And the buffer catches up on that frame.
+    let _ = p.step(Duration::from_secs(1)).expect("a step");
+    assert_eq!(p.staging_size(), (2560, 1440));
+    assert_eq!(p.encode_size(), p.staging_size());
+}
+
+/// A display below the ceiling must not be touched at all — no resampling, no
+/// cost, no quality lost to a pass that had nothing to do.
+#[test]
+fn a_small_display_is_not_resampled() {
+    for (w, h) in [(1920u32, 1080u32), (1366, 768), (800, 600), (1920, 1200)] {
+        let mut p = build(w, h, 60, 100.0);
+        let _ = p.step(Duration::from_secs(1)).expect("a step");
+        assert_eq!(p.encode_size(), (w, h), "{w}x{h} was resized");
+        assert!(!p.is_scaling(), "{w}x{h} was resampled for no reason");
+    }
+}
+
+/// **Awkward display sizes must not produce a dead session.** The staging
+/// buffer rounds its size up to even for the chroma planes, so an odd encode
+/// size leaves it a pixel wider than the frame going into it and the
+/// conversion refuses — which reaches a user as a session that shows nothing
+/// rather than a picture one pixel narrower than it could have been.
+///
+/// The sizes here are the odd ones the synthetic capturer will accept — it has
+/// its own floor, so a display of two pixels is not reachable through it. The
+/// arithmetic is guarded below that floor anyway, because `Pipeline` takes its
+/// size from whatever a backend reports and a future one is not bound by this
+/// capturer's minimum.
+#[test]
+fn an_odd_or_tiny_display_still_encodes() {
+    for (w, h) in [
+        (1921u32, 1081u32),
+        (1919, 1079),
+        (65, 65),
+        (129, 4097),
+        (2561, 1441),
+    ] {
+        let mut p = build(w, h, 30, 100.0);
+        let (ew, eh) = p.encode_size();
+        assert_eq!(ew % 2, 0, "{w}x{h} encodes at an odd width {ew}");
+        assert_eq!(eh % 2, 0, "{w}x{h} encodes at an odd height {eh}");
+        assert!(ew <= w && eh <= h, "{w}x{h} was enlarged to {ew}x{eh}");
+        // And it has to actually run, which is what catches the mismatch.
+        for _ in 0..3 {
+            let _ = p
+                .step(Duration::from_secs(2))
+                .unwrap_or_else(|e| panic!("{w}x{h} failed to step: {e}"));
+        }
+        assert_eq!(p.staging_size(), p.encode_size(), "{w}x{h} disagrees");
+    }
+}
+
+/// A capped session still has to produce pictures a decoder accepts, at the
+/// size it is actually encoding.
+#[test]
+fn a_capped_session_still_round_trips() {
+    let mut p = with_decoder(build(2560, 1440, 30, 100.0).with_ceiling(Ceiling::of(640)));
+    let mut seen = 0;
+    for _ in 0..8 {
+        if let Step::Encoded {
+            decoded: Some(picture),
+            ..
+        } = p.step(Duration::from_secs(2)).expect("a step")
+        {
+            assert_eq!(
+                (picture.width(), picture.height()),
+                p.encode_size(),
+                "the decoder produced a different size than the pipeline claims to encode"
+            );
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "nothing decoded");
+    assert_eq!(p.encode_size(), (640, 360));
 }
 
 /// A keyframe on request, all the way through to a decodable picture — which

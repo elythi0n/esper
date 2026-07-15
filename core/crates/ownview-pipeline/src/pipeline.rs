@@ -14,20 +14,36 @@
 //!
 //! # What the governor can and cannot do here
 //!
-//! It has three levers, and two of them now reach something:
+//! It has three levers, and all three now reach something:
 //!
 //! | Lever | Reaches | Status |
 //! |---|---|---|
 //! | Framerate | the damage gate's rate ceiling | applied |
 //! | Fidelity | the encoder's quantiser range | applied |
-//! | **Resolution** | nothing | **not applied** |
+//! | Resolution | the scaler, and through it the conversion and the encoder | applied |
 //!
-//! Resolution needs a scaler and there is not one. That is stated here, and
-//! reported by [`Pipeline::unapplied_levers`], rather than silently ignored —
-//! because a governor that appears to reduce resolution and does not would
-//! make the bottom of its ladder look like it worked.
+//! Resolution was the last to land, and for a while it reached nothing at
+//! all: the governor would drop to its bottom rung, report three quarter
+//! scale, and encode exactly as many pixels as before. That was reported by
+//! `unapplied_levers` rather than hidden, which is the only reason it stayed
+//! visible long enough to get built.
 //!
-//! Two of those three arrived by being caught rather than by being built.
+//! # Where the size is decided
+//!
+//! Three things narrow it, in order:
+//!
+//! 1. The **display** says how big it is.
+//! 2. The **ceiling** caps it before any load is observed, because on a 4K
+//!    host the extra pixels were never affordable and discovering that at
+//!    runtime costs the first seconds of every session.
+//! 3. The **governor's rung** takes a fraction of what is left, reactively.
+//!
+//! [`Pipeline::retarget`] is the single place those three meet. Staging
+//! buffer, encoder and scaler are resized together or not at all: a rung
+//! change that resized two of the three would hand the converter a frame the
+//! destination is not shaped for.
+//!
+//! Two of the three levers arrived by being caught rather than by being built.
 //! Fidelity had nowhere to land at all — the encoder had no quantiser setting.
 //! And framerate reached the *encoder's rate model* but not the gate, so the
 //! governor would report 15 fps while the gate went on admitting frames at 60:
@@ -39,6 +55,7 @@ use std::time::{Duration, Instant};
 
 use ownview_capture::capturer::{Capture, CaptureError, Capturer};
 use ownview_capture::damage::Damage;
+use ownview_capture::frame::PixelFormat;
 use ownview_capture::gate::{EncodeGate, Policy, Verdict};
 use ownview_capture::geometry::Rect;
 use ownview_color::convert;
@@ -46,6 +63,7 @@ use ownview_color::{ColorSpace, I420};
 use ownview_decode::decoder::{DecodeError, VideoDecoder};
 use ownview_encode::budget::{Budget, Governor, Moved};
 use ownview_encode::encoder::{EncodeError, EncoderConfig, VideoEncoder};
+use ownview_scale::{Ceiling, ScaleError, Scaler};
 
 use crate::timing::{Stage, Timer};
 
@@ -84,6 +102,8 @@ pub enum PipelineError {
     Decode(#[from] DecodeError),
     #[error(transparent)]
     Buffer(#[from] ownview_color::i420::I420Error),
+    #[error(transparent)]
+    Scale(#[from] ScaleError),
 }
 
 /// Running totals for the whole path.
@@ -155,23 +175,20 @@ impl PipelineStats {
 }
 
 /// A lever the governor has that the pipeline cannot act on.
+///
+/// Empty, and deliberately still here. Every rung of the ladder now reaches
+/// something, but the next backend or platform may not manage that, and a
+/// pipeline that cannot honour a lever has to be able to say so rather than
+/// degrade on paper. [`Pipeline::unapplied_levers`] is the channel; this is
+/// the vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unapplied {
-    /// Resolution, because there is no scaler.
-    Resolution,
-}
+pub enum Unapplied {}
 
 impl Unapplied {
     /// Why, for the log and the operator.
     #[must_use]
     pub const fn reason(self) -> &'static str {
-        match self {
-            Self::Resolution => {
-                "the resolution rung needs a scaler, and there is not one yet — \
-                 so the bottom of the CPU budget's ladder reduces framerate and \
-                 quality but not size"
-            }
-        }
+        match self {}
     }
 }
 
@@ -187,14 +204,59 @@ impl Unapplied {
 pub type EncoderFactory<'a> =
     &'a dyn Fn(&EncoderConfig) -> Result<Box<dyn VideoEncoder>, EncodeError>;
 
+/// The size to encode at, given a display, a cap and a rung.
+///
+/// Two properties this has to guarantee, because the stages downstream assume
+/// them rather than check them:
+///
+/// **Never larger than the display.** The ceiling's floor on a tiny edge and
+/// the ladder's floor both round *up* to sixteen, so on a display smaller than
+/// that they would ask the scaler to enlarge. It refuses, correctly, but the
+/// refusal surfaces as a dead session rather than a slightly odd size.
+///
+/// **Always even.** The staging buffer rounds its size *up* to even for the
+/// chroma planes, so an odd target leaves the buffer one pixel wider than the
+/// frame being converted into it — and the conversion rejects that, again as a
+/// dead session. Clamping to the display can reintroduce an odd number after
+/// the other two steps have removed it, so the evening happens last.
+///
+/// A display under two pixels has no even size at or below it and is left
+/// alone; nothing downstream can encode one either way.
+fn target_size(
+    ceiling: Ceiling,
+    native: (u32, u32),
+    level: &ownview_encode::budget::Level,
+) -> (u32, u32) {
+    let (capped_w, capped_h) = ceiling.apply(native.0, native.1);
+    let (w, h) = level.size(capped_w, capped_h);
+    let fit = |want: u32, have: u32| {
+        if have < 2 {
+            return have;
+        }
+        (want.min(have) & !1).max(2)
+    };
+    (fit(w, native.0), fit(h, native.1))
+}
+
 /// The whole media path.
 pub struct Pipeline {
     capturer: Box<dyn Capturer>,
     gate: EncodeGate,
     governor: Governor,
     space: ColorSpace,
+    /// What the display is, before any cap or rung.
+    native: (u32, u32),
+    /// The policy cap on encode size.
+    ceiling: Ceiling,
+    /// Present only when the encode size differs from the capture size.
+    ///
+    /// It holds its own destination across frames, so it cannot be rebuilt
+    /// casually: a rebuild starts from a blank picture and needs a whole
+    /// frame behind it.
+    scaler: Option<Scaler>,
     /// Reused across frames, and holding the previous one — which is what
-    /// makes damage-driven conversion correct.
+    /// makes damage-driven conversion correct. Sized to the **encode** size,
+    /// not the display.
     staging: I420,
     encoder: Box<dyn VideoEncoder>,
     decoder: Option<Box<dyn VideoDecoder>>,
@@ -222,6 +284,8 @@ impl std::fmt::Debug for Pipeline {
             .field("encoder", &self.encoder.backend())
             .field("decoder", &self.decoder.as_ref().map(|d| d.backend()))
             .field("level", &self.governor.level().describe())
+            .field("native", &self.native)
+            .field("staging", &(self.staging.width(), self.staging.height()))
             .finish_non_exhaustive()
     }
 }
@@ -245,13 +309,16 @@ impl Pipeline {
             .find(|m| m.id == monitor)
             .map_or((1920, 1080), ownview_capture::capturer::MonitorInfo::size);
 
-        let staging = I420::new(width, height)?;
         let governor = Governor::new(budget, ownview_encode::budget::Reflexes::default());
         // Clamped to the requested rate from the start, for the same reason
         // the recovery path is: the ladder's top rung is 60 fps and the caller
         // may have asked for 30.
         let mut level = governor.level();
         level.fps = level.fps.min(policy.max_fps.max(1)).max(1);
+
+        let ceiling = Ceiling::default();
+        let (enc_w, enc_h) = target_size(ceiling, (width, height), &level);
+        let staging = I420::new(enc_w, enc_h)?;
         let config = EncoderConfig::for_budget(staging.width(), staging.height(), &budget)
             .with_level(&level);
         let encoder = encoder_for(&config)?;
@@ -262,6 +329,9 @@ impl Pipeline {
             requested_fps: policy.max_fps.max(1),
             governor,
             space: ColorSpace::default(),
+            native: (width, height),
+            ceiling,
+            scaler: None,
             staging,
             encoder,
             decoder: None,
@@ -270,6 +340,16 @@ impl Pipeline {
             started: Instant::now(),
             applied_level: Some(level),
         })
+    }
+
+    /// Set the policy cap on encode size.
+    ///
+    /// Takes effect on the next frame, through the same path a rung change
+    /// takes, so there is one implementation of "resize everything".
+    #[must_use]
+    pub fn with_ceiling(mut self, ceiling: Ceiling) -> Self {
+        self.ceiling = ceiling;
+        self
     }
 
     /// Attach a decoder, so a loopback can check its own output.
@@ -347,7 +427,61 @@ impl Pipeline {
     /// it worked.
     #[must_use]
     pub fn unapplied_levers(&self) -> Vec<Unapplied> {
-        vec![Unapplied::Resolution]
+        Vec::new()
+    }
+
+    /// What the display is, before the ceiling or a rung.
+    #[must_use]
+    pub const fn native_size(&self) -> (u32, u32) {
+        self.native
+    }
+
+    /// What is being encoded.
+    ///
+    /// Derived from the display, the ceiling and the rung — not read off the
+    /// staging buffer. The buffer is resized by [`Self::retarget`] on the
+    /// next frame, so between changing the ceiling and that frame the buffer
+    /// still has its old size. Reporting it would have told a caller that a
+    /// session with the cap switched off was still scaling, which is what a
+    /// `--max-resolution none` run of the loopback printed.
+    #[must_use]
+    pub fn encode_size(&self) -> (u32, u32) {
+        target_size(self.ceiling, self.native, &self.effective_level())
+    }
+
+    /// The size of the buffer frames are converted into.
+    ///
+    /// Equal to [`Self::encode_size`] whenever a frame is being converted.
+    /// They differ only between a policy change and the frame that applies
+    /// it, which is why the two are separate questions.
+    #[must_use]
+    pub const fn staging_size(&self) -> (u32, u32) {
+        (self.staging.width(), self.staging.height())
+    }
+
+    /// The policy cap in force.
+    #[must_use]
+    pub const fn ceiling(&self) -> Ceiling {
+        self.ceiling
+    }
+
+    /// Change the policy cap on a running session.
+    ///
+    /// Takes effect on the next frame, through the same resize path a rung
+    /// change takes.
+    pub fn set_ceiling(&mut self, ceiling: Ceiling) {
+        self.ceiling = ceiling;
+    }
+
+    /// Whether frames are being resampled on the way to the encoder.
+    ///
+    /// Derived from the sizes rather than from whether a scaler object exists.
+    /// The scaler cannot be built until a frame has revealed which bytes hold
+    /// red, so asking this before the first frame would otherwise report a
+    /// capped 4K session as unscaled.
+    #[must_use]
+    pub fn is_scaling(&self) -> bool {
+        self.encode_size() != self.native
     }
 
     /// Ask for a keyframe on the next frame.
@@ -382,7 +516,15 @@ impl Pipeline {
         // because a converter handed a differently-sized frame would resize
         // the staging buffer and silently lose the previous picture that
         // damage-driven conversion depends on.
-        if frame.width() != self.staging.width() || frame.height() != self.staging.height() {
+        //
+        // Against the **display** size, not the staging buffer's. They were
+        // the same thing until the scaler arrived, and comparing against
+        // staging afterwards makes every frame of a scaled session look like a
+        // resolution change: the gate is reconfigured and reports the whole
+        // frame as damaged, the scaler is rebuilt onto a blank destination,
+        // and the conversion is whole. A resolution rung meant to save CPU
+        // would instead have quietly cost the most it possibly could.
+        if (frame.width(), frame.height()) != self.native {
             self.reconfigure(frame.width(), frame.height())?;
         }
 
@@ -391,6 +533,10 @@ impl Pipeline {
 
         // Tell the governor what the path has cost, and follow it.
         self.follow_the_governor(now)?;
+
+        // And make the encode size agree with whatever it just decided,
+        // before anything is sized against it.
+        self.retarget(Some(frame.format()))?;
 
         let (keyframe, damage) = match verdict {
             Verdict::Skip => {
@@ -405,21 +551,46 @@ impl Pipeline {
         // Convert. Only the damaged regions, unless the staging buffer cannot
         // be trusted to hold the previous frame.
         let whole = self.needs_whole_frame || matches!(damage, Damage::Everything);
-        let convert = Timer::start();
-        let converted = if whole {
-            let _ = convert::whole_frame(&frame, self.space, &mut self.staging)?;
-            u64::from(frame.width()) * u64::from(frame.height())
+        // A scaler keeps its own destination across frames, so when the whole
+        // staging buffer is being rewritten the scaler has to rewrite all of
+        // its own too. Handing it a small region here and then converting the
+        // whole thing would convert whatever the scaler's buffer held before.
+        let for_scaler = if whole {
+            Damage::Everything
         } else {
-            let regions = damage.rects(&frame.bounds());
-            convert::regions(&frame, self.space, &mut self.staging, &regions)?
+            damage.clone()
+        };
+
+        let convert = Timer::start();
+        let (converted, source_pixels) = match self.scaler.as_mut() {
+            Some(scaler) => {
+                let scaled = scaler.scale(&frame, &for_scaler)?;
+                let whole_pixels = u64::from(scaled.width()) * u64::from(scaled.height());
+                let n = if whole {
+                    let _ = convert::whole_frame(scaled, self.space, &mut self.staging)?;
+                    whole_pixels
+                } else {
+                    let regions = scaled.damage().rects(&scaled.bounds());
+                    convert::regions(scaled, self.space, &mut self.staging, &regions)?
+                };
+                (n, whole_pixels)
+            }
+            None => {
+                let whole_pixels = u64::from(frame.width()) * u64::from(frame.height());
+                let n = if whole {
+                    let _ = convert::whole_frame(&frame, self.space, &mut self.staging)?;
+                    whole_pixels
+                } else {
+                    let regions = damage.rects(&frame.bounds());
+                    convert::regions(&frame, self.space, &mut self.staging, &regions)?
+                };
+                (n, whole_pixels)
+            }
         };
         convert.stop(&mut self.stats.convert);
         self.needs_whole_frame = false;
         self.stats.pixels_converted = self.stats.pixels_converted.saturating_add(converted);
-        self.stats.pixels_if_whole = self
-            .stats
-            .pixels_if_whole
-            .saturating_add(u64::from(frame.width()) * u64::from(frame.height()));
+        self.stats.pixels_if_whole = self.stats.pixels_if_whole.saturating_add(source_pixels);
 
         let encode = Timer::start();
         let encoded = self.encoder.encode(&self.staging, keyframe);
@@ -456,30 +627,82 @@ impl Pipeline {
         if let Some(cpu) = self.stats.total_cpu() {
             let moved = self.governor.observe(cpu, elapsed);
             if matches!(moved, Moved::Down | Moved::Up) {
-                self.apply_level()?;
+                // The gate decides how many frames are encoded at all, which
+                // is what makes the framerate rung cost anything. The size
+                // and the encoder settings are `retarget`'s, so that a rung
+                // change resizes everything or nothing.
+                self.gate.set_max_fps(self.effective_level().fps);
             }
         }
         Ok(())
     }
 
-    /// Push the governor's current level to the encoder **and the gate**.
+    /// Make the staging buffer, the encoder and the scaler agree on one size.
     ///
-    /// The gate is the half that was missing, and its absence made the whole
-    /// framerate rung decorative: the governor would report 15 fps, the
-    /// encoder's rate model would be told 15, and the gate would carry on
-    /// admitting frames at 60. The pipeline looked degraded and cost the same.
-    fn apply_level(&mut self) -> Result<(), PipelineError> {
+    /// The single place the encode size is decided, and the reason it is one
+    /// place: three things have to be resized together. A rung change that
+    /// resized the staging buffer but not the scaler would hand the converter
+    /// a frame its destination is not shaped for — which the conversion does
+    /// catch, but as a dead session rather than a smaller picture.
+    ///
+    /// `format` is the pixel layout of a frame in hand, or `None` when there
+    /// is not one yet. Without a frame the size is still settled, but a
+    /// scaler cannot be built, because which bytes hold red is a property of
+    /// the backend and not of the geometry.
+    fn retarget(&mut self, format: Option<PixelFormat>) -> Result<(), PipelineError> {
         let level = self.effective_level();
-        if self.applied_level == Some(level) {
+        let (want_w, want_h) = target_size(self.ceiling, self.native, &level);
+        let scaling = (want_w, want_h) != self.native;
+
+        let scaler_fits = match (&self.scaler, format) {
+            // No scaler needed and none present.
+            (None, _) => !scaling,
+            // One present: it has to match on all three counts, because any
+            // of them changing means its weights or its buffer are wrong.
+            (Some(s), Some(f)) => {
+                scaling
+                    && s.source() == self.native
+                    && s.target() == (want_w, want_h)
+                    && s.input_format() == f
+            }
+            // One present and no frame to check it against. Left alone: it
+            // will be checked against the next frame that arrives.
+            (Some(s), None) => scaling && s.target() == (want_w, want_h),
+        };
+        let sized = self.staging.width() == want_w && self.staging.height() == want_h;
+        let configured = self.applied_level == Some(level);
+        if scaler_fits && sized && configured {
             return Ok(());
         }
 
-        // The gate decides how many frames are encoded at all, which is what
-        // makes the rung cost anything.
-        self.gate.set_max_fps(level.fps);
+        if !scaler_fits {
+            self.scaler = match (scaling, format) {
+                (true, Some(f)) => Some(Scaler::new(
+                    self.native.0,
+                    self.native.1,
+                    want_w,
+                    want_h,
+                    f,
+                )?),
+                // Scaling is wanted but the layout is not known yet, so no
+                // scaler this turn. Dropping the old one is deliberate: its
+                // target is wrong and a wrong scaler is worse than none.
+                (true, None) => None,
+                (false, _) => None,
+            };
+            // A fresh scaler starts on a blank destination.
+            self.needs_whole_frame = true;
+        }
 
-        // The resolution part is deliberately not applied; see
-        // `unapplied_levers`. Framerate and fidelity are.
+        if !sized {
+            let _ = self.staging.resize(want_w, want_h)?;
+            // **The staging buffer no longer holds the previous frame**, so
+            // the next conversion has to be whole. Missing this leaves the
+            // untouched regions showing whatever the resize left behind.
+            self.needs_whole_frame = true;
+        }
+
+        self.gate.set_max_fps(level.fps);
         let config = EncoderConfig::for_budget(
             self.staging.width(),
             self.staging.height(),
@@ -502,25 +725,77 @@ impl Pipeline {
         level
     }
 
-    /// Resize everything for a new picture size.
+    /// Take a new display size.
+    ///
+    /// Only the display and the gate are set here. Everything downstream is
+    /// sized by [`Self::retarget`], because the encode size depends on the
+    /// ceiling and the rung as well, and computing it twice is how the two
+    /// copies drift apart.
     fn reconfigure(&mut self, width: u32, height: u32) -> Result<(), PipelineError> {
-        let _ = self.staging.resize(width, height)?;
+        self.native = (width, height);
         self.gate.reconfigure(Rect::sized(width, height));
-        // **The staging buffer no longer holds the previous frame**, so the
-        // next conversion has to be whole. Missing this leaves the untouched
-        // regions of the first frame after a resize showing whatever the
-        // resize left behind.
+        // The old scaler was built for the old display.
+        self.scaler = None;
         self.needs_whole_frame = true;
-        let level = self.effective_level();
-        self.gate.set_max_fps(level.fps);
-        let config = EncoderConfig::for_budget(
-            self.staging.width(),
-            self.staging.height(),
-            &self.governor.budget(),
-        )
-        .with_level(&level);
-        self.encoder.reconfigure(&config)?;
-        self.applied_level = Some(level);
-        Ok(())
+        self.retarget(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ownview_encode::budget::LADDER;
+
+    /// The two properties everything downstream assumes of the encode size,
+    /// over every rung and a range of displays including ones smaller than any
+    /// capture backend will report.
+    ///
+    /// Odd is the dangerous one. The staging buffer rounds *up* to even for
+    /// the chroma planes, so an odd target leaves it a pixel wider than the
+    /// frame going into it, and the colour conversion refuses — a session that
+    /// shows nothing instead of a picture one pixel narrower. Clamping to the
+    /// display can put an odd number back after the ceiling and the rung have
+    /// both removed it, which is why the evening happens last.
+    #[test]
+    fn the_encode_size_is_always_even_and_never_larger_than_the_display() {
+        let ceilings = [Ceiling::none(), Ceiling::default(), Ceiling::of(640)];
+        let sizes = [
+            (2u32, 2u32),
+            (3, 3),
+            (9, 100),
+            (17, 33),
+            (31, 15),
+            (1919, 1079),
+            (1920, 1080),
+            (1921, 1081),
+            (2560, 1440),
+            (3440, 1440),
+            (3840, 2160),
+            (5120, 2880),
+        ];
+        for ceiling in ceilings {
+            for (w, h) in sizes {
+                for level in LADDER {
+                    let (tw, th) = target_size(ceiling, (w, h), level);
+                    assert_eq!(tw % 2, 0, "{w}x{h} {ceiling:?} {level:?} gave width {tw}");
+                    assert_eq!(th % 2, 0, "{w}x{h} {ceiling:?} {level:?} gave height {th}");
+                    assert!(
+                        tw <= w && th <= h,
+                        "{w}x{h} {ceiling:?} {level:?} enlarged to {tw}x{th}"
+                    );
+                    assert!(tw >= 2 && th >= 2, "{w}x{h} collapsed to {tw}x{th}");
+                }
+            }
+        }
+    }
+
+    /// A display below two pixels has no even size at or below it. It is left
+    /// as it is rather than rounded to something larger, because asking the
+    /// scaler to enlarge fails louder and no further along.
+    #[test]
+    fn a_display_too_small_to_snap_is_left_alone() {
+        let level = LADDER.first().copied().expect("the ladder is not empty");
+        assert_eq!(target_size(Ceiling::default(), (1, 1), &level), (1, 1));
+        assert_eq!(target_size(Ceiling::default(), (1, 1080), &level).0, 1);
     }
 }

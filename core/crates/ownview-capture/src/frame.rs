@@ -325,6 +325,15 @@ impl Frame {
     pub fn set_damage(&mut self, damage: Damage) {
         self.damage = damage;
     }
+
+    /// Carry a capture time over to a frame derived from this one.
+    ///
+    /// A stage that resamples or reformats produces a new frame for the same
+    /// moment. Left alone it would timestamp itself, and every latency figure
+    /// downstream would be measured from the wrong end of the pipeline.
+    pub fn set_captured_at(&mut self, captured_at: Instant) {
+        self.captured_at = captured_at;
+    }
 }
 
 #[cfg(test)]

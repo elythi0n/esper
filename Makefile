@@ -158,9 +158,10 @@ tidy:
 ## ownview-crypto: interpreting Ed25519 takes ~200s against ~13s for everything
 ## else, and dalek's unsafe is heavily audited upstream.
 ##
-## ownview-capture and ownview-color: forbid unsafe code, no FFI, so there is no
-## undefined behavior for MIRI to find. Their tests are exhaustive sweeps over
-## pixels, rectangles and colours — exactly what an interpreter is worst at.
+## ownview-capture, ownview-color and ownview-scale: forbid unsafe code and have
+## no FFI, so there is no undefined behavior for MIRI to find. Their tests are
+## exhaustive sweeps over pixels, rectangles, colours and resampling weights —
+## exactly what an interpreter is worst at. ownview-scale alone was 99s.
 ##
 ## ownview-encode, ownview-decode and ownview-pipeline: call into Cisco's C,
 ## directly or through each other. MIRI cannot execute foreign functions at
@@ -181,8 +182,9 @@ tidy:
 miri:
 	@cd $(CORE) && cargo +nightly miri test --workspace \
 		--exclude ownview-crypto --exclude ownview-capture \
-		--exclude ownview-color --exclude ownview-encode \
-		--exclude ownview-decode --exclude ownview-pipeline
+		--exclude ownview-color --exclude ownview-scale \
+		--exclude ownview-encode --exclude ownview-decode \
+		--exclude ownview-pipeline
 
 ## Memory-safety check over every crate, including the slow crypto one
 ##

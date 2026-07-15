@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 ownview-pipeline.workspace = true
+ownview-scale.workspace = true
 ownview-capture.workspace = true
 ownview-color.workspace = true
 ownview-encode.workspace = true
