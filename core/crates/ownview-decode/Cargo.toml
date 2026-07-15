@@ -41,3 +41,8 @@ landlock = "0.4"
 [dev-dependencies]
 ownview-capture.workspace = true
 ownview-encode.workspace = true
+# For CLOCK_PROCESS_CPUTIME_ID in the threading measurement. Wall-clock time
+# and CPU time diverge the moment the encoder uses more than one thread, and
+# the design's ceiling is written in CPU time — so measuring the wrong one
+# would report a threaded encoder as three times cheaper than it is.
+rustix = { version = "1", features = ["time"] }

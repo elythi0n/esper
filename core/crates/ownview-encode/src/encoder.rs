@@ -120,7 +120,31 @@ pub struct EncoderConfig {
     /// Bounded by the CPU budget rather than by the core count. A host is
     /// usually not the viewer's machine, and an encoder that took every core
     /// would be a product failure even with a perfect picture.
+    ///
+    /// **Does nothing on its own**, and that was measured the hard way: with
+    /// one slice per picture there is nothing to run in parallel, so raising
+    /// this produced byte-identical output at identical speed for 1, 2, 4 and
+    /// 8 threads. openh264 parallelises *across slices*, so
+    /// [`EncoderConfig::max_slice_bytes`] has to be set as well.
     pub threads: u16,
+    /// Largest slice openh264 may emit, in bytes.
+    ///
+    /// `None` means one slice per picture, which is the most efficient way to
+    /// code a frame and the reason it is the default.
+    ///
+    /// Setting it does two things, and they pull in opposite directions:
+    ///
+    /// - **It enables threading.** openh264 runs slices in parallel, so
+    ///   without more than one slice, [`EncoderConfig::threads`] has no effect
+    ///   at all.
+    /// - **It costs compression.** A slice is coded independently, with no
+    ///   prediction across its boundary, so more slices means more bytes for
+    ///   the same picture.
+    ///
+    /// It will matter for a third reason later: a slice that fits a datagram
+    /// limits what a lost packet destroys. That is a packetisation decision
+    /// and it is not being made here, but it is the same lever.
+    pub max_slice_bytes: Option<u32>,
     /// What the encoder should assume it is looking at. See [`Tuning`] — the
     /// obvious answer is six times more expensive than the default.
     pub tuning: Tuning,
@@ -138,6 +162,7 @@ impl Default for EncoderConfig {
             keyframe_interval: Duration::from_secs(5),
             space: ColorSpace::default(),
             threads: 1,
+            max_slice_bytes: None,
             tuning: Tuning::default(),
         }
     }
@@ -154,6 +179,36 @@ impl EncoderConfig {
         }
     }
 
+    /// A configuration whose threading follows from a CPU budget.
+    ///
+    /// The two settings that decide parallelism — how many threads, and
+    /// whether the picture is sliced at all — are derived together here rather
+    /// than set independently, because independently they were inconsistent in
+    /// two directions at once:
+    ///
+    /// - Threads with no slicing does **nothing**. openh264 parallelises
+    ///   across slices, so raising the thread count on a single-slice picture
+    ///   produced byte-identical output at identical speed.
+    /// - Threads beyond the budget is **incoherent**. Threading costs 6% to
+    ///   25% *more* CPU, not less, so four threads inside a one-core budget
+    ///   means spending four cores' worth for a quarter of the wall clock.
+    ///
+    /// See [`crate::budget::Budget::encoder_threads`] for the measurements.
+    #[must_use]
+    pub fn for_budget(width: u32, height: u32, budget: &crate::budget::Budget) -> Self {
+        let threads = budget.encoder_threads();
+        Self {
+            width,
+            height,
+            threads,
+            // Slicing only when there is more than one thread to use it.
+            // Otherwise it is a pure loss: it costs compression efficiency
+            // and buys nothing.
+            max_slice_bytes: (threads > 1).then_some(DEFAULT_SLICE_BYTES),
+            ..Self::default()
+        }
+    }
+
     /// Whether this can be acted on.
     #[must_use]
     pub const fn is_well_formed(&self) -> bool {
@@ -166,6 +221,17 @@ impl EncoderConfig {
             && self.threads > 0
     }
 }
+
+/// Slice size used when threading is on.
+///
+/// 32 KiB, measured at 1080p: it produced enough slices to keep four threads
+/// busy while costing 2% in bytes, where 8 KiB slices cost 60% more bytes on
+/// screen-like content for no extra speed.
+///
+/// Measured at one resolution on one processor, so it is a starting point
+/// rather than a law. The relationship between slice size, slice count and
+/// content is not something two data points establish.
+pub const DEFAULT_SLICE_BYTES: u32 = 32 * 1024;
 
 /// One encoded picture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,6 +419,31 @@ mod tests {
             c.bitrate <= 5_000_000,
             "the design's ceiling for balanced 1080p30 is 5 Mbit/s"
         );
+    }
+
+    /// Threading and slicing have to arrive together, because either alone is
+    /// wrong: threads without slices do nothing, and slices without threads
+    /// cost compression for no gain.
+    #[test]
+    fn threading_and_slicing_are_derived_together() {
+        use crate::budget::Budget;
+
+        let single = EncoderConfig::for_budget(1920, 1080, &Budget::of(1.0));
+        assert_eq!(single.threads, 1);
+        assert_eq!(
+            single.max_slice_bytes, None,
+            "one thread must mean one slice: slicing without threads is a \
+             pure loss of compression efficiency"
+        );
+
+        let wide = EncoderConfig::for_budget(1920, 1080, &Budget::of(4.0));
+        assert!(wide.threads > 1);
+        assert_eq!(
+            wide.max_slice_bytes,
+            Some(DEFAULT_SLICE_BYTES),
+            "more than one thread must mean slicing, or the threads do nothing"
+        );
+        assert!(wide.is_well_formed());
     }
 
     #[test]

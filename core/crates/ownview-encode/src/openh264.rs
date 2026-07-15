@@ -157,6 +157,14 @@ fn build(config: &EncoderConfig) -> Result<Inner, EncodeError> {
         .vui(vui)
         .debug(false);
 
+    // Slicing, which is what makes `threads` mean anything. Applied
+    // conditionally so the default stays one slice per picture — the most
+    // efficient way to code a frame.
+    let inner_config = match config.max_slice_bytes {
+        Some(bytes) => inner_config.max_slice_len(bytes),
+        None => inner_config,
+    };
+
     Inner::with_api_config(OpenH264API::from_source(), inner_config).map_err(|e| {
         EncodeError::Backend {
             backend: BACKEND,

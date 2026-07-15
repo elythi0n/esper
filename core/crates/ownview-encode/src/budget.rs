@@ -89,6 +89,47 @@ impl Budget {
     pub fn allows(&self, share: f64) -> bool {
         share <= self.cores
     }
+
+    /// How many encoder threads this budget can actually pay for.
+    ///
+    /// # Why the thread count follows from the budget
+    ///
+    /// Threading and the CPU budget are in direct conflict, and it took a
+    /// measurement to see it. Slice-parallel encoding of full-motion 1080p:
+    ///
+    /// | Threads | Wall ms/frame | **CPU ms/frame** | Share of a core at 30 fps |
+    /// |---:|---:|---:|---:|
+    /// | 1 | 49.7 | 49.4 | 148% |
+    /// | 2 | 29.4 | 56.0 | 168% |
+    /// | 4 | 15.5 | 52.6 | 158% |
+    /// | 8 | 20.5 | 61.8 | 186% |
+    ///
+    /// Threading fixes **latency** — one thread cannot finish a full-motion
+    /// 1080p frame inside a 33 ms interval and four can. It does not fix
+    /// **cost**: the CPU total goes *up* by 6% to 25%, because slices are
+    /// coded independently and the parallelism has overhead.
+    ///
+    /// So four threads inside a one-core budget is incoherent: it means using
+    /// four cores' worth of CPU for a quarter of the wall clock, which
+    /// averages to the same violation. A budget of one core buys one thread.
+    ///
+    /// Deriving the count from the budget makes that explicit, rather than
+    /// leaving two knobs that quietly fight — which is what a separate
+    /// `threads` setting was.
+    ///
+    /// At least one, because zero threads is not a thing an encoder can be.
+    #[must_use]
+    pub fn encoder_threads(&self) -> u16 {
+        // Truncating rather than rounding: a budget of 1.9 cores buys one
+        // thread, because the second would spend CPU the budget has not got.
+        let whole = self.cores.floor().max(1.0);
+        // Capped, because the machine's own core count is a hard limit and a
+        // raised budget on a small host should not ask for threads that do not
+        // exist.
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let wanted = whole.min(cores as f64) as u16;
+        wanted.max(1)
+    }
 }
 
 /// The least budget anything can be given.
@@ -585,6 +626,39 @@ mod tests {
         assert!(
             Budget::of(4.0).cores > 1.0,
             "and a raised budget is honoured"
+        );
+    }
+
+    /// **The conflict that a separate `threads` setting hid.** Threading
+    /// fixes latency and costs CPU, so a one-core budget cannot pay for four
+    /// threads however many cores the machine has.
+    #[test]
+    fn a_budget_of_one_core_buys_one_thread() {
+        assert_eq!(Budget::of(1.0).encoder_threads(), 1);
+        assert_eq!(
+            Budget::of(1.9).encoder_threads(),
+            1,
+            "1.9 cores buys one thread, not two: the second would spend CPU \
+             the budget has not got"
+        );
+        assert_eq!(Budget::of(2.0).encoder_threads(), 2);
+        assert_eq!(Budget::of(4.0).encoder_threads(), 4);
+        // A fraction of a core still buys a thread, because zero threads is
+        // not a thing an encoder can be.
+        assert_eq!(Budget::of(0.1).encoder_threads(), 1);
+        assert_eq!(Budget::default_for(2).encoder_threads(), 1);
+    }
+
+    /// A raised budget on a small machine must not ask for threads that do
+    /// not exist.
+    #[test]
+    fn the_thread_count_never_exceeds_the_machine() {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let absurd = Budget::of(1024.0);
+        assert!(
+            usize::from(absurd.encoder_threads()) <= cores,
+            "asked for {} threads on a {cores} core machine",
+            absurd.encoder_threads()
         );
     }
 
