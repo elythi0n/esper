@@ -22,3 +22,9 @@ ownview-crypto.workspace = true
 ownview-buildinfo.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# X11 capture is a Linux backend and a Linux dependency. The engine builds on
+# Windows and macOS without it, which is the point of keeping backends in
+# their own crates.
+[target.'cfg(target_os = "linux")'.dependencies]
+ownview-capture-x11.workspace = true

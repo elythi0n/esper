@@ -265,7 +265,11 @@ fuzz-targets:
 
 ## Post-build smoke test: binaries agree and ship no endpoint
 .PHONY: smoke
-smoke:
+## Depends on `build`, because it did not and a stale `build/` made a smoke
+## check pass for the wrong reason: `--backend x11` was rejected as an unknown
+## flag by a binary predating the flag, which reads exactly like the backend
+## correctly refusing to open.
+smoke: build
 	@./scripts/smoke.sh
 
 ## Supply-chain audit: every dependency audited or explicitly exempted

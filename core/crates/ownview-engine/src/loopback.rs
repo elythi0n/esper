@@ -32,7 +32,6 @@ use std::time::Duration;
 
 use ownview_capture::gate::Policy;
 use ownview_capture::pattern::Pattern;
-use ownview_capture::synthetic::SyntheticCapturer;
 use ownview_color::convert::reference_yuv;
 use ownview_color::{ColorSpace, I420};
 use ownview_decode::decoder::DecoderConfig;
@@ -42,6 +41,8 @@ use ownview_encode::encoder::{EncodeError, EncoderConfig, VideoEncoder};
 use ownview_encode::openh264::OpenH264;
 use ownview_pipeline::pipeline::{Pipeline, Step};
 use ownview_scale::Ceiling;
+
+use crate::backend::{self, Choice};
 
 /// What the loopback was asked to do.
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +57,10 @@ pub struct Options {
     pub verify: bool,
     /// Cap on the longer edge, or `None` for no cap.
     pub max_resolution: Option<u32>,
+    /// Which capture backend to use.
+    pub backend: Choice,
+    /// Which monitor, for a backend that has more than one.
+    pub monitor: Option<u32>,
 }
 
 impl Default for Options {
@@ -68,6 +73,8 @@ impl Default for Options {
             budget: Budget::default().cores,
             verify: true,
             max_resolution: Ceiling::default().long_edge(),
+            backend: Choice::default(),
+            monitor: None,
         }
     }
 }
@@ -111,9 +118,15 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
                 i += 2;
             }
             "--monitor" => {
-                // Accepted and reported rather than silently ignored: there is
-                // only one capture source until a platform backend exists.
-                let _ = value("--monitor")?;
+                o.monitor = Some(
+                    value("--monitor")?
+                        .parse()
+                        .map_err(|_| "--monitor wants a monitor number".to_owned())?,
+                );
+                i += 2;
+            }
+            "--backend" => {
+                o.backend = Choice::parse(&value("--backend")?)?;
                 i += 2;
             }
             "--max-resolution" => {
@@ -151,11 +164,20 @@ pub fn run(o: &Options) -> Result<(), String> {
     // coupled to how fast this loop happens to run — a mistake made once
     // already, where making the encoder faster silently changed how many
     // frames a measurement saw.
-    let capturer =
-        SyntheticCapturer::new(o.width, o.height, 1_000_000).map_err(|e| e.to_string())?;
+    let chosen = backend::open(
+        o.backend,
+        o.monitor.map(ownview_capture::capturer::MonitorId),
+        (o.width, o.height),
+    )
+    .map_err(|e| e.to_string())?;
+    let monitors: Vec<_> = chosen.capturer.monitors().to_vec();
+    let selected = chosen.capturer.selected();
+    let reports_damage = chosen.capturer.reports_damage();
+    let attempts = chosen.attempts.clone();
+    let capturer = chosen.capturer;
 
     let mut pipeline = Pipeline::new(
-        Box::new(capturer),
+        capturer,
         &encoder_for,
         Budget::of(o.budget),
         Policy {
@@ -173,13 +195,36 @@ pub fn run(o: &Options) -> Result<(), String> {
         pipeline = pipeline.with_decoder(Box::new(decoder));
     }
 
-    println!(
-        "🎞  ownview loopback  {}x{} at {} fps",
-        o.width, o.height, o.fps
-    );
+    let (nw, nh) = pipeline.native_size();
+    println!("🎞  ownview loopback  {nw}x{nh} at {} fps", o.fps);
     println!();
     let (encoder, fast) = pipeline.encoder_backend();
-    println!("  capture   {}", pipeline.capture_backend());
+    println!(
+        "  capture   {}{}",
+        pipeline.capture_backend(),
+        if reports_damage {
+            ""
+        } else {
+            "  (no damage reporting: every frame counts as wholly changed)"
+        }
+    );
+    for line in &attempts {
+        println!("              {line}");
+    }
+    if monitors.len() > 1 {
+        for m in &monitors {
+            println!(
+                "              {} {}  {}x{} at {},{}{}",
+                if m.id == selected { "→" } else { " " },
+                m.name,
+                m.geometry.width,
+                m.geometry.height,
+                m.geometry.x,
+                m.geometry.y,
+                if m.primary { "  primary" } else { "" }
+            );
+        }
+    }
     println!(
         "  encode    {encoder}{}",
         if fast {
@@ -220,6 +265,14 @@ pub fn run(o: &Options) -> Result<(), String> {
     let mut psnr_count = 0u64;
     let mut counter_ok = 0u64;
     let mut counter_wrong = 0u64;
+    // The counter and the PSNR are read out of the *known* pattern, so they
+    // only mean anything against the synthetic source. Against a real screen
+    // there is nothing to compare a decoded picture to — the reference is the
+    // screen, and it has already moved on. Running them anyway reported every
+    // real frame as "a dropped or reordered picture", which is a warning about
+    // the harness rather than the pipeline.
+    let verifiable = matches!(o.backend, Choice::Synthetic)
+        || pipeline.capture_backend() == ownview_capture::synthetic::BACKEND;
 
     while std::time::Instant::now() < deadline {
         match pipeline.step(interval).map_err(|e| e.to_string())? {
@@ -231,6 +284,9 @@ pub fn run(o: &Options) -> Result<(), String> {
                 // pixels. It is how latency will be measured later with no
                 // second clock, and here it catches a dropped or repeated
                 // picture.
+                if !verifiable {
+                    continue;
+                }
                 let read = pattern.read_counter(|x, y| rgb_at(&picture, x, y, space));
                 if read < u64::MAX {
                     // Any value is plausible; what matters is that it decodes
@@ -295,6 +351,15 @@ fn psnr(pattern: &Pattern, frame: u64, got: &I420, space: ColorSpace) -> Option<
 }
 
 fn report(pipeline: &Pipeline, psnr_sum: f64, psnr_count: u64, counter_wrong: u64) {
+    // A real backend waits for the screen to change, so its wall clock is
+    // mostly the wait and its CPU time is nearly nothing. The synthetic one
+    // draws every pixel, which makes it the most expensive stage in the
+    // pipeline. Both numbers mislead if the reader does not know which.
+    let capture_note = if pipeline.capture_backend() == ownview_capture::synthetic::BACKEND {
+        "(synthetic: renders the pattern)"
+    } else {
+        "(mostly waiting for the screen to change)"
+    };
     let s = pipeline.stats();
     let elapsed = pipeline.elapsed();
 
@@ -309,7 +374,7 @@ fn report(pipeline: &Pipeline, psnr_sum: f64, psnr_count: u64, counter_wrong: u6
         // this row is the test pattern's cost, and labelling it matters:
         // unlabelled it reads as capture being the most expensive stage in the
         // pipeline, which is exactly the wrong conclusion to draw.
-        ("capture", &s.capture, "(synthetic: renders the pattern)"),
+        ("capture", &s.capture, capture_note),
         ("convert", &s.convert, ""),
         ("encode", &s.encode, ""),
         ("decode", &s.decode, ""),

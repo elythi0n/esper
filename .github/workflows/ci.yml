@@ -56,6 +56,33 @@ jobs:
         working-directory: core
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The X11 capture backend is only exercised if there is an X server to
+      # exercise it against, and a CI runner has none. Xvfb provides one with
+      # DAMAGE, MIT-SHM, XFIXES and RandR, which is the whole fast path — so
+      # the live tests run here rather than skipping, and the region damage
+      # path is tested deterministically because nothing else on an Xvfb
+      # display moves.
+      #
+      # Linux only: this is where the X11 backend is compiled in at all. On
+      # macOS and Windows DISPLAY stays unset and those tests skip themselves.
+      - name: Start Xvfb (X11 capture tests)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils
+          Xvfb :99 -screen 0 1600x900x24 -nolisten tcp &
+          for _ in $(seq 1 50); do
+            if DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then break; fi
+            sleep 0.2
+          done
+          # Fail loudly if the extensions the backend needs are missing, rather
+          # than letting the tests quietly take their fallback paths.
+          DISPLAY=:99 xdpyinfo | grep -q MIT-SHM
+          DISPLAY=:99 xdpyinfo | grep -q DAMAGE
+          DISPLAY=:99 xdpyinfo | grep -q XFIXES
+          DISPLAY=:99 xdpyinfo | grep -q RANDR
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
       - name: Rust — test
         working-directory: core
         run: cargo test --workspace

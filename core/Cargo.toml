@@ -18,11 +18,23 @@ ownview-pty = { path = "crates/ownview-pty" }
 ownview-audit = { path = "crates/ownview-audit" }
 ownview-buildinfo = { path = "crates/ownview-buildinfo" }
 ownview-capture = { path = "crates/ownview-capture" }
+ownview-capture-x11 = { path = "crates/ownview-capture-x11" }
 ownview-color = { path = "crates/ownview-color" }
 ownview-encode = { path = "crates/ownview-encode" }
 ownview-decode = { path = "crates/ownview-decode" }
 ownview-scale = { path = "crates/ownview-scale" }
 ownview-pipeline = { path = "crates/ownview-pipeline" }
+# Pure Rust: it speaks the X11 protocol over a socket rather than binding
+# libX11, so nothing here links a display library and this crate keeps
+# `forbid(unsafe_code)`. That also keeps the smoke test's "the engine links no
+# display library" check true, which is worth more than it sounds — it is what
+# stops a headless server growing a dependency on a desktop being installed.
+x11rb = { version = "0.14", default-features = false, features = [
+    "randr",
+    "damage",
+    "shm",
+    "xfixes",
+] }
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

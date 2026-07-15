@@ -115,12 +115,39 @@ else
   fail=1
 fi
 
+# Naming a backend that cannot open must fail, not quietly hand back a test
+# pattern. Somebody who said which screen they wanted and got a moving
+# gradient instead would have no way to tell that capture never worked.
+echo "  — checking a named backend is not silently substituted"
+if env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY \
+     "$BIN/ownview-engine" loopback --backend x11 --seconds 1 >/dev/null 2>&1; then
+  printf '  ✗ --backend x11 succeeded with no display, so it fell back silently\n'
+  fail=1
+else
+  printf '  ✓ --backend x11 fails rather than falling back to synthetic\n'
+fi
+
+# And the fallback itself has to work when nothing was named.
+if out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY \
+     "$BIN/ownview-engine" loopback --backend auto --size 320x240 --seconds 1 2>&1); then
+  if printf '%s' "$out" | grep -q 'synthetic: in use'; then
+    printf '  ✓ auto falls back to synthetic and says why\n'
+  else
+    printf '  ✗ auto did not report which backend it chose\n'
+    fail=1
+  fi
+else
+  printf '  ✗ --backend auto failed with no display\n'
+  fail=1
+fi
+
 # The whole media path, headless. This is the phase's exit criterion, and a
 # smoke check rather than a unit test because it is the *binary* that has to
 # work — a pipeline that runs in a test and not from the command line is not
 # something anyone can use.
 echo "  — running the media pipeline end to end, with no display"
-if out=$("$BIN/ownview-engine" loopback --size 320x240 --fps 15 --seconds 1 2>&1); then
+if out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY \
+     "$BIN/ownview-engine" loopback --size 320x240 --fps 15 --seconds 1 2>&1); then
   if printf '%s' "$out" | grep -q 'luma PSNR'; then
     printf '  ✓ loopback captured, converted, encoded and decoded\n'
   else

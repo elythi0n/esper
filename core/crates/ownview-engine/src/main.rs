@@ -8,6 +8,7 @@
 //! At this stage it reports its own identity and exits. Everything else is
 //! built on top of that.
 
+mod backend;
 mod loopback;
 mod serve;
 

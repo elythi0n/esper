@@ -125,6 +125,39 @@ shared library from a third party at run time. Building from source moves H.264
 patent licensing onto whoever ships the binary, which for a self-hosted
 open-source tool is the honest place for it to sit.
 
+### Screen capture, which is 180 000 lines of exempted Rust
+
+X11 capture rests on `x11rb`, and with `x11rb-protocol` behind it that is about
+180 000 lines this project will not audit either. It is a much better position
+than the codec, and the reasons are worth stating rather than assumed:
+
+**It is all safe Rust.** `x11rb-protocol` — the 144 000-line part, and the part
+that actually parses what the display server sends back — contains no `unsafe`
+at all. `x11rb`'s own `unsafe` exists only behind its `allow-unsafe-code`
+feature, which is reachable only through `dl-libxcb`, and neither is enabled
+here: the build asks for `randr`, `damage`, `shm` and `xfixes` and nothing else.
+So a bug in this code is a wrong answer or a panic, not memory corruption. That
+is a different class of problem from a bug in 155 000 lines of C.
+
+**Most of it is generated.** The protocol modules are produced from the X11
+protocol descriptions rather than written, which means the interesting surface
+is far smaller than the line count suggests — and that a review should read the
+generator and the hand-written connection code, not 144 000 lines of
+serialisers.
+
+**Nothing links a display library.** `x11rb` speaks the X11 protocol over a
+socket instead of binding libX11, so `ldd` on the engine shows no `libX11`, no
+`libxcb`, no `libwayland`. A headless server carries the engine without a
+desktop being installed anywhere near it, and there is no C in the capture path
+to sandbox.
+
+**Who is on the other end matters.** The input here comes from the machine's own
+display server, not from a peer. An X server that lies to its clients has
+already taken the screen, the keyboard and the clipboard by more direct means —
+X11 offers a client no isolation from the server or from other clients, which is
+a property of the protocol and the reason Wayland exists. Capture is therefore
+*not* a trust boundary in the way the decoder is, and it is not sandboxed.
+
 ## What the design removes
 
 The strongest thing about OwnView's posture is architectural rather than
