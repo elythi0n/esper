@@ -643,10 +643,28 @@ name = "ownview-engine"
 version = "0.0.0"
 dependencies = [
  "ownview-buildinfo",
+ "ownview-capture",
+ "ownview-color",
  "ownview-crypto",
+ "ownview-decode",
+ "ownview-encode",
+ "ownview-pipeline",
  "ownview-proto",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ownview-pipeline"
+version = "0.0.0"
+dependencies = [
+ "ownview-capture",
+ "ownview-color",
+ "ownview-decode",
+ "ownview-encode",
+ "rustix",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

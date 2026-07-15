@@ -148,6 +148,21 @@ pub struct EncoderConfig {
     /// What the encoder should assume it is looking at. See [`Tuning`] — the
     /// obvious answer is six times more expensive than the default.
     pub tuning: Tuning,
+    /// Quantiser range, as `(min, max)`. `None` leaves openh264's own.
+    ///
+    /// Validated by [`EncoderConfig::is_well_formed`], and that validation is
+    /// load-bearing rather than decorative: openh264's `QpRange::new`
+    /// **panics** on a range whose ends are reversed or whose maximum exceeds
+    /// 51. The check runs before the wrapper is touched, so a bad range is an
+    /// error instead of an abort.
+    ///
+    /// This is where the CPU budget's **fidelity** rung lands. Without it the
+    /// governor had three levers and somewhere to put one of them: framerate
+    /// reached the damage gate, and fidelity and resolution reached nothing at
+    /// all. A ladder whose middle rung does nothing is a ladder that skips
+    /// from framerate straight to resolution — which is the one the design
+    /// spends last, because it is what makes text unreadable.
+    pub qp: Option<(u8, u8)>,
 }
 
 impl Default for EncoderConfig {
@@ -164,6 +179,7 @@ impl Default for EncoderConfig {
             threads: 1,
             max_slice_bytes: None,
             tuning: Tuning::default(),
+            qp: None,
         }
     }
 }
@@ -209,6 +225,20 @@ impl EncoderConfig {
         }
     }
 
+    /// Apply a rung of the CPU budget's ladder.
+    ///
+    /// Framerate and fidelity land here. **Resolution does not**, and that is
+    /// stated rather than silently dropped: scaling a picture needs a scaler,
+    /// there is not one yet, and a configuration that quietly ignored the
+    /// resolution a governor asked for would make the bottom of the ladder
+    /// look like it worked.
+    #[must_use]
+    pub fn with_level(mut self, level: &crate::budget::Level) -> Self {
+        self.fps = level.fps.max(1);
+        self.qp = Some(level.fidelity.qp_range());
+        self
+    }
+
     /// Whether this can be acted on.
     #[must_use]
     pub const fn is_well_formed(&self) -> bool {
@@ -219,6 +249,12 @@ impl EncoderConfig {
             && self.fps > 0
             && self.bitrate > 0
             && self.threads > 0
+            && match self.qp {
+                // H.264 quantisers run 0 to 51, and a range whose ends are
+                // the wrong way round would be silently reinterpreted.
+                Some((min, max)) => min < max && max <= 51,
+                None => true,
+            }
     }
 }
 
@@ -419,6 +455,71 @@ mod tests {
             c.bitrate <= 5_000_000,
             "the design's ceiling for balanced 1080p30 is 5 Mbit/s"
         );
+    }
+
+    /// **The rung that had nowhere to land.** The governor has three levers;
+    /// before this, framerate reached the damage gate and fidelity and
+    /// resolution reached nothing.
+    #[test]
+    fn a_level_sets_the_framerate_and_the_quantiser() {
+        use crate::budget::{Fidelity, Level};
+
+        let level = Level {
+            fps: 15,
+            scale: (1, 1),
+            fidelity: Fidelity::Low,
+        };
+        let c = EncoderConfig::for_size(1920, 1080).with_level(&level);
+        assert_eq!(c.fps, 15);
+        assert_eq!(c.qp, Some(Fidelity::Low.qp_range()));
+        assert!(c.is_well_formed());
+
+        // And a sharper rung asks for a finer quantiser.
+        let sharp = EncoderConfig::for_size(1920, 1080).with_level(&Level {
+            fidelity: Fidelity::High,
+            ..level
+        });
+        assert!(
+            sharp.qp.map(|(min, _)| min) < c.qp.map(|(min, _)| min),
+            "high fidelity must quantise more finely than low"
+        );
+    }
+
+    /// A quantiser range the wrong way round would be silently reinterpreted,
+    /// so it is refused instead.
+    #[test]
+    fn an_impossible_quantiser_range_is_not_well_formed() {
+        let base = EncoderConfig::for_size(640, 480);
+        assert!(
+            !EncoderConfig {
+                qp: Some((40, 20)),
+                ..base
+            }
+            .is_well_formed()
+        );
+        assert!(
+            !EncoderConfig {
+                qp: Some((10, 10)),
+                ..base
+            }
+            .is_well_formed()
+        );
+        assert!(
+            !EncoderConfig {
+                qp: Some((10, 52)),
+                ..base
+            }
+            .is_well_formed(),
+            "H.264 quantisers stop at 51"
+        );
+        assert!(
+            EncoderConfig {
+                qp: Some((14, 32)),
+                ..base
+            }
+            .is_well_formed()
+        );
+        assert!(EncoderConfig { qp: None, ..base }.is_well_formed());
     }
 
     /// Threading and slicing have to arrive together, because either alone is

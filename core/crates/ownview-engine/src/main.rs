@@ -8,6 +8,7 @@
 //! At this stage it reports its own identity and exits. Everything else is
 //! built on top of that.
 
+mod loopback;
 mod serve;
 
 use std::process::ExitCode;
@@ -28,6 +29,16 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("loopback") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match loopback::parse(&rest).and_then(|o| loopback::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("loopback: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("serve") => match serve::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

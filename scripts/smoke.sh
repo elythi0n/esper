@@ -115,5 +115,24 @@ else
   fail=1
 fi
 
+# The whole media path, headless. This is the phase's exit criterion, and a
+# smoke check rather than a unit test because it is the *binary* that has to
+# work — a pipeline that runs in a test and not from the command line is not
+# something anyone can use.
+echo "  — running the media pipeline end to end, with no display"
+if out=$("$BIN/ownview-engine" loopback --size 320x240 --fps 15 --seconds 1 2>&1); then
+  if printf '%s' "$out" | grep -q 'luma PSNR'; then
+    printf '  ✓ loopback captured, converted, encoded and decoded\n'
+  else
+    printf '  ✗ loopback produced no decoded picture\n'
+    printf '%s\n' "$out" | sed 's/^/      /'
+    fail=1
+  fi
+else
+  printf '  ✗ loopback failed\n'
+  printf '%s\n' "$out" | sed 's/^/      /'
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then echo; echo "  smoke test failed"; exit 1; fi
 echo "  ✓ smoke test passed"

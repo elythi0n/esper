@@ -32,7 +32,7 @@
 use openh264::OpenH264API;
 use openh264::encoder::{
     BitRate, Complexity, Encoder as Inner, EncoderConfig as InnerConfig, FrameRate, FrameType,
-    IntraFramePeriod, Level, Profile, RateControlMode, UsageType, VuiConfig,
+    IntraFramePeriod, Level, Profile, QpRange, RateControlMode, UsageType, VuiConfig,
 };
 use openh264::formats::YUVSource;
 use ownview_color::i420::I420;
@@ -156,6 +156,12 @@ fn build(config: &EncoderConfig) -> Result<Inner, EncodeError> {
         .complexity(Complexity::Low)
         .vui(vui)
         .debug(false);
+
+    // The fidelity rung of the CPU budget's ladder.
+    let inner_config = match config.qp {
+        Some((min, max)) => inner_config.qp(QpRange::new(min, max)),
+        None => inner_config,
+    };
 
     // Slicing, which is what makes `threads` mean anything. Applied
     // conditionally so the default stays one slice per picture — the most

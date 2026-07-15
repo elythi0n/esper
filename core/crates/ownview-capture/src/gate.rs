@@ -203,6 +203,21 @@ impl EncodeGate {
         (self.encodes, self.skips)
     }
 
+    /// Change the frame rate ceiling.
+    ///
+    /// This is where the CPU budget's framerate rung has to land, and without
+    /// it the rung reached nothing: the governor would report "15 fps" while
+    /// the gate went on admitting frames at 60. The encoder was told, which
+    /// changed its rate model and not its workload — so the pipeline looked
+    /// degraded and cost the same.
+    ///
+    /// Changed in place rather than by rebuilding the gate, because a rebuilt
+    /// gate loses the damage it has accumulated from skipped frames, and
+    /// losing that leaves stale pixels on the viewer's screen.
+    pub fn set_max_fps(&mut self, fps: u32) {
+        self.policy.max_fps = fps.max(1);
+    }
+
     /// The far end lost sync and needs a keyframe.
     ///
     /// Honoured on the next frame rather than immediately, because there is no
@@ -447,6 +462,54 @@ mod tests {
     /// arrivals a 16.6 ms interval quantises to 20 ms and the honest answer is
     /// fifty encodes, not sixty. Testing at one millisecond measures the
     /// ceiling rather than the arrival grid.
+    /// **The rung that reached nothing.** The governor's framerate lever has to
+    /// change what the gate admits, not just what the encoder is told.
+    #[test]
+    fn the_frame_rate_ceiling_can_be_lowered_and_takes_effect() {
+        let mut g = EncodeGate::new(FRAME, Policy::default());
+        let start = t0();
+        let _ = g.decide(&small_change(), start);
+
+        // At 60 fps, frames a millisecond apart are mostly skipped but some
+        // get through.
+        let mut fast = 0;
+        for i in 1..=200u64 {
+            if g.decide(&small_change(), at(start, i)).encodes() {
+                fast += 1;
+            }
+        }
+
+        // Drop to 15 and the same arrival pattern encodes far fewer.
+        g.set_max_fps(15);
+        let base = at(start, 1000);
+        let mut slow = 0;
+        for i in 1..=200u64 {
+            if g.decide(&small_change(), at(base, i)).encodes() {
+                slow += 1;
+            }
+        }
+
+        assert!(
+            slow * 2 < fast,
+            "lowering the ceiling from 60 to 15 changed encodes from {fast} to \
+             {slow}, which is not a ceiling taking effect"
+        );
+        assert_eq!(g.policy().max_fps, 15);
+    }
+
+    /// A ceiling of zero would mean a division by zero in the interval, so it
+    /// is floored rather than accepted.
+    #[test]
+    fn a_frame_rate_ceiling_of_zero_is_floored() {
+        let mut g = EncodeGate::new(FRAME, Policy::default());
+        g.set_max_fps(0);
+        assert_eq!(g.policy().max_fps, 1);
+        let start = t0();
+        for i in 0..50u64 {
+            let _ = g.decide(&small_change(), at(start, i * 10));
+        }
+    }
+
     /// **The bug the static-screen test found.** The periodic keyframe applies
     /// on every rung, including the active one.
     ///

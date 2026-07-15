@@ -12,6 +12,7 @@ build = "build.rs"
 workspace = true
 
 [dev-dependencies]
+ownview-color.workspace = true
 # The screen-content comparison measures against openh264's own default, so it
 # has to reach the wrapper directly rather than through this crate's opinions.
 openh264 = { version = "0.9", default-features = false, features = ["source"] }

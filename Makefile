@@ -162,10 +162,14 @@ tidy:
 ## undefined behavior for MIRI to find. Their tests are exhaustive sweeps over
 ## pixels, rectangles and colours — exactly what an interpreter is worst at.
 ##
-## ownview-encode and ownview-decode: call into Cisco's C. MIRI cannot execute
-## foreign functions at all, so every test that touches the codec fails rather
-## than passing — which is not a finding about our code. The decoder's real
-## defence is a fuzz target with the C instrumented, plus a sandbox.
+## ownview-encode, ownview-decode and ownview-pipeline: call into Cisco's C,
+## directly or through each other. MIRI cannot execute foreign functions at
+## all, so every test that touches the codec fails rather than passing — which
+## is not a finding about our code. The decoder's real defence is a fuzz target
+## with the C instrumented, plus a sandbox.
+##
+## ownview-pipeline also asks the kernel for CLOCK_PROCESS_CPUTIME_ID, which
+## MIRI does not advance, so its timing tests cannot pass under it either.
 ##
 ## The value is in the parsers, which is why the platform capture backends must
 ## be their own crates rather than modules of ownview-capture: X11, PipeWire
@@ -178,7 +182,7 @@ miri:
 	@cd $(CORE) && cargo +nightly miri test --workspace \
 		--exclude ownview-crypto --exclude ownview-capture \
 		--exclude ownview-color --exclude ownview-encode \
-		--exclude ownview-decode
+		--exclude ownview-decode --exclude ownview-pipeline
 
 ## Memory-safety check over every crate, including the slow crypto one
 ##
@@ -188,7 +192,8 @@ miri:
 .PHONY: miri-full
 miri-full:
 	@cd $(CORE) && cargo +nightly miri test --workspace \
-		--exclude ownview-encode --exclude ownview-decode
+		--exclude ownview-encode --exclude ownview-decode \
+		--exclude ownview-pipeline
 
 ## Fuzz every target (needs nightly + cargo-fuzz). FUZZ_SECONDS=600 for a long run
 ##

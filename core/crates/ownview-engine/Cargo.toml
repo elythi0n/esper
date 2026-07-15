@@ -11,6 +11,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+ownview-pipeline.workspace = true
+ownview-capture.workspace = true
+ownview-color.workspace = true
+ownview-encode.workspace = true
+ownview-decode.workspace = true
 ownview-proto.workspace = true
 ownview-crypto.workspace = true
 ownview-buildinfo.workspace = true
