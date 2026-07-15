@@ -671,6 +671,8 @@ dependencies = [
  "ownview-decode",
  "ownview-encode",
  "ownview-pipeline",
+ "ownview-present",
+ "ownview-present-x11",
  "ownview-proto",
  "ownview-scale",
  "tracing",
@@ -689,6 +691,28 @@ dependencies = [
  "rustix",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "ownview-present"
+version = "0.0.0"
+dependencies = [
+ "ownview-capture",
+ "ownview-color",
+ "thiserror",
+]
+
+[[package]]
+name = "ownview-present-x11"
+version = "0.0.0"
+dependencies = [
+ "ownview-capture",
+ "ownview-capture-x11",
+ "ownview-color",
+ "ownview-present",
+ "thiserror",
+ "tracing",
+ "x11rb",
 ]
 
 [[package]]

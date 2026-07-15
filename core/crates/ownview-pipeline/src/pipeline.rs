@@ -76,6 +76,19 @@ pub enum Step {
         keyframe: bool,
         /// Bytes on the wire.
         bytes: usize,
+        /// What changed in this frame, in picture coordinates.
+        ///
+        /// Carried out of the pipeline because the consumers need it: a
+        /// presenter repaints only these regions, and the transport will want
+        /// to say what a frame covers.
+        ///
+        /// A caveat worth knowing rather than discovering. This is what
+        /// *capture* reported. A lossy encoder can also nudge macroblocks
+        /// nothing touched, so a consumer that repaints only these regions is
+        /// showing very slightly older pixels elsewhere. That is what every
+        /// remote desktop does, and a keyframe — where the damage is
+        /// `Everything` — repaints all of it.
+        damage: Damage,
         /// The decoded picture, when a decoder is attached.
         decoded: Option<I420>,
     },
@@ -551,6 +564,13 @@ impl Pipeline {
         // Convert. Only the damaged regions, unless the staging buffer cannot
         // be trusted to hold the previous frame.
         let whole = self.needs_whole_frame || matches!(damage, Damage::Everything);
+        // Kept before the converter borrows it, so the step can say what the
+        // frame covered.
+        let reported = if whole {
+            Damage::Everything
+        } else {
+            damage.clone()
+        };
         // A scaler keeps its own destination across frames, so when the whole
         // staging buffer is being rewritten the scaler has to rewrite all of
         // its own too. Handing it a small region here and then converting the
@@ -616,6 +636,7 @@ impl Pipeline {
         Ok(Step::Encoded {
             keyframe: encoded.keyframe,
             bytes: encoded.len(),
+            damage: reported,
             decoded,
         })
     }

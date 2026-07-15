@@ -1,0 +1,16 @@
+[package]
+name = "ownview-present"
+description = "The presenter interface: what puts a decoded picture in front of a person."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ownview-capture.workspace = true
+ownview-color.workspace = true
+thiserror.workspace = true

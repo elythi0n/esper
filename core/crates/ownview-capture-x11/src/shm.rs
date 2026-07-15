@@ -161,6 +161,42 @@ impl Segment {
         Ok(())
     }
 
+    /// Copy `buf` into the segment at `offset`.
+    ///
+    /// The mirror of [`Self::read_into`], for the direction where this process
+    /// produces the pixels and the server draws them — a presenter putting a
+    /// decoded picture in a window. Short writes are looped for the same
+    /// reason short reads are.
+    pub fn write_from(&self, offset: usize, buf: &[u8]) -> Result<(), ShmError> {
+        let end = offset.checked_add(buf.len()).ok_or(ShmError::OutOfRange {
+            offset,
+            len: buf.len(),
+            size: self.size,
+        })?;
+        if end > self.size {
+            return Err(ShmError::OutOfRange {
+                offset,
+                len: buf.len(),
+                size: self.size,
+            });
+        }
+        let mut done = 0usize;
+        while done < buf.len() {
+            let at = u64::try_from(offset.saturating_add(done)).unwrap_or(u64::MAX);
+            let rest = buf.get(done..).unwrap_or_default();
+            let n = rustix::io::pwrite(&self.fd, rest, at)
+                .map_err(|e| ShmError::Read(e.to_string()))?;
+            if n == 0 {
+                return Err(ShmError::Read(format!(
+                    "the segment stopped accepting after {done} of {} bytes",
+                    buf.len()
+                )));
+            }
+            done = done.saturating_add(n);
+        }
+        Ok(())
+    }
+
     /// Tell the server to forget the segment.
     ///
     /// Not in `Drop`, because detaching needs the connection and a segment

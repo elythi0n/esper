@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 ownview-pipeline.workspace = true
 ownview-scale.workspace = true
+ownview-present.workspace = true
 ownview-capture.workspace = true
 ownview-color.workspace = true
 ownview-encode.workspace = true
@@ -28,3 +29,4 @@ tracing-subscriber.workspace = true
 # their own crates.
 [target.'cfg(target_os = "linux")'.dependencies]
 ownview-capture-x11.workspace = true
+ownview-present-x11.workspace = true

@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use ownview_capture::gate::Policy;
 use ownview_capture::pattern::Pattern;
+use ownview_color::RgbCoefficients;
 use ownview_color::convert::reference_yuv;
 use ownview_color::{ColorSpace, I420};
 use ownview_decode::decoder::DecoderConfig;
@@ -61,6 +62,8 @@ pub struct Options {
     pub backend: Choice,
     /// Which monitor, for a backend that has more than one.
     pub monitor: Option<u32>,
+    /// Open a window and draw the decoded pictures in it.
+    pub present: bool,
 }
 
 impl Default for Options {
@@ -75,6 +78,7 @@ impl Default for Options {
             max_resolution: Ceiling::default().long_edge(),
             backend: Choice::default(),
             monitor: None,
+            present: false,
         }
     }
 }
@@ -139,6 +143,10 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
                     })?)
                 };
                 i += 2;
+            }
+            "--present" => {
+                o.present = true;
+                i += 1;
             }
             "--no-verify" => {
                 o.verify = false;
@@ -260,7 +268,31 @@ pub fn run(o: &Options) -> Result<(), String> {
     let interval = Duration::from_nanos(1_000_000_000 / u64::from(o.fps.max(1)));
     let deadline = std::time::Instant::now() + Duration::from_secs(o.seconds);
 
+    // The window is the *encode* size, because that is what a decoded picture
+    // is — a session under the resolution ceiling shows fewer pixels than the
+    // display has, and a window sized to the display would letterbox them.
+    let mut presenter: Option<Box<dyn ownview_present::Presenter>> = if o.present {
+        let (ew, eh) = pipeline.encode_size();
+        match open_window(ew, eh) {
+            Ok(p) => {
+                println!("  present   {} at {ew}x{eh}", p.backend());
+                println!();
+                Some(p)
+            }
+            Err(e) => {
+                // Not fatal: a loopback that measures the pipeline is still
+                // useful without a window, and saying so beats refusing.
+                println!("  present   unavailable ({e})");
+                println!();
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let space = ColorSpace::default();
+    let to_rgb = RgbCoefficients::for_space(space);
     let mut psnr_sum = 0f64;
     let mut psnr_count = 0u64;
     let mut counter_ok = 0u64;
@@ -278,8 +310,25 @@ pub fn run(o: &Options) -> Result<(), String> {
         match pipeline.step(interval).map_err(|e| e.to_string())? {
             Step::Encoded {
                 decoded: Some(picture),
+                damage,
                 ..
             } => {
+                if let Some(p) = presenter.as_mut() {
+                    // The pipeline's damage is about the *capture*; what
+                    // changed in the decoded picture is the same regions, so
+                    // the window repaints only those. A decoder that lost sync
+                    // would show it as a stale patch, which is the point.
+                    let shown = p.present(&picture, &damage);
+                    if let Err(e) = shown {
+                        println!("  · the window stopped taking pictures: {e}");
+                        presenter = None;
+                    } else if p.poll().is_ok_and(|evs| {
+                        evs.contains(&ownview_present::PresentEvent::CloseRequested)
+                    }) {
+                        println!("  · the window was closed");
+                        presenter = None;
+                    }
+                }
                 // The counter says which frame this is, read out of the
                 // pixels. It is how latency will be measured later with no
                 // second clock, and here it catches a dropped or repeated
@@ -287,7 +336,7 @@ pub fn run(o: &Options) -> Result<(), String> {
                 if !verifiable {
                     continue;
                 }
-                let read = pattern.read_counter(|x, y| rgb_at(&picture, x, y, space));
+                let read = pattern.read_counter(|x, y| rgb_at(&to_rgb, &picture, x, y));
                 if read < u64::MAX {
                     // Any value is plausible; what matters is that it decodes
                     // to *a* frame index rather than noise.
@@ -312,10 +361,17 @@ pub fn run(o: &Options) -> Result<(), String> {
     Ok(())
 }
 
-fn rgb_at(picture: &I420, x: u32, y: u32, space: ColorSpace) -> [u8; 3] {
+/// One decoded pixel as RGB.
+///
+/// Through the fixed-point conversion rather than the `f64` reference. The
+/// reference is what decides whether that conversion is right — checked
+/// against it over all sixty-seven million triples — and using it here as well
+/// meant reading a counter out of a picture cost a floating-point matrix per
+/// pixel.
+fn rgb_at(coeff: &RgbCoefficients, picture: &I420, x: u32, y: u32) -> [u8; 3] {
     let luma = picture.luma_at(x, y).unwrap_or(0);
     let (u, v) = picture.chroma_at(x, y).unwrap_or((128, 128));
-    let (r, g, b) = ownview_color::convert::reference_rgb(luma, u, v, space);
+    let (r, g, b) = coeff.pixel(luma, u, v);
     [r, g, b]
 }
 
@@ -445,4 +501,24 @@ fn report(pipeline: &Pipeline, psnr_sum: f64, psnr_count: u64, counter_wrong: u6
             println!("  ⚠ {:?} is not applied: {}", lever, lever.reason());
         }
     }
+}
+
+/// Open a window for pictures of this size, if this platform has one.
+#[cfg(target_os = "linux")]
+fn open_window(
+    width: u32,
+    height: u32,
+) -> Result<Box<dyn ownview_present::Presenter>, ownview_present::PresentError> {
+    let p = ownview_present_x11::X11Presenter::open(width, height, ColorSpace::default())?;
+    Ok(Box::new(p))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_window(
+    _width: u32,
+    _height: u32,
+) -> Result<Box<dyn ownview_present::Presenter>, ownview_present::PresentError> {
+    Err(ownview_present::PresentError::Unavailable {
+        tried: "no native presenter is compiled in for this platform".to_owned(),
+    })
 }

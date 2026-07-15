@@ -1,0 +1,448 @@
+//! A plain X11 window that shows decoded pictures.
+//!
+//! # Why a plain window rather than a GPU one
+//!
+//! The decided architecture has two presenters: a webview rendering a `<video>`
+//! element, which is the default, and a native low-latency one. The native one
+//! was specified as `wgpu` plus `winit`.
+//!
+//! This is not that. It is a window drawn by the X server from a shared memory
+//! buffer, and it exists because the *stated purpose* of having a second
+//! presenter this early is "a plain window, easier to debug than a webview" —
+//! and for that purpose `wgpu` and `winit` cost about a hundred crates to
+//! audit, link GPU libraries into a binary that deliberately links no display
+//! library, and cannot run on a CI runner at all.
+//!
+//! This costs **no new dependencies**: `x11rb` is already here for capture,
+//! and drawing is the same shared-memory mechanism in reverse. It runs under
+//! `Xvfb`, so CI exercises it.
+//!
+//! The GPU presenter is still the right thing for the low-latency mode, where
+//! its real justifications live: colour conversion and scaling for free, and
+//! one implementation across three platforms. That is also where the *other*
+//! implementation lands, which matters — a trait with one implementation is
+//! shaped by that implementation whichever one it is.
+//!
+//! # What this deliberately does not do
+//!
+//! **Scaling.** The window is the picture's size. Fit, fill and one-to-one are
+//! product decisions about a viewer's chrome, and a debug window that quietly
+//! resampled would hide exactly the artefacts it exists to show.
+
+use ownview_capture::damage::Damage;
+use ownview_capture::frame::PixelFormat;
+use ownview_capture::geometry::Rect;
+use ownview_capture_x11::shm::Segment;
+use ownview_color::{ColorSpace, I420};
+use ownview_present::{PresentError, PresentEvent, Presenter};
+use x11rb::connection::Connection;
+use x11rb::protocol::Event;
+use x11rb::protocol::xproto::{
+    AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, ImageFormat, PropMode,
+    Window, WindowClass,
+};
+use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
+
+/// The backend name reported in logs and the session HUD.
+pub const BACKEND: &str = "x11-window";
+
+const BPP: usize = 4;
+
+/// A window showing decoded pictures.
+pub struct X11Presenter {
+    conn: RustConnection,
+    window: Window,
+    gc: x11rb::protocol::xproto::Gcontext,
+    depth: u8,
+    format: PixelFormat,
+    space: ColorSpace,
+    width: u32,
+    height: u32,
+    stride: usize,
+    /// The picture as packed RGB. Kept because damage means only part of it is
+    /// rewritten each frame, and the rest has to still be the last picture.
+    surface: Vec<u8>,
+    segment: Option<Segment>,
+    open: bool,
+    /// `WM_DELETE_WINDOW`, so closing the window is a request rather than a
+    /// severed connection.
+    delete_window: u32,
+}
+
+impl std::fmt::Debug for X11Presenter {
+    /// The shape, never the pixels.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("X11Presenter")
+            .field("size", &(self.width, self.height))
+            .field("format", &self.format.name())
+            .field("shared_memory", &self.segment.is_some())
+            .field("open", &self.open)
+            .finish_non_exhaustive()
+    }
+}
+
+impl X11Presenter {
+    /// Open a window for pictures of this size.
+    pub fn open(width: u32, height: u32, space: ColorSpace) -> Result<Self, PresentError> {
+        if width == 0 || height == 0 {
+            return Err(PresentError::WrongSize {
+                want_w: 1,
+                want_h: 1,
+                got_w: width,
+                got_h: height,
+            });
+        }
+        let (conn, screen_num) = x11rb::connect(None).map_err(|e| PresentError::Unavailable {
+            tried: format!("X11 via DISPLAY: {e}"),
+        })?;
+        let setup = conn.setup().clone();
+        let screen = setup
+            .roots
+            .get(screen_num)
+            .ok_or_else(|| PresentError::Backend {
+                backend: BACKEND,
+                detail: format!("the server has no screen {screen_num}"),
+            })?
+            .clone();
+
+        // The window is drawn with the root's visual, so the picture's byte
+        // order is the one the server expects — derived, not assumed, by the
+        // same code the capture backend uses.
+        let format = ownview_capture_x11::format::of(&setup, screen.root_depth, screen.root_visual)
+            .map_err(|e| PresentError::Backend {
+                backend: BACKEND,
+                detail: e.to_string(),
+            })?;
+
+        let fail = |detail: String| PresentError::Backend {
+            backend: BACKEND,
+            detail,
+        };
+        let window = conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        let (w, h) = (
+            u16::try_from(width).map_err(|_| fail(format!("{width} is too wide for a window")))?,
+            u16::try_from(height)
+                .map_err(|_| fail(format!("{height} is too tall for a window")))?,
+        );
+        conn.create_window(
+            screen.root_depth,
+            window,
+            screen.root,
+            0,
+            0,
+            w,
+            h,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            screen.root_visual,
+            &CreateWindowAux::new().event_mask(
+                EventMask::EXPOSURE | EventMask::STRUCTURE_NOTIFY | EventMask::KEY_PRESS,
+            ),
+        )
+        .map_err(|e| fail(e.to_string()))?
+        .check()
+        .map_err(|e| fail(e.to_string()))?;
+
+        let title = format!("ownview — {width}x{height}");
+        let _ = conn.change_property8(
+            PropMode::REPLACE,
+            window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            title.as_bytes(),
+        );
+
+        // Ask to be *told* when the person closes the window instead of having
+        // the connection cut from under the session.
+        let protocols = conn
+            .intern_atom(false, b"WM_PROTOCOLS")
+            .map_err(|e| fail(e.to_string()))?
+            .reply()
+            .map_err(|e| fail(e.to_string()))?
+            .atom;
+        let delete_window = conn
+            .intern_atom(false, b"WM_DELETE_WINDOW")
+            .map_err(|e| fail(e.to_string()))?
+            .reply()
+            .map_err(|e| fail(e.to_string()))?
+            .atom;
+        let _ = conn.change_property32(
+            PropMode::REPLACE,
+            window,
+            protocols,
+            AtomEnum::ATOM,
+            &[delete_window],
+        );
+
+        let gc = conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        conn.create_gc(gc, window, &CreateGCAux::new())
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+
+        conn.map_window(window)
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        conn.flush().map_err(|e| fail(e.to_string()))?;
+
+        let stride = (width as usize).saturating_mul(BPP);
+        let bytes = stride.saturating_mul(height as usize);
+        let segment = match ownview_capture_x11::shm::probe(&conn) {
+            Ok(_) => match Segment::create(&conn, bytes) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!("MIT-SHM segment failed ({e}); drawing over the socket");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("no MIT-SHM ({e}); drawing over the socket");
+                None
+            }
+        };
+
+        Ok(Self {
+            conn,
+            window,
+            gc,
+            depth: screen.root_depth,
+            format,
+            space,
+            width,
+            height,
+            stride,
+            surface: vec![0; bytes],
+            segment,
+            open: true,
+            delete_window,
+        })
+    }
+
+    /// Whether pictures are being moved through shared memory.
+    #[must_use]
+    pub const fn uses_shared_memory(&self) -> bool {
+        self.segment.is_some()
+    }
+
+    /// The X11 window this draws into.
+    ///
+    /// Exposed because a caller may need to reparent it — a viewer embedding
+    /// this inside its own chrome — and because a test that wants to know
+    /// whether a picture arrived has to read the window rather than the screen.
+    /// Reading the *screen* at the origin is what a first version of that test
+    /// did, and it passed under `Xvfb`, where a window with no window manager
+    /// lands at 0,0 and nothing else is on the display.
+    #[must_use]
+    pub const fn window(&self) -> Window {
+        self.window
+    }
+
+    /// The pixel layout the window is drawn in.
+    #[must_use]
+    pub const fn format(&self) -> PixelFormat {
+        self.format
+    }
+
+    /// Blit one rectangle of the surface into the window.
+    fn blit(&self, area: &Rect) -> Result<(), PresentError> {
+        let fail = |detail: String| PresentError::Backend {
+            backend: BACKEND,
+            detail,
+        };
+        let (Ok(sx), Ok(sy), Ok(w), Ok(h)) = (
+            u16::try_from(area.x.max(0)),
+            u16::try_from(area.y.max(0)),
+            u16::try_from(area.width),
+            u16::try_from(area.height),
+        ) else {
+            return Err(fail(format!("{area:?} does not fit an X11 request")));
+        };
+        let (Ok(total_w), Ok(total_h)) = (u16::try_from(self.width), u16::try_from(self.height))
+        else {
+            return Err(fail("the picture does not fit an X11 request".to_owned()));
+        };
+
+        match self.segment.as_ref() {
+            Some(segment) => {
+                // Only the rows this rectangle touches are pushed into the
+                // segment; the rest of it is still the last picture, which is
+                // what makes a caret repaint cost a caret.
+                let from = (area.y.max(0) as usize).saturating_mul(self.stride);
+                let len = (area.height as usize).saturating_mul(self.stride);
+                let Some(rows) = self.surface.get(from..from.saturating_add(len)) else {
+                    return Err(fail(format!("{area:?} is outside the surface")));
+                };
+                segment
+                    .write_from(from, rows)
+                    .map_err(|e| fail(e.to_string()))?;
+                x11rb::protocol::shm::put_image(
+                    &self.conn,
+                    self.window,
+                    self.gc,
+                    total_w,
+                    total_h,
+                    sx,
+                    sy,
+                    w,
+                    h,
+                    area.x.max(0) as i16,
+                    area.y.max(0) as i16,
+                    self.depth,
+                    ImageFormat::Z_PIXMAP.into(),
+                    false,
+                    segment.id(),
+                    0,
+                )
+                .map_err(|e| fail(e.to_string()))?
+                .check()
+                .map_err(|e| fail(e.to_string()))?;
+            }
+            None => {
+                // Over the socket, row by row, because a whole picture can
+                // exceed the server's maximum request size.
+                for row in 0..area.height as usize {
+                    let y = (area.y.max(0) as usize).saturating_add(row);
+                    let from = y
+                        .saturating_mul(self.stride)
+                        .saturating_add((area.x.max(0) as usize).saturating_mul(BPP));
+                    let len = (area.width as usize).saturating_mul(BPP);
+                    let Some(line) = self.surface.get(from..from.saturating_add(len)) else {
+                        return Err(fail(format!("{area:?} is outside the surface")));
+                    };
+                    self.conn
+                        .put_image(
+                            ImageFormat::Z_PIXMAP,
+                            self.window,
+                            self.gc,
+                            w,
+                            1,
+                            area.x.max(0) as i16,
+                            i16::try_from(y).unwrap_or(i16::MAX),
+                            0,
+                            self.depth,
+                            line,
+                        )
+                        .map_err(|e| fail(e.to_string()))?
+                        .check()
+                        .map_err(|e| fail(e.to_string()))?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for X11Presenter {
+    fn drop(&mut self) {
+        if let Some(s) = self.segment.take() {
+            s.detach(&self.conn);
+        }
+        let _ = self.conn.free_gc(self.gc);
+        let _ = self.conn.destroy_window(self.window);
+        let _ = self.conn.flush();
+    }
+}
+
+impl Presenter for X11Presenter {
+    fn backend(&self) -> &'static str {
+        BACKEND
+    }
+
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn present(&mut self, picture: &I420, damage: &Damage) -> Result<(), PresentError> {
+        if (picture.width(), picture.height()) != (self.width, self.height) {
+            return Err(PresentError::WrongSize {
+                want_w: self.width,
+                want_h: self.height,
+                got_w: picture.width(),
+                got_h: picture.height(),
+            });
+        }
+        if damage.is_empty() {
+            return Ok(());
+        }
+        let bounds = Rect::sized(self.width, self.height);
+        for area in damage.rects(&bounds) {
+            ownview_color::rgb::region(
+                picture,
+                self.space,
+                &mut self.surface,
+                self.stride,
+                self.format,
+                &area,
+            )?;
+            self.blit(&area)?;
+        }
+        self.conn.flush().map_err(|e| PresentError::Backend {
+            backend: BACKEND,
+            detail: e.to_string(),
+        })?;
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<Vec<PresentEvent>, PresentError> {
+        let mut out = Vec::new();
+        loop {
+            match self.conn.poll_for_event() {
+                Ok(Some(ev)) => match ev {
+                    Event::Expose(_) => {
+                        if !out.contains(&PresentEvent::Exposed) {
+                            out.push(PresentEvent::Exposed);
+                        }
+                    }
+                    Event::ConfigureNotify(c) => out.push(PresentEvent::Resized {
+                        width: u32::from(c.width),
+                        height: u32::from(c.height),
+                    }),
+                    Event::ClientMessage(m) => {
+                        // The window manager relaying a close request.
+                        if m.data.as_data32().first() == Some(&self.delete_window) {
+                            self.open = false;
+                            out.push(PresentEvent::CloseRequested);
+                        }
+                    }
+                    // Escape closes it, because a debug window with no
+                    // decorations is otherwise hard to get rid of.
+                    Event::KeyPress(k) if k.detail == ESCAPE => {
+                        self.open = false;
+                        out.push(PresentEvent::CloseRequested);
+                    }
+                    _ => {}
+                },
+                Ok(None) => break,
+                Err(e) => {
+                    // A broken connection is the window being gone, which is
+                    // not a failure to report as one.
+                    self.open = false;
+                    out.push(PresentEvent::CloseRequested);
+                    tracing::debug!("X11 presenter connection ended: {e}");
+                    break;
+                }
+            }
+        }
+        // An exposed window has to be repainted from the surface, not from the
+        // next picture: a static screen may not produce another one.
+        if out.contains(&PresentEvent::Exposed) && self.open {
+            let all = Rect::sized(self.width, self.height);
+            self.blit(&all)?;
+            let _ = self.conn.flush();
+        }
+        Ok(out)
+    }
+
+    fn is_open(&self) -> bool {
+        self.open
+    }
+}
+
+/// X11 keycode for Escape on essentially every keyboard map.
+///
+/// A keycode rather than a keysym on purpose: resolving keysyms needs the
+/// keyboard mapping, and this is a debug window's escape hatch rather than a
+/// text input.
+const ESCAPE: u8 = 9;
