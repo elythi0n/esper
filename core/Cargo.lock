@@ -680,6 +680,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-media"
+version = "0.0.0"
+dependencies = [
+ "ownview-capture",
+ "ownview-color",
+ "ownview-decode",
+ "ownview-encode",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-pipeline"
 version = "0.0.0"
 dependencies = [

@@ -15,6 +15,7 @@ ownview-proto = { path = "../crates/ownview-proto" }
 ownview-transport = { path = "../crates/ownview-transport" }
 ownview-capture = { path = "../crates/ownview-capture" }
 ownview-decode = { path = "../crates/ownview-decode" }
+ownview-media = { path = "../crates/ownview-media" }
 
 [[bin]]
 name = "messages"
@@ -60,3 +61,10 @@ bench = false
 
 [profile.release]
 debug = 1
+
+[[bin]]
+name = "media_packets"
+path = "fuzz_targets/media_packets.rs"
+test = false
+doc = false
+bench = false
