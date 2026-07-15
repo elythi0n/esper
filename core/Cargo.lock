@@ -761,6 +761,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-stream"
+version = "0.0.0"
+dependencies = [
+ "ownview-capture",
+ "ownview-color",
+ "ownview-decode",
+ "ownview-encode",
+ "ownview-media",
+ "ownview-pipeline",
+ "ownview-proto",
+ "ownview-scale",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-transport"
 version = "0.0.0"
 dependencies = [

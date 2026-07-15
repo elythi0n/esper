@@ -658,6 +658,311 @@ mod serde_bytes_array {
     }
 }
 
+// ── Media ────────────────────────────────────────────────────────────────────
+//
+// Negotiation for the video stream. These travel on the control stream; the
+// pixels travel as datagrams and are RTP, not CBOR.
+//
+// Engine to engine, unlike everything above. The Go control plane supervises
+// the engine and does not negotiate media, so there are deliberately no
+// cross-language fixtures for these — a fixture nobody on the other side reads
+// is a test of one implementation pretending to be a test of two.
+
+/// Most monitors a host will describe.
+///
+/// Sixteen is far past any real desk and far below the point where a
+/// controller's monitor list becomes an allocation a peer chooses the size of.
+pub const MAX_MONITORS: usize = 16;
+
+/// Largest picture edge this protocol will carry.
+///
+/// 8192 is two generations past 4K on the long edge. It exists so a peer
+/// cannot announce a stream whose buffers would be gigabytes before anything
+/// checks — the decoder enforces its own limit as well, and both being present
+/// is deliberate.
+pub const MAX_PICTURE_EDGE: u32 = 8192;
+
+/// Highest framerate ceiling worth accepting.
+pub const MAX_FPS: u16 = 240;
+
+/// Which video codec a stream carries.
+///
+/// An enum with one variant today. It is here so a peer that only speaks
+/// H.264 refuses an AV1 stream by *name* rather than by failing to decode it,
+/// which is the difference between a clear message and a black window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Codec {
+    /// H.264, baseline or main. The floor: hardware everywhere, and the only
+    /// codec a browser can be relied on to decode.
+    H264,
+}
+
+impl Codec {
+    /// The RTP payload type this codec is offered as.
+    #[must_use]
+    pub const fn payload_type(self) -> u8 {
+        match self {
+            Self::H264 => 96,
+        }
+    }
+
+    /// A name for logs and the session HUD.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+        }
+    }
+}
+
+/// One monitor, as the host describes it.
+///
+/// Geometry is included because a controller showing two monitors has to lay
+/// them out the way the host does, and because pointer coordinates are
+/// normalised per monitor — a controller that guessed the arrangement would
+/// put the cursor in the wrong place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorDescription {
+    /// The host's id for it. Opaque: a controller echoes it back in
+    /// [`MonitorSelect`] and never interprets it.
+    pub id: u32,
+    /// What the host calls it, for showing a person.
+    pub name: String,
+    /// Position in the host's desktop coordinates. Can be negative — a monitor
+    /// left of the primary one starts at a negative x, and pretending
+    /// otherwise is how multi-monitor bugs start.
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// Backing-store scale in percent, so it stays an integer on the wire.
+    ///
+    /// A float would round differently in two languages and make a fixture
+    /// non-reproducible. 100 is a normal display, 200 a typical HiDPI one, and
+    /// 150 a fractional Wayland one.
+    pub scale_percent: u16,
+    /// Whether the host calls this its primary display.
+    pub primary: bool,
+}
+
+impl MonitorDescription {
+    /// The narrowest and widest scale worth believing.
+    const SCALE: std::ops::RangeInclusive<u16> = 25..=800;
+
+    /// Whether this description is within bounds.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.name.is_empty()
+            && self.name.len() <= MAX_NAME_LEN
+            && self.width > 0
+            && self.height > 0
+            && self.width <= MAX_PICTURE_EDGE
+            && self.height <= MAX_PICTURE_EDGE
+            && Self::SCALE.contains(&self.scale_percent)
+    }
+}
+
+/// What the host is going to send, sent once the session is granted.
+///
+/// **Not a negotiation in the sense of a handshake.** The host states what it
+/// will do; a controller that cannot cope closes with a reason. Two rounds of
+/// offer and counter-offer would add a round trip to session setup to settle
+/// something the host decides anyway — it owns the screen, the encoder and the
+/// CPU budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamConfig {
+    /// Every monitor the host can send.
+    pub monitors: Vec<MonitorDescription>,
+    /// Which one it is sending now. One of `monitors`' ids.
+    pub selected: u32,
+    pub codec: Codec,
+    /// The size of picture that will arrive.
+    ///
+    /// **Not the monitor's size.** A resolution ceiling and the CPU budget's
+    /// ladder both reduce it, so a controller sizing a window from the
+    /// monitor's dimensions would letterbox every session on a large display.
+    pub width: u32,
+    pub height: u32,
+    /// The most frames a second the host will send. A ceiling, not a promise:
+    /// a static screen sends almost none.
+    pub max_fps: u16,
+    /// The RTP timestamp clock, in Hz. 90 000 for video, and stated rather
+    /// than assumed so a receiver never has to guess what a timestamp means.
+    pub clock_hz: u32,
+    /// The RTP synchronisation source for this stream, which is how a
+    /// datagram is matched to a monitor.
+    pub ssrc: u32,
+}
+
+impl StreamConfig {
+    /// Whether this configuration is within bounds and self-consistent.
+    ///
+    /// Self-consistency is the part worth having: a config whose `selected`
+    /// names no monitor it listed is not a config a well-behaved host sends,
+    /// and a controller acting on it would ask for pictures of nothing.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.monitors.is_empty()
+            && self.monitors.len() <= MAX_MONITORS
+            && self.monitors.iter().all(MonitorDescription::is_well_formed)
+            && self.monitors.iter().any(|m| m.id == self.selected)
+            && self.width > 0
+            && self.height > 0
+            && self.width <= MAX_PICTURE_EDGE
+            && self.height <= MAX_PICTURE_EDGE
+            && self.max_fps > 0
+            && self.max_fps <= MAX_FPS
+            && self.clock_hz > 0
+            && self.no_duplicate_monitor_ids()
+    }
+
+    /// Ids have to be unique, or `selected` is ambiguous and a controller
+    /// cannot tell two monitors apart.
+    fn no_duplicate_monitor_ids(&self) -> bool {
+        let mut seen: Vec<u32> = self.monitors.iter().map(|m| m.id).collect();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        seen.len() == before
+    }
+
+    /// The monitor being sent, if the config names one it listed.
+    #[must_use]
+    pub fn selected_monitor(&self) -> Option<&MonitorDescription> {
+        self.monitors.iter().find(|m| m.id == self.selected)
+    }
+}
+
+/// A controller asking for a different monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorSelect {
+    /// One of the ids from [`StreamConfig::monitors`].
+    pub monitor: u32,
+}
+
+/// What a controller would prefer, if the host has the headroom.
+///
+/// **A hint, never a command.** The host owns its CPU budget: a controller
+/// asking for 60 fps on a machine that can afford 15 gets 15, and a protocol
+/// that let the controller demand otherwise would let a viewer make somebody
+/// else's laptop unusable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QualityHint {
+    /// A framerate the controller would be happy with. `None` means no
+    /// preference — usually because the viewer is not visible.
+    pub max_fps: Option<u16>,
+    /// A long edge the controller would be happy with, in pixels. A small
+    /// window does not need a 4K stream.
+    pub max_long_edge: Option<u32>,
+    /// What the controller is doing, which is the only thing it knows that the
+    /// host does not.
+    pub profile: Profile,
+}
+
+impl QualityHint {
+    /// The smallest long edge worth asking for.
+    const EDGE: std::ops::RangeInclusive<u32> = 160..=MAX_PICTURE_EDGE;
+
+    /// Whether this hint is within bounds.
+    ///
+    /// A malformed hint is *ignored*, not an error: it asks for something and
+    /// the host was never obliged to agree anyway.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.max_fps.is_none_or(|f| f > 0 && f <= MAX_FPS)
+            && self.max_long_edge.is_none_or(|e| Self::EDGE.contains(&e))
+    }
+}
+
+/// What the person at the controller is doing.
+///
+/// The host cannot work this out from the pixels: a slideshow and a video look
+/// the same to a damage tracker until it is too late to have chosen
+/// differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Profile {
+    /// Reading and typing. Low framerate, high quality — cheaper *and* better
+    /// for the most common content.
+    Text,
+    /// The default, and what to pick when unsure.
+    #[default]
+    Balanced,
+    /// Video or a game. Framerate before fidelity.
+    Motion,
+}
+
+/// A controller asking for a picture it can start from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyframeRequest {
+    /// Why, so a host can tell a controller that lost one packet from one that
+    /// is asking every frame — the second is a link that needs its bitrate
+    /// reduced, not more keyframes.
+    pub reason: KeyframeReason,
+}
+
+/// Why a keyframe is wanted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyframeReason {
+    /// A frame was lost and the decoder cannot continue from what it has.
+    LostSync,
+    /// The controller has just started listening and has no reference picture.
+    Joined,
+    /// The stream's size changed, so the decoder was reset.
+    Reconfigured,
+    /// The viewer became visible again after being hidden.
+    Revealed,
+}
+
+/// Anything that can travel on a media session's control stream.
+///
+/// One tagged enum, ordered, for the same reason the terminal's is: a monitor
+/// selection that overtook the config describing the monitors would name an id
+/// the controller has never heard of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaMessage {
+    /// What the host will send. Host to controller.
+    Config(StreamConfig),
+    /// Send a different monitor. Controller to host.
+    Select(MonitorSelect),
+    /// What the controller would prefer. Controller to host.
+    Hint(QualityHint),
+    /// Send a picture I can start from. Controller to host.
+    Keyframe(KeyframeRequest),
+}
+
+impl MediaMessage {
+    /// Whether this message is within bounds.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Self::Config(c) => c.is_well_formed(),
+            Self::Select(_) | Self::Keyframe(_) => true,
+            Self::Hint(h) => h.is_well_formed(),
+        }
+    }
+
+    /// Whether the given role is allowed to send this.
+    ///
+    /// Direction is part of the protocol, not a convention. A controller
+    /// sending a `Config` would be telling the host what its own screen is,
+    /// and a host sending a `Keyframe` request would be asking the controller
+    /// for a picture. Both are nonsense, and nonsense from a peer is worth
+    /// refusing by name rather than acting on.
+    #[must_use]
+    pub const fn may_be_sent_by(&self, role: Role) -> bool {
+        match self {
+            Self::Config(_) => matches!(role, Role::Host),
+            Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) => {
+                matches!(role, Role::Controller)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,5 +1063,270 @@ mod tests {
         ciborium::into_writer(&cbor, &mut buf).expect("encode");
         let back: Hello = ciborium::from_reader(buf.as_slice()).expect("must ignore unknown field");
         assert_eq!(back.name, "future");
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+
+    fn monitor(id: u32, name: &str) -> MonitorDescription {
+        MonitorDescription {
+            id,
+            name: name.to_owned(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale_percent: 100,
+            primary: id == 0,
+        }
+    }
+
+    fn config() -> StreamConfig {
+        StreamConfig {
+            monitors: vec![monitor(0, "eDP-1"), monitor(1, "DP-3")],
+            selected: 1,
+            codec: Codec::H264,
+            width: 1920,
+            height: 1080,
+            max_fps: 30,
+            clock_hz: 90_000,
+            ssrc: 0xDEAD_BEEF,
+        }
+    }
+
+    /// Through the real framing, so this tests the wire and not just serde.
+    fn roundtrip<T>(value: &T) -> T
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let mut bytes = Vec::new();
+        crate::frame::write_frame(&mut bytes, value).expect("encodes");
+        crate::frame::read_frame(&mut bytes.as_slice()).expect("decodes")
+    }
+
+    /// The bytes a message becomes on the wire.
+    fn encoded(value: &MediaMessage) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        crate::frame::write_frame(&mut bytes, value).expect("encodes");
+        bytes
+    }
+
+    #[test]
+    fn every_media_message_round_trips_through_the_framing() {
+        for message in [
+            MediaMessage::Config(config()),
+            MediaMessage::Select(MonitorSelect { monitor: 1 }),
+            MediaMessage::Hint(QualityHint {
+                max_fps: Some(15),
+                max_long_edge: Some(1280),
+                profile: Profile::Text,
+            }),
+            MediaMessage::Hint(QualityHint {
+                max_fps: None,
+                max_long_edge: None,
+                profile: Profile::Balanced,
+            }),
+            MediaMessage::Keyframe(KeyframeRequest {
+                reason: KeyframeReason::LostSync,
+            }),
+        ] {
+            assert_eq!(roundtrip(&message), message);
+            assert!(message.is_well_formed(), "{message:?} is not well formed");
+        }
+    }
+
+    /// A negative origin has to survive the wire. A monitor to the left of the
+    /// primary one has one, and a field that silently became unsigned would put
+    /// every pointer event on the wrong screen.
+    #[test]
+    fn a_negative_monitor_origin_survives() {
+        let mut m = monitor(0, "left");
+        m.x = -1920;
+        m.y = -300;
+        let got = roundtrip(&m);
+        assert_eq!((got.x, got.y), (-1920, -300));
+    }
+
+    /// **The check worth having.** A config whose `selected` names no monitor
+    /// it listed is not a config a well-behaved host sends, and a controller
+    /// acting on it would ask for pictures of nothing.
+    #[test]
+    fn a_config_selecting_a_monitor_it_does_not_list_is_refused() {
+        let mut c = config();
+        c.selected = 99;
+        assert!(!c.is_well_formed());
+        assert!(c.selected_monitor().is_none());
+        // And the well-formed one does name it.
+        assert_eq!(
+            config().selected_monitor().map(|m| m.name.as_str()),
+            Some("DP-3")
+        );
+    }
+
+    #[test]
+    fn duplicate_monitor_ids_are_refused() {
+        let mut c = config();
+        c.monitors = vec![monitor(4, "a"), monitor(4, "b")];
+        c.selected = 4;
+        assert!(
+            !c.is_well_formed(),
+            "two monitors with one id make `selected` ambiguous"
+        );
+    }
+
+    #[test]
+    fn a_config_outside_its_bounds_is_refused() {
+        for mutate in [
+            (|c: &mut StreamConfig| c.monitors.clear()) as fn(&mut StreamConfig),
+            |c| c.width = 0,
+            |c| c.height = 0,
+            |c| c.width = MAX_PICTURE_EDGE + 1,
+            |c| c.height = MAX_PICTURE_EDGE + 1,
+            |c| c.max_fps = 0,
+            |c| c.max_fps = MAX_FPS + 1,
+            |c| c.clock_hz = 0,
+            |c| {
+                c.monitors = (0..=u32::try_from(MAX_MONITORS).unwrap_or(16))
+                    .map(|i| {
+                        let mut m = monitor(i, "m");
+                        m.id = i;
+                        m
+                    })
+                    .collect()
+            },
+        ] {
+            let mut c = config();
+            mutate(&mut c);
+            assert!(!c.is_well_formed(), "{c:?} was accepted");
+        }
+        // And the unmutated one is fine, or the test proves nothing.
+        assert!(config().is_well_formed());
+    }
+
+    #[test]
+    fn a_monitor_outside_its_bounds_is_refused() {
+        for mutate in [
+            (|m: &mut MonitorDescription| m.name.clear()) as fn(&mut MonitorDescription),
+            |m| m.name = "x".repeat(MAX_NAME_LEN + 1),
+            |m| m.width = 0,
+            |m| m.height = 0,
+            |m| m.width = MAX_PICTURE_EDGE + 1,
+            |m| m.scale_percent = 0,
+            |m| m.scale_percent = 24,
+            |m| m.scale_percent = 801,
+        ] {
+            let mut m = monitor(0, "eDP-1");
+            mutate(&mut m);
+            assert!(!m.is_well_formed(), "{m:?} was accepted");
+        }
+        assert!(monitor(0, "eDP-1").is_well_formed());
+        // The scale range's own edges are fine.
+        for scale in [25u16, 100, 150, 200, 800] {
+            let mut m = monitor(0, "eDP-1");
+            m.scale_percent = scale;
+            assert!(m.is_well_formed(), "scale {scale} was refused");
+        }
+    }
+
+    #[test]
+    fn a_hint_outside_its_bounds_is_refused_rather_than_acted_on() {
+        let ok = QualityHint {
+            max_fps: Some(30),
+            max_long_edge: Some(1920),
+            profile: Profile::Balanced,
+        };
+        assert!(ok.is_well_formed());
+        for bad in [
+            QualityHint {
+                max_fps: Some(0),
+                ..ok
+            },
+            QualityHint {
+                max_fps: Some(MAX_FPS + 1),
+                ..ok
+            },
+            QualityHint {
+                max_long_edge: Some(0),
+                ..ok
+            },
+            QualityHint {
+                max_long_edge: Some(159),
+                ..ok
+            },
+            QualityHint {
+                max_long_edge: Some(MAX_PICTURE_EDGE + 1),
+                ..ok
+            },
+        ] {
+            assert!(!bad.is_well_formed(), "{bad:?} was accepted");
+        }
+        // No preference is not the same as a bad preference.
+        assert!(
+            QualityHint {
+                max_fps: None,
+                max_long_edge: None,
+                profile: Profile::Motion,
+            }
+            .is_well_formed()
+        );
+    }
+
+    /// **Direction is part of the protocol.** A controller sending a `Config`
+    /// is telling the host what its own screen is; a host sending a keyframe
+    /// request is asking the controller for a picture. Both are nonsense, and
+    /// nonsense from a peer is worth refusing by name.
+    #[test]
+    fn each_media_message_may_only_travel_one_way() {
+        let config = MediaMessage::Config(config());
+        assert!(config.may_be_sent_by(Role::Host));
+        assert!(!config.may_be_sent_by(Role::Controller));
+
+        for from_controller in [
+            MediaMessage::Select(MonitorSelect { monitor: 0 }),
+            MediaMessage::Hint(QualityHint {
+                max_fps: None,
+                max_long_edge: None,
+                profile: Profile::Balanced,
+            }),
+            MediaMessage::Keyframe(KeyframeRequest {
+                reason: KeyframeReason::Joined,
+            }),
+        ] {
+            assert!(
+                from_controller.may_be_sent_by(Role::Controller),
+                "{from_controller:?} must be allowed from a controller"
+            );
+            assert!(
+                !from_controller.may_be_sent_by(Role::Host),
+                "{from_controller:?} must not be allowed from a host"
+            );
+        }
+    }
+
+    /// The wire names are the contract. A rename is a protocol break, so it
+    /// should take a test failure to do it by accident.
+    #[test]
+    fn the_wire_names_are_pinned() {
+        for (message, tag) in [
+            (
+                MediaMessage::Keyframe(KeyframeRequest {
+                    reason: KeyframeReason::LostSync,
+                }),
+                "keyframe",
+            ),
+            (MediaMessage::Select(MonitorSelect { monitor: 0 }), "select"),
+        ] {
+            let text: String = encoded(&message).iter().map(|&b| b as char).collect();
+            assert!(
+                text.contains(tag),
+                "the wire form of {message:?} no longer contains {tag:?}"
+            );
+        }
+        // And the codec and profile names.
+        assert_eq!(Codec::H264.name(), "h264");
+        assert_eq!(Codec::H264.payload_type(), 96);
+        assert_eq!(Profile::default(), Profile::Balanced);
     }
 }

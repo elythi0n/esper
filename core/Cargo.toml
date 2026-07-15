@@ -27,6 +27,7 @@ ownview-scale = { path = "crates/ownview-scale" }
 ownview-present = { path = "crates/ownview-present" }
 ownview-present-x11 = { path = "crates/ownview-present-x11" }
 ownview-pipeline = { path = "crates/ownview-pipeline" }
+ownview-stream = { path = "crates/ownview-stream" }
 # Pure Rust: it speaks the X11 protocol over a socket rather than binding
 # libX11, so nothing here links a display library and this crate keeps
 # `forbid(unsafe_code)`. That also keeps the smoke test's "the engine links no

@@ -74,8 +74,13 @@ pub enum Step {
     Encoded {
         /// Whether a decoder can start from it.
         keyframe: bool,
-        /// Bytes on the wire.
-        bytes: usize,
+        /// The encoded frame, in Annex-B framing.
+        ///
+        /// Handed out because a host has to send it, and the pipeline is the
+        /// only thing that has it. Moved rather than copied — the encoder
+        /// already produced an owned buffer — so a loopback that ignores it
+        /// pays nothing for a sender that needs it.
+        bitstream: Vec<u8>,
         /// What changed in this frame, in picture coordinates.
         ///
         /// Carried out of the pipeline because the consumers need it: a
@@ -378,6 +383,21 @@ impl Pipeline {
         self
     }
 
+    /// Every monitor the capture source can see.
+    ///
+    /// Exposed because a host has to describe them to a controller, and the
+    /// capturer is behind the pipeline.
+    #[must_use]
+    pub fn monitors(&self) -> &[ownview_capture::capturer::MonitorInfo] {
+        self.capturer.monitors()
+    }
+
+    /// The monitor being captured.
+    #[must_use]
+    pub fn selected_monitor(&self) -> ownview_capture::capturer::MonitorId {
+        self.capturer.selected()
+    }
+
     /// Which capture backend is in use.
     #[must_use]
     pub fn capture_backend(&self) -> &'static str {
@@ -498,6 +518,24 @@ impl Pipeline {
     }
 
     /// Ask for a keyframe on the next frame.
+    /// Change the frame rate the caller is asking for.
+    ///
+    /// A ceiling on the governor's ladder, not a demand on it: asking for 60
+    /// on a host that can afford 15 still gets 15. That asymmetry is the whole
+    /// point — a controller must not be able to make somebody else's laptop
+    /// unusable by asking nicely.
+    pub fn set_requested_fps(&mut self, fps: u32) {
+        self.requested_fps = fps.max(1);
+        let level = self.effective_level();
+        self.gate.set_max_fps(level.fps);
+    }
+
+    /// The frame rate the caller has asked for.
+    #[must_use]
+    pub const fn requested_fps(&self) -> u32 {
+        self.requested_fps
+    }
+
     pub fn request_keyframe(&mut self) {
         self.gate.request_keyframe();
     }
@@ -635,7 +673,7 @@ impl Pipeline {
 
         Ok(Step::Encoded {
             keyframe: encoded.keyframe,
-            bytes: encoded.len(),
+            bitstream: encoded.bitstream,
             damage: reported,
             decoded,
         })
