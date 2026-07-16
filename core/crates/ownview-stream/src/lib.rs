@@ -25,9 +25,11 @@
 
 pub mod controller;
 pub mod host;
+pub mod jitter;
 
 pub use controller::{ControllerStats, ControllerStream, Decoded};
 pub use host::{HostStep, HostStream, ssrc_for};
+pub use jitter::{Jitter, JitterStats};
 
 /// Somewhere unreliable datagrams go.
 ///

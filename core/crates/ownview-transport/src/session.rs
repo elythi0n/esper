@@ -535,4 +535,21 @@ impl MediaChannel {
     pub fn is_open(&self) -> bool {
         self.conn.close_reason().is_none()
     }
+
+    /// What the transport knows about the path.
+    ///
+    /// Available from the media half because both sides of a session want it:
+    /// a host reports what it is spending and a controller reports what it is
+    /// waiting for, and neither should have to hold the session to ask.
+    #[must_use]
+    pub fn stats(&self) -> Stats {
+        let s = self.conn.stats();
+        Stats {
+            rtt: s.path.rtt,
+            lost_packets: s.path.lost_packets,
+            sent_bytes: s.udp_tx.bytes,
+            received_bytes: s.udp_rx.bytes,
+            congestion_window: s.path.cwnd,
+        }
+    }
 }

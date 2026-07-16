@@ -30,6 +30,7 @@ use ownview_proto::{
 };
 
 use crate::StreamError;
+use crate::jitter::{Jitter, JitterStats};
 
 /// What arrived.
 #[derive(Debug)]
@@ -73,6 +74,13 @@ pub struct ControllerStream {
     awaiting_keyframe: bool,
     /// Requests for the caller to send.
     outbound: Vec<MediaMessage>,
+    /// When to stop waiting for a frame.
+    ///
+    /// Owned here rather than left to the caller, because a caller that has to
+    /// invent the number invents the wrong one — and did: the first version of
+    /// the command-line viewer hardcoded a hundred milliseconds, which is a
+    /// quarter of a second of stutter at 60 fps and one copy per caller.
+    jitter: Jitter,
     stats: ControllerStats,
 }
 
@@ -105,6 +113,7 @@ impl ControllerStream {
             expected: (config.width, config.height),
             awaiting_keyframe: true,
             outbound: Vec::new(),
+            jitter: Jitter::new(config.max_fps, config.clock_hz),
             stats: ControllerStats::default(),
         };
         // A fresh receiver has no reference picture, so say so immediately
@@ -130,6 +139,41 @@ impl ControllerStream {
     #[must_use]
     pub const fn stats(&self) -> ControllerStats {
         self.stats
+    }
+
+    /// How long to wait before deciding the frame in hand is complete.
+    ///
+    /// `None` when nothing is waiting, so a caller may block for as long as it
+    /// likes. `Some(d)` is how long is left; `Some(ZERO)` means now.
+    ///
+    /// A caller polls with this as its timeout and calls [`Self::tick`] when it
+    /// expires. That is the whole protocol between them, and it exists so the
+    /// deadline is one reasoned number rather than one per caller.
+    #[must_use]
+    pub fn due_in(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.jitter.due_in(now)
+    }
+
+    /// Act on the deadline if it has passed.
+    ///
+    /// Does nothing if it has not, so a caller may call it whenever it likes.
+    pub fn tick(&mut self, now: std::time::Instant, out: &mut Vec<Decoded>) {
+        if self.jitter.is_due(now) {
+            self.jitter.fired();
+            self.flush(out);
+        }
+    }
+
+    /// What the arrivals have looked like.
+    #[must_use]
+    pub fn jitter(&self) -> JitterStats {
+        self.jitter.stats()
+    }
+
+    /// Interarrival jitter in milliseconds.
+    #[must_use]
+    pub fn jitter_ms(&self) -> f64 {
+        self.jitter.jitter_ms()
     }
 
     /// The reassembler's own totals.
@@ -237,6 +281,20 @@ impl ControllerStream {
 
     /// Feed one datagram, appending whatever arrived to `out`.
     pub fn receive(&mut self, datagram: &[u8], out: &mut Vec<Decoded>) -> Result<(), StreamError> {
+        self.receive_at(datagram, std::time::Instant::now(), out)
+    }
+
+    /// Feed one datagram, saying when it arrived.
+    ///
+    /// The time is a parameter so the deadline can be tested without sleeping.
+    /// A test that waits real milliseconds to check a timeout is slow and
+    /// flaky in exchange for nothing.
+    pub fn receive_at(
+        &mut self,
+        datagram: &[u8],
+        now: std::time::Instant,
+        out: &mut Vec<Decoded>,
+    ) -> Result<(), StreamError> {
         self.stats.datagrams = self.stats.datagrams.saturating_add(1);
         self.stats.bytes = self.stats.bytes.saturating_add(datagram.len() as u64);
 
@@ -251,9 +309,25 @@ impl ControllerStream {
             return Ok(());
         }
 
+        // The timestamp for the jitter estimator, read back out of the header
+        // rather than tracked separately: it is the only thing that says when
+        // the *sender* thought this datagram belonged.
+        let timestamp = ownview_media::RtpHeader::parse(datagram)
+            .map(|(h, _)| h.timestamp)
+            .unwrap_or(0);
+        let produced_frame = frames
+            .iter()
+            .any(|f| matches!(f, Reassembled::Frame { .. }));
         for frame in frames {
             self.absorb(frame, out);
         }
+        // A frame that completed on its own needs no deadline; one still being
+        // assembled does.
+        if produced_frame {
+            self.jitter.settled();
+        }
+        self.jitter
+            .arrived(now, timestamp, self.depacketizer.is_assembling());
         Ok(())
     }
 

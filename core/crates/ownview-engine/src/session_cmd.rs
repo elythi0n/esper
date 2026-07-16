@@ -449,33 +449,27 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 
         let deadline =
             (o.seconds > 0).then(|| tokio::time::Instant::now() + Duration::from_secs(o.seconds));
+        let started = std::time::Instant::now();
         let mut pictures = 0u64;
         let mut skipped = 0u64;
         let mut out = Vec::new();
-        // **The jitter buffer's deadline, in its simplest honest form.**
+        // **The deadline comes from the stream, not from here.**
         //
-        // Reassembly is deliberately correct rather than eager: a frame whose
-        // start is not yet known waits for the next frame to bound it. On a
-        // *static* screen there is no next frame — the host has nothing to
-        // send and correctly sends nothing — so the first frame waits forever
-        // and the viewer shows nothing at all.
-        //
-        // That is exactly what happened the first time this was pointed at a
-        // real desktop: 382 datagrams arrived, none were lost, and no picture
-        // was ever produced. `flush` exists for this and nothing called it.
-        //
-        // How long to wait is a latency decision, which is why it lives here
-        // and not in the reassembler. A hundred milliseconds is three frames
-        // at 30 fps: long enough that a frame split across datagrams is never
-        // cut short, short enough that a static screen appears at once.
-        const SETTLE: Duration = Duration::from_millis(100);
+        // The first version of this hardcoded a hundred milliseconds, which is
+        // a quarter of a second of stutter at 60 fps and one copy per caller.
+        // `ControllerLink::due_in` derives it from the stream's own framerate
+        // and says how long is left, so this loop only has to honour it.
         const IDLE_GIVE_UP: Duration = Duration::from_secs(30);
         let mut last_arrival = tokio::time::Instant::now();
         loop {
             if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
                 break;
             }
-            match tokio::time::timeout(SETTLE, link.receive(&mut out)).await {
+            // As long as the stream will let us, and no longer.
+            let wait = link
+                .due_in(std::time::Instant::now())
+                .unwrap_or(Duration::from_secs(1));
+            match tokio::time::timeout(wait, link.receive(&mut out)).await {
                 Ok(Ok(())) => last_arrival = tokio::time::Instant::now(),
                 Ok(Err(e)) => {
                     println!("  · the session ended: {e}");
@@ -483,8 +477,9 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 }
                 Err(_) => {
                     // Nothing arrived in time, so whatever is part-assembled
-                    // is as complete as it is going to get.
-                    link.flush(&mut out);
+                    // is as complete as it is going to get. `tick` does
+                    // nothing if the deadline has not really passed.
+                    link.tick(std::time::Instant::now(), &mut out);
                     if last_arrival.elapsed() > IDLE_GIVE_UP {
                         println!("  · nothing arrived for {} seconds", IDLE_GIVE_UP.as_secs());
                         break;
@@ -537,13 +532,34 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         }
         let stats = link.stats();
         println!();
+        let path = link.transport();
+        let jitter = link.jitter();
+        let seconds = started.elapsed().as_secs_f64().max(0.001);
+        println!("  pictures   {pictures} shown, {skipped} not shown");
         println!(
-            "  {pictures} pictures, {skipped} not shown, {} datagrams, {} KiB, \
-             {} frames lost, {} keyframes asked for",
+            "  frames     {} lost, {} keyframes asked for",
+            stats.frames_lost, stats.keyframes_requested
+        );
+        println!(
+            "  received   {} datagrams, {} KiB, {:.0} kbit/s",
             stats.datagrams,
             stats.bytes / 1024,
-            stats.frames_lost,
-            stats.keyframes_requested
+            (stats.bytes as f64 * 8.0 / 1000.0) / seconds
+        );
+        println!(
+            "  path       {:.1} ms round trip, {} packets lost, {} KiB window",
+            path.rtt.as_secs_f64() * 1000.0,
+            path.lost_packets,
+            path.congestion_window / 1024
+        );
+        // The number that says whether the deadline is long enough: a worst
+        // gap past it means frames are being abandoned for packets that were
+        // merely late.
+        println!(
+            "  jitter     {:.1} ms interarrival, worst gap {:.0} ms, {} deadline(s) fired",
+            link.jitter_ms(),
+            jitter.worst_gap.as_secs_f64() * 1000.0,
+            jitter.deadlines
         );
         Ok(())
     })

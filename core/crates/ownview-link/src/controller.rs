@@ -81,6 +81,39 @@ impl ControllerLink {
         self.stream.stats()
     }
 
+    /// How long to wait before deciding the frame in hand is complete.
+    ///
+    /// `None` when nothing is waiting, so a caller may block indefinitely.
+    /// Forwarded from the stream rather than reinvented here: the number is
+    /// derived from the stream's own framerate and belongs in one place.
+    #[must_use]
+    pub fn due_in(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.stream.due_in(now)
+    }
+
+    /// Act on the deadline if it has passed.
+    pub fn tick(&mut self, now: std::time::Instant, out: &mut Vec<Decoded>) {
+        self.stream.tick(now, out);
+    }
+
+    /// What the arrivals have looked like.
+    #[must_use]
+    pub fn jitter(&self) -> ownview_stream::JitterStats {
+        self.stream.jitter()
+    }
+
+    /// Interarrival jitter in milliseconds.
+    #[must_use]
+    pub fn jitter_ms(&self) -> f64 {
+        self.stream.jitter_ms()
+    }
+
+    /// What the transport says about the path.
+    #[must_use]
+    pub fn transport(&self) -> ownview_transport::Stats {
+        self.media.stats()
+    }
+
     /// Whether a keyframe is outstanding.
     #[must_use]
     pub const fn awaiting_keyframe(&self) -> bool {

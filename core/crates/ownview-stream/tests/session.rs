@@ -537,3 +537,105 @@ fn one_frame_followed_by_silence_needs_a_flush_to_be_shown() {
     );
     println!("{} result(s) after the flush", out.len());
 }
+
+/// **The deadline lives in one place now, and it works through the stream.**
+///
+/// The static-screen bug was fixed by making a caller apply a hundred-
+/// millisecond wait. That is the wrong home for the number: a quarter of a
+/// second of stutter at 60 fps, and one copy per caller. `ControllerStream`
+/// owns it, derives it from the stream's own framerate, and tells a caller how
+/// long to wait — so a caller cannot get it wrong by not knowing.
+///
+/// Timed with an explicit clock rather than by sleeping, because a test that
+/// waits real milliseconds to check a timeout is slow and flaky for nothing.
+#[test]
+fn the_stream_says_how_long_to_wait_and_releases_the_frame_when_it_expires() {
+    use std::time::Instant;
+
+    let mut h = host(30);
+    let mut c = controller(&h);
+    let mut sink = RecordingSink::new();
+    for m in c.take_outbound() {
+        h.handle(&m).expect("accepted");
+    }
+
+    // Nothing waiting, so a caller may block as long as it likes.
+    let t0 = Instant::now();
+    assert_eq!(c.due_in(t0), None, "a deadline with no frame to release");
+
+    // One frame, then silence.
+    while !matches!(
+        h.step(Duration::from_secs(1), &mut sink).expect("a step"),
+        HostStep::Sent { .. }
+    ) {}
+    let mut out = Vec::new();
+    for datagram in sink.sent.drain(..) {
+        c.receive_at(&datagram, t0, &mut out).expect("received");
+    }
+
+    // Now something is waiting, and the stream says for how long.
+    let left = c.due_in(t0).expect("a frame is waiting");
+    assert!(
+        left > Duration::ZERO && left <= ownview_stream::jitter::MAX_WAIT,
+        "the deadline was {left:?}"
+    );
+    // Two frame intervals at 30 fps, which is what the derivation says.
+    assert_eq!(left.as_millis(), 66, "the deadline is not the derived one");
+
+    // Before it expires, nothing is released.
+    c.tick(t0 + Duration::from_millis(50), &mut out);
+    assert!(
+        !out.iter().any(|d| matches!(d, Decoded::Picture { .. })),
+        "the frame was released before its deadline: {out:?}"
+    );
+
+    // After it expires, it is.
+    c.tick(t0 + Duration::from_millis(70), &mut out);
+    assert!(
+        out.iter().any(|d| matches!(d, Decoded::Picture { .. })),
+        "the deadline passed and the frame was not released: {out:?}"
+    );
+    assert_eq!(c.jitter().deadlines, 1);
+    // And nothing is waiting any more.
+    assert_eq!(c.due_in(t0 + Duration::from_millis(70)), None);
+}
+
+/// A frame that completes on its own must not leave a deadline armed — the
+/// next thing the caller does would then be to flush nothing, repeatedly.
+#[test]
+fn a_frame_that_completes_normally_arms_no_deadline() {
+    use std::time::Instant;
+
+    let mut h = host(30);
+    let mut c = controller(&h);
+    let mut sink = RecordingSink::new();
+    for m in c.take_outbound() {
+        h.handle(&m).expect("accepted");
+    }
+
+    let t0 = Instant::now();
+    let mut out = Vec::new();
+    let mut pictures = 0;
+    // Enough frames that later ones bound earlier ones and complete normally.
+    for i in 0..12u32 {
+        let _ = h.step(Duration::from_secs(1), &mut sink).expect("a step");
+        for datagram in sink.sent.drain(..) {
+            c.receive_at(
+                &datagram,
+                t0 + Duration::from_millis(u64::from(i) * 33),
+                &mut out,
+            )
+            .expect("received");
+        }
+        pictures += out
+            .drain(..)
+            .filter(|d| matches!(d, Decoded::Picture { .. }))
+            .count();
+    }
+    assert!(pictures > 3, "only {pictures} pictures completed normally");
+    assert_eq!(
+        c.jitter().deadlines,
+        0,
+        "a deadline fired on a stream that never needed one"
+    );
+}
