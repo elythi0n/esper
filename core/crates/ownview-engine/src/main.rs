@@ -9,6 +9,7 @@
 //! built on top of that.
 
 mod backend;
+mod discover_cmd;
 mod loopback;
 mod net;
 mod pairing;
@@ -61,6 +62,16 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("decode-worker: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("discover") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match discover_cmd::parse(&rest).and_then(|o| discover_cmd::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("discover: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -160,6 +171,7 @@ fn print_help() {
          \n\
          Commands:\n  \
            identity   print this device's fingerprint\n  \
+           discover   list the OwnView devices on this network\n  \
            pair       pair with another device, in either direction\n  \
            host       serve this machine's screen to a paired device\n  \
            connect    show a paired host's screen\n  \

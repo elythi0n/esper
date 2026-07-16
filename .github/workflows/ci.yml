@@ -83,6 +83,14 @@ jobs:
           DISPLAY=:99 xdpyinfo | grep -q RANDR
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
+      # The mDNS wire format is checked against `dnspython`, an independent
+      # implementation of the same documents — because a format tested only
+      # against its own reader is tested against its own misunderstandings.
+      # Those tests skip when it is absent and say so, so this is what makes
+      # them actually run.
+      - name: Install dnspython (mDNS interoperability tests)
+        run: python3 -m pip install --break-system-packages dnspython
+
       - name: Rust — test
         working-directory: core
         run: cargo test --workspace

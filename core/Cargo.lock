@@ -649,6 +649,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-discovery"
+version = "0.0.0"
+dependencies = [
+ "ownview-proto",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-encode"
 version = "0.0.0"
 dependencies = [
@@ -669,6 +680,7 @@ dependencies = [
  "ownview-color",
  "ownview-crypto",
  "ownview-decode",
+ "ownview-discovery",
  "ownview-encode",
  "ownview-link",
  "ownview-media",

@@ -586,12 +586,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-discovery"
+version = "0.0.0"
+dependencies = [
+ "ownview-proto",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "ownview-capture",
  "ownview-decode",
+ "ownview-discovery",
  "ownview-media",
  "ownview-proto",
  "ownview-transport",

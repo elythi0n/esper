@@ -110,6 +110,63 @@ pub fn permissions(device: &Device) -> String {
         .join(", ")
 }
 
+/// A flag that goes true when the operator asks this process to stop.
+///
+/// # Why a host has to notice
+///
+/// Without a handler, `SIGTERM` and `SIGINT` kill the process where it
+/// stands — and a host killed where it stands has told nobody. Its mDNS
+/// advertisement stays in every browser's cache until it expires, so a person
+/// clicks a machine that is not there; and a controller mid-session sees the
+/// connection stop rather than being told the host is going, which is the
+/// difference between "it shut down" and "something went wrong, we think".
+/// [`Reason::HOST_SHUTTING_DOWN`] exists for this and needs somewhere to be
+/// sent from.
+///
+/// # And why it obliges every loop
+///
+/// Installing a handler replaces the default action. A host that noticed the
+/// signal in one loop and not another would be *worse* than one that never
+/// noticed: `Ctrl-C` during a session would then do nothing at all. So the
+/// receiver is shared, and every loop that can be waiting for a long time
+/// waits on it too.
+///
+/// `SIGTERM` because that is what a service manager sends, and `SIGINT`
+/// because that is what a person at a terminal sends.
+pub fn stop_signal() -> Result<tokio::sync::watch::Receiver<bool>, String> {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term =
+            signal(SignalKind::terminate()).map_err(|e| format!("listening for SIGTERM: {e}"))?;
+        let mut interrupt =
+            signal(SignalKind::interrupt()).map_err(|e| format!("listening for SIGINT: {e}"))?;
+        tokio::spawn(async move {
+            let which = tokio::select! {
+                _ = term.recv() => "SIGTERM",
+                _ = interrupt.recv() => "interrupted",
+            };
+            println!();
+            println!("  · {which}: shutting down");
+            let _ = tx.send(true);
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                println!();
+                println!("  · interrupted: shutting down");
+                let _ = tx.send(true);
+            }
+        });
+    }
+
+    Ok(rx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

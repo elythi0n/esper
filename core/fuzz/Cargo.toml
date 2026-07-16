@@ -16,6 +16,7 @@ ownview-transport = { path = "../crates/ownview-transport" }
 ownview-capture = { path = "../crates/ownview-capture" }
 ownview-decode = { path = "../crates/ownview-decode" }
 ownview-media = { path = "../crates/ownview-media" }
+ownview-discovery = { path = "../crates/ownview-discovery" }
 
 [[bin]]
 name = "messages"
@@ -65,6 +66,13 @@ debug = 1
 [[bin]]
 name = "media_packets"
 path = "fuzz_targets/media_packets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mdns_packets"
+path = "fuzz_targets/mdns_packets.rs"
 test = false
 doc = false
 bench = false

@@ -125,6 +125,35 @@ shared library from a third party at run time. Building from source moves H.264
 patent licensing onto whoever ships the binary, which for a self-hosted
 open-source tool is the honest place for it to sit.
 
+### The one parser that runs before anybody is authenticated
+
+Everything else in this product reads bytes from a peer that has already proved
+its key in a TLS handshake. **LAN discovery does not.** The mDNS reader takes
+multicast packets from anyone on the segment, before any handshake, and an
+attacker does not need to be paired or even to be talking to us on purpose. By
+reachability it is the widest surface here.
+
+So it is the narrowest code:
+
+| | |
+|---|---|
+| Safe Rust, no dependency | it speaks the protocol itself rather than taking a general DNS-SD stack, which measured at eight crates, ~30 000 lines and ~500 `unsafe` occurrences |
+| A fuzz target on its input path | `mdns_packets`, in the standing list |
+| Bounded name decompression | a pointer must point strictly before itself *and* before every earlier jump, so a pointer loop is impossible rather than unlikely — and note that a length limit cannot catch one, because a loop of pointers accumulates no labels |
+| Malformed packets are counted, not fatal | a responder that could be stopped by one bad packet could be stopped by anyone on the network |
+
+**And nothing it reads is trusted.** A fingerprint in an advertisement is a
+claim: it decides whether a device is *offered* as connectable, and the
+connection itself proves the key. A peer that advertises a paired device's
+fingerprint is listed and then refused, having gained a place in a list. The
+address comes from the packet's source rather than the record it carries, so a
+forged address record changes nothing.
+
+What it costs, stated rather than glossed: **an advertisement tells the segment
+that this machine runs OwnView.** That is the residual in the threat model's
+A4, it is why `discovery.mdns: false` exists, and the port remains open either
+way.
+
 ### Screen capture, which is 180 000 lines of exempted Rust
 
 X11 capture rests on `x11rb`, and with `x11rb-protocol` behind it that is about

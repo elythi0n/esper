@@ -48,6 +48,11 @@ pub struct HostOptions {
     pub max_resolution: Option<u32>,
     /// Serve one session and exit, which is what a test wants.
     pub once: bool,
+    /// Advertise on the LAN. On by default, and the one deliberate exception
+    /// to strict defaults: it reveals that a machine runs OwnView to a network
+    /// segment that is usually the operator's own house, and it buys the best
+    /// thing about the product on a home network.
+    pub mdns: bool,
 }
 
 impl Default for HostOptions {
@@ -60,6 +65,7 @@ impl Default for HostOptions {
             budget: Budget::default().cores,
             max_resolution: Ceiling::default().long_edge(),
             once: false,
+            mdns: true,
         }
     }
 }
@@ -126,6 +132,10 @@ pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
             }
             "--once" => {
                 o.once = true;
+                i += 1;
+            }
+            "--no-mdns" => {
+                o.mdns = false;
                 i += 1;
             }
             other => return Err(format!("unknown flag {other}")),
@@ -239,7 +249,35 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     let mut parked: Option<Parked> = None;
 
     runtime.block_on(async {
-        loop {
+        // Advertised while listening, and taken back when this stops. Without
+        // the goodbye, every browser on the segment keeps offering a machine
+        // that has gone until the record expires, and somebody clicks a device
+        // that is not there.
+        let mdns = if o.mdns {
+            match crate::discover_cmd::advertise(bound).await {
+                Ok(handle) => {
+                    println!("  announcing on this network as {}", handle.instance());
+                    println!();
+                    Some(handle)
+                }
+                Err(e) => {
+                    // Not fatal: a host reachable by address works without
+                    // discovery, and saying so beats refusing to start.
+                    println!("  not announcing on this network ({e})");
+                    println!();
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Every loop that can wait a long time waits on this too. See
+        // `net::stop_signal`: noticing a signal in one place and not another
+        // is worse than not noticing it at all.
+        let mut stopping = net::stop_signal()?;
+
+        let outcome = loop {
             // Let go of a parked session nobody came back for, before waiting
             // for a connection that may never arrive. Otherwise a host that
             // sees no more traffic holds a capture backend open for as long as
@@ -260,14 +298,18 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             // thing `PARK_TIMEOUT` exists to prevent.
             let accepted =
                 match accept_deadline(parked.as_ref().map(|p| p.parked_for(Instant::now()))) {
-                    Some(left) => {
-                        match tokio::time::timeout(left, endpoint.accept()).await {
+                    Some(left) => tokio::select! {
+                        _ = stopping.changed() => break Ok(()),
+                        waited = tokio::time::timeout(left, endpoint.accept()) => match waited {
                             Ok(accepted) => accepted,
                             // Nobody came. Round the loop, where it is let go.
                             Err(_) => continue,
-                        }
-                    }
-                    None => endpoint.accept().await,
+                        },
+                    },
+                    None => tokio::select! {
+                        _ = stopping.changed() => break Ok(()),
+                        accepted = endpoint.accept() => accepted,
+                    },
                 };
             let conn = match accepted {
                 Some(Ok(c)) => c,
@@ -277,7 +319,7 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                     eprintln!("  · a connection failed: {e}");
                     continue;
                 }
-                None => return Ok(()),
+                None => break Ok(()),
             };
             // `Session::open` is done here rather than inside `serve_one` so
             // that nothing in this crate has to name a `quinn::Connection`.
@@ -296,7 +338,7 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             };
             let from = session.remote_address();
             println!("  · {from} connected");
-            match serve_one(session, o, parked.take()).await {
+            match serve_one(session, o, parked.take(), stopping.clone()).await {
                 Ok((stats, still)) => {
                     println!("  · {from} finished: {stats}");
                     parked = still;
@@ -307,18 +349,27 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                 }
             }
             if o.once {
-                // Nothing is coming back to a host that is about to exit, so
-                // the reason travels rather than the session simply vanishing.
-                if let Some(p) = parked.take() {
-                    println!(
-                        "      the parked session ends here: {}",
-                        Expired::HostGone.describe()
-                    );
-                    drop(p.release());
-                }
-                return Ok(());
+                break Ok(());
             }
+        };
+
+        // Nothing is coming back to a host that is exiting, so the reason
+        // travels rather than the session simply vanishing.
+        if let Some(p) = parked.take() {
+            println!(
+                "      the parked session ends here: {}",
+                Expired::HostGone.describe()
+            );
+            drop(p.release());
         }
+        if let Some(mdns) = mdns {
+            mdns.stop().await;
+        }
+        // The close frames of any session that just ended are queued, not
+        // sent. Exiting here would leave a controller waiting out its idle
+        // timeout for a host that told it exactly why it was going.
+        let _ = tokio::time::timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
+        outcome
     })
 }
 
@@ -345,7 +396,12 @@ fn accept_deadline(parked_for: Option<Duration>) -> Option<Duration> {
 type Served = Result<(String, Option<Parked>), (String, Option<Parked>)>;
 
 #[allow(clippy::result_large_err)]
-async fn serve_one(mut session: Session, o: &HostOptions, parked: Option<Parked>) -> Served {
+async fn serve_one(
+    mut session: Session,
+    o: &HostOptions,
+    parked: Option<Parked>,
+    stopping: tokio::sync::watch::Receiver<bool>,
+) -> Served {
     println!(
         "      peer {}  {}",
         session.peer_fingerprint().hex(),
@@ -392,7 +448,7 @@ async fn serve_one(mut session: Session, o: &HostOptions, parked: Option<Parked>
         config.width, config.height, config.max_fps, config.ssrc
     );
 
-    serve(link, media, device, parked).await
+    serve(link, media, device, parked, stopping).await
 }
 
 /// Open a capture backend and build a sender around it.
@@ -432,6 +488,7 @@ async fn serve(
     media: ownview_transport::MediaChannel,
     device: [u8; 32],
     parked: Option<Parked>,
+    mut stopping: tokio::sync::watch::Receiver<bool>,
 ) -> Served {
     // The controller's messages have to reach the pipeline, which lives on the
     // sending thread; and a monitor switch has to be announced back, which
@@ -501,13 +558,28 @@ async fn serve(
     enum Turn {
         FromController(Result<MediaMessage, ownview_transport::ControlError>),
         ToController(Option<MediaMessage>),
+        /// The operator asked this process to stop.
+        Stop,
     }
+    // Whether this side ended it. A session the host closed is not one to
+    // park: parking is for a controller that has not chosen to leave, and this
+    // host is going.
+    let mut ours = false;
     loop {
         let turn = tokio::select! {
+            _ = stopping.changed() => Turn::Stop,
             incoming = control.recv::<MediaMessage>() => Turn::FromController(incoming),
             outgoing = from_pipeline.recv() => Turn::ToController(outgoing),
         };
         match turn {
+            // **The reason travels.** A controller whose host simply stopped
+            // sending cannot tell a shutdown from a network that broke, and
+            // there is a code for this one.
+            Turn::Stop => {
+                media.close(ownview_proto::Reason::HOST_SHUTTING_DOWN);
+                ours = true;
+                break;
+            }
             Turn::FromController(Ok(message)) => {
                 if to_pipeline.send(message).is_err() {
                     break;
@@ -534,30 +606,35 @@ async fn serve(
     // A reason means somebody decided, and a decision is not something to
     // reconnect around. Silence means the path broke under a controller that
     // has not chosen to leave, and that is what parking is for.
-    let keep = match media.peer_close_reason() {
-        Some((code, text)) => {
-            let described = code.describe().unwrap_or(&text);
-            if code.is_failure() {
-                println!("      the controller left: {described} ({})", code.0);
-            } else {
-                println!("      the controller left: {described}");
+    let keep = if ours {
+        println!("      told the controller the host is shutting down");
+        None
+    } else {
+        match media.peer_close_reason() {
+            Some((code, text)) => {
+                let described = code.describe().unwrap_or(&text);
+                if code.is_failure() {
+                    println!("      the controller left: {described} ({})", code.0);
+                } else {
+                    println!("      the controller left: {described}");
+                }
+                None
             }
-            None
-        }
-        None => {
-            // Saying "the connection ended" beats reporting a reason nobody
-            // gave — and the session waits, because the controller never said
-            // it was done.
-            let config = pump.config();
-            println!(
-                "      the connection ended without a reason from either side; \
+            None => {
+                // Saying "the connection ended" beats reporting a reason nobody
+                // gave — and the session waits, because the controller never said
+                // it was done.
+                let config = pump.config();
+                println!(
+                    "      the connection ended without a reason from either side; \
                  parking the {}x{} session for {:?}",
-                config.width,
-                config.height,
-                ownview_stream::PARK_TIMEOUT
-            );
-            media.close(ownview_proto::Reason::PEER_GONE);
-            Some(pump.park(device, Instant::now()))
+                    config.width,
+                    config.height,
+                    ownview_stream::PARK_TIMEOUT
+                );
+                media.close(ownview_proto::Reason::PEER_GONE);
+                Some(pump.park(device, Instant::now()))
+            }
         }
     };
 
@@ -758,7 +835,15 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     }
                 }
                 Ok(Err(e)) => {
-                    println!("  · the session ended: {e}");
+                    // The error is often the peer's close arriving, and the
+                    // close carries a reason. Reporting the error text
+                    // instead — and then announcing our own reason on top of
+                    // it — tells the person the session ended for a reason
+                    // nobody gave, when the host had said exactly why.
+                    match link.peer_close_reason() {
+                        Some((code, text)) => closed_by_peer = Some((code, text)),
+                        None => println!("  · the session ended: {e}"),
+                    }
                     break;
                 }
                 Err(_) => {
