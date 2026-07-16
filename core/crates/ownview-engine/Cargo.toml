@@ -25,6 +25,7 @@ ownview-link.workspace = true
 ownview-media.workspace = true
 ownview-stream.workspace = true
 ownview-discovery.workspace = true
+ownview-input.workspace = true
 tokio.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 ownview-buildinfo.workspace = true
@@ -37,3 +38,4 @@ tracing-subscriber.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 ownview-capture-x11.workspace = true
 ownview-present-x11.workspace = true
+ownview-input-x11.workspace = true

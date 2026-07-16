@@ -22,6 +22,7 @@
 //! the focus** before sending a single event. If it does not, it skips. A test
 //! that typed into the desktop of whoever ran it would be worse than no test.
 
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use ownview_input::{InputSink, Point, hid};
@@ -32,6 +33,22 @@ use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
     ConnectionExt as _, CreateWindowAux, EventMask, InputFocus, WindowClass,
 };
+
+/// **A display has one keyboard focus and one pointer**, and every test that
+/// injects moves both. Run in parallel — which is the default, and what CI
+/// does — one test's `set_input_focus` sends another's keystrokes to the wrong
+/// window, and one test's pointer warp moves another's pointer out from under
+/// it. Both happened, in CI, after passing serially on the developer's
+/// machine.
+///
+/// A lock rather than a fix to the code: a display really does have one focus,
+/// and a real session does not share it with another session on the same
+/// screen.
+static DISPLAY: Mutex<()> = Mutex::new(());
+
+fn exclusive() -> MutexGuard<'static, ()> {
+    DISPLAY.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 /// `Some(injector)` when there is a display with XTEST.
 fn open() -> Option<X11Injector> {
@@ -319,6 +336,7 @@ impl Drop for Focused {
 /// **Injection reaches a window, as the key that was asked for.**
 #[test]
 fn a_key_arrives_at_a_focused_window_as_the_key_it_was_sent_as() {
+    let _display = exclusive();
     if !may_inject() {
         return;
     }
@@ -381,6 +399,7 @@ fn a_key_arrives_at_a_focused_window_as_the_key_it_was_sent_as() {
 /// somebody else's machine, which they cannot diagnose and cannot fix.
 #[test]
 fn release_all_releases_what_was_left_down() {
+    let _display = exclusive();
     if !may_inject() {
         return;
     }
@@ -447,6 +466,7 @@ fn release_all_releases_what_was_left_down() {
 /// name, and does not leave anything held.
 #[test]
 fn a_key_this_platform_does_not_have_is_refused() {
+    let _display = exclusive();
     let Some(mut injector) = open() else { return };
     let e = injector
         .key(KeyEvent {
@@ -469,6 +489,7 @@ fn a_key_this_platform_does_not_have_is_refused() {
 /// applications count them.
 #[test]
 fn a_scroll_arrives_as_one_wheel_click_per_notch() {
+    let _display = exclusive();
     if !may_inject() {
         return;
     }
@@ -504,6 +525,7 @@ fn a_scroll_arrives_as_one_wheel_click_per_notch() {
 /// The pointer goes where it is told, in desktop coordinates.
 #[test]
 fn the_pointer_moves_to_an_absolute_position() {
+    let _display = exclusive();
     if !may_inject() {
         return;
     }

@@ -376,6 +376,24 @@ impl Session {
         Ok(crate::Control::new(s, r))
     }
 
+    /// Something that can accept a control stream later, without borrowing
+    /// the session.
+    ///
+    /// For a stream the peer opens **lazily** — input is the case: a session
+    /// that never sends a keystroke never opens the stream, so accepting it
+    /// means waiting for something that may never arrive. That waiting belongs
+    /// in a task, and a task cannot hold a borrow of the session.
+    ///
+    /// Kept here rather than handing out the connection so that nothing
+    /// outside this crate has to name a `quinn::Connection`: the transport's
+    /// choice of QUIC stays the transport's business.
+    #[must_use]
+    pub fn control_acceptor(&self) -> ControlAcceptor {
+        ControlAcceptor {
+            conn: self.conn.clone(),
+        }
+    }
+
     /// Accept an additional control stream the peer opened.
     pub async fn accept_control(&self) -> Result<crate::Control, SessionError> {
         let (s, r) = self
@@ -585,5 +603,25 @@ impl MediaChannel {
             received_bytes: s.udp_rx.bytes,
             congestion_window: s.path.cwnd,
         }
+    }
+}
+
+/// Accepts a control stream the peer opens later.
+///
+/// See [`Session::control_acceptor`].
+#[derive(Debug, Clone)]
+pub struct ControlAcceptor {
+    conn: quinn::Connection,
+}
+
+impl ControlAcceptor {
+    /// Wait for the peer to open a control stream.
+    pub async fn accept(&self) -> Result<crate::Control, SessionError> {
+        let (s, r) = self
+            .conn
+            .accept_bi()
+            .await
+            .map_err(|e| SessionError::Stream(e.to_string()))?;
+        Ok(crate::Control::new(s, r))
     }
 }

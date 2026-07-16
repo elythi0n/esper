@@ -682,6 +682,8 @@ dependencies = [
  "ownview-decode",
  "ownview-discovery",
  "ownview-encode",
+ "ownview-input",
+ "ownview-input-x11",
  "ownview-link",
  "ownview-media",
  "ownview-pipeline",

@@ -28,15 +28,17 @@
 //! backend, and every sink releases it — on `ReleaseAll`, and again on drop,
 //! because a drop is what a dropped session looks like from here.
 
+pub mod dispatch;
 pub mod held;
 pub mod hid;
 pub mod null;
 
+pub use dispatch::{Dispatcher, Monitor};
 pub use held::Held;
 pub use hid::{Evdev, evdev_for_usage, usage_for_evdev};
 pub use null::{NullSink, Recorded};
 
-use ownview_proto::{Button, InputMessage, KeyEvent, PointerButton, PointerMove, Scroll};
+use ownview_proto::{KeyEvent, PointerButton, Scroll};
 
 /// Anything that went wrong injecting.
 #[derive(Debug, thiserror::Error)]
@@ -102,71 +104,4 @@ pub trait InputSink: std::fmt::Debug + Send {
 
     /// What is held right now, for a caller that wants to report it.
     fn held(&self) -> &Held;
-}
-
-/// Which buttons a platform is being asked about, in one place.
-///
-/// Ordered so a backend can map it to its own numbering with a match rather
-/// than arithmetic on a value it did not choose.
-#[must_use]
-pub const fn all_buttons() -> [Button; 5] {
-    [
-        Button::Left,
-        Button::Middle,
-        Button::Right,
-        Button::Back,
-        Button::Forward,
-    ]
-}
-
-/// Apply one protocol message to a sink.
-///
-/// The monitor is resolved by the caller — only a host knows what monitors it
-/// has — and handed in as the rectangle the position is a fraction of.
-///
-/// **A malformed message is refused here**, once, rather than in each
-/// backend: a usage naming no key and a scroll no device could produce are
-/// both things a peer can send, and a sink that trusted its input would be
-/// trusting a peer's arithmetic.
-pub fn apply(
-    sink: &mut dyn InputSink,
-    message: &InputMessage,
-    monitor: Option<(i32, i32, u32, u32)>,
-) -> Result<(), InputError> {
-    if !message.is_well_formed() {
-        return Err(InputError::Backend {
-            backend: sink.backend(),
-            detail: format!("{} is outside its bounds", message.name()),
-        });
-    }
-    match message {
-        InputMessage::Key(k) => sink.key(*k),
-        InputMessage::Pointer(p) => {
-            let Some((x, y, width, height)) = monitor else {
-                return Err(InputError::NoSuchMonitor {
-                    monitor: p.monitor,
-                    count: 0,
-                });
-            };
-            let (dx, dy) = p.to_pixels(width, height);
-            sink.pointer(Point {
-                x: x.saturating_add(i32::try_from(dx).unwrap_or(i32::MAX)),
-                y: y.saturating_add(i32::try_from(dy).unwrap_or(i32::MAX)),
-            })
-        }
-        InputMessage::Button(b) => sink.button(*b),
-        InputMessage::Scroll(s) => sink.scroll(*s),
-        InputMessage::ReleaseAll => sink.release_all(),
-    }
-}
-
-/// A pointer position on a monitor, for a caller assembling one.
-#[must_use]
-pub fn point_on(monitor: (i32, i32, u32, u32), position: PointerMove) -> Point {
-    let (x, y, width, height) = monitor;
-    let (dx, dy) = position.to_pixels(width, height);
-    Point {
-        x: x.saturating_add(i32::try_from(dx).unwrap_or(i32::MAX)),
-        y: y.saturating_add(i32::try_from(dy).unwrap_or(i32::MAX)),
-    }
 }

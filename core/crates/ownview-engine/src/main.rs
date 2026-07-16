@@ -10,6 +10,8 @@
 
 mod backend;
 mod discover_cmd;
+mod injector;
+mod input_source;
 mod loopback;
 mod net;
 mod pairing;

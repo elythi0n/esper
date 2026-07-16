@@ -202,6 +202,22 @@ pub enum InputMessage {
     /// stuck Ctrl or Alt makes the host unusable for its own owner, who has no
     /// way to know why.
     ReleaseAll,
+    /// Still here, and still holding what I said I was holding.
+    ///
+    /// **This is what lets a host let go of a key when a controller dies
+    /// without saying anything.** A controller that crashes, is killed, or
+    /// loses its network mid-keystroke sends no [`Self::ReleaseAll`], and the
+    /// transport takes its idle timeout to notice — thirty seconds, measured,
+    /// with a modifier held down the whole time.
+    ///
+    /// Silence cannot be the signal on its own: a person holding Shift while
+    /// reading generates no input at all, and that is a legitimate state. So
+    /// a controller holding anything says so about once a second, and a host
+    /// with something held and no word for a few seconds lets it go.
+    ///
+    /// Sent **only** while something is held. A session where nobody is
+    /// touching the keyboard costs nothing.
+    Holding,
 }
 
 impl InputMessage {
@@ -213,7 +229,7 @@ impl InputMessage {
             Self::Scroll(s) => s.is_well_formed(),
             // A monitor that does not exist is refused by the host, which is
             // the only side that knows what monitors there are.
-            Self::Pointer(_) | Self::Button(_) | Self::ReleaseAll => true,
+            Self::Pointer(_) | Self::Button(_) | Self::ReleaseAll | Self::Holding => true,
         }
     }
 
@@ -236,6 +252,7 @@ impl InputMessage {
             Self::Button(_) => "a button event",
             Self::Scroll(_) => "a scroll",
             Self::ReleaseAll => "a release-all",
+            Self::Holding => "a still-holding",
         }
     }
 }
@@ -515,6 +532,7 @@ mod tests {
                 dy_pixels: None,
             }),
             InputMessage::ReleaseAll,
+            InputMessage::Holding,
         ];
         for m in messages {
             assert!(m.may_be_sent_by(Role::Controller), "{}", m.name());
@@ -545,6 +563,7 @@ mod tests {
                 dy_pixels: Some(-40),
             }),
             InputMessage::ReleaseAll,
+            InputMessage::Holding,
         ];
         for m in messages {
             let bytes = crate::encode(&m).expect("encode");

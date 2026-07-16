@@ -65,6 +65,9 @@ pub struct X11Presenter {
     surface: Vec<u8>,
     segment: Option<Segment>,
     open: bool,
+    /// Whether the person's input is reported. See
+    /// [`ownview_present::Presenter::forward_input`].
+    forwarding: bool,
     /// `WM_DELETE_WINDOW`, so closing the window is a request rather than a
     /// severed connection.
     delete_window: u32,
@@ -137,7 +140,20 @@ impl X11Presenter {
             WindowClass::INPUT_OUTPUT,
             screen.root_visual,
             &CreateWindowAux::new().event_mask(
-                EventMask::EXPOSURE | EventMask::STRUCTURE_NOTIFY | EventMask::KEY_PRESS,
+                EventMask::EXPOSURE
+                    | EventMask::STRUCTURE_NOTIFY
+                    // Everything a person does in the window. Selected
+                    // whether or not it is being forwarded, because a mask is
+                    // set once at creation and the session may turn
+                    // forwarding on later — an unselected event is one the
+                    // server never sends, and there is no second chance.
+                    | EventMask::KEY_PRESS
+                    | EventMask::KEY_RELEASE
+                    | EventMask::BUTTON_PRESS
+                    | EventMask::BUTTON_RELEASE
+                    | EventMask::POINTER_MOTION
+                    // The moment everything held has to be let go.
+                    | EventMask::FOCUS_CHANGE,
             ),
         )
         .map_err(|e| fail(e.to_string()))?
@@ -216,6 +232,7 @@ impl X11Presenter {
             surface: vec![0; bytes],
             segment,
             open: true,
+            forwarding: false,
             delete_window,
         })
     }
@@ -412,6 +429,10 @@ impl Presenter for X11Presenter {
         Ok(())
     }
 
+    fn forward_input(&mut self, on: bool) {
+        self.forwarding = on;
+    }
+
     fn present(&mut self, picture: &I420, damage: &Damage) -> Result<(), PresentError> {
         if (picture.width(), picture.height()) != (self.width, self.height) {
             return Err(PresentError::WrongSize {
@@ -465,10 +486,53 @@ impl Presenter for X11Presenter {
                         }
                     }
                     // Escape closes it, because a debug window with no
-                    // decorations is otherwise hard to get rid of.
-                    Event::KeyPress(k) if k.detail == ESCAPE => {
+                    // decorations is otherwise hard to get rid of — but only
+                    // while nothing is being forwarded. A session that
+                    // swallowed Escape would be a remote desktop that cannot
+                    // send it.
+                    Event::KeyPress(k) if k.detail == ESCAPE && !self.forwarding => {
                         self.open = false;
                         out.push(PresentEvent::CloseRequested);
+                    }
+                    Event::KeyPress(k) if self.forwarding => out.push(PresentEvent::Key {
+                        code: u32::from(k.detail),
+                        pressed: true,
+                    }),
+                    Event::KeyRelease(k) if self.forwarding => out.push(PresentEvent::Key {
+                        code: u32::from(k.detail),
+                        pressed: false,
+                    }),
+                    // **The wheel arrives as a button on X11**, and a
+                    // wheel-as-button forwarded as a button would be a middle
+                    // click on the host. Buttons 4 to 7 are the wheel and
+                    // become a scroll; the rest are buttons.
+                    Event::ButtonPress(b) if self.forwarding => match b.detail {
+                        4 => out.push(PresentEvent::Scroll { dx: 0, dy: -1 }),
+                        5 => out.push(PresentEvent::Scroll { dx: 0, dy: 1 }),
+                        6 => out.push(PresentEvent::Scroll { dx: -1, dy: 0 }),
+                        7 => out.push(PresentEvent::Scroll { dx: 1, dy: 0 }),
+                        other => out.push(PresentEvent::Button {
+                            code: u32::from(other),
+                            pressed: true,
+                        }),
+                    },
+                    Event::ButtonRelease(b) if self.forwarding => {
+                        // The wheel's release is the other half of a click
+                        // already reported, so it is dropped rather than sent
+                        // as a scroll of its own.
+                        if !(4..=7).contains(&b.detail) {
+                            out.push(PresentEvent::Button {
+                                code: u32::from(b.detail),
+                                pressed: false,
+                            });
+                        }
+                    }
+                    Event::MotionNotify(m) if self.forwarding => out.push(PresentEvent::Pointer {
+                        x: i32::from(m.event_x),
+                        y: i32::from(m.event_y),
+                    }),
+                    Event::FocusOut(_) if self.forwarding => {
+                        out.push(PresentEvent::FocusLost);
                     }
                     _ => {}
                 },

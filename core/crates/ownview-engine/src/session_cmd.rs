@@ -76,6 +76,8 @@ pub struct ConnectOptions {
     pub addr: SocketAddr,
     pub seconds: u64,
     pub present: bool,
+    /// Send this window's keys and pointer to the host.
+    pub control: bool,
     /// A monitor to ask the host for, when it is not the one announced.
     pub monitor: Option<u32>,
 }
@@ -149,6 +151,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut addr: Option<SocketAddr> = None;
     let mut seconds = 0u64;
     let mut present = false;
+    let mut control = false;
     let mut monitor: Option<u32> = None;
     let mut i = 0usize;
     while let Some(arg) = args.get(i) {
@@ -163,6 +166,10 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
             }
             "--present" => {
                 present = true;
+                i += 1;
+            }
+            "--control" => {
+                control = true;
                 i += 1;
             }
             "--monitor" => {
@@ -185,6 +192,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
         addr: addr.ok_or("connect needs the host's address, as `connect <address>`")?,
         seconds,
         present,
+        control,
         monitor,
     })
 }
@@ -448,7 +456,69 @@ async fn serve_one(
         config.width, config.height, config.max_fps, config.ssrc
     );
 
-    serve(link, media, device, parked, stopping).await
+    // **Whether this device may drive the machine, decided here and once.**
+    // Read from the paired store rather than from anything the peer said: the
+    // controller's own opinion of its permissions is not evidence.
+    let may_control = match paths::devices() {
+        Ok((store, _)) => store
+            .iter()
+            .find(|d| d.public_key == device)
+            .is_some_and(|d| d.permissions.contains(&ownview_proto::Permission::Control)),
+        Err(e) => {
+            eprintln!("      · could not read the paired devices ({e}); input refused");
+            false
+        }
+    };
+
+    let input = if may_control {
+        let chosen = crate::injector::open();
+        for line in &chosen.attempts {
+            println!("      {line}");
+        }
+        if chosen.real {
+            Some(ownview_input::Dispatcher::new(
+                chosen.sink,
+                monitors_from(&config),
+                true,
+            ))
+        } else {
+            // Said out loud rather than accepted quietly. A host that took
+            // keystrokes and dropped them would look like a working session
+            // where nothing happens, which is the hardest fault to diagnose
+            // from the other end.
+            println!("      view only: nothing on this machine can inject input");
+            None
+        }
+    } else {
+        println!("      view only: this device does not hold control");
+        None
+    };
+
+    let waiting_for_input = match input {
+        Some(dispatcher) => {
+            // Accepted in a task because the controller opens this stream
+            // lazily — a session that sends no input never opens it, and
+            // waiting here would hold up the video.
+            let accepting = session.control_acceptor();
+            let stopping = stopping.clone();
+            Some(tokio::spawn(async move {
+                match accepting.accept().await {
+                    Ok(control) => serve_input(control, dispatcher, stopping).await,
+                    Err(e) => tracing::debug!("no input stream on this session: {e}"),
+                }
+            }))
+        }
+        None => None,
+    };
+
+    let served = serve(link, media, device, parked, stopping).await;
+    if let Some(task) = waiting_for_input {
+        // Aborted rather than awaited: it is waiting on a stream that will
+        // never arrive now, and the dispatcher's `Drop` is what releases
+        // anything held.
+        task.abort();
+    }
+    served
 }
 
 /// Open a capture backend and build a sender around it.
@@ -479,6 +549,113 @@ fn fresh(
     .with_ceiling(o.max_resolution.map_or_else(Ceiling::none, Ceiling::of));
 
     HostLink::new(media, control, pipeline).map_err(|e| e.to_string())
+}
+
+/// Serve the controller's input on a stream of its own.
+///
+/// # Why a task rather than a branch in the session loop
+///
+/// The input stream is opened by the *controller*, lazily — a session that
+/// never sends input never opens it — so accepting it means waiting for
+/// something that may never come. A task can wait for ever without holding up
+/// anything else.
+///
+/// # Everything is let go of when this ends
+///
+/// However it ends. The dispatcher releases on drop, and this says so in the
+/// log when something was still held, because a session that ended with keys
+/// down is worth knowing about even when the release worked.
+async fn serve_input(
+    session_input: ownview_transport::Control,
+    mut dispatcher: ownview_input::Dispatcher,
+    mut stopping: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut control = session_input;
+    let mut refusals = 0u64;
+    let mut let_go = 0u64;
+    loop {
+        // **While something is held, the controller has to keep saying so.**
+        // A controller that crashes mid-keystroke sends no release, and the
+        // transport takes its thirty-second idle timeout to notice — thirty
+        // seconds of a modifier held down on somebody else's machine,
+        // measured. So a held session that goes quiet for a few seconds is
+        // treated as gone, and everything is let go.
+        //
+        // Silence with nothing held is not a signal at all: a person watching
+        // a screen types nothing, and that is a session working perfectly.
+        let message = if dispatcher.held().is_empty() {
+            tokio::select! {
+                _ = stopping.changed() => break,
+                m = control.recv::<ownview_proto::InputMessage>() => m,
+            }
+        } else {
+            tokio::select! {
+                _ = stopping.changed() => break,
+                m = control.recv::<ownview_proto::InputMessage>() => m,
+                _ = tokio::time::sleep(HELD_SILENCE) => {
+                    if dispatcher.release_all() {
+                        let_go = let_go.saturating_add(1);
+                        println!(
+                            "      · nothing from the controller for {}s with input held: \
+                             released it",
+                            HELD_SILENCE.as_secs()
+                        );
+                    }
+                    continue;
+                }
+            }
+        };
+        let Ok(message) = message else { break };
+        if let Err(e) = dispatcher.apply(&message) {
+            // **Counted, and said once.** A key this platform does not have
+            // is ordinary, and a line per keystroke would bury the session's
+            // own output. The first is worth seeing.
+            refusals = refusals.saturating_add(1);
+            if refusals == 1 {
+                eprintln!("      · input refused: {e}");
+            }
+        }
+    }
+    let (injected, refused) = dispatcher.counts();
+    if dispatcher.release_all() {
+        println!("      released the input still held when the session ended");
+    }
+    if injected > 0 || refused > 0 {
+        println!("      input: {injected} injected, {refused} refused");
+    }
+    if let_go > 0 {
+        println!("      input was let go of {let_go} time(s) after the controller went quiet");
+    }
+}
+
+/// How long a held key survives silence from the controller.
+///
+/// Three heartbeats' worth. Long enough that a lost packet or a stalled
+/// controller does not drop a modifier somebody is deliberately holding; short
+/// enough that a crashed controller does not leave one held for the
+/// transport's whole idle timeout.
+const HELD_SILENCE: Duration = Duration::from_secs(3);
+
+/// The monitors as the input side needs them, from the config the host
+/// announced.
+///
+/// Taken from the announcement rather than asked for again, so the controller
+/// and the host are working from the same list: a pointer is a fraction of the
+/// monitor the *controller was told about*, and a host that resolved it
+/// against a newer list would put the pointer somewhere the person did not
+/// click.
+fn monitors_from(config: &ownview_proto::StreamConfig) -> Vec<ownview_input::Monitor> {
+    config
+        .monitors
+        .iter()
+        .map(|m| ownview_input::Monitor {
+            id: m.id,
+            x: m.x,
+            y: m.y,
+            width: m.width,
+            height: m.height,
+        })
+        .collect()
 }
 
 /// Run a session until it ends, and decide what survives it.
@@ -780,6 +957,31 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             None
         };
 
+        // **Driving needs a window to drive from.** Input comes from the
+        // viewer's own window, so `--control` without `--present` has nothing
+        // to read: said plainly rather than accepted and silently doing
+        // nothing.
+        let mut driving = None;
+        if o.control {
+            match presenter.as_mut() {
+                Some(p) => match session.open_control().await {
+                    Ok(control) => {
+                        p.forward_input(true);
+                        println!("  control    keys and pointer go to the host");
+                        driving = Some((
+                            crate::input_source::InputSource::new(
+                                config.selected,
+                                (config.width, config.height),
+                            ),
+                            control,
+                        ));
+                    }
+                    Err(e) => println!("  control    unavailable ({e})"),
+                },
+                None => println!("  control    needs a window; add --present"),
+            }
+        }
+
         let deadline =
             (o.seconds > 0).then(|| tokio::time::Instant::now() + Duration::from_secs(o.seconds));
         let started = std::time::Instant::now();
@@ -794,15 +996,35 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // `ControllerLink::due_in` derives it from the stream's own framerate
         // and says how long is left, so this loop only has to honour it.
         const IDLE_GIVE_UP: Duration = Duration::from_secs(30);
+        /// The longest a keystroke may sit in the loop before it is sent.
+        const INPUT_POLL: Duration = Duration::from_millis(10);
         let mut last_arrival = tokio::time::Instant::now();
         loop {
             if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
                 break;
             }
             // As long as the stream will let us, and no longer.
-            let wait = link
+            let mut wait = link
                 .due_in(std::time::Instant::now())
                 .unwrap_or(Duration::from_secs(1));
+            // **Except while driving.** The window's events are read once
+            // round this loop, so the wait is also the longest a keystroke
+            // can sit in it — and with nothing arriving from the host, that
+            // wait is a second. Measured: a key pressed and released 30 ms
+            // apart reached the host a second apart, so the host held it down
+            // and the far end's auto-repeat turned one keystroke into twenty.
+            //
+            // Ten milliseconds is below anything a person can perceive in a
+            // keystroke echo, and the extra wake-ups happen only while
+            // somebody is actually driving. Waiting on the window's own file
+            // descriptor alongside the datagrams would cost nothing at all
+            // and is the better version of this; it needs the presenter to
+            // hand out a pollable handle, which is worth doing when the
+            // viewer is rebuilt rather than bolting a raw descriptor onto the
+            // trait now.
+            if driving.is_some() {
+                wait = wait.min(INPUT_POLL);
+            }
             match tokio::time::timeout(wait, link.pump(&mut out)).await {
                 Ok(Ok(())) => {
                     last_arrival = tokio::time::Instant::now();
@@ -824,6 +1046,14 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                                     "  · now showing monitor {}: {}x{}",
                                     announced.selected, announced.width, announced.height
                                 );
+                                // The same window position is now a fraction
+                                // of a different screen.
+                                if let Some((source, _)) = driving.as_mut() {
+                                    source.showing(
+                                        announced.selected,
+                                        (announced.width, announced.height),
+                                    );
+                                }
                                 if let Some(p) = presenter.as_mut()
                                     && let Err(e) = p.resize(announced.width, announced.height)
                                 {
@@ -892,14 +1122,85 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     }
                 }
             }
-            if presenter.as_mut().is_some_and(|p| {
-                p.poll()
-                    .is_ok_and(|e| e.contains(&ownview_present::PresentEvent::CloseRequested))
-            }) {
+            // What the person did in the window: closed it, or drove the
+            // host with it.
+            let happened = presenter
+                .as_mut()
+                .and_then(|p| p.poll().ok())
+                .unwrap_or_default();
+            if happened.contains(&ownview_present::PresentEvent::CloseRequested) {
                 println!("  · the window was closed");
                 break;
             }
+            if let Some((source, control)) = driving.as_mut() {
+                let mut failed = None;
+                // **Pointer moves collapse to the last one in the batch.** A
+                // mouse dragged across a window produces a motion event per
+                // pixel of the path, and every one but the last describes a
+                // place the pointer has already left. Sending them all would
+                // spend the link on a trail nobody needs — and a host
+                // injecting them all would move its pointer along the same
+                // path a moment late.
+                let mut latest_move = None;
+                for event in &happened {
+                    let Some(message) = source.translate(event) else {
+                        continue;
+                    };
+                    if matches!(message, ownview_proto::InputMessage::Pointer(_)) {
+                        latest_move = Some(message);
+                        continue;
+                    }
+                    // A press has to arrive *after* the move that positioned
+                    // it, or the host clicks where the pointer used to be.
+                    if let Some(m) = latest_move.take()
+                        && let Err(e) = control.send(&m).await
+                    {
+                        failed = Some(e);
+                        break;
+                    }
+                    if let Err(e) = control.send(&message).await {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+                if failed.is_none()
+                    && let Some(m) = latest_move
+                    && let Err(e) = control.send(&m).await
+                {
+                    failed = Some(e);
+                }
+                // **Said only while something is held.** It is what lets the
+                // host let go if this process disappears without a word.
+                if failed.is_none()
+                    && let Some(beat) = source.heartbeat(std::time::Instant::now())
+                    && let Err(e) = control.send(&beat).await
+                {
+                    failed = Some(e);
+                }
+                if let Some(e) = failed {
+                    // The input stream is gone. The session carries on
+                    // showing the screen: a viewer that could no longer type
+                    // is still a viewer, and ending it would take the picture
+                    // away too.
+                    println!("  · input stopped reaching the host ({e}); watching only");
+                    driving = None;
+                }
+            }
         }
+        // **Say what is being let go of, rather than leaving the host to work
+        // it out.** A session ending with a key held is ordinary — the window
+        // closes while somebody is mid-shortcut — and the host's silence timer
+        // would get there in a few seconds. Saying it takes one message and
+        // gets there at once.
+        if let Some((source, control)) = driving.as_mut()
+            && source.is_holding()
+        {
+            match control.send(&ownview_proto::InputMessage::ReleaseAll).await {
+                Ok(()) => println!("  · released the keys still held"),
+                Err(e) => println!("  · could not release the keys still held ({e})"),
+            }
+        }
+
         // And once more at the end, so a session that stops mid-frame still
         // shows what it had.
         link.flush(&mut out);
@@ -959,6 +1260,19 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let jitter = link.jitter();
         let seconds = started.elapsed().as_secs_f64().max(0.001);
         println!("  pictures   {pictures} shown, {skipped} not shown");
+        // Said only when it happened. Input this window produced and the
+        // protocol has no way to carry — a key HID does not name, a pointer
+        // outside the picture — is dropped here rather than approximated, and
+        // a person whose side button does nothing deserves to know it was
+        // this end that decided.
+        if let Some((source, _)) = driving.as_ref()
+            && source.dropped() > 0
+        {
+            println!(
+                "  input      {} event(s) this window produced could not be sent",
+                source.dropped()
+            );
+        }
         println!(
             "  frames     {} lost, {} keyframes asked for",
             stats.frames_lost, stats.keyframes_requested

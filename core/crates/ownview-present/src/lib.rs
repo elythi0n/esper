@@ -60,6 +60,19 @@ pub enum PresentError {
 }
 
 /// Something the person watching did.
+///
+/// # Why input is reported here
+///
+/// A presenter owns the window, and a window is where a person's keys and
+/// mouse arrive. Something else reading them would need its own connection to
+/// somebody else's window, which is worse than this being a slightly wider
+/// job than "show pictures" — and the trait was already the channel for what
+/// the person did, since a close request is exactly that.
+///
+/// **Nothing here interprets them.** A presenter reports what its window was
+/// told, in the window's own coordinates and this platform's own key codes;
+/// turning that into protocol messages is the engine's job, because only the
+/// engine knows which monitor is on screen and what the picture's size is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentEvent {
     /// They asked for the window to go away.
@@ -72,6 +85,28 @@ pub enum PresentEvent {
     Resized { width: u32, height: u32 },
     /// The window needs repainting whether or not the picture changed.
     Exposed,
+    /// A key went down or came up, in **this platform's** code.
+    ///
+    /// Not a HID usage: the translation needs the same table the injecting
+    /// side uses, and putting it here would mean two copies of it.
+    Key { code: u32, pressed: bool },
+    /// A pointer moved to a position **in the window**, in pixels from its
+    /// top-left corner.
+    ///
+    /// In the window rather than on the screen, because the window is what
+    /// shows the picture and the picture is what the position has to be a
+    /// fraction of.
+    Pointer { x: i32, y: i32 },
+    /// A button went down or came up, in this platform's numbering.
+    Button { code: u32, pressed: bool },
+    /// A wheel or touchpad scrolled, in notches.
+    Scroll { dx: i16, dy: i16 },
+    /// The window lost the keyboard.
+    ///
+    /// **The moment everything held has to be let go**, and the reason this is
+    /// reported at all: a person who alt-tabs away mid-keystroke has released
+    /// nothing, and the host would go on holding the key for ever.
+    FocusLost,
 }
 
 /// A place to put pictures.
@@ -97,6 +132,19 @@ pub trait Presenter: std::fmt::Debug {
     /// Whether the window is still there.
     fn is_open(&self) -> bool;
 
+    /// Report the person's keys and pointer, or keep them.
+    ///
+    /// **Off by default, and the default is not the interesting case.** A
+    /// viewer with nothing to send them to is a debug window, and a debug
+    /// window needs a way to close itself — `Escape` — which a session
+    /// forwarding input must not swallow, because a remote desktop that
+    /// cannot send `Escape` is broken.
+    ///
+    /// So the caller says which it is. On, every key goes out and the window
+    /// is closed by the window manager; off, `Escape` closes it and no input
+    /// is reported at all.
+    fn forward_input(&mut self, on: bool);
+
     /// Show pictures of a different size from now on.
     ///
     /// A session's picture size changes when the host switches monitor, and a
@@ -117,6 +165,9 @@ pub trait Presenter: std::fmt::Debug {
 #[derive(Debug, Default)]
 pub struct NullPresenter {
     size: (u32, u32),
+    /// Whether input would be forwarded, for a caller checking that a session
+    /// turned it on.
+    pub forwarding: bool,
     /// Every picture's damage, in order.
     pub shown: Vec<Damage>,
     /// Luma samples that would have been converted, damage taken into account.
@@ -130,6 +181,7 @@ impl NullPresenter {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             size: (width, height),
+            forwarding: false,
             shown: Vec::new(),
             pixels: 0,
             open: true,
@@ -185,6 +237,10 @@ impl Presenter for NullPresenter {
         }
         self.size = (width, height);
         Ok(())
+    }
+
+    fn forward_input(&mut self, on: bool) {
+        self.forwarding = on;
     }
 }
 
