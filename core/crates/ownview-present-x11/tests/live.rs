@@ -52,6 +52,15 @@ fn open(w: u32, h: u32) -> Option<X11Presenter> {
 }
 
 /// A picture filled with one YUV triple.
+/// The size the server says the window is, read independently of the
+/// presenter's own bookkeeping.
+fn window_size(window: u32) -> Option<(u32, u32)> {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let (conn, _) = x11rb::connect(None).ok()?;
+    let g = conn.get_geometry(window).ok()?.reply().ok()?;
+    Some((u32::from(g.width), u32::from(g.height)))
+}
+
 fn flat(w: u32, h: u32, y: u8, u: u8, v: u8) -> I420 {
     let mut img = I420::new(w, h).expect("a valid size");
     let (ys, us) = (img.y_stride(), img.uv_stride());
@@ -253,6 +262,81 @@ fn a_damaged_region_updates_only_itself() {
         "the rest of the window was repainted although nothing said it changed \
          ({outside}) — damage is being ignored, so a caret costs a frame"
     );
+}
+
+/// **A window that follows the session.** A host switching monitor changes
+/// the picture's size, and a presenter that only refused the new size would
+/// leave the viewer on the last frame of the old screen — which reads as a
+/// host that has hung.
+#[test]
+fn a_resized_window_takes_pictures_of_the_new_size() {
+    let _screen = exclusive();
+    const W: u32 = 96;
+    const H: u32 = 64;
+    let Some(mut p) = open(W, H) else { return };
+    p.present(&flat(W, H, 126, 90, 200), &Damage::Everything)
+        .expect("the first size");
+
+    // Both directions, and a portrait shape: a monitor switch is as likely to
+    // be to a taller screen as a wider one, and an arithmetic mistake in the
+    // stride shows up on one and not the other.
+    for (w, h) in [(160u32, 100u32), (48, 128), (W, H)] {
+        p.resize(w, h).expect("resized");
+        assert_eq!(p.size(), (w, h), "the presenter reports the new size");
+        // The window follows, but not synchronously: `configure_window` is
+        // checked, which proves the request reached the server, and a window
+        // manager then resizes the window in its own time.
+        let mut geometry = window_size(p.window()).expect("the window's own size");
+        for _ in 0..20 {
+            if geometry == (w, h) {
+                break;
+            }
+            let _ = p.poll();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            geometry = window_size(p.window()).expect("the window's own size");
+        }
+        assert_eq!(
+            geometry,
+            (w, h),
+            "the window did not follow the resize — a window manager refusing a \
+             client's size would look the same, so check that before the code"
+        );
+        p.present(&flat(w, h, 126, 90, 200), &Damage::Everything)
+            .expect("a picture of the new size");
+        // And the old size is now the wrong one.
+        assert!(
+            matches!(
+                p.present(&flat(W + 7, H + 3, 126, 90, 200), &Damage::Everything),
+                Err(ownview_present::PresentError::WrongSize { .. })
+            ),
+            "after a resize only the new size is accepted"
+        );
+        assert!(p.is_open(), "and the window survives it");
+    }
+}
+
+/// Resizing to the size already in use must cost nothing: a re-announcement
+/// that changed something else should not make the window flicker.
+#[test]
+fn resizing_to_the_same_size_does_nothing() {
+    let _screen = exclusive();
+    let Some(mut p) = open(64, 48) else { return };
+    p.resize(64, 48).expect("a no-op resize");
+    assert_eq!(p.size(), (64, 48));
+    p.present(&flat(64, 48, 126, 90, 200), &Damage::Everything)
+        .expect("still presents");
+}
+
+#[test]
+fn a_window_cannot_be_resized_to_nothing() {
+    let _screen = exclusive();
+    let Some(mut p) = open(64, 48) else { return };
+    assert!(p.resize(0, 48).is_err());
+    assert!(p.resize(64, 0).is_err());
+    // And it still works at the size it had.
+    assert_eq!(p.size(), (64, 48));
+    p.present(&flat(64, 48, 126, 90, 200), &Damage::Everything)
+        .expect("unharmed");
 }
 
 #[test]

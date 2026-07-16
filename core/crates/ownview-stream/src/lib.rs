@@ -29,7 +29,7 @@ pub mod jitter;
 pub mod resume;
 
 pub use controller::{ControllerStats, ControllerStream, Decoded};
-pub use host::{HostStep, HostStream, ssrc_for};
+pub use host::{Handled, HostStep, HostStream, ssrc_for};
 pub use jitter::{Jitter, JitterStats};
 pub use resume::{Expired, PARK_TIMEOUT, Parked, ResumeRefused};
 
@@ -92,11 +92,18 @@ pub enum StreamError {
     #[error("{what} is outside the bounds the protocol allows")]
     Malformed { what: &'static str },
     /// A monitor switch mid-session, which no capture backend can do yet.
-    #[error(
-        "this session is sending monitor {current} and cannot switch to {wanted} \
-         yet: no capture backend supports changing monitor without a reconnect"
-    )]
-    CannotSwitchMonitor { current: u32, wanted: u32 },
+    /// The switch was asked for and could not be done.
+    ///
+    /// Carries the backend's own reason, because the two a controller can act
+    /// on are opposite: a monitor that does not exist means ask for another
+    /// one, and a backend that cannot switch means the monitor it is watching
+    /// is the only one it will get on this session.
+    #[error("this session is sending monitor {current} and cannot switch to {wanted}: {why}")]
+    CannotSwitchMonitor {
+        current: u32,
+        wanted: u32,
+        why: String,
+    },
 }
 
 /// A sink that keeps everything, for tests and for measuring.

@@ -47,6 +47,7 @@ pub struct SyntheticCapturer {
     limit: Option<u64>,
     /// A pending geometry change, delivered once.
     reconfigure_at: Option<u64>,
+    selected: MonitorId,
 }
 
 impl SyntheticCapturer {
@@ -72,6 +73,7 @@ impl SyntheticCapturer {
             started: false,
             limit: None,
             reconfigure_at: None,
+            selected: MonitorId(0),
         })
     }
 
@@ -99,6 +101,41 @@ impl SyntheticCapturer {
     pub const fn with_frame_limit(mut self, frames: u64) -> Self {
         self.limit = Some(frames);
         self
+    }
+
+    /// Add another monitor of this size, to the right of the ones before it.
+    ///
+    /// Give them **different sizes**. A switch that changed `selected` while
+    /// still capturing the old monitor would be invisible between two monitors
+    /// of the same size, and the frame's size is what a test can see.
+    pub fn with_extra_monitor(mut self, width: u32, height: u32) -> Result<Self, PatternError> {
+        // Rejected here rather than at select time: an unusable monitor in the
+        // list is a fixture that lies about the host it is standing in for.
+        let _ = Pattern::new(width, height)?;
+        let x = self
+            .monitors
+            .iter()
+            .map(|m| {
+                m.geometry
+                    .x
+                    .saturating_add(i32::try_from(m.geometry.width).unwrap_or(i32::MAX))
+            })
+            .max()
+            .unwrap_or(0);
+        let id = MonitorId(u32::try_from(self.monitors.len()).unwrap_or(0));
+        self.monitors.push(MonitorInfo {
+            name: format!("synthetic-{}", id.0),
+            id,
+            geometry: Rect {
+                x,
+                y: 0,
+                width,
+                height,
+            },
+            scale: 1.0,
+            primary: false,
+        });
+        Ok(self)
     }
 
     /// Report a geometry change before the given frame.
@@ -187,7 +224,7 @@ impl Capturer for SyntheticCapturer {
     }
 
     fn selected(&self) -> MonitorId {
-        MonitorId(0)
+        self.selected
     }
 
     fn format(&self) -> PixelFormat {
@@ -196,6 +233,31 @@ impl Capturer for SyntheticCapturer {
 
     fn reports_damage(&self) -> bool {
         true
+    }
+
+    fn select(&mut self, monitor: MonitorId) -> Result<(), CaptureError> {
+        if monitor == self.selected {
+            return Ok(());
+        }
+        let Some(info) = self.monitors.iter().find(|m| m.id == monitor) else {
+            return Err(CaptureError::NoSuchMonitor {
+                id: monitor,
+                count: self.monitors.len(),
+            });
+        };
+        let (width, height) = (info.geometry.width, info.geometry.height);
+        // `with_extra_monitor` refused a size no pattern can render, so this
+        // is unreachable unless a monitor list was built some other way.
+        self.pattern = Pattern::new(width, height).map_err(|e| CaptureError::Backend {
+            backend: BACKEND,
+            detail: e.to_string(),
+        })?;
+        self.selected = monitor;
+        // The new monitor has never been rendered, so the next frame is whole
+        // and due immediately.
+        self.started = false;
+        self.next_due = None;
+        Ok(())
     }
 
     fn next_frame(&mut self, timeout: Duration) -> Result<Capture, CaptureError> {
@@ -574,5 +636,88 @@ mod tests {
     #[test]
     fn a_screen_too_small_for_the_pattern_is_refused() {
         assert!(SyntheticCapturer::new(8, 8, 30).is_err());
+    }
+
+    /// **The frames follow the selection, not just the bookkeeping.** A
+    /// backend that changed `selected` and went on capturing the old monitor
+    /// would report a switch that never happened, and the size is what makes
+    /// that visible.
+    #[test]
+    fn selecting_another_monitor_changes_the_frames() {
+        let mut cap = SyntheticCapturer::new(320, 240, 1_000_000)
+            .expect("a size")
+            .with_extra_monitor(160, 128)
+            .expect("a second size");
+        assert_eq!(cap.selected(), MonitorId(0));
+        let first = frame_of(cap.next_frame(Duration::from_millis(50)).expect("a frame"));
+        assert_eq!((first.width(), first.height()), (320, 240));
+
+        cap.select(MonitorId(1)).expect("the switch");
+        assert_eq!(cap.selected(), MonitorId(1));
+        let second = frame_of(cap.next_frame(Duration::from_millis(50)).expect("a frame"));
+        assert_eq!(
+            (second.width(), second.height()),
+            (160, 128),
+            "the frames are of the monitor now selected"
+        );
+        // The new monitor has never been seen, so its first frame is whole.
+        assert!(
+            matches!(second.damage(), Damage::Everything),
+            "a monitor never captured before cannot have partial damage: {:?}",
+            second.damage()
+        );
+
+        // And back, which is the same requirement in the other direction.
+        cap.select(MonitorId(0)).expect("the switch back");
+        let third = frame_of(cap.next_frame(Duration::from_millis(50)).expect("a frame"));
+        assert_eq!((third.width(), third.height()), (320, 240));
+    }
+
+    #[test]
+    fn selecting_a_monitor_that_is_not_there_is_refused_and_changes_nothing() {
+        let mut cap = SyntheticCapturer::new(320, 240, 1_000_000)
+            .expect("a size")
+            .with_extra_monitor(160, 128)
+            .expect("a second size");
+        let e = cap.select(MonitorId(7)).expect_err("there is no monitor 7");
+        assert!(
+            matches!(e, CaptureError::NoSuchMonitor { .. }),
+            "and it says which of the two failures it was: {e:?}"
+        );
+        assert_eq!(cap.selected(), MonitorId(0), "still on the monitor it had");
+        let frame = frame_of(cap.next_frame(Duration::from_millis(50)).expect("a frame"));
+        assert_eq!((frame.width(), frame.height()), (320, 240));
+    }
+
+    /// Selecting the current monitor must not reset anything: it is what a
+    /// controller does when somebody clicks the screen they are watching, and
+    /// a whole frame for that is a visible hitch for no change.
+    #[test]
+    fn selecting_the_current_monitor_does_not_reset_the_capture() {
+        let mut cap = SyntheticCapturer::new(320, 240, 1_000_000).expect("a size");
+        let first = frame_of(cap.next_frame(Duration::from_millis(50)).expect("a frame"));
+        assert!(
+            matches!(first.damage(), Damage::Everything),
+            "the first is whole"
+        );
+        cap.select(MonitorId(0)).expect("a no-op");
+        let second = frame_of(cap.next_frame(Duration::from_millis(50)).expect("a frame"));
+        assert!(
+            !matches!(second.damage(), Damage::Everything),
+            "a no-op selection must not make the next frame whole again"
+        );
+    }
+
+    /// A monitor too small for the pattern is refused when the fixture is
+    /// built, not when a session tries to switch to it — a monitor list with
+    /// an unusable screen in it lies about the host it stands in for.
+    #[test]
+    fn an_extra_monitor_too_small_to_render_is_refused_at_once() {
+        assert!(
+            SyntheticCapturer::new(320, 240, 30)
+                .expect("a size")
+                .with_extra_monitor(8, 8)
+                .is_err()
+        );
     }
 }

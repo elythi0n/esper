@@ -21,7 +21,8 @@ use ownview_pipeline::pipeline::Pipeline;
 use ownview_proto::{KeyframeReason, MediaMessage, MonitorSelect, Profile, Role};
 use ownview_scale::Ceiling;
 use ownview_stream::{
-    ControllerStream, DatagramSink, Decoded, HostStep, HostStream, RecordingSink, SinkError,
+    ControllerStream, DatagramSink, Decoded, Handled, HostStep, HostStream, RecordingSink,
+    SinkError,
 };
 
 const W: u32 = 320;
@@ -34,6 +35,27 @@ fn encoder_for(config: &EncoderConfig) -> Result<Box<dyn VideoEncoder>, EncodeEr
 
 fn host(fps: u32) -> HostStream {
     let capturer = SyntheticCapturer::new(W, H, 1_000_000).expect("a valid size");
+    let pipeline = Pipeline::new(
+        Box::new(capturer),
+        &encoder_for,
+        Budget::of(100.0),
+        Policy {
+            max_fps: fps,
+            ..Policy::default()
+        },
+    )
+    .expect("a pipeline")
+    .with_ceiling(Ceiling::none());
+    HostStream::new(pipeline, MTU).expect("a host stream")
+}
+
+/// A host with two monitors of **different sizes**, so a switch is visible in
+/// the frame rather than taken on trust.
+fn host_with_two_monitors(fps: u32) -> HostStream {
+    let capturer = SyntheticCapturer::new(W, H, 1_000_000)
+        .expect("a valid size")
+        .with_extra_monitor(W / 2, H / 2)
+        .expect("a valid second size");
     let pipeline = Pipeline::new(
         Box::new(capturer),
         &encoder_for,
@@ -288,25 +310,140 @@ fn a_host_refuses_a_message_only_it_may_send() {
     );
 }
 
-/// Refused with the reason, not ignored. A controller told nothing would show
-/// a still picture and conclude the host had hung.
+/// **A switch changes the stream's shape, and the config is the only thing
+/// that says so.** A controller that was not told would size its buffers from
+/// the old announcement and hold a decoder whose reference pictures are all of
+/// another screen.
 #[test]
-fn switching_monitor_mid_session_is_refused_with_a_reason() {
-    let mut h = host(30);
-    let current = h.config().selected;
-    // Selecting the monitor already being sent is a no-op, not an error.
-    h.handle(&MediaMessage::Select(MonitorSelect { monitor: current }))
-        .expect("selecting the current monitor is fine");
+fn switching_monitor_re_announces_a_new_size_and_a_new_stream() {
+    let mut h = host_with_two_monitors(30);
+    let before = h.config();
+    assert!(before.monitors.len() >= 2, "the fixture needs two monitors");
+    let other = before
+        .monitors
+        .iter()
+        .map(|m| m.id)
+        .find(|id| *id != before.selected)
+        .expect("another monitor");
 
-    let err = h
-        .handle(&MediaMessage::Select(MonitorSelect {
-            monitor: current.wrapping_add(1),
-        }))
-        .expect_err("no backend can switch monitor yet");
-    let text = err.to_string();
+    let Handled::Announce(after) = h
+        .handle(&MediaMessage::Select(MonitorSelect { monitor: other }))
+        .expect("the switch")
+    else {
+        panic!("a switch must answer with the config the controller has to be told");
+    };
+
+    assert_eq!(after.selected, other);
+    assert_ne!(
+        (after.width, after.height),
+        (before.width, before.height),
+        "the fixture's monitors differ in size, so the announced size must too"
+    );
+    assert_ne!(
+        after.ssrc, before.ssrc,
+        "a different screen is a different synchronisation source"
+    );
     assert!(
-        text.contains("cannot switch") && text.contains("reconnect"),
-        "the refusal must say why and what would work: {text}"
+        after.is_well_formed(),
+        "and it must still be a legal config"
+    );
+
+    // What comes out is the new monitor's size, not merely what was announced.
+    let mut sink = RecordingSink::default();
+    let mut frames = 0;
+    for _ in 0..16 {
+        if let HostStep::Sent { .. } = h
+            .step(Duration::from_millis(50), &mut sink)
+            .expect("a step")
+        {
+            frames += 1;
+            if frames == 2 {
+                break;
+            }
+        }
+    }
+    assert!(frames > 0, "nothing was sent after the switch");
+
+    let mut c = ControllerStream::new(&after)
+        .expect("the host's own config")
+        .with_decoder(Box::new(
+            OpenH264Decoder::new(&DecoderConfig::default()).expect("a decoder"),
+        ));
+    let mut out = Vec::new();
+    for datagram in &sink.sent {
+        c.receive(datagram, &mut out).expect("a datagram");
+    }
+    // A frame is released when the next one begins, or when the stream is
+    // flushed. The last frame here has no successor.
+    c.flush(&mut out);
+    let picture = out
+        .iter()
+        .find_map(|d| match d {
+            Decoded::Picture { picture, .. } => Some(picture),
+            _ => None,
+        })
+        .expect("a picture of the new monitor");
+    assert_eq!(
+        (picture.width(), picture.height()),
+        (after.width, after.height),
+        "the pixels are of the newly selected monitor"
+    );
+}
+
+/// Selecting the monitor already being sent costs nothing.
+///
+/// It is what a controller does when somebody clicks the screen they are
+/// already watching, and the wrong answer is expensive: a keyframe, a whole
+/// frame's conversion, and a visible hitch for no change at all.
+#[test]
+fn selecting_the_current_monitor_changes_nothing() {
+    let mut h = host_with_two_monitors(30);
+    let before = h.config();
+    let announced = h
+        .handle(&MediaMessage::Select(MonitorSelect {
+            monitor: before.selected,
+        }))
+        .expect("selecting the current monitor is fine");
+    assert!(
+        matches!(announced, Handled::Nothing),
+        "there is nothing to announce, so nothing must be announced: {announced:?}"
+    );
+    assert_eq!(
+        h.config().ssrc,
+        before.ssrc,
+        "the stream is the same stream"
+    );
+}
+
+/// **A refusal is still an answer.** A monitor that does not exist is refused
+/// with the reason *and* with the config the host is keeping — because a
+/// controller told nothing cannot tell "no" from a host that has stopped
+/// responding, and would sit showing a still picture waiting for a switch that
+/// is never coming.
+#[test]
+fn switching_to_a_monitor_that_is_not_there_keeps_the_one_that_is() {
+    let mut h = host_with_two_monitors(30);
+    let before = h.config();
+    let answer = h
+        .handle(&MediaMessage::Select(MonitorSelect { monitor: 99 }))
+        .expect("a refusal is not a session failure");
+    let Handled::Refused { config, why } = answer else {
+        panic!("the controller has to be told, and told why: {answer:?}");
+    };
+    let text = why.to_string();
+    assert!(
+        text.contains("cannot switch") && text.contains("99"),
+        "the refusal must name what was asked for: {text}"
+    );
+    assert_eq!(
+        config.selected, before.selected,
+        "and the answer is the monitor it is keeping"
+    );
+    let after = h.config();
+    assert_eq!(
+        (after.selected, after.ssrc, after.width, after.height),
+        (before.selected, before.ssrc, before.width, before.height),
+        "a refused switch must leave the session exactly as it was"
     );
 }
 

@@ -16,6 +16,8 @@ pub struct ControllerLink {
     media: MediaChannel,
     control: Control,
     config: StreamConfig,
+    /// An announcement the caller has not seen yet.
+    announced: Option<StreamConfig>,
 }
 
 impl std::fmt::Debug for ControllerLink {
@@ -44,6 +46,9 @@ impl ControllerLink {
             media,
             control,
             config,
+            // The opening config is not an announcement: the caller has it
+            // already, as the return of this function.
+            announced: None,
         };
         // A fresh controller has no reference picture, so it asks at once.
         //
@@ -143,12 +148,50 @@ impl ControllerLink {
         self.flush_outbound().await
     }
 
+    /// Wait for whichever comes first: a datagram, or something the host says.
+    ///
+    /// **Both, not just datagrams.** A host that switched monitor says so on
+    /// the control stream, and a controller reading only datagrams would go on
+    /// reassembling a stream that no longer exists — every packet rejected for
+    /// the wrong SSRC, the window frozen on the last picture of the old
+    /// screen, and nothing to say why.
+    ///
+    /// Sound because [`ownview_transport::Control::recv`] is cancel-safe and
+    /// so is reading a datagram: whichever loses keeps whatever it had read.
+    /// The send in `flush_outbound` happens after the select has resolved,
+    /// where nothing can cancel it half-written.
+    pub async fn pump(&mut self, out: &mut Vec<Decoded>) -> Result<(), LinkError> {
+        enum Arrived {
+            Datagram(bytes::Bytes),
+            Said(MediaMessage),
+        }
+        let arrived = tokio::select! {
+            datagram = self.media.recv() => Arrived::Datagram(datagram?),
+            said = self.control.recv::<MediaMessage>() => Arrived::Said(said?),
+        };
+        match arrived {
+            Arrived::Datagram(datagram) => self.stream.receive(&datagram, out)?,
+            Arrived::Said(message) => self.handle(&message)?,
+        }
+        self.flush_outbound().await
+    }
+
     /// Send whatever the receiving half has asked for.
     pub async fn flush_outbound(&mut self) -> Result<(), LinkError> {
         for message in self.stream.take_outbound() {
             self.control.send(&message).await?;
         }
         Ok(())
+    }
+
+    /// Ask the host for a different monitor.
+    ///
+    /// Queued rather than sent, like every other thing this side says, and
+    /// carried out by the next [`Self::flush_outbound`] or [`Self::pump`]. The
+    /// answer is a new config on the control stream, or a refusal — the host
+    /// owns the screen and decides.
+    pub fn select_monitor(&mut self, monitor: u32) {
+        self.stream.select_monitor(monitor);
     }
 
     /// Tell the host what this viewer would prefer.
@@ -162,6 +205,16 @@ impl ControllerLink {
         self.flush_outbound().await
     }
 
+    /// The host's latest announcement, once, if it has made one.
+    ///
+    /// **Separate from comparing configs**, because the answer to a refused
+    /// request is the config the host is *keeping* — identical to the one
+    /// already held. A caller watching for a change would see none and report
+    /// nothing, which is the silence the refusal exists to break.
+    pub fn take_announcement(&mut self) -> Option<StreamConfig> {
+        self.announced.take()
+    }
+
     /// Handle a message the host sent on the control stream.
     ///
     /// The only one a host sends is a new configuration, which means the
@@ -171,6 +224,7 @@ impl ControllerLink {
         self.stream.handle(message)?;
         if let MediaMessage::Config(config) = message {
             self.config = config.clone();
+            self.announced = Some(config.clone());
         }
         Ok(())
     }

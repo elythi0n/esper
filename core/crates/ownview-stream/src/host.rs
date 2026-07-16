@@ -77,6 +77,31 @@ impl std::fmt::Debug for HostStream {
     }
 }
 
+/// What a host has to say after acting on a controller's message.
+///
+/// Every variant that carries a config carries one that **must be sent**: a
+/// request answered with nothing is indistinguishable from a host that has
+/// stopped responding.
+#[derive(Debug)]
+pub enum Handled {
+    /// Done, and there is nothing the controller needs to know.
+    Nothing,
+    /// The stream changed shape. A different monitor is a different size, a
+    /// different SSRC, and a decoder whose reference pictures are all of
+    /// somewhere else.
+    Announce(StreamConfig),
+    /// The request could not be met, and the session carries on regardless.
+    ///
+    /// Carries the config the host is *keeping*, so the controller learns the
+    /// answer rather than inferring it from silence, and the reason, so an
+    /// operator can see which of "no such monitor" and "this backend will not
+    /// move" it was.
+    Refused {
+        config: StreamConfig,
+        why: StreamError,
+    },
+}
+
 /// The SSRC for a monitor.
 ///
 /// Derived rather than random so that a reconnect to the same monitor is the
@@ -299,7 +324,12 @@ impl HostStream {
     /// will not accept a non-exhaustive match; a guard listing roles by hand
     /// would go stale silently. `the_direction_rule_and_what_the_host_accepts_
     /// agree` holds the two statements of the rule to each other.
-    pub fn handle(&mut self, message: &MediaMessage) -> Result<(), StreamError> {
+    /// Whatever comes back **must be sent to the controller**. A host answers
+    /// a request either with the new shape of the stream or with the shape it
+    /// is keeping, and silence is the one answer it must never give: a
+    /// controller told nothing shows a still picture and concludes the host
+    /// has hung.
+    pub fn handle(&mut self, message: &MediaMessage) -> Result<Handled, StreamError> {
         if !message.is_well_formed() {
             return Err(StreamError::Malformed {
                 what: name_of(message),
@@ -308,24 +338,42 @@ impl HostStream {
         match message {
             MediaMessage::Keyframe(_) => {
                 self.pipeline.request_keyframe();
-                Ok(())
+                Ok(Handled::Nothing)
             }
             MediaMessage::Hint(hint) => {
                 self.apply(hint.max_fps, hint.max_long_edge, hint.profile);
-                Ok(())
+                Ok(Handled::Nothing)
             }
             MediaMessage::Select(select) => {
+                // Not a reset: a controller clicking the monitor it is already
+                // watching should not cost it a keyframe.
                 if select.monitor == self.monitor {
-                    return Ok(());
+                    return Ok(Handled::Nothing);
                 }
-                // Refused with the reason rather than ignored. No capture
-                // backend can change monitor without a reconnect yet, and a
-                // controller told nothing would show a still picture and
-                // assume the host had hung.
-                Err(StreamError::CannotSwitchMonitor {
-                    current: self.monitor,
-                    wanted: select.monitor,
-                })
+                if let Err(e) = self
+                    .pipeline
+                    .select_monitor(ownview_capture::capturer::MonitorId(select.monitor))
+                {
+                    // **Not an error of the session's.** The host would not do
+                    // it; the session is intact and still sending. So the
+                    // answer is the config it is keeping, which tells the
+                    // controller both that it was heard and what it is
+                    // getting instead.
+                    return Ok(Handled::Refused {
+                        config: self.config(),
+                        why: StreamError::CannotSwitchMonitor {
+                            current: self.monitor,
+                            wanted: select.monitor,
+                            why: e.to_string(),
+                        },
+                    });
+                }
+                self.monitor = select.monitor;
+                // A different screen is a different synchronisation source,
+                // which is what RTP means by one, and what makes the switch
+                // legible in a packet capture.
+                self.packetizer.set_ssrc(ssrc_for(select.monitor));
+                Ok(Handled::Announce(self.config()))
             }
             // Host to controller only: a controller announcing a config
             // would be telling the host what its own screen is.

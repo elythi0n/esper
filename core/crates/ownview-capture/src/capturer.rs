@@ -94,6 +94,14 @@ pub enum CaptureError {
     #[error("{id} does not exist; this host has {count}")]
     NoSuchMonitor { id: MonitorId, count: usize },
 
+    /// This backend cannot change monitor once it is capturing.
+    ///
+    /// Separate from [`Self::NoSuchMonitor`] because the two mean opposite
+    /// things to a controller: one is a monitor that does not exist, the other
+    /// is a monitor that does and a backend that will not move to it.
+    #[error("the {backend} backend cannot change monitor once it is capturing")]
+    CannotSwitchMonitor { backend: &'static str },
+
     /// The user has not granted, or has withdrawn, screen capture permission.
     ///
     /// Its own variant because it is the one failure a person can fix, and it
@@ -139,4 +147,16 @@ pub trait Capturer: std::fmt::Debug + Send {
 
     /// Wait up to `timeout` for the next frame.
     fn next_frame(&mut self, timeout: Duration) -> Result<Capture, CaptureError>;
+
+    /// Capture a different monitor from now on.
+    ///
+    /// Required rather than defaulted, so a new backend has to answer the
+    /// question instead of inheriting a refusal nobody notices. A backend that
+    /// genuinely cannot switch says [`CaptureError::CannotSwitchMonitor`], and
+    /// the session keeps the monitor it has.
+    ///
+    /// Selecting the monitor already selected is a no-op, **not** a reset: a
+    /// controller clicking the current monitor should not cost a keyframe.
+    /// Anything else discards the previous picture, so the next frame is whole.
+    fn select(&mut self, monitor: MonitorId) -> Result<(), CaptureError>;
 }

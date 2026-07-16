@@ -410,6 +410,33 @@ impl Capturer for X11Capturer {
         self.tracker.is_some()
     }
 
+    /// Cheap here, because the capture is of the root either way: what changes
+    /// is the rectangle of it that gets read. No new connection, no new
+    /// permission, and the accumulated damage stays valid because the surface
+    /// it described has been discarded and the next frame is whole.
+    fn select(&mut self, monitor: MonitorId) -> Result<(), CaptureError> {
+        if monitor == self.selected {
+            return Ok(());
+        }
+        if !self.monitors.iter().any(|m| m.id == monitor) {
+            return Err(CaptureError::NoSuchMonitor {
+                id: monitor,
+                count: self.monitors.len(),
+            });
+        }
+        let was = self.selected;
+        self.selected = monitor;
+        // A segment that could not be made for the new size leaves the
+        // capturer sized for a monitor it is no longer pointed at, so the old
+        // selection goes back.
+        if let Err(e) = self.resize_for_selected() {
+            self.selected = was;
+            let _ = self.resize_for_selected();
+            return Err(e);
+        }
+        Ok(())
+    }
+
     fn next_frame(&mut self, timeout: Duration) -> Result<Capture, CaptureError> {
         let deadline = Instant::now().checked_add(timeout);
         let remaining = move || {
@@ -837,5 +864,79 @@ mod tests {
         for r in d.rects(&bounds) {
             assert!(bounds.contains(&r), "{r:?} escaped the frame");
         }
+    }
+
+    /// **A band narrower than the frame, at a non-zero offset.**
+    ///
+    /// The live tests capture whatever the desktop happens to damage, and on
+    /// both machines this was written against that turned out to be full-width
+    /// bands every time — so `left`, the horizontal half of this arithmetic,
+    /// was exercised by nothing that could fail. Shifting it by a pixel broke
+    /// no test at all, which is the only reason this exists: a band is placed
+    /// here at a known offset, and a shift in either direction shows up.
+    #[test]
+    fn a_band_lands_at_its_own_offset_in_the_surface() {
+        const W: usize = 8;
+        const H: usize = 6;
+        let stride = W * BPP;
+        let mut surface = vec![0u8; stride * H];
+
+        // Two rows of three pixels, starting at (2, 3). Each pixel is
+        // numbered so a row placed at the wrong offset is visible rather than
+        // merely different.
+        let band = rect(2, 3, 3, 2);
+        let row_bytes = 3 * BPP;
+        let packed: Vec<u8> = (0..(row_bytes * 2) as u8).collect();
+
+        place(&packed, &mut surface, band, stride, row_bytes).expect("placed");
+
+        for (y, row) in surface.chunks_exact(stride).enumerate() {
+            for (x, px) in row.as_chunks::<BPP>().0.iter().enumerate() {
+                let inside = (2..5).contains(&x) && (3..5).contains(&y);
+                if !inside {
+                    assert_eq!(
+                        px, &[0; BPP],
+                        "({x},{y}) is outside {band:?} and was written"
+                    );
+                    continue;
+                }
+                // The pixel this band held for that position.
+                let at = (y - 3) * row_bytes + (x - 2) * BPP;
+                let want = packed.get(at..at + BPP).expect("in the band");
+                assert_eq!(
+                    px.as_slice(),
+                    want,
+                    "({x},{y}) holds the wrong pixel of {band:?}"
+                );
+            }
+        }
+    }
+
+    /// A band that does not fit is refused rather than clipped.
+    #[test]
+    fn a_band_past_the_surface_is_refused() {
+        const W: usize = 8;
+        let stride = W * BPP;
+        let mut surface = vec![0u8; stride * 4];
+        let row_bytes = 3 * BPP;
+        let packed = vec![0u8; row_bytes * 2];
+        // Starts on the last row, so its second row is past the end.
+        let band = rect(2, 3, 3, 2);
+        assert!(place(&packed, &mut surface, band, stride, row_bytes).is_err());
+    }
+
+    /// The server returning fewer bytes than the band needs is an error, not a
+    /// partial picture: a short reply placed as far as it goes leaves a band
+    /// half of this frame and half of the last one.
+    #[test]
+    fn a_short_reply_is_refused() {
+        const W: usize = 8;
+        let stride = W * BPP;
+        let mut surface = vec![0u8; stride * 8];
+        let row_bytes = 3 * BPP;
+        let band = rect(2, 3, 3, 2);
+        let packed = vec![0u8; row_bytes * 2 - 1];
+        let e = place(&packed, &mut surface, band, stride, row_bytes).expect_err("refused");
+        assert!(e.contains("short of"), "{e}");
     }
 }

@@ -51,6 +51,24 @@ fn first_frame(cap: &mut X11Capturer) -> ownview_capture::frame::Frame {
     panic!("no frame after twenty attempts");
 }
 
+/// Whether a frame's reported damage covers all of `want`.
+///
+/// The reported rectangles are non-overlapping bands, so summing the
+/// intersected areas is exact rather than an approximation.
+fn damage_covers(
+    frame: &ownview_capture::frame::Frame,
+    want: &ownview_capture::geometry::Rect,
+) -> bool {
+    let got: u64 = frame
+        .damage()
+        .rects(&frame.bounds())
+        .iter()
+        .filter_map(|r| r.intersect(want))
+        .map(|r| u64::from(r.width) * u64::from(r.height))
+        .sum();
+    got >= u64::from(want.width) * u64::from(want.height)
+}
+
 /// A change on the screen that a real desktop cannot swallow: a small window
 /// of a known colour, mapped at a known place and taken away again on drop.
 ///
@@ -526,15 +544,7 @@ fn a_known_change_is_reported_at_the_place_it_happened() {
                 if matches!(f.damage(), Damage::Regions(_)) {
                     saw_regions = true;
                 }
-                // Covered when the reported rectangles between them contain
-                // every pixel of the square. They are non-overlapping bands,
-                // so summing the intersected areas is exact.
-                let got: u64 = rects
-                    .iter()
-                    .filter_map(|r| r.intersect(&want))
-                    .map(|r| u64::from(r.width) * u64::from(r.height))
-                    .sum();
-                if got >= u64::from(want.width) * u64::from(want.height) {
+                if damage_covers(&f, &want) {
                     covered = true;
                     println!(
                         "the square was reported by {} rect(s){}",
@@ -557,6 +567,71 @@ fn a_known_change_is_reported_at_the_place_it_happened() {
         "filling {want:?} on the captured monitor produced no damage covering it — \
          the event, the drain, the clip or the translation is wrong"
     );
+}
+
+/// **A monitor switch on a live server, on every monitor there is.**
+///
+/// The X11 backend captures the root either way, so a switch is a change of
+/// which rectangle of it gets read — cheap, and easy to get wrong in a way
+/// that still produces a picture: read the new monitor's geometry into a
+/// surface sized for the old one and the result is a sheared or truncated
+/// screen rather than an error.
+#[test]
+fn every_monitor_can_be_switched_to_on_a_live_session() {
+    let Some(mut cap) = open() else { return };
+    let all: Vec<_> = cap.monitors().to_vec();
+    if all.len() < 2 {
+        println!("skipped: one monitor, so there is nothing to switch to");
+        return;
+    }
+    let _ = first_frame(&mut cap);
+
+    for m in &all {
+        cap.select(m.id).expect("the switch");
+        assert_eq!(cap.selected(), m.id);
+        let frame = first_frame(&mut cap);
+        assert_eq!(
+            (frame.width(), frame.height()),
+            m.size(),
+            "{} is {}x{}, so its frames must be",
+            m.name,
+            m.geometry.width,
+            m.geometry.height
+        );
+        // Every row present at the new size: a surface still sized for the
+        // previous monitor is exactly how this fails while still looking like
+        // a picture.
+        for y in 0..frame.height() {
+            assert!(
+                frame
+                    .row(y)
+                    .is_some_and(|r| r.len() >= frame.width() as usize * 4),
+                "row {y} of {} is short",
+                m.name
+            );
+        }
+        println!(
+            "{} captured at {}x{}",
+            m.name,
+            frame.width(),
+            frame.height()
+        );
+    }
+}
+
+#[test]
+fn switching_to_a_monitor_the_server_does_not_have_is_refused() {
+    let Some(mut cap) = open() else { return };
+    let was = cap.selected();
+    let count = cap.monitors().len();
+    let e = cap
+        .select(MonitorId(9999))
+        .expect_err("no server has monitor 9999");
+    assert!(matches!(e, CaptureError::NoSuchMonitor { .. }), "{e:?}");
+    assert_eq!(cap.selected(), was, "a refused switch changes nothing");
+    assert_eq!(cap.monitors().len(), count);
+    // And it still captures.
+    let _ = first_frame(&mut cap);
 }
 
 /// **The pixels, not just the geometry.**
@@ -610,33 +685,75 @@ fn a_known_colour_arrives_at_the_place_it_was_drawn() {
     let patch = Patch::map(monitor.x + want.x, monitor.y + want.y, SIZE, pixel);
     let conn = patch.conn();
     let root = patch.root();
-
-    let frame = first_frame(&mut cap);
-
-    // What the server says is there now, read independently of the backend.
-    let direct = conn
-        .get_image(
-            ImageFormat::Z_PIXMAP,
-            root,
-            i16::try_from(monitor.x + want.x).expect("on-screen"),
-            i16::try_from(monitor.y + want.y).expect("on-screen"),
-            SIZE,
-            SIZE,
-            !0,
-        )
-        .expect("get_image")
-        .reply()
-        .expect("reply");
     let (r_at, g_at, b_at) = format.rgb_offsets();
-    let still_there =
+
+    // What the server itself says is at that place on screen, read
+    // independently of the backend under test.
+    let reads_as_the_colour = || {
+        let direct = conn
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                root,
+                i16::try_from(monitor.x + want.x).expect("on-screen"),
+                i16::try_from(monitor.y + want.y).expect("on-screen"),
+                SIZE,
+                SIZE,
+                !0,
+            )
+            .expect("get_image")
+            .reply()
+            .expect("reply");
         direct.data.as_chunks::<4>().0.iter().all(|px| {
             px.get(r_at) == Some(&R) && px.get(g_at) == Some(&G) && px.get(b_at) == Some(&B)
-        });
-    if !still_there {
-        println!(
-            "skipped: the square is not what the server reads back from the root at that \
-             place, so there is nothing to compare against"
-        );
+        })
+    };
+
+    // **A mapped window is not yet a painted one.** `map_state` says the
+    // window is on screen; a compositing window manager paints it into the
+    // root a frame or so later. A capture taken in between is a picture of the
+    // desktop, and correctly so — so nothing can be asked of the backend until
+    // the server agrees the colour is there.
+    let mut on_screen = false;
+    for _ in 0..40 {
+        if reads_as_the_colour() {
+            on_screen = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if !on_screen {
+        println!("skipped: the server never showed the square at that place on the root");
+        return;
+    }
+
+    // **The frame that carried the change, not merely the next one.** A frame
+    // can arrive whose damage was accumulated before the window was painted,
+    // and it updates only the bands that damage names — so the square's pixels
+    // would still be the desktop's, and comparing that frame would be
+    // comparing a picture of a moment before the thing being looked for
+    // existed.
+    let mut carried: Option<ownview_capture::frame::Frame> = None;
+    for _ in 0..20 {
+        match cap
+            .next_frame(Duration::from_millis(250))
+            .expect("a capture")
+        {
+            Capture::Frame(f) if damage_covers(&f, &want) => {
+                carried = Some(f);
+                break;
+            }
+            Capture::Frame(_) | Capture::Unchanged => {}
+            Capture::Reconfigured(_) => break,
+        }
+    }
+    let Some(frame) = carried else {
+        panic!("no frame reported {want:?} as changed after the window was painted there");
+    };
+
+    // And it must still be there, or the desktop won the race after all and
+    // there is nothing left to compare against.
+    if !reads_as_the_colour() {
+        println!("skipped: the desktop repainted over the square before it could be compared");
         return;
     }
 

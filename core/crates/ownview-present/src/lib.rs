@@ -96,6 +96,17 @@ pub trait Presenter: std::fmt::Debug {
 
     /// Whether the window is still there.
     fn is_open(&self) -> bool;
+
+    /// Show pictures of a different size from now on.
+    ///
+    /// A session's picture size changes when the host switches monitor, and a
+    /// presenter that only refused the new size would leave the viewer showing
+    /// the last frame of the old screen for ever — which reads as a host that
+    /// has hung.
+    ///
+    /// Resizing to the size already in use does nothing, so a re-announcement
+    /// that changed something else costs no flicker.
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), PresentError>;
 }
 
 /// A presenter that shows nothing and remembers everything.
@@ -161,6 +172,19 @@ impl Presenter for NullPresenter {
 
     fn is_open(&self) -> bool {
         self.open
+    }
+
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), PresentError> {
+        if width == 0 || height == 0 {
+            return Err(PresentError::WrongSize {
+                want_w: self.size.0,
+                want_h: self.size.1,
+                got_w: width,
+                got_h: height,
+            });
+        }
+        self.size = (width, height);
+        Ok(())
     }
 }
 

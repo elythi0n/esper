@@ -38,8 +38,8 @@ use ownview_present::{PresentError, PresentEvent, Presenter};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, ImageFormat, PropMode,
-    Window, WindowClass,
+    AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask,
+    ImageFormat, PropMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -352,6 +352,64 @@ impl Presenter for X11Presenter {
 
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// The window is resized to match, because a viewer showing a 2560x1440
+    /// screen in a 1920x1080 window would either scale it or crop it, and this
+    /// layer does neither: it shows pixels at their own size.
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), PresentError> {
+        if (width, height) == (self.width, self.height) {
+            return Ok(());
+        }
+        let fail = |detail: String| PresentError::Backend {
+            backend: BACKEND,
+            detail,
+        };
+        if width == 0 || height == 0 {
+            return Err(PresentError::WrongSize {
+                want_w: self.width,
+                want_h: self.height,
+                got_w: width,
+                got_h: height,
+            });
+        }
+        let stride = (width as usize).saturating_mul(BPP);
+        let bytes = stride.saturating_mul(height as usize);
+
+        // The new segment before the old one goes, so a failure leaves a
+        // presenter that still works at the size it already had.
+        let segment = match self.segment.as_ref() {
+            Some(_) => match Segment::create(&self.conn, bytes) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!("MIT-SHM segment failed on resize ({e}); over the socket");
+                    None
+                }
+            },
+            None => None,
+        };
+        self.conn
+            .configure_window(
+                self.window,
+                &ConfigureWindowAux::new().width(width).height(height),
+            )
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        self.conn.flush().map_err(|e| fail(e.to_string()))?;
+
+        if let Some(old) = self.segment.take() {
+            old.detach(&self.conn);
+        }
+        self.segment = segment;
+        self.width = width;
+        self.height = height;
+        self.stride = stride;
+        // Black rather than the old picture stretched: nothing here has seen
+        // the new screen yet, and a keyframe is already on its way.
+        self.surface.clear();
+        self.surface.resize(bytes, 0);
+        Ok(())
     }
 
     fn present(&mut self, picture: &I420, damage: &Damage) -> Result<(), PresentError> {

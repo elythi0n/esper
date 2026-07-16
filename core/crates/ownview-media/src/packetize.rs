@@ -142,6 +142,18 @@ impl Packetizer {
         self.sequence = sequence;
     }
 
+    /// Become a different stream.
+    ///
+    /// For a monitor switch: RTP says a synchronisation source is one
+    /// timeline, and pixels of a different screen at a different size are not
+    /// that. The sequence numbering restarts because a receiver keyed on the
+    /// new SSRC has no history to be consistent with — and continuing the old
+    /// count would suggest a continuity that does not exist.
+    pub const fn set_ssrc(&mut self, ssrc: u32) {
+        self.ssrc = ssrc;
+        self.sequence = 0;
+    }
+
     /// Change the MTU, for a path that turned out to be different.
     pub fn set_mtu(&mut self, mtu: usize) -> Result<(), PacketizeError> {
         if mtu < MIN_MTU {

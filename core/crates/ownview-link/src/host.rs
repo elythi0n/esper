@@ -8,7 +8,7 @@ use std::time::Duration;
 use ownview_pipeline::pipeline::Pipeline;
 use ownview_proto::{MediaMessage, StreamConfig};
 use ownview_stream::resume::Parked;
-use ownview_stream::{HostStep, HostStream};
+use ownview_stream::{Handled, HostStep, HostStream};
 use ownview_transport::{Control, MediaChannel, Session};
 
 use crate::{LinkError, SessionSink};
@@ -138,8 +138,11 @@ impl HostLink {
         self.sink.close(reason);
     }
 
-    /// Act on one message from the controller.
-    pub fn handle(&mut self, message: &MediaMessage) -> Result<(), LinkError> {
+    /// Act on one message from the controller, and say what it must be told.
+    ///
+    /// Whatever comes back has to reach the controller. See
+    /// [`ownview_stream::Handled`].
+    pub fn handle(&mut self, message: &MediaMessage) -> Result<Handled, LinkError> {
         Ok(self.stream.handle(message)?)
     }
 
@@ -180,7 +183,10 @@ impl HostPump {
     }
 
     /// Act on a message the async side received.
-    pub fn handle(&mut self, message: &MediaMessage) -> Result<(), LinkError> {
+    ///
+    /// Whatever comes back has to go to the async side and out on the control
+    /// stream: the sending thread has no way to send it itself.
+    pub fn handle(&mut self, message: &MediaMessage) -> Result<Handled, LinkError> {
         Ok(self.stream.handle(message)?)
     }
 

@@ -392,6 +392,35 @@ impl Pipeline {
         self.capturer.monitors()
     }
 
+    /// Capture a different monitor from now on, and say what will be encoded.
+    ///
+    /// The reshape is the one a resolution change already takes: the gate is
+    /// resized, the scaler is dropped because it was built for the old
+    /// display, and the next frame is whole because the staging buffer holds a
+    /// picture of somewhere else. A keyframe is requested for the same reason
+    /// — every reference picture the decoder holds is of the old monitor.
+    ///
+    /// Selecting the monitor already selected does nothing at all, rather than
+    /// costing a keyframe and a whole frame's conversion.
+    pub fn select_monitor(
+        &mut self,
+        monitor: ownview_capture::capturer::MonitorId,
+    ) -> Result<(u32, u32), PipelineError> {
+        if monitor == self.capturer.selected() {
+            return Ok(self.encode_size());
+        }
+        self.capturer.select(monitor)?;
+        let (width, height) = self
+            .capturer
+            .monitors()
+            .iter()
+            .find(|m| m.id == monitor)
+            .map_or(self.native, ownview_capture::capturer::MonitorInfo::size);
+        self.reconfigure(width, height)?;
+        self.request_keyframe();
+        Ok(self.encode_size())
+    }
+
     /// The monitor being captured.
     #[must_use]
     pub fn selected_monitor(&self) -> ownview_capture::capturer::MonitorId {

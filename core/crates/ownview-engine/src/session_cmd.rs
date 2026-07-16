@@ -31,7 +31,7 @@ use ownview_link::{ControllerLink, HostLink, parts};
 use ownview_pipeline::pipeline::Pipeline;
 use ownview_proto::{Hello, MediaMessage, Role};
 use ownview_scale::Ceiling;
-use ownview_stream::{Decoded, Expired, HostStep, PARK_TIMEOUT, Parked};
+use ownview_stream::{Decoded, Expired, Handled, HostStep, PARK_TIMEOUT, Parked};
 use ownview_transport::{AnyOf, Endpoint, NoPeers, OnlyPeer, Session};
 
 use crate::backend::Choice;
@@ -70,6 +70,8 @@ pub struct ConnectOptions {
     pub addr: SocketAddr,
     pub seconds: u64,
     pub present: bool,
+    /// A monitor to ask the host for, when it is not the one announced.
+    pub monitor: Option<u32>,
 }
 
 /// Parse `host` flags.
@@ -137,6 +139,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut addr: Option<SocketAddr> = None;
     let mut seconds = 0u64;
     let mut present = false;
+    let mut monitor: Option<u32> = None;
     let mut i = 0usize;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
@@ -152,6 +155,15 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
                 present = true;
                 i += 1;
             }
+            "--monitor" => {
+                monitor = Some(
+                    args.get(i + 1)
+                        .ok_or_else(|| "--monitor needs a monitor number".to_owned())?
+                        .parse()
+                        .map_err(|_| "--monitor wants a monitor number".to_owned())?,
+                );
+                i += 2;
+            }
             other if !other.starts_with('-') && addr.is_none() => {
                 addr = Some(net::parse_addr(other)?);
                 i += 1;
@@ -163,6 +175,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
         addr: addr.ok_or("connect needs the host's address, as `connect <address>`")?,
         seconds,
         present,
+        monitor,
     })
 }
 
@@ -421,8 +434,10 @@ async fn serve(
     parked: Option<Parked>,
 ) -> Served {
     // The controller's messages have to reach the pipeline, which lives on the
-    // sending thread. One channel, one direction.
+    // sending thread; and a monitor switch has to be announced back, which
+    // only the control stream can do. One channel each way.
     let (to_pipeline, mut from_control) = tokio::sync::mpsc::unbounded_channel::<MediaMessage>();
+    let (to_controller, mut from_pipeline) = tokio::sync::mpsc::unbounded_channel::<MediaMessage>();
     let (mut pump, mut control) = link.split();
 
     let sending = std::thread::spawn(move || {
@@ -432,8 +447,33 @@ async fn serve(
             // Anything the controller asked for, before the next frame, so a
             // keyframe request is acted on by the very next one.
             while let Ok(message) = from_control.try_recv() {
-                if let Err(e) = pump.handle(&message) {
-                    eprintln!("      · refused a message from the controller: {e}");
+                let answer = match pump.handle(&message) {
+                    Ok(Handled::Nothing) => None,
+                    // The stream changed shape, and the controller has to be
+                    // told or it will go on reassembling a stream that no
+                    // longer exists.
+                    Ok(Handled::Announce(config)) => {
+                        println!(
+                            "      now sending monitor {}: {}x{}, ssrc {:#010x}",
+                            config.selected, config.width, config.height, config.ssrc
+                        );
+                        Some(config)
+                    }
+                    // Told, and still answered: the config the host is
+                    // keeping is how the controller learns it was heard.
+                    Ok(Handled::Refused { config, why }) => {
+                        eprintln!("      · {why}");
+                        Some(config)
+                    }
+                    Err(e) => {
+                        eprintln!("      · refused a message from the controller: {e}");
+                        None
+                    }
+                };
+                if let Some(config) = answer
+                    && to_controller.send(MediaMessage::Config(config)).is_err()
+                {
+                    break;
                 }
             }
             match pump.pump(interval) {
@@ -453,10 +493,35 @@ async fn serve(
         (frames, pump.sent(), pump)
     });
 
-    // The async side reads the control stream until the peer goes away.
-    while let Ok(message) = control.recv::<MediaMessage>().await {
-        if to_pipeline.send(message).is_err() {
-            break;
+    // The async side owns the control stream in both directions: what the
+    // controller says goes to the pipeline, and what the pipeline answers goes
+    // back out. `Control::recv` is cancel-safe, which is what makes waiting on
+    // both at once sound; `send` is awaited outside the select, where nothing
+    // can cancel it half-written.
+    enum Turn {
+        FromController(Result<MediaMessage, ownview_transport::ControlError>),
+        ToController(Option<MediaMessage>),
+    }
+    loop {
+        let turn = tokio::select! {
+            incoming = control.recv::<MediaMessage>() => Turn::FromController(incoming),
+            outgoing = from_pipeline.recv() => Turn::ToController(outgoing),
+        };
+        match turn {
+            Turn::FromController(Ok(message)) => {
+                if to_pipeline.send(message).is_err() {
+                    break;
+                }
+            }
+            // The peer went away, which is the ordinary end of a session.
+            Turn::FromController(Err(_)) => break,
+            Turn::ToController(Some(message)) => {
+                if control.send(&message).await.is_err() {
+                    break;
+                }
+            }
+            // The sending thread is done, so there is nothing left to say.
+            Turn::ToController(None) => break,
         }
     }
     drop(to_pipeline);
@@ -604,6 +669,25 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let mut link =
             link.with_decoder(Box::new(worker) as Box<dyn ownview_decode::decoder::VideoDecoder>);
 
+        // **The monitor a person asked for, asked for once the session is up.**
+        // It cannot go in the connection: which monitors exist is something
+        // only the host knows, and it says so in the config that has just
+        // arrived. A monitor that is not there comes back as a refusal on the
+        // control stream and the session carries on with the one it has.
+        let mut asked_for: Option<u32> = None;
+        if let Some(wanted) = o.monitor {
+            if wanted == config.selected {
+                println!("  monitor    {wanted} is the one the host is already sending");
+            } else {
+                println!("  monitor    asking for {wanted}");
+                link.select_monitor(wanted);
+                link.flush_outbound()
+                    .await
+                    .map_err(|e| format!("asking for monitor {wanted}: {e}"))?;
+                asked_for = Some(wanted);
+            }
+        }
+
         let mut presenter = if o.present {
             match crate::loopback::open_window(config.width, config.height) {
                 Ok(p) => {
@@ -642,8 +726,37 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             let wait = link
                 .due_in(std::time::Instant::now())
                 .unwrap_or(Duration::from_secs(1));
-            match tokio::time::timeout(wait, link.receive(&mut out)).await {
-                Ok(Ok(())) => last_arrival = tokio::time::Instant::now(),
+            match tokio::time::timeout(wait, link.pump(&mut out)).await {
+                Ok(Ok(())) => {
+                    last_arrival = tokio::time::Instant::now();
+                    // The host said something about the shape of the stream.
+                    // Either it switched, or it is telling us what it is
+                    // keeping — and both are said out loud, because a viewer
+                    // that silently changes size, or silently does not, looks
+                    // like a fault either way.
+                    if let Some(announced) = link.take_announcement() {
+                        match asked_for.take_if(|m| *m != announced.selected) {
+                            Some(refused) => println!(
+                                "  · the host would not switch to monitor {refused}; \
+                                 it is still sending monitor {}",
+                                announced.selected
+                            ),
+                            None => {
+                                asked_for = None;
+                                println!(
+                                    "  · now showing monitor {}: {}x{}",
+                                    announced.selected, announced.width, announced.height
+                                );
+                                if let Some(p) = presenter.as_mut()
+                                    && let Err(e) = p.resize(announced.width, announced.height)
+                                {
+                                    println!("  · the window could not follow: {e}");
+                                    presenter = None;
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(Err(e)) => {
                     println!("  · the session ended: {e}");
                     break;
