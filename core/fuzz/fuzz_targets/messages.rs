@@ -18,8 +18,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use ownview_proto::{
-    Hello, PairConfirm, PairResponse, PairResult, PairSpake, Permission, PermissionChange,
-    SessionDeny, SessionGrant, SessionRequest, SessionResponse, decode,
+    Hello, InputMessage, MediaMessage, PairConfirm, PairResponse, PairResult, PairSpake, Permission,
+    PermissionChange, Role, SessionDeny, SessionGrant, SessionRequest, SessionResponse,
+    TerminalMessage, decode,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -36,6 +37,9 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode::<SessionResponse>(data);
     let _ = decode::<PermissionChange>(data);
     let _ = decode::<Permission>(data);
+    let _ = decode::<MediaMessage>(data);
+    let _ = decode::<TerminalMessage>(data);
+    let _ = decode::<InputMessage>(data);
 
     // The validators are what a host actually calls on a decoded message, and
     // they must be as robust as the decoder. A validator that panics on a
@@ -53,5 +57,23 @@ fuzz_target!(|data: &[u8]| {
     }
     if let Ok(g) = decode::<SessionGrant>(data) {
         let _ = g.allows(Permission::View);
+    }
+    if let Ok(m) = decode::<MediaMessage>(data) {
+        let _ = m.is_well_formed();
+        let _ = m.may_be_sent_by(Role::Controller);
+    }
+    // Input arrives from a peer on every session that grants control, and the
+    // validator is what stands between a hostile field and a platform's
+    // injection API.
+    if let Ok(i) = decode::<InputMessage>(data) {
+        let _ = i.is_well_formed();
+        let _ = i.may_be_sent_by(Role::Controller);
+        let _ = i.name();
+        // Both directions of the pointer arithmetic, on sizes a peer chose.
+        if let InputMessage::Pointer(p) = i {
+            let _ = p.to_pixels(0, 0);
+            let _ = p.to_pixels(1, 1);
+            let _ = p.to_pixels(u32::MAX, u32::MAX);
+        }
     }
 });

@@ -698,6 +698,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-input"
+version = "0.0.0"
+dependencies = [
+ "ownview-proto",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "ownview-input-x11"
+version = "0.0.0"
+dependencies = [
+ "ownview-input",
+ "ownview-proto",
+ "thiserror",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
 name = "ownview-link"
 version = "0.0.0"
 dependencies = [

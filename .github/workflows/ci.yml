@@ -82,6 +82,11 @@ jobs:
           DISPLAY=:99 xdpyinfo | grep -q XFIXES
           DISPLAY=:99 xdpyinfo | grep -q RANDR
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          # Injection tests take the input focus and move the pointer, so they
+          # are off unless asked for — a suite that did that to somebody's
+          # desktop whenever they ran it is a suite they turn off. Here the
+          # display is an Xvfb nobody is looking at, so they run.
+          echo "OWNVIEW_INJECT_TESTS=1" >> "$GITHUB_ENV"
 
       # The mDNS wire format is checked against `dnspython`, an independent
       # implementation of the same documents — because a format tested only

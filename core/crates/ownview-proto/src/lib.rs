@@ -10,6 +10,7 @@
 
 pub mod codes;
 pub mod frame;
+pub mod input;
 pub mod message;
 pub mod replay;
 
@@ -29,6 +30,7 @@ pub mod replay;
 // in these modules is public here.
 pub use codes::*;
 pub use frame::*;
+pub use input::*;
 pub use message::*;
 pub use replay::*;
 

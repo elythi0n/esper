@@ -1,0 +1,16 @@
+[package]
+name = "ownview-input"
+description = "Injecting a controller's keys and pointer into a host: the sink trait, the physical-key table, and what has to be let go of."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ownview-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
