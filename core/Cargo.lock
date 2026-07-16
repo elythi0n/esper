@@ -680,6 +680,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-link"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "ownview-capture",
+ "ownview-color",
+ "ownview-crypto",
+ "ownview-decode",
+ "ownview-encode",
+ "ownview-media",
+ "ownview-pipeline",
+ "ownview-proto",
+ "ownview-scale",
+ "ownview-stream",
+ "ownview-transport",
+ "rustls",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ownview-media"
 version = "0.0.0"
 dependencies = [

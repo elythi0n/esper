@@ -402,6 +402,26 @@ impl Session {
             .map_err(|e| SessionError::Stream(e.to_string()))
     }
 
+    /// A handle for sending and receiving media, detached from the session.
+    ///
+    /// # Why this exists rather than sharing the `Session`
+    ///
+    /// Capture blocks — `XShmGetImage`, `AcquireNextFrame`, a PipeWire wait —
+    /// so the capture and encode loop gets a thread of its own, and that
+    /// thread is what has the frames to send. It cannot borrow the session,
+    /// which is being used by the async task running the control stream.
+    ///
+    /// A `MediaChannel` is cheap to clone, `Send` and `Sync`, and can do
+    /// exactly two things: send a datagram and say how large one may be. That
+    /// is the whole surface the sending thread needs, and keeping it to that
+    /// means the thread cannot accidentally reach for the control stream.
+    #[must_use]
+    pub fn media_channel(&self) -> MediaChannel {
+        MediaChannel {
+            conn: self.conn.clone(),
+        }
+    }
+
     /// Send a media datagram.
     ///
     /// Unreliable by design: a lost video packet must never delay the next one,
@@ -473,4 +493,46 @@ fn peer_key_from_tls(conn: &quinn::Connection) -> Result<[u8; KEY_LEN], SessionE
 
     der::public_key_from_spki(first.as_ref())
         .ok_or_else(|| SessionError::BadHello("peer key is not an Ed25519 SPKI".to_owned()))
+}
+
+/// The media half of a session: datagrams in and out, nothing else.
+///
+/// Cloneable and shareable, so the thread that captures can send without
+/// holding the session the control stream is using.
+#[derive(Debug, Clone)]
+pub struct MediaChannel {
+    conn: quinn::Connection,
+}
+
+impl MediaChannel {
+    /// Send one datagram.
+    ///
+    /// Unreliable by design: a lost video packet must never delay the next
+    /// one, and retransmitting a frame already too late to display costs
+    /// latency for nothing.
+    pub fn send(&self, payload: bytes::Bytes) -> Result<(), SessionError> {
+        self.conn
+            .send_datagram(payload)
+            .map_err(|e| SessionError::Stream(e.to_string()))
+    }
+
+    /// Receive one datagram.
+    pub async fn recv(&self) -> Result<bytes::Bytes, SessionError> {
+        self.conn.read_datagram().await.map_err(SessionError::from)
+    }
+
+    /// The largest datagram that will fit without fragmenting.
+    ///
+    /// `None` means the peer did not enable datagrams at all, which for this
+    /// protocol means it is not a peer that can carry video.
+    #[must_use]
+    pub fn max_datagram_size(&self) -> Option<usize> {
+        self.conn.max_datagram_size()
+    }
+
+    /// Whether the connection is still up.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.conn.close_reason().is_none()
+    }
 }

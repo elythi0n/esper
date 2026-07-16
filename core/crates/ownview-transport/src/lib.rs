@@ -21,5 +21,5 @@ pub use crypto_suite::{KX_GROUP, TLS_VERSIONS, provider};
 pub use endpoint::{ALPN, Endpoint, IDLE_TIMEOUT, KEEPALIVE, TransportError};
 pub use pair::{AnyKeyForPairingOnly, PairError, pairing_authority};
 pub use parked::{Limits, LiveTerminal, Parked, ParkedSessions, Resumed};
-pub use session::{HELLO_TIMEOUT, Session, SessionError, Stats};
+pub use session::{HELLO_TIMEOUT, MediaChannel, Session, SessionError, Stats};
 pub use terminal::{Ended, EscapeWatcher, TerminalError, TerminalPolicy, TerminalService, Typed};

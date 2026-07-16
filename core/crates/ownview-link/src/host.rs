@@ -1,0 +1,230 @@
+//! The sending side of a link.
+//!
+//! Announces what it will send, then runs the pipeline on a thread of its own
+//! while the control stream is served on the async side.
+
+use std::time::Duration;
+
+use ownview_pipeline::pipeline::Pipeline;
+use ownview_proto::{MediaMessage, StreamConfig};
+use ownview_stream::{HostStep, HostStream};
+use ownview_transport::{Control, MediaChannel, Session};
+
+use crate::{LinkError, SessionSink};
+
+/// The smallest path worth attempting.
+///
+/// Below this the RTP and QUIC headers are a large fraction of every datagram
+/// and a frame fragments into hundreds of pieces. IPv6 guarantees 1280 bytes
+/// end to end, so a path under this is a misconfiguration rather than a
+/// network.
+pub const MIN_PATH: usize = 1200;
+
+/// The sending side of a media session.
+pub struct HostLink {
+    stream: HostStream,
+    sink: SessionSink,
+    control: Control,
+}
+
+impl std::fmt::Debug for HostLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostLink")
+            .field("stream", &self.stream)
+            .field("sent", &self.sink.stats())
+            .finish_non_exhaustive()
+    }
+}
+
+impl HostLink {
+    /// Build a sender for an open session.
+    ///
+    /// The MTU comes from the transport rather than a guess, because the
+    /// transport is the only thing that knows what the path actually carries —
+    /// and it is *checked*: a peer with datagrams disabled or a path too small
+    /// to be worth using is told so, rather than discovering it as every frame
+    /// being refused.
+    pub fn new(
+        media: &MediaChannel,
+        control: Control,
+        pipeline: Pipeline,
+    ) -> Result<Self, LinkError> {
+        let mtu = check_path(media.max_datagram_size())?;
+        let stream = HostStream::new(pipeline, mtu)?;
+        Ok(Self {
+            stream,
+            sink: SessionSink::new(media.clone()),
+            control,
+        })
+    }
+
+    /// The configuration this host will announce.
+    #[must_use]
+    pub fn config(&self) -> StreamConfig {
+        self.stream.config()
+    }
+
+    /// What has been sent.
+    #[must_use]
+    pub fn sent(&self) -> crate::SinkStats {
+        self.sink.stats()
+    }
+
+    /// The sending half, for a caller that wants to drive it itself.
+    #[must_use]
+    pub const fn stream(&self) -> &HostStream {
+        &self.stream
+    }
+
+    /// Tell the controller what is coming.
+    ///
+    /// Sent before any datagram. A controller that received pixels first would
+    /// not know their size, their codec or which monitor they are — and every
+    /// buffer on its side is sized from this.
+    pub async fn announce(&mut self) -> Result<StreamConfig, LinkError> {
+        let config = self.stream.config();
+        self.control
+            .send(&MediaMessage::Config(config.clone()))
+            .await?;
+        Ok(config)
+    }
+
+    /// Run one turn of capture, encode and send.
+    ///
+    /// Synchronous, and meant to be called from a thread of its own: capture
+    /// blocks by design, so an async task doing this would stall its executor
+    /// for as long as the screen took to change.
+    pub fn pump(&mut self, timeout: Duration) -> Result<HostStep, LinkError> {
+        Ok(self.stream.step(timeout, &mut self.sink)?)
+    }
+
+    /// Whether the connection is still up.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.sink.is_open()
+    }
+
+    /// Act on one message from the controller.
+    pub fn handle(&mut self, message: &MediaMessage) -> Result<(), LinkError> {
+        Ok(self.stream.handle(message)?)
+    }
+
+    /// Wait for the next message from the controller.
+    pub async fn recv(&mut self) -> Result<MediaMessage, LinkError> {
+        Ok(self.control.recv().await?)
+    }
+
+    /// Split into the parts two threads need.
+    ///
+    /// The pump goes to a blocking thread and the control stream stays on the
+    /// async side. Splitting rather than sharing is what makes it impossible
+    /// for the sending thread to touch the control stream — and a compile
+    /// error is a better guarantee than a comment asking it not to.
+    #[must_use]
+    pub fn split(self) -> (HostPump, Control) {
+        (
+            HostPump {
+                stream: self.stream,
+                sink: self.sink,
+            },
+            self.control,
+        )
+    }
+}
+
+/// The sending half, on its own thread.
+#[derive(Debug)]
+pub struct HostPump {
+    stream: HostStream,
+    sink: SessionSink,
+}
+
+impl HostPump {
+    /// Run one turn.
+    pub fn pump(&mut self, timeout: Duration) -> Result<HostStep, LinkError> {
+        Ok(self.stream.step(timeout, &mut self.sink)?)
+    }
+
+    /// Act on a message the async side received.
+    pub fn handle(&mut self, message: &MediaMessage) -> Result<(), LinkError> {
+        Ok(self.stream.handle(message)?)
+    }
+
+    /// What has been sent.
+    #[must_use]
+    pub fn sent(&self) -> crate::SinkStats {
+        self.sink.stats()
+    }
+
+    /// Whether the connection is still up.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.sink.is_open()
+    }
+
+    /// What this host is sending, for a re-announcement after a change.
+    #[must_use]
+    pub fn config(&self) -> StreamConfig {
+        self.stream.config()
+    }
+}
+
+/// Whether a path can carry video, and how much of it at a time.
+///
+/// Pure, so it can be tested without a network that has an unusual MTU — and
+/// the two things it refuses are worth refusing separately. A peer with
+/// datagrams disabled and a path too small to use are both "video is
+/// impossible", and an operator needs to be told which.
+pub fn check_path(reported: Option<usize>) -> Result<usize, LinkError> {
+    let mtu = reported.ok_or(LinkError::NoDatagrams)?;
+    if mtu < MIN_PATH {
+        return Err(LinkError::PathTooSmall {
+            found: mtu,
+            needed: MIN_PATH,
+        });
+    }
+    Ok(mtu)
+}
+
+/// A session's media channel and control stream, taken apart.
+///
+/// A convenience for the common shape: take the control stream the `Hello`
+/// exchange left behind, and a media channel for the sending thread.
+pub fn parts(session: &mut Session) -> Result<(MediaChannel, Control), LinkError> {
+    let media = session.media_channel();
+    let control = session.take_control().ok_or(LinkError::NoControl)?;
+    Ok((media, control))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_peer_without_datagrams_cannot_carry_video() {
+        assert!(matches!(check_path(None), Err(LinkError::NoDatagrams)));
+    }
+
+    #[test]
+    fn a_path_too_small_is_refused_with_both_numbers() {
+        for found in [0usize, 1, 576, MIN_PATH - 1] {
+            match check_path(Some(found)) {
+                Err(LinkError::PathTooSmall { found: f, needed }) => {
+                    assert_eq!(f, found);
+                    assert_eq!(needed, MIN_PATH);
+                }
+                other => panic!("a {found}-byte path gave {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_usable_path_is_reported_as_it_came() {
+        // Passed through rather than clamped: the transport knows the path and
+        // the packetizer must fragment to what it actually said, not to a
+        // rounder number.
+        for mtu in [MIN_PATH, 1382, 1500, 9000] {
+            assert_eq!(check_path(Some(mtu)).ok(), Some(mtu));
+        }
+    }
+}

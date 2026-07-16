@@ -1,0 +1,32 @@
+[package]
+name = "ownview-link"
+description = "A media session over a real transport: the sink that puts datagrams on a QUIC connection, and the control exchange around it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ownview-decode.workspace = true
+ownview-media.workspace = true
+ownview-pipeline.workspace = true
+ownview-proto.workspace = true
+ownview-stream.workspace = true
+ownview-transport.workspace = true
+bytes = "1"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+ownview-capture.workspace = true
+ownview-color.workspace = true
+ownview-crypto.workspace = true
+ownview-encode.workspace = true
+ownview-scale.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
