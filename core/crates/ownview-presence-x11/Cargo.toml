@@ -1,0 +1,21 @@
+[package]
+name = "ownview-presence-x11"
+description = "The session indicator and the panic key on X11: a frame around the screen, and a key grabbed above every application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ownview-input.workspace = true
+ownview-presence.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+x11rb.workspace = true
+
+[dev-dependencies]
+ownview-display-lock.workspace = true

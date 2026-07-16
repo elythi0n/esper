@@ -16,6 +16,7 @@ mod loopback;
 mod net;
 mod pairing;
 mod paths;
+mod presence_task;
 mod serve;
 mod session_cmd;
 

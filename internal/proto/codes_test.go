@@ -120,7 +120,7 @@ func TestReasonForMapsFramingErrors(t *testing.T) {
 // has to close with whatever code is nearest, and a controller cannot tell
 // "the person closed the window" from "the host refused you".
 func TestEndingsAreNotFailures(t *testing.T) {
-	for _, r := range []Reason{ClosedByUser, SessionComplete, HostShuttingDown, Superseded, PeerGone} {
+	for _, r := range []Reason{ClosedByUser, SessionComplete, HostShuttingDown, Superseded, PeerGone, StoppedAtHost} {
 		if got := r.Class(); got != ClassNormal {
 			t.Errorf("Reason(%d).Class() = %q, want %q", r, got, ClassNormal)
 		}

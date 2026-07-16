@@ -39,6 +39,17 @@ impl Reason {
     /// Not a failure of either side's making, which is why it lives here: a
     /// laptop that closed its lid is not a peer that did something wrong.
     pub const PEER_GONE: Self = Self(5);
+    /// The person at the host ended it.
+    ///
+    /// **Its own code because it is its own event.** A controller told "the
+    /// host is shutting down" would wait for it to come back; told "you were
+    /// disconnected" it would reconnect. Neither is what happened: somebody
+    /// standing at the machine decided they had seen enough, and the honest
+    /// thing to show the person at the other end is that a person did this.
+    ///
+    /// It revokes nothing. The pairing is intact and a reconnection is
+    /// allowed — what stops it being useful is that the screen is now locked.
+    pub const STOPPED_AT_HOST: Self = Self(6);
 
     // 1xx — protocol
     pub const PROTOCOL_VERSION_MISMATCH: Self = Self(100);
@@ -110,6 +121,7 @@ impl Reason {
             Self::HOST_SHUTTING_DOWN => "the host is shutting down",
             Self::SUPERSEDED => "replaced by a newer session",
             Self::PEER_GONE => "the peer stopped responding",
+            Self::STOPPED_AT_HOST => "the person at the host ended it",
             Self::PROTOCOL_VERSION_MISMATCH => "protocol version mismatch",
             Self::MALFORMED_FRAME => "malformed frame",
             Self::FRAME_TOO_LARGE => "frame exceeds the maximum length",
@@ -238,6 +250,7 @@ mod normal_close_tests {
             Reason::HOST_SHUTTING_DOWN,
             Reason::SUPERSEDED,
             Reason::PEER_GONE,
+            Reason::STOPPED_AT_HOST,
         ] {
             assert_eq!(r.class(), Class::Normal, "{r:?}");
             assert!(!r.is_failure(), "{r:?} reads as a failure");

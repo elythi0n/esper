@@ -251,6 +251,39 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     }
     println!();
 
+    // **The indicator and the panic key, before any session.** Not a setting
+    // and not a feature: software that can watch a screen has to make being
+    // watched obvious, and software that can drive a keyboard has to leave the
+    // person in front of it a way to stop that.
+    //
+    // A host that cannot provide either says so loudly rather than serving a
+    // session quietly, because the thing it is failing to provide is
+    // something a person relies on.
+    let (indicator, mut presses) = match crate::presence_task::start() {
+        Ok((i, presses)) => {
+            let panic_key = if i.armed() {
+                "Ctrl+Alt+Shift+Esc ends every session and locks the screen"
+            } else {
+                "PANIC KEY UNAVAILABLE: something else on this display holds it"
+            };
+            println!("  presence   {} — {panic_key}", i.backend());
+            if !i.can_show() {
+                println!(
+                    "             ⚠ no session indicator: this display has no SHAPE extension"
+                );
+            }
+            println!();
+            (Some(i), Some(presses))
+        }
+        Err(e) => {
+            println!("  presence   ⚠ NONE ({e})");
+            println!("             This machine cannot show that it is being watched and has no");
+            println!("             panic key. Sessions will still be served.");
+            println!();
+            (None, None)
+        }
+    };
+
     // A session whose transport went away, waiting for its controller to come
     // back. Held here rather than inside `serve_one` because it has to outlive
     // the session it came from — that is the whole point of it.
@@ -304,10 +337,17 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             // would hold the capture backend — and on a host, the screen being
             // captured — open for as long as the host runs, which is the whole
             // thing `PARK_TIMEOUT` exists to prevent.
+            // A panic waits like a stop does — a person who hit it while
+            // nobody was connected still wants the screen locked, and a
+            // parked session let go of.
             let accepted =
                 match accept_deadline(parked.as_ref().map(|p| p.parked_for(Instant::now()))) {
                     Some(left) => tokio::select! {
                         _ = stopping.changed() => break Ok(()),
+                        () = wait_for_panic(presses.as_mut()) => {
+                            panic_now(indicator.as_ref());
+                            continue;
+                        }
                         waited = tokio::time::timeout(left, endpoint.accept()) => match waited {
                             Ok(accepted) => accepted,
                             // Nobody came. Round the loop, where it is let go.
@@ -316,6 +356,10 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                     },
                     None => tokio::select! {
                         _ = stopping.changed() => break Ok(()),
+                        () = wait_for_panic(presses.as_mut()) => {
+                            panic_now(indicator.as_ref());
+                            continue;
+                        }
                         accepted = endpoint.accept() => accepted,
                     },
                 };
@@ -346,7 +390,16 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             };
             let from = session.remote_address();
             println!("  · {from} connected");
-            match serve_one(session, o, parked.take(), stopping.clone()).await {
+            match serve_one(
+                session,
+                o,
+                parked.take(),
+                stopping.clone(),
+                indicator.as_ref(),
+                presses.as_mut(),
+            )
+            .await
+            {
                 Ok((stats, still)) => {
                     println!("  · {from} finished: {stats}");
                     parked = still;
@@ -381,6 +434,43 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     })
 }
 
+/// Wait for the panic key, or for ever when there is none.
+///
+/// A `select!` branch needs a future either way, and a host with no working
+/// panic key must not fall out of its loop immediately — so the absence is a
+/// future that never completes rather than a special case at every call site.
+async fn wait_for_panic(presses: Option<&mut crate::presence_task::Presses>) {
+    match presses {
+        // One press, taken from the queue: acted on once by whoever was
+        // waiting. See `presence_task::Presses` for what the first version of
+        // this did instead.
+        Some(queue) => {
+            let _ = queue.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Act on the panic key: say so, and lock the screen.
+///
+/// Ending the sessions is the caller's part — it is the caller that holds
+/// them — and it happens whatever this does, because a machine with no screen
+/// locker is still a machine somebody wants to stop being watched.
+fn panic_now(indicator: Option<&crate::presence_task::Indicator>) {
+    println!();
+    println!("  ⚠ PANIC KEY: ending every session and locking the screen");
+    if let Some(i) = indicator {
+        i.hide();
+    }
+    match ownview_presence::lock_screen() {
+        Ok(how) => println!("    locked the screen with {how}"),
+        // Said, not swallowed. Somebody who believes their screen is locked
+        // and is wrong is worse off than somebody who has been told.
+        Err(e) => println!("    ⚠ COULD NOT LOCK THE SCREEN: {e}"),
+    }
+    println!();
+}
+
 /// How long to wait for the next connection: forever, or until the parked
 /// session expires.
 ///
@@ -409,6 +499,8 @@ async fn serve_one(
     o: &HostOptions,
     parked: Option<Parked>,
     stopping: tokio::sync::watch::Receiver<bool>,
+    indicator: Option<&crate::presence_task::Indicator>,
+    presses: Option<&mut crate::presence_task::Presses>,
 ) -> Served {
     println!(
         "      peer {}  {}",
@@ -511,7 +603,20 @@ async fn serve_one(
         None => None,
     };
 
-    let served = serve(link, media, device, parked, stopping).await;
+    // **The indicator goes up before a single frame goes out.** A person
+    // whose screen starts being watched has to be told at the moment it
+    // starts, not once the far end has a picture.
+    if let Some(indicator) = indicator {
+        indicator.show(ownview_presence::Watching {
+            peer: session.peer_hello().name.clone(),
+            controlling: may_control,
+        });
+    }
+
+    let served = serve(link, media, device, parked, stopping, presses, indicator).await;
+    if let Some(indicator) = indicator {
+        indicator.hide();
+    }
     if let Some(task) = waiting_for_input {
         // Aborted rather than awaited: it is waiting on a stream that will
         // never arrive now, and the dispatcher's `Drop` is what releases
@@ -666,6 +771,8 @@ async fn serve(
     device: [u8; 32],
     parked: Option<Parked>,
     mut stopping: tokio::sync::watch::Receiver<bool>,
+    mut presses: Option<&mut crate::presence_task::Presses>,
+    indicator: Option<&crate::presence_task::Indicator>,
 ) -> Served {
     // The controller's messages have to reach the pipeline, which lives on the
     // sending thread; and a monitor switch has to be announced back, which
@@ -737,14 +844,18 @@ async fn serve(
         ToController(Option<MediaMessage>),
         /// The operator asked this process to stop.
         Stop,
+        /// The person at the host hit the panic key.
+        Panic,
     }
-    // Whether this side ended it. A session the host closed is not one to
-    // park: parking is for a controller that has not chosen to leave, and this
-    // host is going.
-    let mut ours = false;
+    // Which reason this side ended it with, if it did. A session the host
+    // closed is not one to park — parking is for a controller that has not
+    // chosen to leave — and the reason is worth naming in the log rather than
+    // printing one fixed sentence for two different endings.
+    let mut ours: Option<ownview_proto::Reason> = None;
     loop {
         let turn = tokio::select! {
             _ = stopping.changed() => Turn::Stop,
+            () = wait_for_panic(presses.as_deref_mut()) => Turn::Panic,
             incoming = control.recv::<MediaMessage>() => Turn::FromController(incoming),
             outgoing = from_pipeline.recv() => Turn::ToController(outgoing),
         };
@@ -754,7 +865,23 @@ async fn serve(
             // there is a code for this one.
             Turn::Stop => {
                 media.close(ownview_proto::Reason::HOST_SHUTTING_DOWN);
-                ours = true;
+                ours = Some(ownview_proto::Reason::HOST_SHUTTING_DOWN);
+                break;
+            }
+            // **Its own reason.** A controller told "the host is shutting
+            // down" would wait for it to come back, and told "you were
+            // disconnected" would reconnect. Neither happened: a person
+            // standing at the machine decided they had seen enough.
+            Turn::Panic => {
+                media.close(ownview_proto::Reason::STOPPED_AT_HOST);
+                ours = Some(ownview_proto::Reason::STOPPED_AT_HOST);
+                // **The whole action, here.** Whoever takes the press does
+                // all of it: the first version closed the session here and
+                // left the announcement and the screen lock to the accept
+                // loop, which then found the queue empty — so the session
+                // ended correctly and nothing was said and nothing was
+                // locked.
+                panic_now(indicator);
                 break;
             }
             Turn::FromController(Ok(message)) => {
@@ -783,8 +910,11 @@ async fn serve(
     // A reason means somebody decided, and a decision is not something to
     // reconnect around. Silence means the path broke under a controller that
     // has not chosen to leave, and that is what parking is for.
-    let keep = if ours {
-        println!("      told the controller the host is shutting down");
+    let keep = if let Some(reason) = ours {
+        println!(
+            "      told the controller: {}",
+            reason.describe().unwrap_or("it was over")
+        );
         None
     } else {
         match media.peer_close_reason() {

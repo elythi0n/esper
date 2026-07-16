@@ -1,0 +1,11 @@
+[package]
+name = "ownview-display-lock"
+description = "One X display, one test at a time — across processes, because cargo runs test binaries in parallel."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

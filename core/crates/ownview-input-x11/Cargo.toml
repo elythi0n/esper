@@ -16,3 +16,6 @@ ownview-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 x11rb.workspace = true
+
+[dev-dependencies]
+ownview-display-lock.workspace = true

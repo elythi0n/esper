@@ -28,6 +28,7 @@ const (
 	HostShuttingDown Reason = 3
 	Superseded       Reason = 4
 	PeerGone         Reason = 5
+	StoppedAtHost    Reason = 6
 )
 
 // Protocol.
@@ -127,6 +128,7 @@ var descriptions = map[Reason]string{
 	HostShuttingDown:        "the host is shutting down",
 	Superseded:              "replaced by a newer session",
 	PeerGone:                "the peer stopped responding",
+	StoppedAtHost:           "the person at the host ended it",
 	ProtocolVersionMismatch: "protocol version mismatch",
 	MalformedFrame:          "malformed frame",
 	FrameTooLarge:           "frame exceeds the maximum length",

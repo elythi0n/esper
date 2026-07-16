@@ -598,6 +598,7 @@ name = "ownview-capture-x11"
 version = "0.0.0"
 dependencies = [
  "ownview-capture",
+ "ownview-display-lock",
  "rustix",
  "thiserror",
  "tracing",
@@ -660,6 +661,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-display-lock"
+version = "0.0.0"
+
+[[package]]
 name = "ownview-encode"
 version = "0.0.0"
 dependencies = [
@@ -687,6 +692,8 @@ dependencies = [
  "ownview-link",
  "ownview-media",
  "ownview-pipeline",
+ "ownview-presence",
+ "ownview-presence-x11",
  "ownview-present",
  "ownview-present-x11",
  "ownview-proto",
@@ -712,6 +719,7 @@ dependencies = [
 name = "ownview-input-x11"
 version = "0.0.0"
 dependencies = [
+ "ownview-display-lock",
  "ownview-input",
  "ownview-proto",
  "thiserror",
@@ -768,6 +776,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ownview-presence"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "ownview-presence-x11"
+version = "0.0.0"
+dependencies = [
+ "ownview-display-lock",
+ "ownview-input",
+ "ownview-presence",
+ "thiserror",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
 name = "ownview-present"
 version = "0.0.0"
 dependencies = [
@@ -783,6 +811,7 @@ dependencies = [
  "ownview-capture",
  "ownview-capture-x11",
  "ownview-color",
+ "ownview-display-lock",
  "ownview-present",
  "thiserror",
  "tracing",

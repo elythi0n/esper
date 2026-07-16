@@ -12,8 +12,6 @@
 //! path — the colour conversion, the shared segment, the blit and the byte
 //! order — rather than proving that no call returned an error.
 
-use std::sync::{Mutex, MutexGuard};
-
 use ownview_capture::damage::{Damage, Regions};
 use ownview_capture::geometry::Rect;
 use ownview_color::{ColorSpace, I420};
@@ -31,10 +29,11 @@ use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
 /// than of this code, which is why the fix is a lock rather than a change to
 /// the presenter: a real viewer's window is placed and raised by a window
 /// manager, and a viewer does not read its own pixels back.
-static SCREEN: Mutex<()> = Mutex::new(());
-
-fn exclusive() -> MutexGuard<'static, ()> {
-    SCREEN.lock().unwrap_or_else(|p| p.into_inner())
+/// Across processes, not just this binary: `cargo test` runs the workspace's
+/// test binaries in parallel, so the input and presence suites would otherwise
+/// be taking the focus and drawing over the screen in the middle of these.
+fn exclusive() -> ownview_display_lock::DisplayLock {
+    ownview_display_lock::DisplayLock::take()
 }
 
 fn open(w: u32, h: u32) -> Option<X11Presenter> {

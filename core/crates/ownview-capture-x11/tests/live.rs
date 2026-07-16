@@ -25,6 +25,17 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::rust_connection::RustConnection;
 
+/// The display, to this suite alone.
+///
+/// **These read pixels back**, and three other suites in this workspace draw
+/// over the screen, take the focus and move the pointer. `cargo test` runs
+/// test binaries in parallel, so without a lock that spans processes one of
+/// them happens in the middle of one of these — which is a failure nobody
+/// reading either test could explain.
+fn exclusive() -> ownview_display_lock::DisplayLock {
+    ownview_display_lock::DisplayLock::take()
+}
+
 /// `Some(capturer)`, or `None` with a note, when there is no display.
 fn open() -> Option<X11Capturer> {
     if std::env::var_os("DISPLAY").is_none() {
@@ -456,6 +467,7 @@ fn every_monitor_can_be_captured_at_its_own_size() {
 /// test, because the machine you develop on takes one path every time.
 #[test]
 fn the_socket_transport_agrees_with_shared_memory() {
+    let _display = exclusive();
     let Some(mut shm) = open() else { return };
     if shm.transport() != Transport::SharedMemory {
         println!("skipped: no MIT-SHM here, so there is nothing to compare against");
@@ -497,6 +509,7 @@ fn the_socket_transport_agrees_with_shared_memory() {
 /// a moment. That is the price of testing the path rather than hoping.
 #[test]
 fn a_known_change_is_reported_at_the_place_it_happened() {
+    let _display = exclusive();
     let Some(mut cap) = open() else { return };
     if !cap.reports_damage() {
         println!("skipped: no XDamage on this server");
@@ -650,6 +663,7 @@ fn switching_to_a_monitor_the_server_does_not_have_is_refused() {
 /// bug.
 #[test]
 fn a_known_colour_arrives_at_the_place_it_was_drawn() {
+    let _display = exclusive();
     use x11rb::protocol::xproto::ImageFormat;
 
     let Some(mut cap) = open() else { return };
@@ -799,6 +813,7 @@ fn a_known_colour_arrives_at_the_place_it_was_drawn() {
 /// test on a real desktop.
 #[test]
 fn damage_on_another_monitor_does_not_end_the_wait_early() {
+    let _display = exclusive();
     let Some(mut cap) = open() else { return };
     if !cap.reports_damage() {
         println!("skipped: no XDamage on this server");

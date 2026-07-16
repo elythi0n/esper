@@ -32,6 +32,10 @@ ownview-link = { path = "crates/ownview-link" }
 ownview-discovery = { path = "crates/ownview-discovery" }
 ownview-input = { path = "crates/ownview-input" }
 ownview-input-x11 = { path = "crates/ownview-input-x11" }
+ownview-presence = { path = "crates/ownview-presence" }
+ownview-presence-x11 = { path = "crates/ownview-presence-x11" }
+# Test-only: see the crate's own documentation.
+ownview-display-lock = { path = "crates/ownview-display-lock" }
 # Pure Rust: it speaks the X11 protocol over a socket rather than binding
 # libX11, so nothing here links a display library and this crate keeps
 # `forbid(unsafe_code)`. That also keeps the smoke test's "the engine links no
@@ -47,6 +51,10 @@ x11rb = { version = "0.14", default-features = false, features = [
     # is the point: a remote desktop whose keystrokes were ignored by anything
     # that checks would be a remote desktop that does not work.
     "xtest",
+    # The session indicator's frame has to be *visible* without being
+    # *clickable*: without an empty input shape, four windows around the edge
+    # of the screen would swallow every click on the edge of the screen.
+    "shape",
 ] }
 # Already in the tree through quinn, and already vetted, so this costs nothing
 # new. Wanted for `SO_REUSEPORT` — without it an mDNS responder cannot start on

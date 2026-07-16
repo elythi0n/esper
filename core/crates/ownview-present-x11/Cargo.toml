@@ -20,6 +20,7 @@ tracing.workspace = true
 x11rb = { workspace = true }
 
 [dev-dependencies]
+ownview-display-lock.workspace = true
 x11rb = { workspace = true }
 ownview-capture-x11.workspace = true
 ownview-capture.workspace = true

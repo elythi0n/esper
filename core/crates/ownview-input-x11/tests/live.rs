@@ -22,7 +22,6 @@
 //! the focus** before sending a single event. If it does not, it skips. A test
 //! that typed into the desktop of whoever ran it would be worse than no test.
 
-use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use ownview_input::{InputSink, Point, hid};
@@ -41,13 +40,11 @@ use x11rb::protocol::xproto::{
 /// it. Both happened, in CI, after passing serially on the developer's
 /// machine.
 ///
-/// A lock rather than a fix to the code: a display really does have one focus,
-/// and a real session does not share it with another session on the same
-/// screen.
-static DISPLAY: Mutex<()> = Mutex::new(());
-
-fn exclusive() -> MutexGuard<'static, ()> {
-    DISPLAY.lock().unwrap_or_else(|p| p.into_inner())
+/// Across processes, because a `static Mutex` here would serialise these tests
+/// and do nothing about the presence suite drawing a frame over the screen
+/// from another binary at the same time.
+fn exclusive() -> ownview_display_lock::DisplayLock {
+    ownview_display_lock::DisplayLock::take()
 }
 
 /// `Some(injector)` when there is a display with XTEST.
@@ -223,20 +220,23 @@ fn every_usage_in_the_table_fits_a_keycode() {
     }
 }
 
-/// Whether this run may inject into the display it can see.
+/// Whether this run may do visible things to the display it can see.
 ///
 /// **Off unless asked for.** Injecting takes the input focus and moves the
 /// pointer, and on a real desktop that is somebody's session: a test that
 /// stole the focus mid-sentence and moved the mouse whenever they ran the
-/// suite would be a test they turn off. CI sets this along`DISPLAY`, where
-/// the display is an `Xvfb` nobody is looking at.
+/// suite would be a test they turn off. CI sets this alongside `DISPLAY`,
+/// where the display is an `Xvfb` nobody is looking at.
+///
+/// One switch for every test in the product that disturbs a display, so
+/// there is one thing to know rather than one per crate.
 ///
 /// The test that matters most — the key table against the server's own
 /// keyboard — needs none of this and always runs, because it only *reads*.
-fn may_inject() -> bool {
-    if std::env::var_os("OWNVIEW_INJECT_TESTS").is_none() {
+fn may_disturb_the_display() -> bool {
+    if std::env::var_os("OWNVIEW_DISPLAY_TESTS").is_none() {
         println!(
-            "skipped: set OWNVIEW_INJECT_TESTS=1 to allow injecting into this display. \
+            "skipped: set OWNVIEW_DISPLAY_TESTS=1 to allow injecting into this display. \
              It takes the input focus and moves the pointer, so it is off unless asked for."
         );
         return false;
@@ -337,7 +337,7 @@ impl Drop for Focused {
 #[test]
 fn a_key_arrives_at_a_focused_window_as_the_key_it_was_sent_as() {
     let _display = exclusive();
-    if !may_inject() {
+    if !may_disturb_the_display() {
         return;
     }
     let Some(mut injector) = open() else { return };
@@ -400,7 +400,7 @@ fn a_key_arrives_at_a_focused_window_as_the_key_it_was_sent_as() {
 #[test]
 fn release_all_releases_what_was_left_down() {
     let _display = exclusive();
-    if !may_inject() {
+    if !may_disturb_the_display() {
         return;
     }
     let Some(mut injector) = open() else { return };
@@ -490,7 +490,7 @@ fn a_key_this_platform_does_not_have_is_refused() {
 #[test]
 fn a_scroll_arrives_as_one_wheel_click_per_notch() {
     let _display = exclusive();
-    if !may_inject() {
+    if !may_disturb_the_display() {
         return;
     }
     let Some(mut injector) = open() else { return };
@@ -526,7 +526,7 @@ fn a_scroll_arrives_as_one_wheel_click_per_notch() {
 #[test]
 fn the_pointer_moves_to_an_absolute_position() {
     let _display = exclusive();
-    if !may_inject() {
+    if !may_disturb_the_display() {
         return;
     }
     let Some(mut injector) = open() else { return };

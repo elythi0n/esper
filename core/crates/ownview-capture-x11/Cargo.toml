@@ -20,6 +20,7 @@ x11rb = { workspace = true }
 # does: `event` is for waiting on the X connection with a deadline, and `fs`
 # and `mm` are for the shared memory segment.
 [dev-dependencies]
+ownview-display-lock.workspace = true
 x11rb = { workspace = true }
 ownview-capture = { workspace = true, features = [] }
 
