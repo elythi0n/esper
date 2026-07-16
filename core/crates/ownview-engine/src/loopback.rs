@@ -505,7 +505,7 @@ fn report(pipeline: &Pipeline, psnr_sum: f64, psnr_count: u64, counter_wrong: u6
 
 /// Open a window for pictures of this size, if this platform has one.
 #[cfg(target_os = "linux")]
-fn open_window(
+pub fn open_window(
     width: u32,
     height: u32,
 ) -> Result<Box<dyn ownview_present::Presenter>, ownview_present::PresentError> {
@@ -514,7 +514,7 @@ fn open_window(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_window(
+pub fn open_window(
     _width: u32,
     _height: u32,
 ) -> Result<Box<dyn ownview_present::Presenter>, ownview_present::PresentError> {

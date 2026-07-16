@@ -252,94 +252,109 @@ impl ControllerStream {
         }
 
         for frame in frames {
-            match frame {
-                Reassembled::Lost { timestamp, why } => {
-                    self.stats.frames_lost = self.stats.frames_lost.saturating_add(1);
-                    // **The flag is not cleared first.** It used to be, which
-                    // defeated the coalescing on the very next line: every
-                    // lost frame produced its own request.
-                    self.ask(KeyframeReason::LostSync);
-                    out.push(Decoded::Lost {
-                        timestamp,
-                        why: why.reason(),
-                    });
-                }
-                Reassembled::Frame {
-                    bitstream,
-                    timestamp,
-                    keyframe,
-                } => {
-                    if keyframe {
-                        self.awaiting_keyframe = false;
-                    } else if self.awaiting_keyframe {
-                        // Provably whole, and its references are gone.
-                        self.stats.frames_skipped = self.stats.frames_skipped.saturating_add(1);
-                        out.push(Decoded::Skipped {
-                            timestamp,
-                            why: "a keyframe is outstanding, so this frame's \
-                                  reference pictures are missing",
-                        });
-                        continue;
-                    }
-                    let Some(decoder) = self.decoder.as_mut() else {
-                        out.push(Decoded::Skipped {
-                            timestamp,
-                            why: "no decoder is attached",
-                        });
-                        continue;
-                    };
-                    match decoder.decode(&bitstream) {
-                        Ok(Some(picture)) => {
-                            if (picture.width(), picture.height()) != self.expected {
-                                // The host changed size without saying so.
-                                // Worth noticing rather than rendering: every
-                                // buffer on this side was sized from the
-                                // config.
-                                self.expected = (picture.width(), picture.height());
-                                tracing::warn!(
-                                    "the stream changed to {}x{} without a new config",
-                                    picture.width(),
-                                    picture.height()
-                                );
-                            }
-                            self.stats.pictures = self.stats.pictures.saturating_add(1);
-                            out.push(Decoded::Picture {
-                                picture,
-                                timestamp,
-                                keyframe,
-                            });
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            // The decoder refused. Its references are gone or
-                            // the frame is bad; either way a keyframe is the
-                            // answer and the session continues.
-                            self.stats.frames_skipped = self.stats.frames_skipped.saturating_add(1);
-                            self.ask(KeyframeReason::LostSync);
-                            tracing::debug!("the decoder refused a frame: {e}");
-                            out.push(Decoded::Skipped {
-                                timestamp,
-                                why: "the decoder refused it",
-                            });
-                        }
-                    }
-                }
-            }
+            self.absorb(frame, out);
         }
         Ok(())
     }
 
+    /// Handle one reassembly result.
+    ///
+    /// **Shared by `receive` and `flush`, and it has to be.** `flush` used to
+    /// forward only losses and silently drop a frame it had just released —
+    /// so the deadline that exists to make a static screen appear released the
+    /// frame and then threw it away. The two paths differ in *when* they run,
+    /// never in what they do.
+    fn absorb(&mut self, frame: Reassembled, out: &mut Vec<Decoded>) {
+        match frame {
+            Reassembled::Lost { timestamp, why } => {
+                self.stats.frames_lost = self.stats.frames_lost.saturating_add(1);
+                // **The flag is not cleared first.** It used to be, which
+                // defeated the coalescing on the very next line: every
+                // lost frame produced its own request.
+                self.ask(KeyframeReason::LostSync);
+                out.push(Decoded::Lost {
+                    timestamp,
+                    why: why.reason(),
+                });
+            }
+            Reassembled::Frame {
+                bitstream,
+                timestamp,
+                keyframe,
+            } => {
+                if keyframe {
+                    self.awaiting_keyframe = false;
+                } else if self.awaiting_keyframe {
+                    // Provably whole, and its references are gone.
+                    self.stats.frames_skipped = self.stats.frames_skipped.saturating_add(1);
+                    out.push(Decoded::Skipped {
+                        timestamp,
+                        why: "a keyframe is outstanding, so this frame's \
+                              reference pictures are missing",
+                    });
+                    return;
+                }
+                let Some(decoder) = self.decoder.as_mut() else {
+                    out.push(Decoded::Skipped {
+                        timestamp,
+                        why: "no decoder is attached",
+                    });
+                    return;
+                };
+                match decoder.decode(&bitstream) {
+                    Ok(Some(picture)) => {
+                        if (picture.width(), picture.height()) != self.expected {
+                            // The host changed size without saying so. Worth
+                            // noticing rather than rendering: every buffer on
+                            // this side was sized from the config.
+                            self.expected = (picture.width(), picture.height());
+                            tracing::warn!(
+                                "the stream changed to {}x{} without a new config",
+                                picture.width(),
+                                picture.height()
+                            );
+                        }
+                        self.stats.pictures = self.stats.pictures.saturating_add(1);
+                        out.push(Decoded::Picture {
+                            picture,
+                            timestamp,
+                            keyframe,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        // The decoder refused. Its references are gone or the
+                        // frame is bad; either way a keyframe is the answer
+                        // and the session continues.
+                        self.stats.frames_skipped = self.stats.frames_skipped.saturating_add(1);
+                        self.ask(KeyframeReason::LostSync);
+                        tracing::debug!("the decoder refused a frame: {e}");
+                        out.push(Decoded::Skipped {
+                            timestamp,
+                            why: "the decoder refused it",
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     /// Decide whatever frame is part-assembled, without waiting for the next.
     ///
-    /// For the end of a stream, and for a jitter buffer's deadline.
+    /// # Why a caller has to do this
+    ///
+    /// Reassembly is correct rather than eager: a frame whose start is not yet
+    /// known waits for the next frame to bound it. On a **static screen** there
+    /// is no next frame — the host has nothing to send and correctly sends
+    /// nothing — so without a deadline the first frame waits forever and the
+    /// viewer shows nothing at all.
+    ///
+    /// How long to wait is a latency decision and belongs to the caller, which
+    /// is why it is not a timer in here. What is in here is the guarantee that
+    /// calling it produces whatever there was to produce.
     pub fn flush(&mut self, out: &mut Vec<Decoded>) {
-        if let Some(Reassembled::Lost { timestamp, why }) = self.depacketizer.flush() {
-            self.stats.frames_lost = self.stats.frames_lost.saturating_add(1);
-            self.ask(KeyframeReason::LostSync);
-            out.push(Decoded::Lost {
-                timestamp,
-                why: why.reason(),
-            });
+        if let Some(frame) = self.depacketizer.flush() {
+            self.absorb(frame, out);
         }
     }
 

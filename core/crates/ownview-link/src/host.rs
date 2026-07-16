@@ -14,11 +14,12 @@ use crate::{LinkError, SessionSink};
 
 /// The smallest path worth attempting.
 ///
-/// Below this the RTP and QUIC headers are a large fraction of every datagram
-/// and a frame fragments into hundreds of pieces. IPv6 guarantees 1280 bytes
-/// end to end, so a path under this is a misconfiguration rather than a
-/// network.
-pub const MIN_PATH: usize = 1200;
+/// **The packetizer's floor, not a second opinion about it.** Two constants
+/// that have to agree is a bug waiting to happen, and it happened: both were
+/// 1200, both were measured against the wrong quantity, and both were wrong in
+/// the same direction. See [`ownview_media::MIN_MTU`] for what the number is
+/// and why it is expressed in datagram payload rather than path MTU.
+pub const MIN_PATH: usize = ownview_media::MIN_MTU;
 
 /// The sending side of a media session.
 pub struct HostLink {

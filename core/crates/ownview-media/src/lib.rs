@@ -55,7 +55,7 @@ pub use depacketize::{
 /// its target reads better saying what it is asserting about.
 pub use depacketize::MAX_FRAME_BYTES as MAX_FRAME_BYTES_EXPORT;
 pub use depacketize::MAX_PACKETS_PER_FRAME as MAX_PACKETS_EXPORT;
-pub use packetize::{PacketizeError, Packetizer, to_annexb};
+pub use packetize::{MIN_MTU, PacketizeError, Packetizer, to_annexb};
 pub use rtp::{RTP_HEADER_LEN, RtpError, RtpHeader};
 
 /// The payload type for H.264, as WebRTC's default offer uses.

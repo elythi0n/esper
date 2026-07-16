@@ -486,3 +486,54 @@ fn the_direction_rule_and_what_the_host_accepts_agree() {
         );
     }
 }
+
+/// **A static screen must still show something.**
+///
+/// Reassembly is deliberately correct rather than eager: a frame whose start
+/// is not yet known waits for the *next* frame to bound it. On a static screen
+/// there is no next frame — the host has nothing to send and correctly sends
+/// nothing — so without a deadline the first frame waits forever and the
+/// viewer shows nothing at all.
+///
+/// Pointed at a real desktop for the first time, that is exactly what
+/// happened: 382 datagrams arrived, none were lost, none were skipped, and no
+/// picture was ever produced. `flush` existed for this and nothing called it.
+///
+/// So this pins both halves of the contract: without a flush the frame is
+/// held, and with one it arrives.
+#[test]
+fn one_frame_followed_by_silence_needs_a_flush_to_be_shown() {
+    let mut h = host(30);
+    let mut c = controller(&h);
+    let mut sink = RecordingSink::new();
+    for m in c.take_outbound() {
+        h.handle(&m).expect("accepted");
+    }
+
+    // Exactly one frame, then nothing more — a screen that changed once.
+    let mut sent = 0;
+    while sent == 0 {
+        if let HostStep::Sent { .. } = h.step(Duration::from_secs(1), &mut sink).expect("a step") {
+            sent += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for datagram in sink.sent.drain(..) {
+        c.receive(&datagram, &mut out).expect("received");
+    }
+
+    // Held, because nothing has said the frame is over.
+    assert!(
+        !out.iter().any(|d| matches!(d, Decoded::Picture { .. })),
+        "a frame was emitted before anything bounded it: {out:?}"
+    );
+
+    // The deadline is what releases it.
+    c.flush(&mut out);
+    assert!(
+        out.iter().any(|d| matches!(d, Decoded::Picture { .. })),
+        "a flush did not release the frame, so a static screen would never \
+         appear: {out:?}"
+    );
+    println!("{} result(s) after the flush", out.len());
+}

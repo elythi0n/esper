@@ -34,13 +34,25 @@ const FU_A: u8 = 28;
 /// FU-A adds an indicator byte and a header byte to every fragment.
 const FU_HEADER_LEN: usize = 2;
 
-/// The smallest MTU worth attempting.
+/// The smallest datagram worth attempting.
 ///
-/// IPv6 guarantees 1280 bytes end to end, and QUIC will not operate below
-/// that. Anything smaller is a misconfiguration rather than a network, and
-/// accepting it would mean fragmenting a frame into thousands of packets whose
-/// headers outweigh their payloads.
-pub const MIN_MTU: usize = 1200;
+/// # This is datagram payload, not path MTU, and the difference bit
+///
+/// QUIC's floor is 1200 bytes of *UDP payload*, and IPv6 guarantees 1280 bytes
+/// end to end. Neither is what a sender gets to fill: the QUIC packet header,
+/// the AEAD tag and the DATAGRAM frame header come out of it first, leaving
+/// about 1162 bytes on a connection at QUIC's minimum.
+///
+/// So a floor of 1200 expressed against `max_datagram_size` is a floor no
+/// connection clears until path MTU discovery has raised it — which happens
+/// after a connection is established, not before. The first version of this
+/// was 1200, and it refused **every real connection at startup** while passing
+/// a test that happened to ask later.
+///
+/// 1100 leaves sixty bytes of margin under the worst case a conforming QUIC
+/// peer can offer, and is still large enough that RTP's twelve-byte header is
+/// noise.
+pub const MIN_MTU: usize = 1100;
 
 /// Why a frame could not be packetized.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

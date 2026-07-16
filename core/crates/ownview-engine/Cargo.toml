@@ -20,6 +20,12 @@ ownview-encode.workspace = true
 ownview-decode.workspace = true
 ownview-proto.workspace = true
 ownview-crypto.workspace = true
+ownview-transport.workspace = true
+ownview-link.workspace = true
+ownview-media.workspace = true
+ownview-stream.workspace = true
+tokio.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 ownview-buildinfo.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

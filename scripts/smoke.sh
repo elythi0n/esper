@@ -141,6 +141,30 @@ else
   fail=1
 fi
 
+# A host with nothing paired is refused rather than started. A listening
+# endpoint that can accept nobody has exactly one possible outcome, and it is a
+# confusing failure at the far end.
+echo "  — checking a host with no paired devices refuses to start"
+empty=$(mktemp -d)
+if out=$(OWNVIEW_HOME="$empty" "$BIN/ownview-engine" host --listen 127.0.0.1:0 2>&1); then
+  printf '  ✗ host started with no paired devices\n'
+  fail=1
+else
+  if printf '%s' "$out" | grep -q 'pair'; then
+    printf '  ✓ host refuses to start and says to pair first\n'
+  else
+    printf '  ✗ host refused but did not say what to do: %s\n' "$out"
+    fail=1
+  fi
+fi
+if out=$(OWNVIEW_HOME="$empty" "$BIN/ownview-engine" connect 127.0.0.1:1 2>&1); then
+  printf '  ✗ connect started with no paired devices\n'
+  fail=1
+else
+  printf '  ✓ connect refuses without a paired host\n'
+fi
+rm -rf "$empty"
+
 # The whole media path, headless. This is the phase's exit criterion, and a
 # smoke check rather than a unit test because it is the *binary* that has to
 # work — a pipeline that runs in a test and not from the command line is not

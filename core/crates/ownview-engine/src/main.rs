@@ -10,7 +10,11 @@
 
 mod backend;
 mod loopback;
+mod net;
+mod pairing;
+mod paths;
 mod serve;
+mod session_cmd;
 
 use std::process::ExitCode;
 
@@ -36,6 +40,57 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("loopback: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        // **Re-executed as the sandboxed decoder.** The worker is this same
+        // binary, so the two halves of the parent-child protocol cannot be at
+        // different versions — which for a protocol between them is worth more
+        // than the tidiness of a second executable.
+        //
+        // Checked first, and by *both* the argument and the environment
+        // variable, so an operator cannot reach it by accident and a stray
+        // `decode-worker` on a command line does nothing.
+        Some(ownview_decode::WORKER_ARG)
+            if std::env::var_os(ownview_decode::WORKER_ENV).is_some() =>
+        {
+            match ownview_decode::child::run_on_stdio(
+                &ownview_decode::decoder::DecoderConfig::default(),
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("decode-worker: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("pair") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match pairing::parse(&rest).and_then(|o| pairing::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("pair: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("host") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match session_cmd::parse_host(&rest).and_then(|o| session_cmd::run_host(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("host: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("connect") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match session_cmd::parse_connect(&rest).and_then(|o| session_cmd::run_connect(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("connect: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -105,6 +160,9 @@ fn print_help() {
          \n\
          Commands:\n  \
            identity   print this device's fingerprint\n  \
+           pair       pair with another device, in either direction\n  \
+           host       serve this machine's screen to a paired device\n  \
+           connect    show a paired host's screen\n  \
            serve      speak the control protocol on stdin/stdout\n  \
            version    print version, build time and protocol version\n  \
            help       this text"

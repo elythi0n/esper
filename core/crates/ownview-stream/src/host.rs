@@ -87,7 +87,12 @@ impl std::fmt::Debug for HostStream {
 pub fn ssrc_for(monitor: u32) -> u32 {
     // A single round of a well-known integer hash. Not a secret — QUIC has
     // already authenticated and encrypted the link — just a spread.
-    let mut x = monitor.wrapping_mul(0x9E37_79B9);
+    //
+    // The offset is why monitor 0 is not SSRC 0: without it the commonest case
+    // in the product hashes to zero and lands on the fallback below, so every
+    // single-monitor session announced `ssrc 0x00000001` and the spread this
+    // function exists for did nothing for the case that matters most.
+    let mut x = monitor.wrapping_add(0x517C_C1B7).wrapping_mul(0x9E37_79B9);
     x ^= x >> 16;
     x = x.wrapping_mul(0x85EB_CA6B);
     x ^= x >> 13;
@@ -311,5 +316,55 @@ const fn name_of(message: &MediaMessage) -> &'static str {
         MediaMessage::Select(_) => "a monitor selection",
         MediaMessage::Hint(_) => "a quality hint",
         MediaMessage::Keyframe(_) => "a keyframe request",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The commonest case must not be the degenerate one.** Monitor 0 used
+    /// to hash to zero and fall through to the fallback, so every
+    /// single-monitor session announced `ssrc 0x00000001` — the one case the
+    /// spread exists for, and the one case it did nothing for.
+    #[test]
+    fn monitor_zero_gets_a_real_ssrc() {
+        let first = ssrc_for(0);
+        assert_ne!(first, 0, "zero reads as unset to every tool that shows it");
+        assert_ne!(
+            first, 1,
+            "monitor 0 fell through to the fallback, so the hash did nothing"
+        );
+    }
+
+    #[test]
+    fn adjacent_monitors_do_not_get_adjacent_ssrcs() {
+        // A packet capture with two streams in it should be readable, which it
+        // is not if the two identities differ by one.
+        for id in 0..8u32 {
+            let a = ssrc_for(id);
+            let b = ssrc_for(id + 1);
+            assert!(
+                a.abs_diff(b) > 1000,
+                "monitors {id} and {} got {a:#010x} and {b:#010x}",
+                id + 1
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_monitor_always_gets_the_same_ssrc() {
+        // A reconnect to the same monitor is the same stream, which is what
+        // lets a receiver carry on rather than resynchronising.
+        for id in [0u32, 1, 7, 1000, u32::MAX] {
+            assert_eq!(ssrc_for(id), ssrc_for(id));
+        }
+    }
+
+    #[test]
+    fn every_monitor_gets_a_usable_ssrc() {
+        for id in 0..2000u32 {
+            assert_ne!(ssrc_for(id), 0, "monitor {id} got zero");
+        }
     }
 }
