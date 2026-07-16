@@ -27,6 +27,7 @@ pub mod sink;
 
 pub use controller::ControllerLink;
 pub use host::{HostLink, HostPump, MIN_PATH, check_path, parts};
+pub use ownview_stream::ResumeRefused;
 pub use sink::{SessionSink, SinkStats};
 
 /// Anything that went wrong running a session over a transport.
@@ -59,4 +60,7 @@ pub enum LinkError {
          protocol needs; a link this small cannot carry video"
     )]
     PathTooSmall { found: usize, needed: usize },
+    /// A parked session would not go back on this transport.
+    #[error("the session could not be resumed: {0}")]
+    Resume(ResumeRefused),
 }

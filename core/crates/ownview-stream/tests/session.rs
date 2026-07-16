@@ -639,3 +639,158 @@ fn a_frame_that_completes_normally_arms_no_deadline() {
         "a deadline fired on a stream that never needed one"
     );
 }
+
+// ── Reconnect ───────────────────────────────────────────────────────────────
+
+/// **A media session is resumed, not replayed — and that is the design.**
+///
+/// Terminal mode keeps a backlog, because a shell goes on producing output
+/// while nobody is connected and output nobody saw is output lost. Video is the
+/// opposite: a frame from ten seconds ago is a picture of a screen that no
+/// longer exists. So there is no backlog, and what a reconnect gets is a
+/// keyframe.
+#[test]
+fn a_resumed_session_keeps_the_pipeline_and_sends_a_keyframe() {
+    use ownview_stream::Parked;
+    use std::time::Instant;
+
+    const OWNER: [u8; 32] = [7u8; 32];
+    let mut h = host(30);
+    let before = h.config();
+    let ssrc = h.ssrc();
+
+    // Run a little, so the pipeline has state worth keeping.
+    let mut sink = RecordingSink::new();
+    for _ in 0..8 {
+        let _ = h.step(Duration::from_secs(1), &mut sink).expect("a step");
+    }
+    let sequence = h.next_sequence();
+    assert!(
+        sequence > 0,
+        "nothing was sent, so there is nothing to resume"
+    );
+
+    // The transport goes away.
+    let parked = Parked::park(h, OWNER, Instant::now());
+    assert_eq!(parked.encode_size(), (before.width, before.height));
+
+    // And comes back.
+    let mut resumed = parked
+        .resume(&OWNER, 1200)
+        .map_err(|(_, e)| e)
+        .expect("the owner may resume");
+
+    // **Nothing was re-negotiated.** Same monitor, same size, same stream.
+    let after = resumed.config();
+    assert_eq!(after.selected, before.selected, "the monitor changed");
+    assert_eq!((after.width, after.height), (before.width, before.height));
+    assert_eq!(resumed.ssrc(), ssrc, "the stream's identity changed");
+    assert_eq!(
+        resumed.next_sequence(),
+        sequence,
+        "the numbering restarted, so a capture reads as two streams"
+    );
+
+    // And the first frame out is one a fresh decoder can start from, because
+    // the controller on the other end is new.
+    let mut sink = RecordingSink::new();
+    let mut first_keyframe = None;
+    for _ in 0..20 {
+        if let HostStep::Sent { keyframe, .. } = resumed
+            .step(Duration::from_secs(1), &mut sink)
+            .expect("a step")
+        {
+            first_keyframe = Some(keyframe);
+            break;
+        }
+    }
+    assert_eq!(
+        first_keyframe,
+        Some(true),
+        "the first frame after a resume was not a keyframe, so the reconnected \
+         controller has nothing it can decode"
+    );
+}
+
+/// **A parked session belongs to the device that had it.**
+///
+/// Without this check a controller could inherit another controller's session
+/// by reconnecting first — a session it was never granted, on a screen it may
+/// not be allowed to see.
+#[test]
+fn another_device_cannot_resume_someone_elses_session() {
+    use ownview_stream::{Parked, ResumeRefused};
+    use std::time::Instant;
+
+    const OWNER: [u8; 32] = [1u8; 32];
+    const STRANGER: [u8; 32] = [2u8; 32];
+    let parked = Parked::park(host(30), OWNER, Instant::now());
+    assert!(parked.may_resume(&OWNER));
+    assert!(!parked.may_resume(&STRANGER));
+
+    let (parked, refused) = parked
+        .resume(&STRANGER, 1200)
+        .map(|_| panic!("a stranger resumed somebody else's session"))
+        .unwrap_err();
+    assert_eq!(refused, ResumeRefused::NotYours);
+    assert_eq!(refused.reason(), ownview_proto::Reason::PERMISSION_DENIED);
+
+    // And it is still there for its owner, because a refused resume must not
+    // destroy the session it was refusing to hand over.
+    assert!(
+        parked.resume(&OWNER, 1200).is_ok(),
+        "a refused resume destroyed the session"
+    );
+}
+
+/// **Parking is bounded.** A parked session holds a capture pipeline, an
+/// encoder, and on a host the screen being captured — so a controller that is
+/// never coming back must stop costing anything.
+#[test]
+fn a_parked_session_expires() {
+    use ownview_stream::{Expired, PARK_TIMEOUT, Parked};
+    use std::time::Instant;
+
+    let t0 = Instant::now();
+    let parked = Parked::park(host(30), [0u8; 32], t0);
+    assert!(!parked.is_expired(t0));
+    assert!(!parked.is_expired(t0 + PARK_TIMEOUT - Duration::from_millis(1)));
+    assert!(parked.is_expired(t0 + PARK_TIMEOUT));
+    assert_eq!(
+        parked.parked_for(t0 + Duration::from_secs(3)),
+        Duration::from_secs(3)
+    );
+
+    // Every way it can end carries a reason the peer can act on, and none of
+    // them is a failure of either side's making.
+    for e in [Expired::TimedOut, Expired::Superseded, Expired::HostGone] {
+        assert!(
+            !e.reason().is_failure(),
+            "{e:?} closes with a failure code, so a laptop that closed its lid \
+             looks like a peer that misbehaved"
+        );
+        assert!(e.reason().describe().is_some());
+        assert!(!e.describe().is_empty());
+    }
+}
+
+/// A resume onto a path that cannot carry video is refused, and the session
+/// survives the refusal.
+#[test]
+fn a_resume_onto_an_unusable_path_keeps_the_session() {
+    use ownview_stream::{Parked, ResumeRefused};
+    use std::time::Instant;
+
+    const OWNER: [u8; 32] = [3u8; 32];
+    let parked = Parked::park(host(30), OWNER, Instant::now());
+    let (parked, refused) = parked
+        .resume(&OWNER, 40)
+        .map(|_| panic!("a 40-byte path was accepted"))
+        .unwrap_err();
+    assert!(matches!(refused, ResumeRefused::Stream(_)), "{refused:?}");
+    assert_eq!(refused.reason(), ownview_proto::Reason::MIGRATION_FAILED);
+    assert!(
+        parked.resume(&OWNER, 1200).is_ok(),
+        "a refused resume destroyed the session"
+    );
+}

@@ -20,6 +20,26 @@ use serde::{Deserialize, Serialize};
 pub struct Reason(pub u16);
 
 impl Reason {
+    // 0xx — a session that ended, rather than failed.
+    //
+    // Every other class is a failure. Without a class for endings, a session
+    // closing normally has to pick whichever failure is nearest, and a
+    // controller cannot tell "the person closed the window" from "the host
+    // refused you".
+    /// Somebody closed the viewer, or interrupted it.
+    pub const CLOSED_BY_USER: Self = Self(1);
+    /// The session ran for as long as it was asked to.
+    pub const SESSION_COMPLETE: Self = Self(2);
+    /// The host is going away — shutting down, or losing its display.
+    pub const HOST_SHUTTING_DOWN: Self = Self(3);
+    /// A newer session for the same device replaced this one.
+    pub const SUPERSEDED: Self = Self(4);
+    /// The peer stopped responding, and the session was given up on.
+    ///
+    /// Not a failure of either side's making, which is why it lives here: a
+    /// laptop that closed its lid is not a peer that did something wrong.
+    pub const PEER_GONE: Self = Self(5);
+
     // 1xx — protocol
     pub const PROTOCOL_VERSION_MISMATCH: Self = Self(100);
     pub const MALFORMED_FRAME: Self = Self(101);
@@ -52,10 +72,23 @@ impl Reason {
     pub const MIGRATION_FAILED: Self = Self(502);
     pub const IDLE_TIMEOUT: Self = Self(503);
 
+    /// Whether this code describes a failure rather than an ending.
+    ///
+    /// The distinction a caller actually needs: a viewer that closed cleanly
+    /// should say so and exit, and one that was refused should say why and
+    /// tell somebody. Reported by class rather than by listing codes, so a
+    /// code from a newer peer is classified correctly without this build
+    /// knowing its name.
+    #[must_use]
+    pub const fn is_failure(self) -> bool {
+        !matches!(self.class(), Class::Normal)
+    }
+
     /// The class this code belongs to, derived from its hundreds digit.
     #[must_use]
     pub const fn class(self) -> Class {
         match self.0 / 100 {
+            0 => Class::Normal,
             1 => Class::Protocol,
             2 => Class::Authentication,
             3 => Class::Authorization,
@@ -72,6 +105,11 @@ impl Reason {
     #[must_use]
     pub const fn describe(self) -> Option<&'static str> {
         Some(match self {
+            Self::CLOSED_BY_USER => "closed",
+            Self::SESSION_COMPLETE => "session complete",
+            Self::HOST_SHUTTING_DOWN => "the host is shutting down",
+            Self::SUPERSEDED => "replaced by a newer session",
+            Self::PEER_GONE => "the peer stopped responding",
             Self::PROTOCOL_VERSION_MISMATCH => "protocol version mismatch",
             Self::MALFORMED_FRAME => "malformed frame",
             Self::FRAME_TOO_LARGE => "frame exceeds the maximum length",
@@ -113,6 +151,8 @@ impl std::fmt::Display for Reason {
 /// The class of a reason code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
+    /// The session ended rather than failed.
+    Normal,
     Protocol,
     Authentication,
     Authorization,
@@ -180,5 +220,67 @@ mod tests {
             assert!(r.describe().is_some(), "code {} has no description", r.0);
             assert_ne!(r.class(), Class::Unknown, "code {} has no class", r.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod normal_close_tests {
+    use super::*;
+
+    /// **Every other class is a failure.** Without this one, a session ending
+    /// normally has to close with whatever code is nearest, and a controller
+    /// cannot tell "the person closed the window" from "the host refused you".
+    #[test]
+    fn an_ending_is_not_a_failure() {
+        for r in [
+            Reason::CLOSED_BY_USER,
+            Reason::SESSION_COMPLETE,
+            Reason::HOST_SHUTTING_DOWN,
+            Reason::SUPERSEDED,
+            Reason::PEER_GONE,
+        ] {
+            assert_eq!(r.class(), Class::Normal, "{r:?}");
+            assert!(!r.is_failure(), "{r:?} reads as a failure");
+            assert!(r.describe().is_some(), "{r:?} has no description");
+        }
+    }
+
+    #[test]
+    fn every_other_class_is_a_failure() {
+        for r in [
+            Reason::PROTOCOL_VERSION_MISMATCH,
+            Reason::UNKNOWN_PEER_KEY,
+            Reason::PERMISSION_DENIED,
+            Reason::NO_CAPTURE_BACKEND,
+            Reason::IDLE_TIMEOUT,
+        ] {
+            assert!(r.is_failure(), "{r:?} reads as an ending");
+        }
+    }
+
+    /// A code this build has never heard of must still be classified, because
+    /// a newer peer will send one and "unknown" is not the same as "fine".
+    #[test]
+    fn an_unknown_code_is_classified_without_being_known() {
+        let future = Reason(999);
+        assert_eq!(future.class(), Class::Unknown);
+        assert!(
+            future.is_failure(),
+            "an unrecognised code must not be assumed harmless"
+        );
+        assert_eq!(future.describe(), None);
+
+        // And an unrecognised code in the normal range is an ending, because
+        // the class is what carries the meaning rather than the name.
+        let future_normal = Reason(42);
+        assert_eq!(future_normal.class(), Class::Normal);
+        assert!(!future_normal.is_failure());
+    }
+
+    /// Zero is what a caller passes when it has nothing to say, and it must
+    /// not read as a failure.
+    #[test]
+    fn zero_is_an_ending() {
+        assert!(!Reason(0).is_failure());
     }
 }

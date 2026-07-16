@@ -536,6 +536,40 @@ impl MediaChannel {
         self.conn.close_reason().is_none()
     }
 
+    /// Close with a reason the peer can act on.
+    ///
+    /// On the media half because the thread that sends is the thread that
+    /// notices the session is over — a capture loop that finds its display
+    /// gone should be able to say so without reaching for the session.
+    pub fn close(&self, reason: Reason) {
+        self.conn
+            .close(u32::from(reason.0).into(), reason.to_string().as_bytes());
+    }
+
+    /// Why the peer closed, once it has.
+    ///
+    /// `None` while the connection is up, or when it ended without either side
+    /// saying anything — a timeout or a broken path rather than a decision.
+    ///
+    /// The string is peer-supplied and returned alongside the code precisely
+    /// because a newer peer may send a code this build has no name for: the
+    /// code is what a caller branches on, the string is what a person reads.
+    #[must_use]
+    pub fn peer_close_reason(&self) -> Option<(Reason, String)> {
+        match self.conn.close_reason()? {
+            quinn::ConnectionError::ApplicationClosed(closed) => {
+                let code = u16::try_from(u64::from(closed.error_code)).unwrap_or(0);
+                Some((
+                    Reason(code),
+                    String::from_utf8_lossy(&closed.reason).into_owned(),
+                ))
+            }
+            // Not a decision either side made, so there is no reason to
+            // report — reporting one would invent an explanation.
+            _ => None,
+        }
+    }
+
     /// What the transport knows about the path.
     ///
     /// Available from the media half because both sides of a session want it:

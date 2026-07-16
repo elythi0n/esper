@@ -26,10 +26,12 @@
 pub mod controller;
 pub mod host;
 pub mod jitter;
+pub mod resume;
 
 pub use controller::{ControllerStats, ControllerStream, Decoded};
 pub use host::{HostStep, HostStream, ssrc_for};
 pub use jitter::{Jitter, JitterStats};
+pub use resume::{Expired, PARK_TIMEOUT, Parked, ResumeRefused};
 
 /// Somewhere unreliable datagrams go.
 ///

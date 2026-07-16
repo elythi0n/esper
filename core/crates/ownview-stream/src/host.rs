@@ -181,6 +181,59 @@ impl HostStream {
         Ok(())
     }
 
+    /// The sequence number the next datagram will carry.
+    ///
+    /// Read when parking, so a resumed session continues the numbering.
+    #[must_use]
+    pub const fn next_sequence(&self) -> u16 {
+        self.packetizer.next_sequence()
+    }
+
+    /// Take the pipeline back, for parking the session across a reconnect.
+    ///
+    /// Consumes the stream, because a stream without its pipeline is not one —
+    /// and because a caller able to keep both could send on a transport that
+    /// has gone.
+    #[must_use]
+    pub fn into_pipeline(self) -> Pipeline {
+        self.pipeline
+    }
+
+    /// Resume a parked session onto a new transport.
+    ///
+    /// `sequence` continues the old stream's numbering, so a capture of the
+    /// traffic reads as one stream interrupted rather than two unrelated ones.
+    ///
+    /// Returns the pipeline on failure, so a refused resume can be parked again
+    /// rather than destroying the session it was trying to save.
+    // The large `Err` is the whole point: it carries the pipeline back so a
+    // refused resume can be parked again rather than destroying the session it
+    // was trying to save. Boxing it would add an allocation on the path that
+    // exists to avoid losing somebody's session.
+    #[allow(clippy::result_large_err)]
+    pub fn resume(
+        pipeline: Pipeline,
+        mtu: usize,
+        sequence: u16,
+    ) -> Result<Self, (Pipeline, StreamError)> {
+        let monitor = pipeline.selected_monitor().0;
+        match Packetizer::new(ssrc_for(monitor), mtu) {
+            Ok(mut packetizer) => {
+                packetizer.set_sequence(sequence);
+                Ok(Self {
+                    pipeline,
+                    packetizer,
+                    monitor,
+                    started: Instant::now(),
+                    datagrams: 0,
+                    bytes: 0,
+                    scratch: Vec::new(),
+                })
+            }
+            Err(e) => Err((pipeline, e.into())),
+        }
+    }
+
     /// Run one turn: capture, encode, packetize, send.
     pub fn step(
         &mut self,

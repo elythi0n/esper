@@ -46,6 +46,17 @@ impl SessionSink {
     pub fn is_open(&self) -> bool {
         self.media.is_open()
     }
+
+    /// Close the session, saying why.
+    pub fn close(&self, reason: ownview_proto::Reason) {
+        self.media.close(reason);
+    }
+
+    /// Why the peer closed, once it has.
+    #[must_use]
+    pub fn peer_close_reason(&self) -> Option<(ownview_proto::Reason, String)> {
+        self.media.peer_close_reason()
+    }
 }
 
 impl DatagramSink for SessionSink {

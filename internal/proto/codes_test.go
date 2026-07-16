@@ -113,3 +113,44 @@ func TestReasonForMapsFramingErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestEndingsAreNotFailures locks the distinction the 0xx class exists for.
+//
+// Every other class is a failure. Without this one, a session ending normally
+// has to close with whatever code is nearest, and a controller cannot tell
+// "the person closed the window" from "the host refused you".
+func TestEndingsAreNotFailures(t *testing.T) {
+	for _, r := range []Reason{ClosedByUser, SessionComplete, HostShuttingDown, Superseded, PeerGone} {
+		if got := r.Class(); got != ClassNormal {
+			t.Errorf("Reason(%d).Class() = %q, want %q", r, got, ClassNormal)
+		}
+		if r.IsFailure() {
+			t.Errorf("Reason(%d) reads as a failure", r)
+		}
+		if _, known := r.Describe(); !known {
+			t.Errorf("Reason(%d) has no description", r)
+		}
+	}
+	for _, r := range []Reason{ProtocolVersionMismatch, UnknownPeerKey, PermissionDenied, NoCaptureBackend, IdleTimeout} {
+		if !r.IsFailure() {
+			t.Errorf("Reason(%d) reads as an ending", r)
+		}
+	}
+}
+
+// TestUnknownCodeIsNotAssumedHarmless covers a code from a newer peer: it must
+// still be classified, because "unknown" is not the same as "fine".
+func TestUnknownCodeIsNotAssumedHarmless(t *testing.T) {
+	if !Reason(999).IsFailure() {
+		t.Error("an unrecognized code was assumed harmless")
+	}
+	// And an unrecognized code in the normal range is an ending, because the
+	// class carries the meaning rather than the name.
+	if Reason(42).IsFailure() {
+		t.Error("an unrecognized code in the 0xx range read as a failure")
+	}
+	// Zero is what a caller passes with nothing to say.
+	if Reason(0).IsFailure() {
+		t.Error("zero read as a failure")
+	}
+}

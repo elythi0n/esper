@@ -131,6 +131,17 @@ impl Packetizer {
         self.mtu.saturating_sub(RTP_HEADER_LEN)
     }
 
+    /// Continue an interrupted stream's numbering.
+    ///
+    /// For a session resumed on a new transport: the packets are the same
+    /// stream, so a capture of the traffic should read as one stream
+    /// interrupted rather than two unrelated ones. The receiver is new and has
+    /// no expectation either way, which is why this is about legibility rather
+    /// than correctness.
+    pub const fn set_sequence(&mut self, sequence: u16) {
+        self.sequence = sequence;
+    }
+
     /// Change the MTU, for a path that turned out to be different.
     pub fn set_mtu(&mut self, mtu: usize) -> Result<(), PacketizeError> {
         if mtu < MIN_MTU {

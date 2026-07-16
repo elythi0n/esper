@@ -18,6 +18,12 @@ use std::time::Duration;
 use ownview_capture::capturer::{Capture, CaptureError, Capturer, MonitorId};
 use ownview_capture::damage::Damage;
 use ownview_capture_x11::capturer::{Transport, X11Capturer};
+use x11rb::connection::Connection as _;
+use x11rb::protocol::xproto::{
+    BackingStore, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, MapState, StackMode,
+    Window, WindowClass,
+};
+use x11rb::rust_connection::RustConnection;
 
 /// `Some(capturer)`, or `None` with a note, when there is no display.
 fn open() -> Option<X11Capturer> {
@@ -43,6 +49,119 @@ fn first_frame(cap: &mut X11Capturer) -> ownview_capture::frame::Frame {
         }
     }
     panic!("no frame after twenty attempts");
+}
+
+/// A change on the screen that a real desktop cannot swallow: a small window
+/// of a known colour, mapped at a known place and taken away again on drop.
+///
+/// Filling the root window directly is the obvious way to make a change, and
+/// it only works where nothing covers the root. X11 keeps no backing store for
+/// the parts of the root nobody can see, so a fill into an obscured root is
+/// clipped away and draws nothing at all — no error, the request succeeds.
+/// Under `Xvfb` the root is bare and that never shows; on a real desktop the
+/// corner of a screen is somebody else's window, and a test drawing there is
+/// testing an empty screen. The dangerous half of that is not the failure: a
+/// test that draws nowhere can **pass**, by proving nothing happened when
+/// nothing was made to happen.
+///
+/// A window of our own is what a screen change actually is, and damage on the
+/// root covers what its children draw, which is why capturing the root works
+/// at all.
+struct Patch {
+    conn: RustConnection,
+    root: Window,
+    window: Window,
+}
+
+impl Patch {
+    /// `size` by `size` of solid `pixel` at desktop position `x`, `y`, on
+    /// screen by the time this returns.
+    fn map(x: i32, y: i32, size: u16, pixel: u32) -> Self {
+        let (conn, screen_num) = x11rb::connect(None).expect("a second connection");
+        let screen = conn.setup().roots.get(screen_num).expect("a screen");
+        let (root, depth, visual) = (screen.root, screen.root_depth, screen.root_visual);
+        let window = conn.generate_id().expect("an id");
+        conn.create_window(
+            depth,
+            window,
+            root,
+            i16::try_from(x).expect("on-screen"),
+            i16::try_from(y).expect("on-screen"),
+            size,
+            size,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual,
+            // Override-redirect so the window manager leaves it exactly where
+            // it was put instead of decorating it, moving it or refusing it.
+            &CreateWindowAux::new()
+                .background_pixel(pixel)
+                .override_redirect(1)
+                .backing_store(BackingStore::ALWAYS),
+        )
+        .expect("create_window")
+        .check()
+        .expect("a window");
+        conn.map_window(window)
+            .expect("map_window")
+            .check()
+            .expect("mapped");
+        conn.configure_window(
+            window,
+            &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+        )
+        .expect("configure_window")
+        .check()
+        .expect("raised");
+
+        let patch = Self { conn, root, window };
+        patch.wait_until_on_screen();
+        patch
+    }
+
+    fn conn(&self) -> &RustConnection {
+        &self.conn
+    }
+
+    /// The root this was mapped on, for reading back what is on screen.
+    fn root(&self) -> Window {
+        self.root
+    }
+
+    /// Move it, which is a change at the old place and at the new one.
+    fn nudge(&self, x: i32, y: i32) {
+        self.conn
+            .configure_window(self.window, &ConfigureWindowAux::new().x(x).y(y))
+            .expect("configure_window")
+            .check()
+            .expect("moved");
+        self.wait_until_on_screen();
+    }
+
+    /// The server has processed the request and the pixels are on screen.
+    /// Without this a read can happen before they are anywhere.
+    fn wait_until_on_screen(&self) {
+        for _ in 0..40 {
+            let attrs = self
+                .conn
+                .get_window_attributes(self.window)
+                .expect("get_window_attributes")
+                .reply()
+                .expect("a reply");
+            if attrs.map_state == MapState::VIEWABLE {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("the window never became viewable");
+    }
+}
+
+impl Drop for Patch {
+    fn drop(&mut self) {
+        let _ = self.conn.destroy_window(self.window);
+        let _ = self.conn.flush();
+    }
 }
 
 #[test]
@@ -350,20 +469,16 @@ fn the_socket_transport_agrees_with_shared_memory() {
 /// — which is where CI runs these — *nothing* moves, so a test that waits for
 /// damage to happen proves nothing exactly where it matters most.
 ///
-/// So this makes the damage. It fills a small rectangle on the root window at
-/// a known position on the captured monitor and then asserts that what comes
-/// back covers it. That exercises the whole chain at once: the event arriving,
-/// the region being drained and re-armed, the clip to this monitor, and the
-/// translation out of desktop coordinates.
+/// So this makes the damage, with a [`Patch`] at a known position on the
+/// captured monitor, and then asserts that what comes back covers it. That
+/// exercises the whole chain at once: the event arriving, the region being
+/// drained and re-armed, the clip to this monitor, and the translation out of
+/// desktop coordinates.
 ///
-/// On a real desktop this paints a 64x64 square in the corner of one screen
-/// for as long as it takes something to repaint over it. That is the price of
-/// testing the path rather than hoping.
+/// On a real desktop this shows a 64x64 square in the corner of one screen for
+/// a moment. That is the price of testing the path rather than hoping.
 #[test]
 fn a_known_change_is_reported_at_the_place_it_happened() {
-    use x11rb::connection::Connection as _;
-    use x11rb::protocol::xproto::{ConnectionExt as _, CreateGCAux, Rectangle};
-
     let Some(mut cap) = open() else { return };
     if !cap.reports_damage() {
         println!("skipped: no XDamage on this server");
@@ -383,14 +498,6 @@ fn a_known_change_is_reported_at_the_place_it_happened() {
         let _ = cap.next_frame(Duration::from_millis(80));
     }
 
-    let (conn, screen_num) = x11rb::connect(None).expect("a second connection");
-    let root = conn.setup().roots.get(screen_num).expect("a screen").root;
-    let gc = conn.generate_id().expect("an id");
-    conn.create_gc(gc, root, &CreateGCAux::new().foreground(0x00ff_00ff))
-        .expect("create_gc")
-        .check()
-        .expect("gc created");
-
     // Monitor-local (16, 16), which is somewhere on the captured screen
     // whatever its offset on the desktop is.
     const SIZE: u16 = 64;
@@ -400,17 +507,7 @@ fn a_known_change_is_reported_at_the_place_it_happened() {
         width: u32::from(SIZE),
         height: u32::from(SIZE),
     };
-    let at = Rectangle {
-        x: i16::try_from(monitor.x + want.x).expect("on-screen"),
-        y: i16::try_from(monitor.y + want.y).expect("on-screen"),
-        width: SIZE,
-        height: SIZE,
-    };
-    conn.poly_fill_rectangle(root, gc, &[at])
-        .expect("fill")
-        .check()
-        .expect("filled");
-    conn.flush().expect("flush");
+    let _patch = Patch::map(monitor.x + want.x, monitor.y + want.y, SIZE, 0x00ff_00ff);
 
     // Now the damage must arrive, and it must cover the square.
     let mut covered = false;
@@ -455,8 +552,6 @@ fn a_known_change_is_reported_at_the_place_it_happened() {
             Capture::Reconfigured(_) => break,
         }
     }
-    let _ = conn.free_gc(gc);
-    let _ = conn.flush();
     assert!(
         covered,
         "filling {want:?} on the captured monitor produced no damage covering it — \
@@ -473,15 +568,14 @@ fn a_known_change_is_reported_at_the_place_it_happened() {
 /// moves part of the screen somewhere else. All three produce something that
 /// still looks like a picture.
 ///
-/// A known colour is filled at a known place and then looked for. The race
-/// with a live desktop repainting over it is settled by reading the same
-/// rectangle directly: if the fill is gone from the server too, the desktop
-/// won, and there is nothing to compare. If it is there and the captured frame
-/// disagrees, that is this backend's bug.
+/// A known colour is put on screen at a known place and then looked for. The
+/// race with a live desktop is settled by reading the same rectangle back from
+/// the server: if the colour is not there either, there is nothing to compare.
+/// If it is there and the captured frame disagrees, that is this backend's
+/// bug.
 #[test]
 fn a_known_colour_arrives_at_the_place_it_was_drawn() {
-    use x11rb::connection::Connection as _;
-    use x11rb::protocol::xproto::{ConnectionExt as _, CreateGCAux, ImageFormat, Rectangle};
+    use x11rb::protocol::xproto::ImageFormat;
 
     let Some(mut cap) = open() else { return };
     let selected = cap.selected();
@@ -502,32 +596,20 @@ fn a_known_colour_arrives_at_the_place_it_was_drawn() {
     const G: u8 = 0x77;
     const B: u8 = 0xDD;
     const SIZE: u16 = 64;
+    // Somewhere the other test's square cannot reach: these two run at the
+    // same time, and a window over the colour would only ever be read as the
+    // desktop having repainted.
     let want = ownview_capture::geometry::Rect {
-        x: 32,
-        y: 32,
+        x: 16,
+        y: 112,
         width: u32::from(SIZE),
         height: u32::from(SIZE),
     };
 
-    let (conn, screen_num) = x11rb::connect(None).expect("a second connection");
-    let root = conn.setup().roots.get(screen_num).expect("a screen").root;
-    let gc = conn.generate_id().expect("an id");
     let pixel = (u32::from(R) << 16) | (u32::from(G) << 8) | u32::from(B);
-    conn.create_gc(gc, root, &CreateGCAux::new().foreground(pixel))
-        .expect("create_gc")
-        .check()
-        .expect("gc");
-    let at = Rectangle {
-        x: i16::try_from(monitor.x + want.x).expect("on-screen"),
-        y: i16::try_from(monitor.y + want.y).expect("on-screen"),
-        width: SIZE,
-        height: SIZE,
-    };
-    conn.poly_fill_rectangle(root, gc, &[at])
-        .expect("fill")
-        .check()
-        .expect("filled");
-    conn.flush().expect("flush");
+    let patch = Patch::map(monitor.x + want.x, monitor.y + want.y, SIZE, pixel);
+    let conn = patch.conn();
+    let root = patch.root();
 
     let frame = first_frame(&mut cap);
 
@@ -536,10 +618,10 @@ fn a_known_colour_arrives_at_the_place_it_was_drawn() {
         .get_image(
             ImageFormat::Z_PIXMAP,
             root,
-            at.x,
-            at.y,
-            at.width,
-            at.height,
+            i16::try_from(monitor.x + want.x).expect("on-screen"),
+            i16::try_from(monitor.y + want.y).expect("on-screen"),
+            SIZE,
+            SIZE,
             !0,
         )
         .expect("get_image")
@@ -550,11 +632,11 @@ fn a_known_colour_arrives_at_the_place_it_was_drawn() {
         direct.data.as_chunks::<4>().0.iter().all(|px| {
             px.get(r_at) == Some(&R) && px.get(g_at) == Some(&G) && px.get(b_at) == Some(&B)
         });
-    let _ = conn.free_gc(gc);
-    let _ = conn.flush();
-
     if !still_there {
-        println!("skipped: the desktop repainted over the square before it could be read");
+        println!(
+            "skipped: the square is not what the server reads back from the root at that \
+             place, so there is nothing to compare against"
+        );
         return;
     }
 
@@ -600,9 +682,6 @@ fn a_known_colour_arrives_at_the_place_it_was_drawn() {
 /// test on a real desktop.
 #[test]
 fn damage_on_another_monitor_does_not_end_the_wait_early() {
-    use x11rb::connection::Connection as _;
-    use x11rb::protocol::xproto::{ConnectionExt as _, CreateGCAux, Rectangle};
-
     let Some(mut cap) = open() else { return };
     if !cap.reports_damage() {
         println!("skipped: no XDamage on this server");
@@ -631,30 +710,14 @@ fn damage_on_another_monitor_does_not_end_the_wait_early() {
 
     let _ = first_frame(&mut cap);
 
-    let (conn, screen_num) = x11rb::connect(None).expect("a second connection");
-    let root = conn.setup().roots.get(screen_num).expect("a screen").root;
-    let gc = conn.generate_id().expect("an id");
-    conn.create_gc(gc, root, &CreateGCAux::new().foreground(0x0033_6699))
-        .expect("create_gc")
-        .check()
-        .expect("gc");
+    let patch = Patch::map(elsewhere.x + 8, elsewhere.y + 8, 32, 0x0033_6699);
 
     const TIMEOUT: Duration = Duration::from_millis(300);
     let mut judged = 0;
-    for round in 0..6 {
-        // Make damage on the other screen, so there is definitely a wake-up
-        // that this monitor should ignore.
-        let at = Rectangle {
-            x: i16::try_from(elsewhere.x + 8 + round * 4).expect("on-screen"),
-            y: i16::try_from(elsewhere.y + 8).expect("on-screen"),
-            width: 32,
-            height: 32,
-        };
-        conn.poly_fill_rectangle(root, gc, &[at])
-            .expect("fill")
-            .check()
-            .expect("filled");
-        conn.flush().expect("flush");
+    for round in 1..=6 {
+        // Move it, so there is definitely a change on the other screen for
+        // this monitor to ignore.
+        patch.nudge(elsewhere.x + 8 + round * 4, elsewhere.y + 8);
 
         let started = std::time::Instant::now();
         let got = cap.next_frame(TIMEOUT).expect("a capture");
@@ -675,7 +738,5 @@ fn damage_on_another_monitor_does_not_end_the_wait_early() {
             Capture::Frame(_) | Capture::Reconfigured(_) => {}
         }
     }
-    let _ = conn.free_gc(gc);
-    let _ = conn.flush();
     println!("{judged} of 6 rounds returned Unchanged, all after the full wait");
 }

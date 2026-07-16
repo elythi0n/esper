@@ -6,6 +6,7 @@ import "errors"
 // the accompanying string exists so the person reading the UI understands.
 // Every failure carries both.
 //
+//	0xx  Normal         — the session ended rather than failed
 //	1xx  Protocol       — version mismatch, malformed frame
 //	2xx  Authentication — unknown key, changed key, pairing failed
 //	3xx  Authorization  — permission denied, revoked, out of schedule
@@ -15,6 +16,19 @@ import "errors"
 // These values are the wire contract and must stay in step with the Rust
 // crate's codes.rs. TestReasonCodesMatchRust locks the numbering.
 type Reason uint16
+
+// Normal — a session that ended, rather than failed.
+//
+// Every other class is a failure. Without a class for endings, a session
+// closing normally has to pick whichever failure is nearest, and a controller
+// cannot tell "the person closed the window" from "the host refused you".
+const (
+	ClosedByUser     Reason = 1
+	SessionComplete  Reason = 2
+	HostShuttingDown Reason = 3
+	Superseded       Reason = 4
+	PeerGone         Reason = 5
+)
 
 // Protocol.
 const (
@@ -64,6 +78,8 @@ type Class string
 // The reason classes. Unknown covers a code from a newer peer that this build
 // does not recognize — such codes are preserved and displayed, never rejected.
 const (
+	// ClassNormal is a session that ended rather than failed.
+	ClassNormal         Class = "normal"
 	ClassProtocol       Class = "protocol"
 	ClassAuthentication Class = "authentication"
 	ClassAuthorization  Class = "authorization"
@@ -72,10 +88,23 @@ const (
 	ClassUnknown        Class = "unknown"
 )
 
+// IsFailure reports whether this code describes a failure rather than an
+// ending.
+//
+// The distinction a caller actually needs: a viewer that closed cleanly should
+// say so and exit, and one that was refused should say why and tell somebody.
+// Decided by class rather than by listing codes, so a code from a newer peer is
+// classified correctly without this build knowing its name.
+func (r Reason) IsFailure() bool {
+	return r.Class() != ClassNormal
+}
+
 // Class returns the family this code belongs to, derived from its hundreds
 // digit.
 func (r Reason) Class() Class {
 	switch r / 100 {
+	case 0:
+		return ClassNormal
 	case 1:
 		return ClassProtocol
 	case 2:
@@ -93,6 +122,11 @@ func (r Reason) Class() Class {
 
 // descriptions holds the human text for every code this build knows.
 var descriptions = map[Reason]string{
+	ClosedByUser:            "closed",
+	SessionComplete:         "session complete",
+	HostShuttingDown:        "the host is shutting down",
+	Superseded:              "replaced by a newer session",
+	PeerGone:                "the peer stopped responding",
 	ProtocolVersionMismatch: "protocol version mismatch",
 	MalformedFrame:          "malformed frame",
 	FrameTooLarge:           "frame exceeds the maximum length",

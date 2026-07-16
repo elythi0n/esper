@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use ownview_pipeline::pipeline::Pipeline;
 use ownview_proto::{MediaMessage, StreamConfig};
+use ownview_stream::resume::Parked;
 use ownview_stream::{HostStep, HostStream};
 use ownview_transport::{Control, MediaChannel, Session};
 
@@ -59,6 +60,33 @@ impl HostLink {
         })
     }
 
+    /// Put a parked session back on a new transport.
+    ///
+    /// The path is checked first and the device second, so a refusal hands the
+    /// [`Parked`] session back untouched: a resume that cannot happen must not
+    /// destroy the session it was trying to save.
+    // The large `Err` carries that session back. See `Parked::resume`.
+    #[allow(clippy::result_large_err)]
+    pub fn resume(
+        media: &MediaChannel,
+        control: Control,
+        parked: Parked,
+        device: &[u8; 32],
+    ) -> Result<Self, (Parked, LinkError)> {
+        let mtu = match check_path(media.max_datagram_size()) {
+            Ok(mtu) => mtu,
+            Err(e) => return Err((parked, e)),
+        };
+        match parked.resume(device, mtu) {
+            Ok(stream) => Ok(Self {
+                stream,
+                sink: SessionSink::new(media.clone()),
+                control,
+            }),
+            Err((parked, refused)) => Err((parked, LinkError::Resume(refused))),
+        }
+    }
+
     /// The configuration this host will announce.
     #[must_use]
     pub fn config(&self) -> StreamConfig {
@@ -103,6 +131,11 @@ impl HostLink {
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.sink.is_open()
+    }
+
+    /// Close the session, saying why.
+    pub fn close(&self, reason: ownview_proto::Reason) {
+        self.sink.close(reason);
     }
 
     /// Act on one message from the controller.
@@ -163,10 +196,31 @@ impl HostPump {
         self.sink.is_open()
     }
 
+    /// Close the session, saying why.
+    pub fn close(&self, reason: ownview_proto::Reason) {
+        self.sink.close(reason);
+    }
+
+    /// Why the peer closed, once it has.
+    #[must_use]
+    pub fn peer_close_reason(&self) -> Option<(ownview_proto::Reason, String)> {
+        self.sink.peer_close_reason()
+    }
+
     /// What this host is sending, for a re-announcement after a change.
     #[must_use]
     pub fn config(&self) -> StreamConfig {
         self.stream.config()
+    }
+
+    /// Keep the session alive without a transport, for `owner` to come back to.
+    ///
+    /// Consumes the pump because the sink is the part that has gone: what is
+    /// worth keeping is the pipeline, and the sequence numbering so the stream
+    /// reads as one interrupted rather than two.
+    #[must_use]
+    pub fn park(self, owner: [u8; 32], now: std::time::Instant) -> Parked {
+        Parked::park(self.stream, owner, now)
     }
 }
 
