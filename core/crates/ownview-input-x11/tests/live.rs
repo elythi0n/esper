@@ -129,6 +129,13 @@ fn expected_keysyms() -> Vec<(u16, Vec<u32>, &'static str)> {
         (0xE6, vec![0xFFEA, 0xFE03], "Alt_R or AltGr"),
         (0xE7, vec![0xFFEC], "Super_R"),
     ]);
+    // **The media keys**, which are on most keyboards made this century and
+    // are the part of the table nothing else exercises.
+    out.extend([
+        (0x7F, vec![0x1008_FF12], "XF86AudioMute"),
+        (0x80, vec![0x1008_FF13], "XF86AudioRaiseVolume"),
+        (0x81, vec![0x1008_FF11], "XF86AudioLowerVolume"),
+    ]);
     // Function keys F1 to F12.
     for i in 0..12u16 {
         out.push((
@@ -196,6 +203,25 @@ fn every_known_key_maps_to_the_symbol_that_physical_key_produces() {
     }
 
     println!("{checked} keys map to the symbol their physical position produces");
+
+    // **F13 to F24 are not F13 to F24 here, and that is the platform.**
+    //
+    // Linux calls them `KEY_F13`..`KEY_F24` (evdev 183..194), and X's own
+    // evdev keymap gives those keycodes the tool and launch symbols instead —
+    // keycode 191 is `XF86Tools`, not `F13`. Nothing in this table is wrong:
+    // the position is the position, and what a host makes of it is the host's
+    // keymap's business, which is the whole point of sending positions.
+    //
+    // Reported rather than asserted, because which symbol a keymap puts there
+    // is not this project's to promise. It is here so the next person to
+    // wonder why F13 types something odd finds the answer.
+    for (usage, name) in [(0x68u16, "F13"), (0x73, "F24")] {
+        if let Some(evdev) = hid::evdev_for_usage(usage) {
+            let code = u8::try_from(evdev.0 + 8).expect("a keycode");
+            let syms = keysyms_for(&conn, code);
+            println!("  {name} (usage {usage:#04x}) is keycode {code}, which is {syms:04x?}");
+        }
+    }
     assert!(
         wrong.is_empty(),
         "the key table disagrees with this keyboard:\n  {}",

@@ -244,11 +244,17 @@ fn the_frame_is_not_clickable() {
         .expect("query")
         .reply()
         .expect("reply");
-    assert_eq!(
-        under.child,
-        x11rb::NONE,
-        "something is under the pointer at the edge of the screen, so the frame is \
-         swallowing clicks"
+    // **Not "nothing is there" but "the frame is not there".** The first
+    // version asserted the root, which held only on an empty display: any
+    // other window at the corner — on the machine this was written on, a
+    // nested X server — made it fail for a reason that has nothing to do with
+    // the frame.
+    let frame = p.windows();
+    assert!(
+        !frame.contains(&under.child),
+        "the pointer at the edge of the screen is over the indicator's own window \
+         {:?}, so the frame is swallowing clicks",
+        under.child
     );
     p.hide().expect("hidden");
 }

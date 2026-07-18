@@ -134,6 +134,25 @@ impl X11Presence {
             );
         }
 
+        // **Told when the stacking order changes, rather than raising the
+        // frame on a timer.**
+        //
+        // The first version re-raised on every poll — thirty times a second —
+        // which put a `ConfigureNotify` on the root that often. Anything
+        // watching the root saw a flood: four thousand events in nine seconds,
+        // measured while trying to watch for something else entirely.
+        //
+        // `SubstructureNotify` says when a window is mapped, raised or
+        // configured. The frame is put back only then, which is exactly when
+        // it could have been covered.
+        if let Ok(cookie) = conn.change_window_attributes(
+            root,
+            &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                .event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
+        ) {
+            let _ = cookie.check();
+        }
+
         let mut me = Self {
             conn,
             root,
@@ -292,6 +311,11 @@ impl X11Presence {
     }
 
     /// Put the frame back on top, in case something came up over it.
+    ///
+    /// This itself produces `ConfigureNotify` on the root — the frame is being
+    /// configured — so a caller that raised on every such event would chase
+    /// its own tail for ever. The events our own windows generate are ignored
+    /// by [`Self::is_ours`].
     fn raise(&self) {
         let Some(edges) = self.edges else { return };
         for window in edges {
@@ -301,6 +325,11 @@ impl X11Presence {
             );
         }
         let _ = self.conn.flush();
+    }
+
+    /// Whether a window is part of the frame.
+    fn is_ours(&self, window: Window) -> bool {
+        self.edges.is_some_and(|edges| edges.contains(&window))
     }
 
     fn destroy_edges(&mut self) {
@@ -356,17 +385,22 @@ impl Presence for X11Presence {
 
     fn poll(&mut self) -> Result<Vec<HostEvent>, PresenceError> {
         let mut out = Vec::new();
+        let mut somebody_moved = false;
         while let Ok(Some(event)) = self.conn.poll_for_event() {
-            if let Event::KeyPress(_) = event {
+            match event {
                 // The only key this connection is given is the one it
                 // grabbed, so there is nothing to check: the grab is the
-                // filter, and checking the keycode again here would be
-                // checking the server's own work.
-                out.push(HostEvent::Panic);
+                // filter, and checking the keycode again would be checking
+                // the server's own work.
+                Event::KeyPress(_) => out.push(HostEvent::Panic),
+                // Something appeared, moved or was raised — which is the only
+                // way the frame can end up underneath anything.
+                Event::MapNotify(e) if !self.is_ours(e.window) => somebody_moved = true,
+                Event::ConfigureNotify(e) if !self.is_ours(e.window) => somebody_moved = true,
+                _ => {}
             }
         }
-        // Kept on top whenever anybody asks what happened, which is often.
-        if self.edges.is_some() {
+        if somebody_moved && self.edges.is_some() {
             self.raise();
         }
         Ok(out)

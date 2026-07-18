@@ -784,6 +784,10 @@ async fn serve(
     let sending = std::thread::spawn(move || {
         let interval = Duration::from_millis(200);
         let mut frames = 0u64;
+        // What the controller was last told the picture's size is. Read from
+        // the pump rather than passed in, so there is one source for it.
+        let opening = pump.config();
+        let mut announced = (opening.width, opening.height);
         loop {
             // Anything the controller asked for, before the next frame, so a
             // keyframe request is acted on by the very next one.
@@ -823,6 +827,33 @@ async fn serve(
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("      · the pipeline stopped: {e}");
+                    break;
+                }
+            }
+
+            // **The governor changes the encode size, and the controller has
+            // to be told.**
+            //
+            // A monitor switch is announced because a controller asked for it.
+            // This one nobody asked for: the CPU budget's resolution rung
+            // lowers the picture on its own, and a controller still working
+            // from the opening announcement sizes its window and its pointer
+            // arithmetic from a size that is no longer being sent.
+            //
+            // Found live — the viewer said "this presenter shows 1280x720, not
+            // 960x540" and stopped showing anything, on a session where
+            // nothing had gone wrong except that the host got busy.
+            let now_sending = pump.config();
+            if (now_sending.width, now_sending.height) != announced {
+                announced = (now_sending.width, now_sending.height);
+                println!(
+                    "      now sending {}x{} (the CPU budget moved)",
+                    now_sending.width, now_sending.height
+                );
+                if to_controller
+                    .send(MediaMessage::Config(now_sending))
+                    .is_err()
+                {
                     break;
                 }
             }
