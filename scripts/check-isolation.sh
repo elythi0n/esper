@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify this repository is self-contained.
 #
-# OwnView is developed inside a larger planning tree that holds design
+# Esper is developed inside a larger planning tree that holds design
 # documents, decision records and a build tracker. None of that is published,
 # and nothing here may reference it: a public repository linking into a private
 # folder is a broken link at best and a leak at worst.

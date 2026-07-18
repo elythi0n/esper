@@ -5,7 +5,7 @@ the CBOR payload — as it appears on the wire.
 
 **Both language implementations must decode every fixture to the same value, and
 re-encode that value to byte-identical output.** The Rust side checks this in
-`core/crates/ownview-proto/tests/fixtures.rs`; the Go side in
+`core/crates/esper-proto/tests/fixtures.rs`; the Go side in
 `internal/proto/fixtures_test.go`. Both run in CI.
 
 This exists because two independent implementations of one protocol drift

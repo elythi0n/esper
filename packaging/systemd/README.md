@@ -1,8 +1,8 @@
 # systemd units
 
-## `ownview.service` — a **user** service
+## `esper.service` — a **user** service
 
-OwnView runs as the user whose screen and shell it exposes. That is not a
+Esper runs as the user whose screen and shell it exposes. That is not a
 limitation to work around: the engine needs no privilege to capture a display
 the user is already looking at or to start a shell as them, and running it as
 root would turn a compromise of the engine into a compromise of the machine
@@ -10,9 +10,9 @@ rather than of one account.
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp ownview.service ~/.config/systemd/user/
+cp esper.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now ownview
+systemctl --user enable --now esper
 ```
 
 ### On a headless server, enable lingering
@@ -21,7 +21,7 @@ systemctl --user enable --now ownview
 sudo loginctl enable-linger $USER
 ```
 
-Without it systemd stops user services when the last session ends, so OwnView
+Without it systemd stops user services when the last session ends, so Esper
 would stop the moment you disconnect — and you could not reconnect to start it
 again. This is the single most common way a working install becomes an
 unreachable one.
@@ -45,7 +45,7 @@ Two settings are deliberately *not* tightened:
 ## Verifying a change to the unit
 
 ```sh
-systemd-analyze verify packaging/systemd/ownview.service
+systemd-analyze verify packaging/systemd/esper.service
 ```
 
 Worth running rather than reading. It caught `StartLimitIntervalSec` and
@@ -54,7 +54,7 @@ ignores them silently in the wrong section, so the restart rate limiting would
 have been absent with nothing to show it. A unit file that looks right is not
 the same as one that is.
 
-(It will complain that `~/.local/bin/ownview` is not executable until you have
+(It will complain that `~/.local/bin/esper` is not executable until you have
 installed it. That one is expected.)
 
 ## What there is no unit for

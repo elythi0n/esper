@@ -1,8 +1,8 @@
-BINARY  := ownview
+BINARY  := esper
 BIN     := build
 DIST    := dist
-MODULE  := github.com/elythi0n/ownview
-PKG     := ./cmd/ownview
+MODULE  := github.com/elythi0n/esper
+PKG     := ./cmd/esper
 CORE    := core
 
 # Effective version — read from the VERSION file if present, else v0.0.0.
@@ -27,13 +27,13 @@ PLATFORMS := linux/amd64 linux/arm64
 # poison the tree. Installing to a system prefix does need it — that's
 # `install-only`, which never builds.
 define GUARD_ROOT
-@if [ "$$(id -u)" = "0" ] && [ -z "$(OWNVIEW_ALLOW_ROOT)" ]; then \
+@if [ "$$(id -u)" = "0" ] && [ -z "$(ESPER_ALLOW_ROOT)" ]; then \
 	echo "refusing to build as root — it leaves root-owned files that break later builds."; \
 	echo ""; \
 	echo "  to install system-wide, build as yourself first, then install:"; \
 	echo "      make build && sudo make install-only"; \
 	echo ""; \
-	echo "  override (not recommended): OWNVIEW_ALLOW_ROOT=1"; \
+	echo "  override (not recommended): ESPER_ALLOW_ROOT=1"; \
 	exit 1; \
 fi
 endef
@@ -50,7 +50,7 @@ check-isolation:
 .PHONY: build
 build: build-rust build-go
 
-## Build the Go control plane → ./build/ownview
+## Build the Go control plane → ./build/esper
 .PHONY: build-go
 build-go:
 	$(GUARD_ROOT)
@@ -66,9 +66,9 @@ build-rust:
 	@echo "building engine + broker $(VERSION)..."
 	@cd $(CORE) && cargo build --release --quiet
 	@mkdir -p $(BIN)
-	@cp $(CORE)/target/release/ownview-engine $(BIN)/
-	@cp $(CORE)/target/release/ownview-broker $(BIN)/
-	@echo "  → $(BIN)/ownview-engine, $(BIN)/ownview-broker"
+	@cp $(CORE)/target/release/esper-engine $(BIN)/
+	@cp $(CORE)/target/release/esper-broker $(BIN)/
+	@echo "  → $(BIN)/esper-engine, $(BIN)/esper-broker"
 
 ## Build size-optimised release binaries → ./build/dist
 ##
@@ -79,15 +79,15 @@ build-dist:
 	$(GUARD_ROOT)
 	@echo "building dist binaries $(VERSION) (lto, stripped)..."
 	@cd $(CORE) && cargo build --profile dist --quiet \
-		--bin ownview-engine --bin ownview-broker
+		--bin esper-engine --bin esper-broker
 	@mkdir -p $(BIN)/dist
-	@cp $(CORE)/target/dist/ownview-engine $(BIN)/dist/
-	@cp $(CORE)/target/dist/ownview-broker $(BIN)/dist/
+	@cp $(CORE)/target/dist/esper-engine $(BIN)/dist/
+	@cp $(CORE)/target/dist/esper-broker $(BIN)/dist/
 	@go build -trimpath -ldflags='$(LDFLAGS)' -o $(BIN)/dist/$(BINARY) $(PKG)
 	@printf '  %-20s %s\n' \
-		ownview          "$$(du -h $(BIN)/dist/$(BINARY) | cut -f1)" \
-		ownview-engine   "$$(du -h $(BIN)/dist/ownview-engine | cut -f1)" \
-		ownview-broker   "$$(du -h $(BIN)/dist/ownview-broker | cut -f1)"
+		esper          "$$(du -h $(BIN)/dist/$(BINARY) | cut -f1)" \
+		esper-engine   "$$(du -h $(BIN)/dist/esper-engine | cut -f1)" \
+		esper-broker   "$$(du -h $(BIN)/dist/esper-broker | cut -f1)"
 
 ## Build the Go binary for every platform → ./dist
 .PHONY: build-all
@@ -155,25 +155,25 @@ tidy:
 ## Two crates are excluded, for the same reason stated two ways: MIRI's cost
 ## here is measured and its value here is not.
 ##
-## ownview-crypto: interpreting Ed25519 takes ~200s against ~13s for everything
+## esper-crypto: interpreting Ed25519 takes ~200s against ~13s for everything
 ## else, and dalek's unsafe is heavily audited upstream.
 ##
-## ownview-capture, ownview-color and ownview-scale: forbid unsafe code and have
+## esper-capture, esper-color and esper-scale: forbid unsafe code and have
 ## no FFI, so there is no undefined behavior for MIRI to find. Their tests are
 ## exhaustive sweeps over pixels, rectangles, colours and resampling weights —
-## exactly what an interpreter is worst at. ownview-scale alone was 99s.
+## exactly what an interpreter is worst at. esper-scale alone was 99s.
 ##
-## ownview-encode, ownview-decode and ownview-pipeline: call into Cisco's C,
+## esper-encode, esper-decode and esper-pipeline: call into Cisco's C,
 ## directly or through each other. MIRI cannot execute foreign functions at
 ## all, so every test that touches the codec fails rather than passing — which
 ## is not a finding about our code. The decoder's real defence is a fuzz target
 ## with the C instrumented, plus a sandbox.
 ##
-## ownview-pipeline also asks the kernel for CLOCK_PROCESS_CPUTIME_ID, which
+## esper-pipeline also asks the kernel for CLOCK_PROCESS_CPUTIME_ID, which
 ## MIRI does not advance, so its timing tests cannot pass under it either.
 ##
 ## The value is in the parsers, which is why the platform capture backends must
-## be their own crates rather than modules of ownview-capture: X11, PipeWire
+## be their own crates rather than modules of esper-capture: X11, PipeWire
 ## and DXGI bindings are where undefined behavior in *our* unsafe code will
 ## live, and they have to stay in this set.
 ##
@@ -181,10 +181,10 @@ tidy:
 .PHONY: miri
 miri:
 	@cd $(CORE) && cargo +nightly miri test --workspace \
-		--exclude ownview-crypto --exclude ownview-capture \
-		--exclude ownview-color --exclude ownview-scale \
-		--exclude ownview-encode --exclude ownview-decode \
-		--exclude ownview-pipeline
+		--exclude esper-crypto --exclude esper-capture \
+		--exclude esper-color --exclude esper-scale \
+		--exclude esper-encode --exclude esper-decode \
+		--exclude esper-pipeline
 
 ## Memory-safety check over every crate, including the slow crypto one
 ##
@@ -194,8 +194,8 @@ miri:
 .PHONY: miri-full
 miri-full:
 	@cd $(CORE) && cargo +nightly miri test --workspace \
-		--exclude ownview-encode --exclude ownview-decode \
-		--exclude ownview-pipeline
+		--exclude esper-encode --exclude esper-decode \
+		--exclude esper-pipeline
 
 ## Fuzz every target (needs nightly + cargo-fuzz). FUZZ_SECONDS=600 for a long run
 ##
@@ -242,7 +242,7 @@ FUZZ_CFLAGS = -fsanitize=address -fno-omit-frame-pointer \
 ## step with the encoder's settings.
 .PHONY: fuzz-corpus
 fuzz-corpus:
-	@cd $(CORE) && cargo test -p ownview-decode --test seed_corpus --release \
+	@cd $(CORE) && cargo test -p esper-decode --test seed_corpus --release \
 		-- --ignored --nocapture
 
 .PHONY: fuzz
@@ -297,13 +297,13 @@ install: build install-only
 ## Install already-built binaries without building (sudo-safe: never builds)
 .PHONY: install-only
 install-only:
-	@for b in $(BINARY) ownview-engine ownview-broker; do \
+	@for b in $(BINARY) esper-engine esper-broker; do \
 		if [ ! -x $(BIN)/$$b ]; then \
 			echo "no binary at $(BIN)/$$b — run 'make build' first (as your normal user)"; \
 			exit 1; \
 		fi; \
 	done
-	@for b in $(BINARY) ownview-engine ownview-broker; do \
+	@for b in $(BINARY) esper-engine esper-broker; do \
 		install -Dm755 $(BIN)/$$b $(DESTDIR)$(PREFIX)/bin/$$b || { \
 			echo "permission denied writing to $(DESTDIR)$(PREFIX)/bin"; \
 			echo "  → run : make build && sudo make install-only"; \
@@ -315,7 +315,7 @@ install-only:
 ## Install to ~/.local/bin (no sudo)
 .PHONY: install-user
 install-user: build
-	@for b in $(BINARY) ownview-engine ownview-broker; do \
+	@for b in $(BINARY) esper-engine esper-broker; do \
 		install -Dm755 $(BIN)/$$b $(HOME)/.local/bin/$$b; \
 	done
 	@echo "installed → $(HOME)/.local/bin/"
@@ -327,8 +327,8 @@ install-user: build
 .PHONY: uninstall
 uninstall:
 	@rm -f $(DESTDIR)$(PREFIX)/bin/$(BINARY) \
-	       $(DESTDIR)$(PREFIX)/bin/ownview-engine \
-	       $(DESTDIR)$(PREFIX)/bin/ownview-broker
+	       $(DESTDIR)$(PREFIX)/bin/esper-engine \
+	       $(DESTDIR)$(PREFIX)/bin/esper-broker
 
 ## Remove build artifacts
 .PHONY: clean

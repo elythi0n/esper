@@ -1,0 +1,17 @@
+[package]
+name = "esper-broker"
+description = "The Esper broker: a stateless introducer and blind relay."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-proto.workspace = true
+esper-buildinfo.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "esper-stream"
+description = "The media path behind a transport: a host that packetizes what it captures, and a controller that reassembles and decodes it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-capture.workspace = true
+esper-color.workspace = true
+esper-decode.workspace = true
+esper-media.workspace = true
+esper-pipeline.workspace = true
+esper-proto.workspace = true
+esper-scale.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+esper-encode.workspace = true

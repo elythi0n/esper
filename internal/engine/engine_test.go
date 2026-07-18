@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/elythi0n/ownview/internal/proto"
+	"github.com/elythi0n/esper/internal/proto"
 )
 
 // engineBinary returns the built engine, skipping the test when it is absent.
@@ -21,9 +21,9 @@ func engineBinary(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := filepath.Join(root, "build", "ownview-engine")
+	p := filepath.Join(root, "build", "esper-engine")
 	if _, err := os.Stat(p); err != nil {
-		t.Skip("no built engine at build/ownview-engine — run 'make build'")
+		t.Skip("no built engine at build/esper-engine — run 'make build'")
 	}
 	return p
 }
@@ -61,7 +61,7 @@ func TestHandshakeAcrossTheProcessSeam(t *testing.T) {
 	if h.Role != proto.RoleHost {
 		t.Errorf("engine role = %q, want %q", h.Role, proto.RoleHost)
 	}
-	if h.Name != "ownview-engine" {
+	if h.Name != "esper-engine" {
 		t.Errorf("engine name = %q", h.Name)
 	}
 	if !h.DeviceKeyIsWellFormed() {
@@ -147,7 +147,7 @@ func TestDirectoryIsNotMistakenForABinary(t *testing.T) {
 }
 
 func TestNonExecutableFileIsRejected(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "ownview-engine")
+	p := filepath.Join(t.TempDir(), "esper-engine")
 	if err := os.WriteFile(p, []byte("not a binary"), 0o644); err != nil {
 		t.Fatal(err)
 	}

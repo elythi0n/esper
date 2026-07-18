@@ -1,0 +1,20 @@
+[package]
+name = "esper-scale"
+description = "Area-average downscaling of captured frames, so the governor's resolution rung has somewhere to land."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-capture.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+esper-capture.workspace = true
+esper-color.workspace = true

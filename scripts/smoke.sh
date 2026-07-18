@@ -12,7 +12,7 @@ BIN=build
 fail=0
 check() { if [ "$2" = "$3" ]; then printf '  ✓ %s\n' "$1"; else printf '  ✗ %s\n      got:  %s\n      want: %s\n' "$1" "$2" "$3"; fail=1; fi; }
 
-for b in ownview ownview-engine ownview-broker; do
+for b in esper esper-engine esper-broker; do
   if [ ! -x "$BIN/$b" ]; then
     echo "  ✗ $BIN/$b missing — run 'make build' first"; exit 1
   fi
@@ -20,27 +20,27 @@ done
 
 expected_version=$(cat VERSION)
 
-go_version=$("$BIN/ownview" version | head -1 | awk '{print $2}')
-eng_version=$("$BIN/ownview-engine" version | head -1 | awk '{print $2}')
-brk_version=$("$BIN/ownview-broker" version | head -1 | awk '{print $2}')
+go_version=$("$BIN/esper" version | head -1 | awk '{print $2}')
+eng_version=$("$BIN/esper-engine" version | head -1 | awk '{print $2}')
+brk_version=$("$BIN/esper-broker" version | head -1 | awk '{print $2}')
 
-check "ownview reports the VERSION file"        "$go_version"  "$expected_version"
-check "ownview-engine reports the VERSION file" "$eng_version" "$expected_version"
-check "ownview-broker reports the VERSION file" "$brk_version" "$expected_version"
+check "esper reports the VERSION file"        "$go_version"  "$expected_version"
+check "esper-engine reports the VERSION file" "$eng_version" "$expected_version"
+check "esper-broker reports the VERSION file" "$brk_version" "$expected_version"
 
-go_proto=$("$BIN/ownview" version | awk '/protocol/{print $2}')
-eng_proto=$("$BIN/ownview-engine" version | awk '/protocol/{print $2}')
-brk_proto=$("$BIN/ownview-broker" version | awk '/protocol/{print $2}')
+go_proto=$("$BIN/esper" version | awk '/protocol/{print $2}')
+eng_proto=$("$BIN/esper-engine" version | awk '/protocol/{print $2}')
+brk_proto=$("$BIN/esper-broker" version | awk '/protocol/{print $2}')
 
 check "engine agrees with the control plane on the protocol version" "$eng_proto" "$go_proto"
 check "broker agrees with the control plane on the protocol version" "$brk_proto" "$go_proto"
 
 # Exit codes are part of the CLI contract: scripts branch on them.
-"$BIN/ownview" version >/dev/null 2>&1; check "ownview version exits 0" "$?" "0"
-set +e; "$BIN/ownview" definitely-not-a-command >/dev/null 2>&1; rc=$?; set -e
-check "ownview rejects an unknown command with exit 1" "$rc" "1"
+"$BIN/esper" version >/dev/null 2>&1; check "esper version exits 0" "$?" "0"
+set +e; "$BIN/esper" definitely-not-a-command >/dev/null 2>&1; rc=$?; set -e
+check "esper rejects an unknown command with exit 1" "$rc" "1"
 
-# OwnView operates no infrastructure, so a shipped binary must contain nothing
+# Esper operates no infrastructure, so a shipped binary must contain nothing
 # it could phone home to. This check is that claim's proof, and the reason the
 # claim is checkable rather than merely stated.
 #
@@ -49,7 +49,7 @@ check "ownview rejects an unknown command with exit 1" "$rc" "1"
 # which is worse than not having one:
 #
 #   1. Bare domains do not count. Go embeds every module path and source
-#      filename in its build info, so `github.com/elythi0n/ownview` is in every
+#      filename in its build info, so `github.com/elythi0n/esper` is in every
 #      binary we will ever ship and is not something the program can connect to.
 #   2. Documentation hosts do not count. `getrandom` carries the error string
 #      "Node.js ES modules are not directly supported, see https://docs.rs/..."
@@ -68,7 +68,7 @@ doc_hosts='docs\.rs|doc\.rust-lang\.org|rust-lang\.github\.io|www\.w3\.org|(www\
 # documentation ranges are not endpoints anyone can phone home to.
 harmless_ip='^(0\.|127\.|169\.254\.|22[4-9]\.|23[0-9]\.|24[0-9]\.|25[0-5]\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|255\.255\.255\.255)'
 
-for b in ownview ownview-engine ownview-broker; do
+for b in esper esper-engine esper-broker; do
   urls=$(strings "$BIN/$b" \
          | grep -oEi '(https?|wss?|quic|ftp)://[a-z0-9.-]+' \
          | grep -vEi "://($doc_hosts)" | sort -u || true)
@@ -80,7 +80,7 @@ for b in ownview ownview-engine ownview-broker; do
     printf '  ✗ %s contains something connectable:\n' "$b"
     [ -n "$urls" ] && printf '%s\n' "$urls" | sed 's/^/      url: /'
     [ -n "$ips" ]  && printf '%s\n' "$ips"  | sed 's/^/      ip:  /'
-    echo "      OwnView ships no default endpoint. If this is a dependency's,"
+    echo "      Esper ships no default endpoint. If this is a dependency's,"
     echo "      that dependency needs justifying or replacing. If it is a"
     echo "      documentation link in a diagnostic string, add it to doc_hosts"
     echo "      above WITH A REASON."
@@ -95,23 +95,23 @@ done
 # would still build and still pass every test, and would fail on the first
 # server someone tried it on.
 echo "  — checking the engine needs no display"
-if ldd "$BIN/ownview-engine" 2>/dev/null \
+if ldd "$BIN/esper-engine" 2>/dev/null \
    | grep -qiE 'libX11|libwayland|libGL|libEGL|libdrm|libgbm|libxcb'; then
-  printf '  ✗ ownview-engine links a display library:\n'
-  ldd "$BIN/ownview-engine" | grep -iE 'libX11|libwayland|libGL|libEGL|libdrm|libgbm|libxcb' | sed 's/^/      /'
+  printf '  ✗ esper-engine links a display library:\n'
+  ldd "$BIN/esper-engine" | grep -iE 'libX11|libwayland|libGL|libEGL|libdrm|libgbm|libxcb' | sed 's/^/      /'
   echo "      Terminal mode must run on a headless server. A display library"
   echo "      here means it will not."
   fail=1
 else
-  printf '  ✓ ownview-engine links no display library\n'
+  printf '  ✓ esper-engine links no display library\n'
 fi
 
 # And it must actually run with the display environment stripped.
 if env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE -u XAUTHORITY \
-     "$BIN/ownview-engine" version >/dev/null 2>&1; then
-  printf '  ✓ ownview-engine runs with no display environment\n'
+     "$BIN/esper-engine" version >/dev/null 2>&1; then
+  printf '  ✓ esper-engine runs with no display environment\n'
 else
-  printf '  ✗ ownview-engine failed with the display environment stripped\n'
+  printf '  ✗ esper-engine failed with the display environment stripped\n'
   fail=1
 fi
 
@@ -120,7 +120,7 @@ fi
 # gradient instead would have no way to tell that capture never worked.
 echo "  — checking a named backend is not silently substituted"
 if env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY \
-     "$BIN/ownview-engine" loopback --backend x11 --seconds 1 >/dev/null 2>&1; then
+     "$BIN/esper-engine" loopback --backend x11 --seconds 1 >/dev/null 2>&1; then
   printf '  ✗ --backend x11 succeeded with no display, so it fell back silently\n'
   fail=1
 else
@@ -129,7 +129,7 @@ fi
 
 # And the fallback itself has to work when nothing was named.
 if out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY \
-     "$BIN/ownview-engine" loopback --backend auto --size 320x240 --seconds 1 2>&1); then
+     "$BIN/esper-engine" loopback --backend auto --size 320x240 --seconds 1 2>&1); then
   if printf '%s' "$out" | grep -q 'synthetic: in use'; then
     printf '  ✓ auto falls back to synthetic and says why\n'
   else
@@ -146,7 +146,7 @@ fi
 # confusing failure at the far end.
 echo "  — checking a host with no paired devices refuses to start"
 empty=$(mktemp -d)
-if out=$(OWNVIEW_HOME="$empty" "$BIN/ownview-engine" host --listen 127.0.0.1:0 2>&1); then
+if out=$(ESPER_HOME="$empty" "$BIN/esper-engine" host --listen 127.0.0.1:0 2>&1); then
   printf '  ✗ host started with no paired devices\n'
   fail=1
 else
@@ -157,7 +157,7 @@ else
     fail=1
   fi
 fi
-if out=$(OWNVIEW_HOME="$empty" "$BIN/ownview-engine" connect 127.0.0.1:1 2>&1); then
+if out=$(ESPER_HOME="$empty" "$BIN/esper-engine" connect 127.0.0.1:1 2>&1); then
   printf '  ✗ connect started with no paired devices\n'
   fail=1
 else
@@ -171,7 +171,7 @@ rm -rf "$empty"
 # something anyone can use.
 echo "  — running the media pipeline end to end, with no display"
 if out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY \
-     "$BIN/ownview-engine" loopback --size 320x240 --fps 15 --seconds 1 2>&1); then
+     "$BIN/esper-engine" loopback --size 320x240 --fps 15 --seconds 1 2>&1); then
   if printf '%s' "$out" | grep -q 'luma PSNR'; then
     printf '  ✓ loopback captured, converted, encoded and decoded\n'
   else

@@ -1,6 +1,6 @@
 # Security
 
-OwnView is remote desktop software. It can see everything on a screen and type
+Esper is remote desktop software. It can see everything on a screen and type
 anything into it, which makes it one of the highest-consequence things a person
 installs. This document says what we claim, what we do not, and how to report a
 problem.
@@ -9,7 +9,7 @@ problem.
 
 **Do not open a public issue.**
 
-Email **security@ownview.invalid** — *(placeholder: replace with a monitored
+Email **security@esper.invalid** — *(placeholder: replace with a monitored
 address and publish a PGP key before the first release)*.
 
 - We aim to acknowledge within **72 hours**.
@@ -20,7 +20,7 @@ There is no bug bounty yet.
 
 ## The honest claim
 
-OwnView does not claim to be uncrackable. No software is, and a product making
+Esper does not claim to be uncrackable. No software is, and a product making
 that claim has either not been examined or is not being straight with you.
 
 What we do claim:
@@ -33,9 +33,9 @@ What we do claim:
 
 ### Not independently audited
 
-**OwnView has not had a third-party security audit.** This will remain here,
+**Esper has not had a third-party security audit.** This will remain here,
 stated plainly, until one happens and its report is published. Anyone deploying
-OwnView in a high-risk setting should weigh that.
+Esper in a high-risk setting should weigh that.
 
 Nor are all of its cryptographic dependencies. Every dependency is either
 covered by a published third-party audit we import, or recorded as an
@@ -49,7 +49,7 @@ exemption — and the exemptions include things that matter:
 | **`spake2`** | **exemption — and its own README states it has never been audited** |
 
 The curve arithmetic, the signature scheme and the password-authenticated key
-exchange that OwnView's entire trust model rests on are therefore unreviewed by
+exchange that Esper's entire trust model rests on are therefore unreviewed by
 us and uncovered by the audit sets we trust. There is no audited Rust
 alternative to any of them today; we chose the best-provenance option in each
 case and are telling you which they are.
@@ -150,7 +150,7 @@ address comes from the packet's source rather than the record it carries, so a
 forged address record changes nothing.
 
 What it costs, stated rather than glossed: **an advertisement tells the segment
-that this machine runs OwnView.** That is the residual in the threat model's
+that this machine runs Esper.** That is the residual in the threat model's
 A4, it is why `discovery.mdns: false` exists, and the port remains open either
 way.
 
@@ -189,7 +189,7 @@ a property of the protocol and the reason Wayland exists. Capture is therefore
 
 ## What the design removes
 
-The strongest thing about OwnView's posture is architectural rather than
+The strongest thing about Esper's posture is architectural rather than
 defensive. These categories do not apply because the thing they attack does not
 exist:
 
@@ -221,12 +221,12 @@ exist:
 
 Stated so the list above is not mistaken for a guarantee:
 
-- **Root or Administrator on either endpoint.** They own the framebuffer and the keyboard regardless of what OwnView does.
+- **Root or Administrator on either endpoint.** They own the framebuffer and the keyboard regardless of what Esper does.
 - **A user who pairs with someone they should not have.** Social engineering is not a cryptographic problem.
 - **Hardware keyloggers, screen photography, shoulder surfing.**
 - **A malicious OS, compromised firmware, or a hostile hypervisor.**
 - **Traffic analysis.** Packet sizes and timing leak coarse activity. Padding is not implemented.
-- **Anonymity.** OwnView protects confidentiality and integrity, not the fact that a connection happened.
+- **Anonymity.** Esper protects confidentiality and integrity, not the fact that a connection happened.
 
 ## Supported versions
 

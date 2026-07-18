@@ -1,4 +1,4 @@
-# OwnView
+# Esper
 
 > Secure, private remote desktop. No account, no password, no server.
 
@@ -17,8 +17,8 @@ default server address compiled into the binary** — so there is nothing to opt
 out of and nothing to take on trust.
 
 On a LAN, machines find each other. On an overlay network — Tailscale,
-WireGuard, ZeroTier, Nebula — OwnView notices and rides it. Beyond that you may
-run a broker yourself, and if you don't, OwnView does less rather than routing
+WireGuard, ZeroTier, Nebula — Esper notices and rides it. Beyond that you may
+run a broker yourself, and if you don't, Esper does less rather than routing
 you through someone else.
 
 Everything is end-to-end encrypted between device keys on every path, including
@@ -79,9 +79,9 @@ Three binaries come out:
 
 | Binary | Role |
 |---|---|
-| `ownview` | The control plane: CLI, device store, engine supervisor |
-| `ownview-engine` | The realtime engine: capture, encode, transport, input |
-| `ownview-broker` | A stateless introducer and blind relay, run by you |
+| `esper` | The control plane: CLI, device store, engine supervisor |
+| `esper-engine` | The realtime engine: capture, encode, transport, input |
+| `esper-broker` | A stateless introducer and blind relay, run by you |
 
 ## How it is put together
 
@@ -96,7 +96,7 @@ crosses that seam.** Rust owns capture through to present, end to end; the
 socket carries commands and state at roughly ten messages a second.
 
 ```
-┌─ ownview (Go) ──────────────┐        ┌─ ownview-engine (Rust) ─────────┐
+┌─ esper (Go) ──────────────┐        ┌─ esper-engine (Rust) ─────────┐
 │  CLI · devices · policy     │  CBOR  │  capture → encode → QUIC        │
 │  local API · supervision    │ ◄────► │  QUIC → decode → present        │
 └─────────────────────────────┘ socket └─────────────────────────────────┘
@@ -109,7 +109,7 @@ a second message.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) — including what OwnView does **not** defend
+See [SECURITY.md](SECURITY.md) — including what Esper does **not** defend
 against, and the plain statement that it has not yet been independently audited.
 
 Short version: Ed25519 device identity, SPAKE2 pairing, hybrid post-quantum key

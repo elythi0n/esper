@@ -57,7 +57,7 @@ func TestEveryNamedCodeHasADescription(t *testing.T) {
 // exactly the shape of thing that drifts. A comment saying "keep in sync" is
 // not a mechanism; this is.
 func TestReasonCodesMatchRust(t *testing.T) {
-	path := filepath.Join("..", "..", "core", "crates", "ownview-proto", "src", "codes.rs")
+	path := filepath.Join("..", "..", "core", "crates", "esper-proto", "src", "codes.rs")
 	src, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)

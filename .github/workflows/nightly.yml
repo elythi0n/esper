@@ -11,7 +11,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The full MIRI run, including ownview-crypto — ~200s of interpreting Ed25519
+  # The full MIRI run, including esper-crypto — ~200s of interpreting Ed25519
   # that is not worth a per-push wait but is worth knowing about daily.
   miri-full:
     name: miri (all crates)
@@ -25,7 +25,7 @@ jobs:
         with:
           workspaces: core
       # `make miri-full` rather than the cargo command, so the crate
-      # exclusions live in one place. ownview-encode cannot run under MIRI at
+      # exclusions live in one place. esper-encode cannot run under MIRI at
       # all — MIRI cannot call into C — and duplicating that here would mean
       # remembering it twice.
       - run: make miri-full

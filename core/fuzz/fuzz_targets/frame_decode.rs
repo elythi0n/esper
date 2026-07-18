@@ -14,7 +14,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ownview_proto::{Hello, read_frame};
+use esper_proto::{Hello, read_frame};
 
 fuzz_target!(|data: &[u8]| {
     let mut cursor = data;

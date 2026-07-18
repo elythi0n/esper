@@ -11,31 +11,31 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
-ownview-proto = { path = "crates/ownview-proto" }
-ownview-media = { path = "crates/ownview-media" }
-ownview-crypto = { path = "crates/ownview-crypto" }
-ownview-transport = { path = "crates/ownview-transport" }
-ownview-pty = { path = "crates/ownview-pty" }
-ownview-audit = { path = "crates/ownview-audit" }
-ownview-buildinfo = { path = "crates/ownview-buildinfo" }
-ownview-capture = { path = "crates/ownview-capture" }
-ownview-capture-x11 = { path = "crates/ownview-capture-x11" }
-ownview-color = { path = "crates/ownview-color" }
-ownview-encode = { path = "crates/ownview-encode" }
-ownview-decode = { path = "crates/ownview-decode" }
-ownview-scale = { path = "crates/ownview-scale" }
-ownview-present = { path = "crates/ownview-present" }
-ownview-present-x11 = { path = "crates/ownview-present-x11" }
-ownview-pipeline = { path = "crates/ownview-pipeline" }
-ownview-stream = { path = "crates/ownview-stream" }
-ownview-link = { path = "crates/ownview-link" }
-ownview-discovery = { path = "crates/ownview-discovery" }
-ownview-input = { path = "crates/ownview-input" }
-ownview-input-x11 = { path = "crates/ownview-input-x11" }
-ownview-presence = { path = "crates/ownview-presence" }
-ownview-presence-x11 = { path = "crates/ownview-presence-x11" }
+esper-proto = { path = "crates/esper-proto" }
+esper-media = { path = "crates/esper-media" }
+esper-crypto = { path = "crates/esper-crypto" }
+esper-transport = { path = "crates/esper-transport" }
+esper-pty = { path = "crates/esper-pty" }
+esper-audit = { path = "crates/esper-audit" }
+esper-buildinfo = { path = "crates/esper-buildinfo" }
+esper-capture = { path = "crates/esper-capture" }
+esper-capture-x11 = { path = "crates/esper-capture-x11" }
+esper-color = { path = "crates/esper-color" }
+esper-encode = { path = "crates/esper-encode" }
+esper-decode = { path = "crates/esper-decode" }
+esper-scale = { path = "crates/esper-scale" }
+esper-present = { path = "crates/esper-present" }
+esper-present-x11 = { path = "crates/esper-present-x11" }
+esper-pipeline = { path = "crates/esper-pipeline" }
+esper-stream = { path = "crates/esper-stream" }
+esper-link = { path = "crates/esper-link" }
+esper-discovery = { path = "crates/esper-discovery" }
+esper-input = { path = "crates/esper-input" }
+esper-input-x11 = { path = "crates/esper-input-x11" }
+esper-presence = { path = "crates/esper-presence" }
+esper-presence-x11 = { path = "crates/esper-presence-x11" }
 # Test-only: see the crate's own documentation.
-ownview-display-lock = { path = "crates/ownview-display-lock" }
+esper-display-lock = { path = "crates/esper-display-lock" }
 # Pure Rust: it speaks the X11 protocol over a socket rather than binding
 # libX11, so nothing here links a display library and this crate keeps
 # `forbid(unsafe_code)`. That also keeps the smoke test's "the engine links no
@@ -108,7 +108,7 @@ debug = 1
 # biggest size win available. The controller puts the user's terminal into raw
 # mode and restores it in `Drop`; with `abort` that never runs, leaving a shell
 # that does not echo and a user who cannot see what they are typing to fix it.
-# `ownview-pty`'s panic hook does cover that case, but relying on one mechanism
+# `esper-pty`'s panic hook does cover that case, but relying on one mechanism
 # where two exist is a poor trade for a few hundred kilobytes.
 [profile.dist]
 inherits = "release"

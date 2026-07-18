@@ -39,8 +39,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ownview_capture::damage::{Damage, MAX_REGIONS, Regions};
-use ownview_capture::geometry::Rect;
+use esper_capture::damage::{Damage, MAX_REGIONS, Regions};
+use esper_capture::geometry::Rect;
 
 /// A small frame, so the bitmap oracle is cheap and the region cap is
 /// reachable with a handful of rectangles.

@@ -36,8 +36,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ownview_decode::decoder::{DecoderConfig, VideoDecoder};
-use ownview_decode::openh264::OpenH264Decoder;
+use esper_decode::decoder::{DecoderConfig, VideoDecoder};
+use esper_decode::openh264::OpenH264Decoder;
 
 /// A modest ceiling, so a picture the fuzzer talks the decoder into is caught
 /// here rather than by the machine running out of memory.

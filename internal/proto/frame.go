@@ -1,6 +1,6 @@
-// Package proto is the Go half of the OwnView wire protocol: the same
+// Package proto is the Go half of the Esper wire protocol: the same
 // length-prefixed CBOR framing, messages and reason codes that
-// core/crates/ownview-proto implements in Rust.
+// core/crates/esper-proto implements in Rust.
 //
 // Two independent implementations of one protocol drift silently, so they are
 // held together by a shared fixture corpus: every message in
@@ -28,7 +28,7 @@ import (
 const ProtocolVersion uint16 = 1
 
 // ALPN identifies the QUIC connection.
-const ALPN = "ownview/1"
+const ALPN = "esper/1"
 
 // MaxFrameLen is the maximum control frame length. Anything larger is a bulk
 // stream by definition, so this is a protocol invariant rather than a tuning

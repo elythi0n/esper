@@ -525,11 +525,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-audit"
+name = "esper-audit"
 version = "0.0.0"
 dependencies = [
- "ownview-crypto",
- "ownview-proto",
+ "esper-crypto",
+ "esper-proto",
  "serde",
  "serde_json",
  "thiserror",
@@ -537,7 +537,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-capture"
+name = "esper-capture"
 version = "0.0.0"
 dependencies = [
  "thiserror",
@@ -545,22 +545,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-color"
+name = "esper-color"
 version = "0.0.0"
 dependencies = [
- "ownview-capture",
+ "esper-capture",
  "thiserror",
  "tracing",
 ]
 
 [[package]]
-name = "ownview-crypto"
+name = "esper-crypto"
 version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
  "hkdf",
  "hmac",
- "ownview-proto",
+ "esper-proto",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -572,13 +572,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-decode"
+name = "esper-decode"
 version = "0.0.0"
 dependencies = [
  "landlock",
  "linux-raw-sys",
  "openh264",
- "ownview-color",
+ "esper-color",
  "rustix",
  "seccompiler",
  "thiserror",
@@ -586,10 +586,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-discovery"
+name = "esper-discovery"
 version = "0.0.0"
 dependencies = [
- "ownview-proto",
+ "esper-proto",
  "socket2",
  "thiserror",
  "tokio",
@@ -597,20 +597,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-fuzz"
+name = "esper-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
- "ownview-capture",
- "ownview-decode",
- "ownview-discovery",
- "ownview-media",
- "ownview-proto",
- "ownview-transport",
+ "esper-capture",
+ "esper-decode",
+ "esper-discovery",
+ "esper-media",
+ "esper-proto",
+ "esper-transport",
 ]
 
 [[package]]
-name = "ownview-media"
+name = "esper-media"
 version = "0.0.0"
 dependencies = [
  "thiserror",
@@ -618,7 +618,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-proto"
+name = "esper-proto"
 version = "0.0.0"
 dependencies = [
  "ciborium",
@@ -628,10 +628,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-pty"
+name = "esper-pty"
 version = "0.0.0"
 dependencies = [
- "ownview-proto",
+ "esper-proto",
  "pty-process",
  "rustix",
  "thiserror",
@@ -640,15 +640,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-transport"
+name = "esper-transport"
 version = "0.0.0"
 dependencies = [
  "bytes",
  "getrandom 0.2.17",
- "ownview-audit",
- "ownview-crypto",
- "ownview-proto",
- "ownview-pty",
+ "esper-audit",
+ "esper-crypto",
+ "esper-proto",
+ "esper-pty",
  "quinn",
  "rustls",
  "rustls-pki-types",

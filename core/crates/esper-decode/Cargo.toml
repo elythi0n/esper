@@ -1,0 +1,48 @@
+[package]
+name = "esper-decode"
+description = "Software H.264 decoding. The one place a peer's bytes reach a large C parser."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-color.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+openh264 = { version = "0.9", default-features = false, features = ["source"] }
+
+# The jail. Linux only, and the crate reports itself as unsandboxed anywhere
+# else rather than claiming a protection it does not have.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Already in the tree via esper-pty. Supplies setrlimit — including
+# RLIMIT_AS, which is the bound that closes openh264's own allocation hole —
+# and set_no_new_privs, which seccomp requires without CAP_SYS_ADMIN.
+rustix = { version = "1", features = ["process", "thread"] }
+# AWS's seccomp-bpf compiler, from Firecracker. Apache-2.0 OR BSD-3-Clause.
+seccompiler = "0.5"
+# Syscall numbers. seccompiler's own examples use `libc::SYS_*`, but this crate
+# is already in the tree as rustix's own dependency and already covered by
+# cargo-vet's publisher trust — so the filter's numbers come from the crate
+# rustix trusts rather than from a second source of the same constants.
+linux-raw-sys = { version = "0.12", default-features = false, features = [
+    "general",
+    "no_std",
+] }
+# Landlock, for the filesystem. A second layer with a different failure mode:
+# seccomp blocks the syscall, Landlock denies the path, and a gap in one is not
+# automatically a gap in the other.
+landlock = "0.4"
+
+[dev-dependencies]
+esper-capture.workspace = true
+esper-encode.workspace = true
+# For CLOCK_PROCESS_CPUTIME_ID in the threading measurement. Wall-clock time
+# and CPU time diverge the moment the encoder uses more than one thread, and
+# the design's ceiling is written in CPU time — so measuring the wrong one
+# would report a threaded encoder as three times cheaper than it is.
+rustix = { version = "1", features = ["time"] }

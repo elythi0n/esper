@@ -1,4 +1,4 @@
-// Package engine spawns and supervises ownview-engine, the Rust process that
+// Package engine spawns and supervises esper-engine, the Rust process that
 // owns the realtime path, and speaks the control protocol to it.
 //
 // The seam is a process boundary rather than cgo. That is deliberate: cgo would
@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/elythi0n/ownview/internal/proto"
+	"github.com/elythi0n/esper/internal/proto"
 )
 
 // Errors callers are expected to branch on.
@@ -41,7 +41,7 @@ var (
 )
 
 // binaryName is the engine executable, without a platform extension.
-const binaryName = "ownview-engine"
+const binaryName = "esper-engine"
 
 // Supervisor keeps one engine process alive and owns the control channel to it.
 //
@@ -113,7 +113,7 @@ func resolve(explicit string) (string, error) {
 	tried = append(tried, "$PATH")
 
 	return "", fmt.Errorf("%w: looked in %v — %s and %s ship together, so this is "+
-		"usually a partial install", ErrNotFound, tried, binaryName, "ownview")
+		"usually a partial install", ErrNotFound, tried, binaryName, "esper")
 }
 
 func isExecutable(p string) bool {

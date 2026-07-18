@@ -295,6 +295,339 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-audit"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "esper-crypto",
+ "esper-proto",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-broker"
+version = "0.0.0"
+dependencies = [
+ "esper-buildinfo",
+ "esper-proto",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "esper-buildinfo"
+version = "0.0.0"
+
+[[package]]
+name = "esper-capture"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-capture-x11"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-display-lock",
+ "rustix",
+ "thiserror",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
+name = "esper-color"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-crypto"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "esper-proto",
+ "hex",
+ "hkdf",
+ "hmac",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spake2",
+ "subtle",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "esper-decode"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-color",
+ "esper-encode",
+ "landlock",
+ "linux-raw-sys",
+ "openh264",
+ "rustix",
+ "seccompiler",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-discovery"
+version = "0.0.0"
+dependencies = [
+ "esper-proto",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "esper-display-lock"
+version = "0.0.0"
+
+[[package]]
+name = "esper-encode"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-color",
+ "openh264",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-engine"
+version = "0.0.0"
+dependencies = [
+ "esper-buildinfo",
+ "esper-capture",
+ "esper-capture-x11",
+ "esper-color",
+ "esper-crypto",
+ "esper-decode",
+ "esper-discovery",
+ "esper-encode",
+ "esper-input",
+ "esper-input-x11",
+ "esper-link",
+ "esper-media",
+ "esper-pipeline",
+ "esper-presence",
+ "esper-presence-x11",
+ "esper-present",
+ "esper-present-x11",
+ "esper-proto",
+ "esper-scale",
+ "esper-stream",
+ "esper-transport",
+ "rustls",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "esper-input"
+version = "0.0.0"
+dependencies = [
+ "esper-proto",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-input-x11"
+version = "0.0.0"
+dependencies = [
+ "esper-display-lock",
+ "esper-input",
+ "esper-proto",
+ "thiserror",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
+name = "esper-link"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "esper-capture",
+ "esper-color",
+ "esper-crypto",
+ "esper-decode",
+ "esper-encode",
+ "esper-media",
+ "esper-pipeline",
+ "esper-proto",
+ "esper-scale",
+ "esper-stream",
+ "esper-transport",
+ "rustls",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "esper-media"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-color",
+ "esper-decode",
+ "esper-encode",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-pipeline"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-color",
+ "esper-decode",
+ "esper-encode",
+ "esper-scale",
+ "rustix",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-presence"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-presence-x11"
+version = "0.0.0"
+dependencies = [
+ "esper-display-lock",
+ "esper-input",
+ "esper-presence",
+ "thiserror",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
+name = "esper-present"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-color",
+ "thiserror",
+]
+
+[[package]]
+name = "esper-present-x11"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-capture-x11",
+ "esper-color",
+ "esper-display-lock",
+ "esper-present",
+ "thiserror",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
+name = "esper-proto"
+version = "0.0.0"
+dependencies = [
+ "ciborium",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "esper-pty"
+version = "0.0.0"
+dependencies = [
+ "esper-proto",
+ "pty-process",
+ "rustix",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "esper-scale"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-color",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-stream"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-color",
+ "esper-decode",
+ "esper-encode",
+ "esper-media",
+ "esper-pipeline",
+ "esper-proto",
+ "esper-scale",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-transport"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "ed25519-dalek",
+ "esper-audit",
+ "esper-crypto",
+ "esper-proto",
+ "esper-pty",
+ "getrandom 0.2.17",
+ "quinn",
+ "rand_core 0.6.4",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -555,339 +888,6 @@ dependencies = [
  "cc",
  "nasm-rs",
  "walkdir",
-]
-
-[[package]]
-name = "ownview-audit"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "ownview-crypto",
- "ownview-proto",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-broker"
-version = "0.0.0"
-dependencies = [
- "ownview-buildinfo",
- "ownview-proto",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ownview-buildinfo"
-version = "0.0.0"
-
-[[package]]
-name = "ownview-capture"
-version = "0.0.0"
-dependencies = [
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-capture-x11"
-version = "0.0.0"
-dependencies = [
- "ownview-capture",
- "ownview-display-lock",
- "rustix",
- "thiserror",
- "tracing",
- "x11rb",
-]
-
-[[package]]
-name = "ownview-color"
-version = "0.0.0"
-dependencies = [
- "ownview-capture",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-crypto"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "hex",
- "hkdf",
- "hmac",
- "ownview-proto",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "sha2",
- "spake2",
- "subtle",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "ownview-decode"
-version = "0.0.0"
-dependencies = [
- "landlock",
- "linux-raw-sys",
- "openh264",
- "ownview-capture",
- "ownview-color",
- "ownview-encode",
- "rustix",
- "seccompiler",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-discovery"
-version = "0.0.0"
-dependencies = [
- "ownview-proto",
- "socket2",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ownview-display-lock"
-version = "0.0.0"
-
-[[package]]
-name = "ownview-encode"
-version = "0.0.0"
-dependencies = [
- "openh264",
- "ownview-capture",
- "ownview-color",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-engine"
-version = "0.0.0"
-dependencies = [
- "ownview-buildinfo",
- "ownview-capture",
- "ownview-capture-x11",
- "ownview-color",
- "ownview-crypto",
- "ownview-decode",
- "ownview-discovery",
- "ownview-encode",
- "ownview-input",
- "ownview-input-x11",
- "ownview-link",
- "ownview-media",
- "ownview-pipeline",
- "ownview-presence",
- "ownview-presence-x11",
- "ownview-present",
- "ownview-present-x11",
- "ownview-proto",
- "ownview-scale",
- "ownview-stream",
- "ownview-transport",
- "rustls",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ownview-input"
-version = "0.0.0"
-dependencies = [
- "ownview-proto",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-input-x11"
-version = "0.0.0"
-dependencies = [
- "ownview-display-lock",
- "ownview-input",
- "ownview-proto",
- "thiserror",
- "tracing",
- "x11rb",
-]
-
-[[package]]
-name = "ownview-link"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "ownview-capture",
- "ownview-color",
- "ownview-crypto",
- "ownview-decode",
- "ownview-encode",
- "ownview-media",
- "ownview-pipeline",
- "ownview-proto",
- "ownview-scale",
- "ownview-stream",
- "ownview-transport",
- "rustls",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ownview-media"
-version = "0.0.0"
-dependencies = [
- "ownview-capture",
- "ownview-color",
- "ownview-decode",
- "ownview-encode",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-pipeline"
-version = "0.0.0"
-dependencies = [
- "ownview-capture",
- "ownview-color",
- "ownview-decode",
- "ownview-encode",
- "ownview-scale",
- "rustix",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-presence"
-version = "0.0.0"
-dependencies = [
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-presence-x11"
-version = "0.0.0"
-dependencies = [
- "ownview-display-lock",
- "ownview-input",
- "ownview-presence",
- "thiserror",
- "tracing",
- "x11rb",
-]
-
-[[package]]
-name = "ownview-present"
-version = "0.0.0"
-dependencies = [
- "ownview-capture",
- "ownview-color",
- "thiserror",
-]
-
-[[package]]
-name = "ownview-present-x11"
-version = "0.0.0"
-dependencies = [
- "ownview-capture",
- "ownview-capture-x11",
- "ownview-color",
- "ownview-display-lock",
- "ownview-present",
- "thiserror",
- "tracing",
- "x11rb",
-]
-
-[[package]]
-name = "ownview-proto"
-version = "0.0.0"
-dependencies = [
- "ciborium",
- "serde",
- "serde_bytes",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "ownview-pty"
-version = "0.0.0"
-dependencies = [
- "ownview-proto",
- "pty-process",
- "rustix",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ownview-scale"
-version = "0.0.0"
-dependencies = [
- "ownview-capture",
- "ownview-color",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-stream"
-version = "0.0.0"
-dependencies = [
- "ownview-capture",
- "ownview-color",
- "ownview-decode",
- "ownview-encode",
- "ownview-media",
- "ownview-pipeline",
- "ownview-proto",
- "ownview-scale",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "ownview-transport"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "ownview-audit",
- "ownview-crypto",
- "ownview-proto",
- "ownview-pty",
- "quinn",
- "rand_core 0.6.4",
- "rustls",
- "rustls-pki-types",
- "serde",
- "subtle",
- "thiserror",
- "tokio",
- "tracing",
- "zeroize",
 ]
 
 [[package]]

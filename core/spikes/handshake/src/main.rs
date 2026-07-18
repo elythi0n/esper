@@ -1,7 +1,7 @@
 //! Handshake spike: does QUIC + TLS 1.3 give us a hybrid post-quantum key
 //! agreement, and does it actually engage?
 //!
-//! OwnView requires hybrid post-quantum key agreement from its first release.
+//! Esper requires hybrid post-quantum key agreement from its first release.
 //! This measures whether the TLS path delivers it in practice, because a handshake that *configures* X25519MLKEM768 and then
 //! silently negotiates classical X25519 is worse than no PQ at all — it buys a
 //! claim without the property.
@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use quinn::{ClientConfig, Endpoint, ServerConfig};
 
-const ALPN: &[u8] = b"ownview/1";
+const ALPN: &[u8] = b"esper/1";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,10 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// What happens when one side will only speak PQ and the other will only speak
 /// classical?
 ///
-/// This is the property that decides the shipping configuration. If OwnView
+/// This is the property that decides the shipping configuration. If Esper
 /// offers a *list* — hybrid first, classical after — then a peer or an active
 /// attacker who strips the hybrid gets a classical session and nobody notices.
-/// If OwnView offers **only** the hybrid, there is nothing to fall back to: the
+/// If Esper offers **only** the hybrid, there is nothing to fall back to: the
 /// handshake fails. Both ends are ours, so interoperating with a classical-only
 /// peer is not a requirement, which makes the strict configuration free.
 fn downgrade_resistance() -> Result<(), Box<dyn std::error::Error>> {
@@ -65,7 +65,7 @@ fn downgrade_resistance() -> Result<(), Box<dyn std::error::Error>> {
         let mut sp = rustls::crypto::aws_lc_rs::default_provider();
         sp.kx_groups = server_groups;
 
-        let cert = rcgen::generate_simple_self_signed(vec!["ownview".into()])?;
+        let cert = rcgen::generate_simple_self_signed(vec!["esper".into()])?;
         let cert_der = rustls_pki_types::CertificateDer::from(cert.cert.der().to_vec());
         let key_der = rustls_pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der())?;
 
@@ -79,7 +79,7 @@ fn downgrade_resistance() -> Result<(), Box<dyn std::error::Error>> {
             .with_custom_certificate_verifier(Arc::new(AcceptAny))
             .with_no_client_auth();
 
-        let name = rustls_pki_types::ServerName::try_from("ownview")?.to_owned();
+        let name = rustls_pki_types::ServerName::try_from("esper")?.to_owned();
         let mut client = ClientConnection::new(Arc::new(client_cfg), name)?;
         let mut server = ServerConnection::new(Arc::new(server_cfg))?;
 
@@ -145,7 +145,7 @@ fn prove_pq_engages() -> Result<(), Box<dyn std::error::Error>> {
         provider.kx_groups = groups;
         let provider = Arc::new(provider);
 
-        let cert = rcgen::generate_simple_self_signed(vec!["ownview".into()])?;
+        let cert = rcgen::generate_simple_self_signed(vec!["esper".into()])?;
         let cert_der = rustls_pki_types::CertificateDer::from(cert.cert.der().to_vec());
         let key_der = rustls_pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der())?;
 
@@ -159,7 +159,7 @@ fn prove_pq_engages() -> Result<(), Box<dyn std::error::Error>> {
             .with_custom_certificate_verifier(Arc::new(AcceptAny))
             .with_no_client_auth();
 
-        let name = rustls_pki_types::ServerName::try_from("ownview")?.to_owned();
+        let name = rustls_pki_types::ServerName::try_from("esper")?.to_owned();
         let mut client = ClientConnection::new(Arc::new(client_cfg), name)?;
         let mut server = ServerConnection::new(Arc::new(server_cfg))?;
 
@@ -256,7 +256,7 @@ async fn run_once(
     // A self-signed certificate stands in for raw public keys here. RPK is the
     // shipping intent; what this spike measures is the key agreement, which is
     // independent of how identity is carried.
-    let cert = rcgen::generate_simple_self_signed(vec!["ownview".into()])?;
+    let cert = rcgen::generate_simple_self_signed(vec!["esper".into()])?;
     let cert_der = rustls_pki_types::CertificateDer::from(cert.cert.der().to_vec());
     let key_der = rustls_pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der())?;
 
@@ -300,7 +300,7 @@ async fn run_once(
     client.set_default_client_config(client_cfg);
 
     let started = Instant::now();
-    let conn = client.connect(server_addr, "ownview")?.await?;
+    let conn = client.connect(server_addr, "esper")?.await?;
     let handshake = started.elapsed();
 
     let stats = conn.stats();

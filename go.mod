@@ -1,4 +1,4 @@
-module github.com/elythi0n/ownview
+module github.com/elythi0n/esper
 
 go 1.26.0
 

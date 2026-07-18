@@ -1,7 +1,7 @@
 [workspace]
 
 [package]
-name = "ownview-fuzz"
+name = "esper-fuzz"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -11,12 +11,12 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-ownview-proto = { path = "../crates/ownview-proto" }
-ownview-transport = { path = "../crates/ownview-transport" }
-ownview-capture = { path = "../crates/ownview-capture" }
-ownview-decode = { path = "../crates/ownview-decode" }
-ownview-media = { path = "../crates/ownview-media" }
-ownview-discovery = { path = "../crates/ownview-discovery" }
+esper-proto = { path = "../crates/esper-proto" }
+esper-transport = { path = "../crates/esper-transport" }
+esper-capture = { path = "../crates/esper-capture" }
+esper-decode = { path = "../crates/esper-decode" }
+esper-media = { path = "../crates/esper-media" }
+esper-discovery = { path = "../crates/esper-discovery" }
 
 [[bin]]
 name = "messages"

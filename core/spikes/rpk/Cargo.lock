@@ -480,12 +480,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
-name = "ownview-crypto"
+name = "esper-crypto"
 version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
- "ownview-proto",
+ "esper-proto",
  "rand_core",
  "serde",
  "sha2",
@@ -495,7 +495,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ownview-proto"
+name = "esper-proto"
 version = "0.0.0"
 dependencies = [
  "ciborium",
@@ -650,7 +650,7 @@ version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
- "ownview-crypto",
+ "esper-crypto",
  "quinn",
  "rustls",
  "rustls-pki-types",

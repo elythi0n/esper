@@ -30,7 +30,7 @@ count, a size — is checked against a cap before it is used to size a buffer.
 **Every parser that touches untrusted input gets a fuzz target.** A parser
 without one is not finished.
 
-**The wire protocol is implemented twice**, in `core/crates/ownview-proto` and
+**The wire protocol is implemented twice**, in `core/crates/esper-proto` and
 `internal/proto`. Changing a message means changing both, adding a fixture to
 `testdata/fixtures`, and confirming both languages re-encode it byte-identically.
 If they disagree, the protocol is ambiguous — fix the encoders; never regenerate

@@ -17,7 +17,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ownview_proto::{
+use esper_proto::{
     Hello, InputMessage, MediaMessage, PairConfirm, PairResponse, PairResult, PairSpake, Permission,
     PermissionChange, Role, SessionDeny, SessionGrant, SessionRequest, SessionResponse,
     TerminalMessage, decode,

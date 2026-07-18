@@ -16,7 +16,7 @@ ignore = []
 
 [licenses]
 version = 2
-# Permissive licences only. OwnView is MIT; a copyleft dependency would change
+# Permissive licences only. Esper is MIT; a copyleft dependency would change
 # what downstream users may do, which is not a decision a transitive dependency
 # gets to make for them.
 allow = [
@@ -41,7 +41,7 @@ allow-wildcard-paths = true
 # Two crates doing the same job means two parsers, two sets of bugs, and a
 # question about which one is actually in the path. Crypto is the case where
 # that matters most, so it is banned outright rather than warned about:
-# ownview-crypto is the only crate permitted to bring one in, and having a
+# esper-crypto is the only crate permitted to bring one in, and having a
 # second implementation of a primitive in the tree is a bug by definition.
 deny = [
     # Unmaintained or superseded, and easy to acquire transitively.

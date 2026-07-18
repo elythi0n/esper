@@ -1,4 +1,4 @@
-# golangci-lint configuration for ownview.
+# golangci-lint configuration for esper.
 #
 # The intent is to enforce the standard Go hygiene linters without picking
 # stylistic fights. If a check turns into noise, prefer fixing the code or
@@ -84,7 +84,7 @@ formatters:
     goimports:
       # Group local imports under the module path separately from third-party.
       local-prefixes:
-        - github.com/elythi0n/ownview
+        - github.com/elythi0n/esper
 
 issues:
   # Don't hide issues just because they appear many times.

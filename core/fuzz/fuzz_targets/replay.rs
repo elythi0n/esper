@@ -13,7 +13,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ownview_proto::ReplayWindow;
+use esper_proto::ReplayWindow;
 
 fuzz_target!(|data: &[u8]| {
     let mut w = ReplayWindow::new();

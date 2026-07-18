@@ -1,7 +1,7 @@
 //! Can two peers authenticate each other by raw Ed25519 public key over QUIC,
 //! with no certificate authority anywhere?
 //!
-//! This is the shape OwnView needs: pairing stores a peer's public key, and
+//! This is the shape Esper needs: pairing stores a peer's public key, and
 //! every later connection proves possession of it. No CA, no expiry, no name
 //! to validate — the key is the identity.
 //!
@@ -22,7 +22,7 @@ use rustls::client::AlwaysResolvesClientRawPublicKeys;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
 use rustls::server::AlwaysResolvesServerRawPublicKeys;
 
-const ALPN: &[u8] = b"ownview/1";
+const ALPN: &[u8] = b"esper/1";
 
 fn keypair() -> SigningKey {
     let mut seed = [0u8; 32];
@@ -34,8 +34,8 @@ fn keypair() -> SigningKey {
 fn certified(key: &SigningKey) -> Arc<rustls::sign::CertifiedKey> {
     // Our own hand-built encodings, not a DER library. This spike is now also
     // the test that a TLS provider accepts them.
-    let spki = ownview_crypto::der::spki(&key.verifying_key().to_bytes()).to_vec();
-    let pkcs8 = ownview_crypto::der::pkcs8(&key.to_bytes()).to_vec();
+    let spki = esper_crypto::der::spki(&key.verifying_key().to_bytes()).to_vec();
+    let pkcs8 = esper_crypto::der::pkcs8(&key.to_bytes()).to_vec();
 
     let signer = rustls::crypto::aws_lc_rs::default_provider()
         .key_provider
@@ -50,7 +50,7 @@ fn certified(key: &SigningKey) -> Arc<rustls::sign::CertifiedKey> {
 
 /// The SPKI bytes a peer will present for this key — what we compare against.
 fn spki_of(key: &SigningKey) -> Vec<u8> {
-    ownview_crypto::der::spki(&key.verifying_key().to_bytes()).to_vec()
+    esper_crypto::der::spki(&key.verifying_key().to_bytes()).to_vec()
 }
 
 #[tokio::main]
@@ -162,7 +162,7 @@ async fn try_connect(
     ep.set_default_client_config(client_cfg);
     let conn = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        ep.connect(addr, "ownview")?,
+        ep.connect(addr, "esper")?,
     )
     .await??;
     // **A completed `connect()` does not mean the peer accepted us.**
@@ -174,7 +174,7 @@ async fn try_connect(
     //
     // So authentication is only proven once the server has *done something*
     // that required accepting us. A round trip is the cheapest such proof, and
-    // this is why OwnView's session establishment must not treat a connected
+    // this is why Esper's session establishment must not treat a connected
     // QUIC handle as an authenticated peer.
     let (mut send, mut recv) = tokio::time::timeout(
         std::time::Duration::from_secs(5),

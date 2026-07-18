@@ -1,0 +1,28 @@
+[package]
+name = "esper-present-x11"
+description = "A plain X11 window that shows decoded pictures, for debugging the media path without a webview."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-capture.workspace = true
+esper-color.workspace = true
+esper-present.workspace = true
+esper-capture-x11.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+x11rb = { workspace = true }
+
+[dev-dependencies]
+esper-display-lock.workspace = true
+x11rb = { workspace = true }
+esper-capture-x11.workspace = true
+esper-capture.workspace = true
+esper-color.workspace = true
+esper-present.workspace = true

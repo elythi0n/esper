@@ -64,13 +64,13 @@ itself (`quinn`, `quinn-proto`, `quinn-udp`), the async runtime (`tokio`, `mio`,
 `lru-slab`, `chacha20`, `rand`).
 
 Four of them — `js-sys`, `wasm-bindgen*`, `web-time` — are WASM-target crates
-that appear in the dependency graph but are **not linked on any target OwnView
+that appear in the dependency graph but are **not linked on any target Esper
 builds for**. Verified with `cargo tree --target x86_64-unknown-linux-gnu`
 rather than assumed.
 
 What did *not* come in, deliberately: `quinn`'s default features enable
 `platform-verifier`, which pulls in `rustls-platform-verifier`, a bundled
-Mozilla root certificate store, and `jni`. OwnView has **no certificate
+Mozilla root certificate store, and `jni`. Esper has **no certificate
 authority in its trust model** — peers are authenticated by raw public key
 against keys stored at pairing — so a platform CA verifier is a general-purpose
 trust mechanism at a boundary that deliberately does not want one.

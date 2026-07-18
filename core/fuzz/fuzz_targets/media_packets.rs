@@ -25,7 +25,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ownview_media::{Depacketizer, Reassembled, MAX_FRAME_BYTES_EXPORT, MAX_PACKETS_EXPORT};
+use esper_media::{Depacketizer, Reassembled, MAX_FRAME_BYTES_EXPORT, MAX_PACKETS_EXPORT};
 
 /// The stream the depacketizer is told to accept.
 const SSRC: u32 = 0x1234_5678;
@@ -66,7 +66,7 @@ fuzz_target!(|data: &[u8]| {
                     // Every unit must be non-empty: an empty one is a start
                     // code followed by another, which no decoder should be
                     // asked to make sense of.
-                    for unit in ownview_media::NalUnits::new(bitstream) {
+                    for unit in esper_media::NalUnits::new(bitstream) {
                         assert!(!unit.bytes.is_empty(), "an empty NAL unit was emitted");
                     }
                 }

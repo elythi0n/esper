@@ -38,8 +38,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ownview_discovery::name::{MAX_LABEL, MAX_NAME};
-use ownview_discovery::wire::{Data, Message};
+use esper_discovery::name::{MAX_LABEL, MAX_NAME};
+use esper_discovery::wire::{Data, Message};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(message) = Message::decode(data) else {
@@ -70,7 +70,7 @@ fuzz_target!(|data: &[u8]| {
     // writer cannot express, which is how one implementation ends up
     // disagreeing with another about what a packet said.
     let again = message.encode();
-    if again.len() <= ownview_discovery::wire::MAX_PACKET {
+    if again.len() <= esper_discovery::wire::MAX_PACKET {
         match Message::decode(&again) {
             Ok(second) => assert_eq!(second, message, "re-encoding changed the message"),
             Err(e) => panic!("our own encoding could not be read back: {e}"),
@@ -78,7 +78,7 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-fn check_name(name: &ownview_discovery::name::Name) {
+fn check_name(name: &esper_discovery::name::Name) {
     assert!(
         name.wire_len() <= MAX_NAME,
         "a name of {} bytes came out of a packet",

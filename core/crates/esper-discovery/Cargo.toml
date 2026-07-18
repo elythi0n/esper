@@ -1,0 +1,18 @@
+[package]
+name = "esper-discovery"
+description = "LAN discovery over mDNS: the subset of DNS-SD Esper needs, speaking the protocol on a socket rather than binding a daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-proto.workspace = true
+socket2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

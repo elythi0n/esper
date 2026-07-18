@@ -13,7 +13,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The full build and test suite on every platform OwnView targets. All three
+  # The full build and test suite on every platform Esper targets. All three
   # are real targets, so all three are tested from the first commit rather than
   # bolted on when the port happens.
   test:
@@ -87,7 +87,7 @@ jobs:
           # A suite that did that to somebody's desktop whenever they ran it is
           # a suite they turn off. Here the display is an Xvfb nobody is
           # looking at, so they run.
-          echo "OWNVIEW_DISPLAY_TESTS=1" >> "$GITHUB_ENV"
+          echo "ESPER_DISPLAY_TESTS=1" >> "$GITHUB_ENV"
 
       # The mDNS wire format is checked against `dnspython`, an independent
       # implementation of the same documents — because a format tested only
@@ -200,7 +200,7 @@ jobs:
       - run: make build
       - run: ./scripts/smoke.sh
 
-  # Memory-safety checks over the fast crates. ownview-crypto is excluded here
+  # Memory-safety checks over the fast crates. esper-crypto is excluded here
   # and covered by the nightly workflow: interpreting Ed25519 costs ~200s
   # against ~13s for everything else, and dalek's unsafe is audited upstream.
   # The FFI crates land in Phase 3 and belong in *this* set, because that is
@@ -218,7 +218,7 @@ jobs:
           workspaces: core
       - name: miri test
         working-directory: core
-        run: cargo miri test --workspace --exclude ownview-crypto
+        run: cargo miri test --workspace --exclude esper-crypto
 
   # The frame decoder is the first parser attacker-controlled bytes reach. A
   # short run on every change catches a regression; long runs happen out of band.

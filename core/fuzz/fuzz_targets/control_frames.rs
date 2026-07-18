@@ -23,7 +23,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use ownview_transport::FrameReader;
+use esper_transport::FrameReader;
 
 /// Feed `data` in pieces of `step` bytes and collect what comes out.
 ///
