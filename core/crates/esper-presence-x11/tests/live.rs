@@ -483,8 +483,14 @@ fn an_active_keyboard_grab_takes_the_panic_key_and_that_is_x11() {
 fn the_panic_key_is_grabbed_before_any_session() {
     let _display = exclusive();
     let Some(p) = open() else { return };
+    // **Asserted outright.** This read an environment variable that nothing
+    // sets, so the `is_none()` was always true and the assertion could never
+    // fail — a test that cannot fail, left behind by renaming the gate around
+    // it. If something else on the display already holds the key, that is
+    // worth failing over here: the whole point of this test is that the key is
+    // ours before any session exists.
     assert!(
-        p.panic_key_grabbed() || std::env::var_os("ESPER_INJECT_TESTS").is_none(),
+        p.panic_key_grabbed(),
         "the panic key should be grabbed as soon as presence is open"
     );
     assert!(!p.is_showing(), "and no indicator until there is a session");
