@@ -473,6 +473,222 @@ fn a_hidden_pointer_is_transparent_to_the_server() {
     panic!("the server is still drawing something where the pointer should be hidden");
 }
 
+/// **A pointer drawn into the picture, at the pixels it should be.**
+///
+/// The composited path, for a session that is only watching. Checked against
+/// the window's own pixels: an opaque pointer must be exactly where its
+/// hotspot was put, and the picture must be untouched a pixel away.
+#[test]
+fn a_drawn_pointer_lands_where_its_hotspot_was_put() {
+    let _screen = exclusive();
+    if !may_disturb_the_display() {
+        return;
+    }
+    const W: u32 = 96;
+    const H: u32 = 64;
+    let Some(mut p) = open(W, H) else { return };
+    settle(&mut p);
+
+    // A picture that is one flat colour, so anything drawn over it stands out.
+    const Y: u8 = 126;
+    const U: u8 = 90;
+    const V: u8 = 200;
+    let background =
+        esper_color::rgb::RgbCoefficients::for_space(ColorSpace::default()).pixel(Y, U, V);
+    p.present(&flat(W, H, Y, U, V), &Damage::Everything)
+        .expect("presents");
+
+    // An opaque green 8x8 pointer whose hotspot is its middle.
+    let image = esper_capture::cursor::CursorImage {
+        width: 8,
+        height: 8,
+        hotspot_x: 4,
+        hotspot_y: 4,
+        rgba: (0..64).flat_map(|_| [0u8, 255, 0, 255]).collect(),
+    };
+    p.set_cursor(Some(&image)).expect("the shape");
+    p.draw_cursor_at(Some((40, 32))).expect("drawn");
+    std::thread::sleep(Duration::from_millis(120));
+
+    let Some((data, (r_at, g_at, b_at))) = read_back(p.window(), W, H) else {
+        println!("skipped: could not read the window back");
+        return;
+    };
+    let at = |x: u32, y: u32| -> (u8, u8, u8) {
+        let i = ((y * W + x) * 4) as usize;
+        let px = data.get(i..i + 4).unwrap_or(&[0, 0, 0, 0]);
+        (
+            px.get(r_at).copied().unwrap_or(0),
+            px.get(g_at).copied().unwrap_or(0),
+            px.get(b_at).copied().unwrap_or(0),
+        )
+    };
+
+    // The hotspot's own pixel is the pointer.
+    assert_eq!(at(40, 32), (0, 255, 0), "the pointer is not at its hotspot");
+    // Its corners: the image spans 36..44 and 28..36, so 36,28 is the first.
+    assert_eq!(at(36, 28), (0, 255, 0), "the pointer's top-left corner");
+    assert_eq!(at(43, 35), (0, 255, 0), "the pointer's bottom-right corner");
+    // And a pixel outside it is still the picture.
+    let outside = at(35, 28);
+    assert!(
+        (i32::from(outside.0) - i32::from(background.0)).abs() <= 1
+            && (i32::from(outside.1) - i32::from(background.1)).abs() <= 1,
+        "the pixel beside the pointer should still be the picture, got {outside:?} \
+         against {background:?}"
+    );
+}
+
+/// **A moving pointer leaves nothing behind it.**
+///
+/// The failure this catches is the one every software cursor makes: saving the
+/// picture *after* the pointer has been drawn on it, so every move stamps
+/// another copy and the window fills with pointers.
+#[test]
+fn a_pointer_moved_across_the_picture_leaves_no_trail() {
+    let _screen = exclusive();
+    if !may_disturb_the_display() {
+        return;
+    }
+    const W: u32 = 96;
+    const H: u32 = 64;
+    let Some(mut p) = open(W, H) else { return };
+    settle(&mut p);
+
+    const Y: u8 = 126;
+    const U: u8 = 90;
+    const V: u8 = 200;
+    let background =
+        esper_color::rgb::RgbCoefficients::for_space(ColorSpace::default()).pixel(Y, U, V);
+    p.present(&flat(W, H, Y, U, V), &Damage::Everything)
+        .expect("presents");
+
+    let image = esper_capture::cursor::CursorImage {
+        width: 4,
+        height: 4,
+        hotspot_x: 0,
+        hotspot_y: 0,
+        rgba: (0..16).flat_map(|_| [0u8, 255, 0, 255]).collect(),
+    };
+    p.set_cursor(Some(&image)).expect("the shape");
+    for x in (10..70).step_by(6) {
+        p.draw_cursor_at(Some((x, 20))).expect("drawn");
+    }
+    std::thread::sleep(Duration::from_millis(150));
+
+    let Some((data, (r_at, g_at, b_at))) = read_back(p.window(), W, H) else {
+        println!("skipped: could not read the window back");
+        return;
+    };
+    let mut green = 0usize;
+    for px in data.as_chunks::<4>().0 {
+        let (r, g, b) = (
+            px.get(r_at).copied().unwrap_or(0),
+            px.get(g_at).copied().unwrap_or(0),
+            px.get(b_at).copied().unwrap_or(0),
+        );
+        if (r, g, b) == (0, 255, 0) {
+            green += 1;
+        }
+    }
+    assert_eq!(
+        green, 16,
+        "only the pointer's own 16 pixels should be the pointer's colour — {green} are, \
+         so the moves left a trail"
+    );
+    let _ = background;
+}
+
+/// A pointer drawn near the edge is clipped to the picture rather than
+/// refused, and rather than writing past it.
+#[test]
+fn a_pointer_at_the_edge_is_clipped() {
+    let _screen = exclusive();
+    if !may_disturb_the_display() {
+        return;
+    }
+    const W: u32 = 64;
+    const H: u32 = 48;
+    let Some(mut p) = open(W, H) else { return };
+    settle(&mut p);
+    p.present(&flat(W, H, 126, 90, 200), &Damage::Everything)
+        .expect("presents");
+
+    let image = esper_capture::cursor::CursorImage {
+        width: 16,
+        height: 16,
+        hotspot_x: 8,
+        hotspot_y: 8,
+        rgba: (0..256).flat_map(|_| [0u8, 255, 0, 255]).collect(),
+    };
+    p.set_cursor(Some(&image)).expect("the shape");
+    // Every corner and past every edge.
+    for (x, y) in [(0, 0), (W - 1, 0), (0, H - 1), (W - 1, H - 1)] {
+        p.draw_cursor_at(Some((x, y))).expect("drawn at a corner");
+    }
+    p.draw_cursor_at(None).expect("and away again");
+    assert!(p.is_open());
+}
+
+/// **Drawn or worn, never both.** A window showing its own pointer *and* one
+/// composited into the picture shows two pointers.
+#[test]
+fn drawing_the_pointer_stops_the_window_wearing_it() {
+    let _screen = exclusive();
+    if !may_disturb_the_display() {
+        return;
+    }
+    let Some(mut p) = open(64, 48) else { return };
+    let (conn, _) = x11rb::connect(None).expect("a connection");
+    if conn.xfixes_query_version(5, 0).map(|c| c.reply()).is_err() {
+        println!("skipped: no XFIXES on this server");
+        return;
+    }
+    let image = esper_capture::cursor::CursorImage {
+        width: 2,
+        height: 2,
+        hotspot_x: 0,
+        hotspot_y: 0,
+        rgba: (0..4).flat_map(|_| [255u8, 0, 0, 255]).collect(),
+    };
+    p.set_cursor(Some(&image)).expect("worn");
+    p.draw_cursor_at(Some((10, 10))).expect("drawn instead");
+
+    conn.warp_pointer(x11rb::NONE, p.window(), 0, 0, 0, 0, 20, 20)
+        .expect("warp")
+        .check()
+        .expect("warped");
+    conn.flush().expect("flush");
+
+    // The window's own pointer must now be invisible: what is drawn into the
+    // picture is the only pointer.
+    for _ in 0..40 {
+        if let Ok(cookie) = conn.xfixes_get_cursor_image()
+            && let Ok(reply) = cookie.reply()
+            && reply.cursor_image.iter().all(|argb| argb >> 24 == 0)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("the window is still wearing a pointer while one is drawn into the picture");
+}
+
+/// Wait for the window to be on screen before reading it back.
+fn settle(p: &mut X11Presenter) {
+    for _ in 0..40 {
+        let _ = p.poll();
+        std::thread::sleep(Duration::from_millis(25));
+        if p.poll()
+            .expect("poll")
+            .iter()
+            .any(|e| matches!(e, PresentEvent::Exposed))
+        {
+            break;
+        }
+    }
+}
+
 /// A cursor whose pixels do not match its size is refused rather than built
 /// from whatever happens to be next to it.
 #[test]

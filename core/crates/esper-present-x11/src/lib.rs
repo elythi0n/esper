@@ -75,6 +75,19 @@ pub struct X11Presenter {
     /// The cursor the window is currently wearing, kept so it can be freed
     /// when it is replaced.
     cursor: Option<x11rb::protocol::xproto::Cursor>,
+    /// The pointer's pixels, kept because they are needed twice: to hand to
+    /// the window server, and to draw into the picture.
+    image: Option<CursorImage>,
+    /// Where the pointer is being drawn into the picture, if it is.
+    drawn_at: Option<(u32, u32)>,
+    /// The picture's own pixels from under the drawn pointer, and where they
+    /// came from.
+    ///
+    /// **The classic software-cursor trick, and the only honest way to do it
+    /// here.** The alternative is keeping the last frame to repaint from,
+    /// which costs a copy of the whole picture every frame; this costs a copy
+    /// of a 24-square cursor.
+    beneath: Option<(Rect, Vec<u8>)>,
     /// `WM_DELETE_WINDOW`, so closing the window is a request rather than a
     /// severed connection.
     delete_window: u32,
@@ -269,6 +282,9 @@ impl X11Presenter {
             forwarding: false,
             argb_format,
             cursor: None,
+            image: None,
+            drawn_at: None,
+            beneath: None,
             delete_window,
         })
     }
@@ -299,6 +315,253 @@ impl X11Presenter {
     }
 
     /// Blit one rectangle of the surface into the window.
+    /// Hand a pointer to the window server as this window's own cursor.
+    ///
+    /// Separate from [`esper_present::Presenter::set_cursor`] because
+    /// `draw_cursor_at` needs it too — to take the worn pointer *away* while
+    /// one is being composited — and going back through the trait method
+    /// would land in the composite branch instead, leaving the window wearing
+    /// a pointer while another was drawn. Which is what it did.
+    fn wear(&mut self, image: Option<&CursorImage>) -> Result<(), PresentError> {
+        let fail = |detail: String| PresentError::Backend {
+            backend: BACKEND,
+            detail,
+        };
+        let Some(format) = self.argb_format else {
+            return Err(fail(
+                "this server has no 32-bit ARGB picture format, so a cursor with an \
+                 alpha channel cannot be built"
+                    .to_owned(),
+            ));
+        };
+
+        let (width, height, hotspot, pixels) = match image {
+            Some(i) => (
+                i.width,
+                i.height,
+                (i.hotspot_x, i.hotspot_y),
+                i.rgba.clone(),
+            ),
+            // A 1x1 transparent cursor for the hidden state: cheaper than a
+            // full transparent bitmap and impossible to get wrong.
+            None => (1, 1, (0, 0), vec![0, 0, 0, 0]),
+        };
+
+        let pixmap = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .create_pixmap(32, pixmap, self.window, width, height)
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+
+        // The image, as the server wants it: BGRA bytes on a little-endian
+        // server, which is what `image_byte_order` says. Built from the
+        // protocol's named RGBA rather than assumed, so a big-endian server
+        // gets the right bytes too.
+        let mut data = Vec::with_capacity(pixels.len());
+        let big_endian =
+            self.conn.setup().image_byte_order == x11rb::protocol::xproto::ImageOrder::MSB_FIRST;
+        for px in pixels.as_chunks::<4>().0 {
+            let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
+            if big_endian {
+                data.extend_from_slice(&[a, r, g, b]);
+            } else {
+                data.extend_from_slice(&[b, g, r, a]);
+            }
+        }
+
+        let gc = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .create_gc(gc, pixmap, &CreateGCAux::new())
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .put_image(
+                ImageFormat::Z_PIXMAP,
+                pixmap,
+                gc,
+                width,
+                height,
+                0,
+                0,
+                0,
+                32,
+                &data,
+            )
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        let _ = self.conn.free_gc(gc);
+
+        let picture = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .render_create_picture(picture, pixmap, format, &CreatePictureAux::new())
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+
+        let cursor = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .render_create_cursor(cursor, picture, hotspot.0, hotspot.1)
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .change_window_attributes(
+                self.window,
+                &ChangeWindowAttributesAux::new().cursor(cursor),
+            )
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        self.conn.flush().map_err(|e| fail(e.to_string()))?;
+
+        // The pixmap and the picture have done their work; the cursor holds
+        // its own copy. The *previous* cursor goes now rather than before, so
+        // the window is never briefly without one.
+        let _ = self.conn.render_free_picture(picture);
+        let _ = self.conn.free_pixmap(pixmap);
+        if let Some(old) = self.cursor.replace(cursor) {
+            let _ = self.conn.free_cursor(old);
+        }
+        Ok(())
+    }
+
+    /// Where the drawn pointer's pixels land in the picture, clipped to it.
+    ///
+    /// `None` when the pointer is not being drawn, or when it is entirely off
+    /// the picture — which happens while it is on another monitor and the
+    /// position has not caught up.
+    fn drawn_rect(&self) -> Option<Rect> {
+        let (px, py) = self.drawn_at?;
+        let image = self.image.as_ref()?;
+        // The position is where the pointer *points*, so the image's corner is
+        // the hotspot's distance up and left of it. Saturating, because a
+        // pointer near the top-left corner has its corner off the picture.
+        let x = i64::from(px) - i64::from(image.hotspot_x);
+        let y = i64::from(py) - i64::from(image.hotspot_y);
+        let left = x.max(0);
+        let top = y.max(0);
+        let right = (x + i64::from(image.width)).min(i64::from(self.width));
+        let bottom = (y + i64::from(image.height)).min(i64::from(self.height));
+        if right <= left || bottom <= top {
+            return None;
+        }
+        Some(Rect {
+            x: i32::try_from(left).unwrap_or(0),
+            y: i32::try_from(top).unwrap_or(0),
+            width: u32::try_from(right - left).unwrap_or(0),
+            height: u32::try_from(bottom - top).unwrap_or(0),
+        })
+    }
+
+    /// Put the picture's own pixels back where the pointer was drawn.
+    ///
+    /// Called before anything writes to the surface, so that what is saved
+    /// next is the picture and not a picture with a pointer already on it —
+    /// the mistake that leaves a trail of pointers behind a moving one.
+    fn uncover(&mut self) {
+        let Some((rect, pixels)) = self.beneath.take() else {
+            return;
+        };
+        let row_bytes = (rect.width as usize).saturating_mul(BPP);
+        for row in 0..rect.height as usize {
+            let from = row.saturating_mul(row_bytes);
+            let start = (rect.y.max(0) as usize)
+                .saturating_add(row)
+                .saturating_mul(self.stride)
+                .saturating_add((rect.x.max(0) as usize).saturating_mul(BPP));
+            if let (Some(src), Some(dst)) = (
+                pixels.get(from..from.saturating_add(row_bytes)),
+                self.surface.get_mut(start..start.saturating_add(row_bytes)),
+            ) {
+                dst.copy_from_slice(src);
+            }
+        }
+    }
+
+    /// Save the picture under the pointer and blend the pointer over it.
+    ///
+    /// The blend is `src + dst * (1 - alpha)`, which is what premultiplied
+    /// alpha means: the pointer's colours already carry their own coverage, so
+    /// the only thing to do with the picture underneath is let the rest of it
+    /// through.
+    fn cover(&mut self) {
+        let Some(rect) = self.drawn_rect() else {
+            return;
+        };
+        let Some(image) = self.image.clone() else {
+            return;
+        };
+        let (r_at, g_at, b_at) = self.format.rgb_offsets();
+        let row_bytes = (rect.width as usize).saturating_mul(BPP);
+
+        // What the picture has there, kept so it can be put back.
+        let mut saved = Vec::with_capacity(row_bytes.saturating_mul(rect.height as usize));
+        for row in 0..rect.height as usize {
+            let start = (rect.y.max(0) as usize)
+                .saturating_add(row)
+                .saturating_mul(self.stride)
+                .saturating_add((rect.x.max(0) as usize).saturating_mul(BPP));
+            match self.surface.get(start..start.saturating_add(row_bytes)) {
+                Some(src) => saved.extend_from_slice(src),
+                // The rectangle was clipped to the picture, so this cannot
+                // happen — and if it somehow did, drawing nothing is better
+                // than drawing somewhere else.
+                None => return,
+            }
+        }
+
+        // Which part of the image the rectangle corresponds to: the pointer
+        // may have been clipped at the top or the left.
+        let skip_x = (i64::from(rect.x)
+            - (i64::from(self.drawn_at.unwrap_or((0, 0)).0) - i64::from(image.hotspot_x)))
+        .max(0) as usize;
+        let skip_y = (i64::from(rect.y)
+            - (i64::from(self.drawn_at.unwrap_or((0, 0)).1) - i64::from(image.hotspot_y)))
+        .max(0) as usize;
+
+        for row in 0..rect.height as usize {
+            let dst_start = (rect.y.max(0) as usize)
+                .saturating_add(row)
+                .saturating_mul(self.stride)
+                .saturating_add((rect.x.max(0) as usize).saturating_mul(BPP));
+            let src_row = row.saturating_add(skip_y);
+            for col in 0..rect.width as usize {
+                let src_at = src_row
+                    .saturating_mul(image.width as usize)
+                    .saturating_add(col.saturating_add(skip_x))
+                    .saturating_mul(4);
+                let Some(&[sr, sg, sb, sa]) = image
+                    .rgba
+                    .get(src_at..src_at.saturating_add(4))
+                    .and_then(|p| p.first_chunk::<4>())
+                else {
+                    continue;
+                };
+                let keep = u32::from(255 - sa);
+                let at = dst_start.saturating_add(col.saturating_mul(BPP));
+                let Some(dst) = self.surface.get_mut(at..at.saturating_add(BPP)) else {
+                    continue;
+                };
+                for (offset, src) in [(r_at, sr), (g_at, sg), (b_at, sb)] {
+                    if let Some(d) = dst.get_mut(offset) {
+                        // `+ 127) / 255` rather than `>> 8`: the cheap shift
+                        // darkens every blended pixel slightly, and a pointer
+                        // is small enough that nobody would notice and exactly
+                        // the sort of thing that is wrong for ever once it
+                        // ships.
+                        let under = (u32::from(*d) * keep + 127) / 255;
+                        *d = u8::try_from(u32::from(src).saturating_add(under).min(255))
+                            .unwrap_or(255);
+                    }
+                }
+            }
+        }
+        self.beneath = Some((rect, saved));
+    }
+
     fn blit(&self, area: &Rect) -> Result<(), PresentError> {
         let fail = |detail: String| PresentError::Backend {
             backend: BACKEND,
@@ -480,111 +743,71 @@ impl Presenter for X11Presenter {
     /// A hidden pointer is a fully transparent cursor, which is exactly how
     /// applications hide one and so needs no separate mechanism.
     fn set_cursor(&mut self, image: Option<&CursorImage>) -> Result<(), PresentError> {
-        let fail = |detail: String| PresentError::Backend {
-            backend: BACKEND,
-            detail,
-        };
-        let Some(format) = self.argb_format else {
-            return Err(fail(
-                "this server has no 32-bit ARGB picture format, so a cursor with an                  alpha channel cannot be built"
-                    .to_owned(),
-            ));
-        };
+        if let Some(i) = image
+            && !i.is_consistent()
+        {
+            return Err(PresentError::Backend {
+                backend: BACKEND,
+                detail: "the cursor's pixels do not match its size".to_owned(),
+            });
+        }
+        // **Kept, because the pixels are needed twice**: handed to the window
+        // server when the pointer is worn, and drawn into the picture when it
+        // is composited instead.
+        self.image = image.cloned();
 
-        // A 1x1 transparent cursor for the hidden state: cheaper than a full
-        // transparent bitmap and impossible to get wrong.
-        let (width, height, hotspot, pixels) = match image {
-            Some(i) if i.is_consistent() => (
-                i.width,
-                i.height,
-                (i.hotspot_x, i.hotspot_y),
-                i.rgba.clone(),
-            ),
+        // Composited rather than worn: put the picture back where the old
+        // pointer was, draw the new one, and show both places.
+        if self.drawn_at.is_some() {
+            let was = self.beneath.as_ref().map(|(r, _)| *r);
+            self.uncover();
+            self.cover();
+            let now = self.drawn_rect();
+            for area in [was, now].into_iter().flatten() {
+                self.blit(&area)?;
+            }
+            return self.conn.flush().map_err(|e| PresentError::Backend {
+                backend: BACKEND,
+                detail: e.to_string(),
+            });
+        }
+        self.wear(image)
+    }
+
+    /// **Drawn into the picture, or worn by the window — never both.**
+    fn draw_cursor_at(&mut self, at: Option<(u32, u32)>) -> Result<(), PresentError> {
+        if at == self.drawn_at {
+            return Ok(());
+        }
+        let was_drawn = self.drawn_at.is_some();
+        let old_rect = self.beneath.as_ref().map(|(r, _)| *r);
+        self.uncover();
+        self.drawn_at = at;
+
+        match at {
             Some(_) => {
-                return Err(fail("the cursor's pixels do not match its size".to_owned()));
+                // The window must stop showing its own pointer, or there are
+                // two of them on screen.
+                if !was_drawn {
+                    self.wear(None)?;
+                }
+                self.cover();
             }
-            None => (1, 1, (0, 0), vec![0, 0, 0, 0]),
-        };
-
-        let pixmap = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
-        self.conn
-            .create_pixmap(32, pixmap, self.window, width, height)
-            .map_err(|e| fail(e.to_string()))?
-            .check()
-            .map_err(|e| fail(e.to_string()))?;
-
-        // The image, as the server wants it: BGRA bytes on a little-endian
-        // server, which is what `image_byte_order` says. Built from the
-        // protocol's named RGBA rather than assumed, so a big-endian server
-        // gets the right bytes too.
-        let mut data = Vec::with_capacity(pixels.len());
-        let big_endian =
-            self.conn.setup().image_byte_order == x11rb::protocol::xproto::ImageOrder::MSB_FIRST;
-        for px in pixels.as_chunks::<4>().0 {
-            let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
-            if big_endian {
-                data.extend_from_slice(&[a, r, g, b]);
-            } else {
-                data.extend_from_slice(&[b, g, r, a]);
+            None => {
+                // Back to the window's own cursor, which is the pointer that
+                // costs nothing.
+                let image = self.image.clone();
+                self.wear(image.as_ref())?;
             }
         }
-
-        let gc = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
-        self.conn
-            .create_gc(gc, pixmap, &CreateGCAux::new())
-            .map_err(|e| fail(e.to_string()))?
-            .check()
-            .map_err(|e| fail(e.to_string()))?;
-        self.conn
-            .put_image(
-                ImageFormat::Z_PIXMAP,
-                pixmap,
-                gc,
-                width,
-                height,
-                0,
-                0,
-                0,
-                32,
-                &data,
-            )
-            .map_err(|e| fail(e.to_string()))?
-            .check()
-            .map_err(|e| fail(e.to_string()))?;
-        let _ = self.conn.free_gc(gc);
-
-        let picture = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
-        self.conn
-            .render_create_picture(picture, pixmap, format, &CreatePictureAux::new())
-            .map_err(|e| fail(e.to_string()))?
-            .check()
-            .map_err(|e| fail(e.to_string()))?;
-
-        let cursor = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
-        self.conn
-            .render_create_cursor(cursor, picture, hotspot.0, hotspot.1)
-            .map_err(|e| fail(e.to_string()))?
-            .check()
-            .map_err(|e| fail(e.to_string()))?;
-        self.conn
-            .change_window_attributes(
-                self.window,
-                &ChangeWindowAttributesAux::new().cursor(cursor),
-            )
-            .map_err(|e| fail(e.to_string()))?
-            .check()
-            .map_err(|e| fail(e.to_string()))?;
-        self.conn.flush().map_err(|e| fail(e.to_string()))?;
-
-        // The pixmap and the picture have done their work; the cursor holds
-        // its own copy. The *previous* cursor goes now rather than before, so
-        // the window is never briefly without one.
-        let _ = self.conn.render_free_picture(picture);
-        let _ = self.conn.free_pixmap(pixmap);
-        if let Some(old) = self.cursor.replace(cursor) {
-            let _ = self.conn.free_cursor(old);
+        let new_rect = self.drawn_rect();
+        for area in [old_rect, new_rect].into_iter().flatten() {
+            self.blit(&area)?;
         }
-        Ok(())
+        self.conn.flush().map_err(|e| PresentError::Backend {
+            backend: BACKEND,
+            detail: e.to_string(),
+        })
     }
 
     fn present(&mut self, picture: &I420, damage: &Damage) -> Result<(), PresentError> {
@@ -599,16 +822,31 @@ impl Presenter for X11Presenter {
         if damage.is_empty() {
             return Ok(());
         }
+        // **The pointer comes off before the picture goes on.** Converting
+        // over a surface that still has a pointer drawn on it would save those
+        // pixels as if they were the picture's, and a moving pointer would
+        // leave a trail of itself behind.
+        self.uncover();
+
         let bounds = Rect::sized(self.width, self.height);
-        for area in damage.rects(&bounds) {
+        let areas = damage.rects(&bounds);
+        for area in &areas {
             esper_color::rgb::region(
                 picture,
                 self.space,
                 &mut self.surface,
                 self.stride,
                 self.format,
-                &area,
+                area,
             )?;
+        }
+        self.cover();
+        for area in &areas {
+            self.blit(area)?;
+        }
+        // The pointer's own rectangle, which the picture's damage knows
+        // nothing about.
+        if let Some(area) = self.drawn_rect() {
             self.blit(&area)?;
         }
         self.conn.flush().map_err(|e| PresentError::Backend {

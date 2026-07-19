@@ -20,13 +20,27 @@ use std::time::{Duration, Instant};
 
 use esper_input::{Held, hid};
 use esper_present::PresentEvent;
-use esper_proto::{Button, InputMessage, KeyEvent, PointerButton, PointerMove, Scroll};
+use esper_proto::{Button, CursorPos, InputMessage, KeyEvent, PointerButton, PointerMove, Scroll};
 
 /// What Xorg's input drivers add to an evdev code to get a keycode, undone.
 ///
 /// The same convention the injecting side probes, in the other direction. A
 /// keycode below the offset is not an evdev key at all.
 const KEYCODE_OFFSET: u32 = 8;
+
+/// How long the pointer must be still before the host's position is compared
+/// against it.
+///
+/// Two hundred milliseconds — comfortably longer than any round trip a session
+/// is usable over, so the host's report has caught up before it is judged.
+pub const SETTLED: Duration = Duration::from_millis(200);
+
+/// How far apart the two positions may be and still be the same place.
+///
+/// In monitor fractions, where the whole edge is 65 535. Five hundred is about
+/// fifteen pixels on a 1920-wide screen: far more than the rounding between two
+/// sizes can produce, and far less than a grab moves a pointer.
+pub const TOLERANCE: i32 = 500;
 
 /// How often a controller says it is still holding something.
 ///
@@ -55,6 +69,12 @@ pub struct InputSource {
     holding: Held,
     /// When the last heartbeat went out.
     said: Option<Instant>,
+    /// The last position asked for, and when.
+    ///
+    /// Kept to answer one question: **is the host's pointer following mine?**
+    /// If it is not, a pointer drawn under the person's hand is a lie, and the
+    /// host's own position has to be drawn instead.
+    asked: Option<(PointerMove, Instant)>,
 }
 
 impl InputSource {
@@ -67,6 +87,7 @@ impl InputSource {
             dropped: 0,
             holding: Held::new(),
             said: None,
+            asked: None,
         }
     }
 
@@ -136,13 +157,9 @@ impl InputSource {
                     self.dropped = self.dropped.saturating_add(1);
                     return None;
                 }
-                Some(InputMessage::Pointer(PointerMove::from_pixels(
-                    self.monitor,
-                    *x,
-                    *y,
-                    w,
-                    h,
-                )))
+                let asked = PointerMove::from_pixels(self.monitor, *x, *y, w, h);
+                self.asked = Some((asked, Instant::now()));
+                Some(InputMessage::Pointer(asked))
             }
             PresentEvent::Button { code, pressed } => {
                 let Some(button) = button_of(*code) else {
@@ -176,6 +193,40 @@ impl InputSource {
                 None
             }
         }
+    }
+
+    /// Whether the host's pointer has stopped following this one.
+    ///
+    /// # Why this waits for the pointer to settle
+    ///
+    /// The host's report of where its pointer is arrives a round trip after
+    /// the position that put it there. **During movement the two always
+    /// disagree** — that is the latency this whole design exists to hide — so
+    /// comparing them while the mouse is moving would call every gesture a
+    /// divergence and switch to a drawn pointer for the duration.
+    ///
+    /// So the question is only asked once nothing has been sent for
+    /// [`SETTLED`]. A difference that survives the pointer standing still is
+    /// not latency: something on the host is holding the pointer — a game, a
+    /// drawing tool, anything with a grab — and the local pointer is no longer
+    /// where the host's is.
+    ///
+    /// `false` when nothing has been asked for yet: a session that has not
+    /// moved the pointer has nothing to disagree with.
+    #[must_use]
+    pub fn host_is_not_following(&self, reported: CursorPos, now: Instant) -> bool {
+        let Some((asked, when)) = self.asked else {
+            return false;
+        };
+        if now.saturating_duration_since(when) < SETTLED {
+            return false;
+        }
+        if reported.monitor != asked.monitor {
+            return true;
+        }
+        let dx = i32::from(reported.x) - i32::from(asked.x);
+        let dy = i32::from(reported.y) - i32::from(asked.y);
+        dx.abs() > TOLERANCE || dy.abs() > TOLERANCE
     }
 
     /// The HID usage for one of this platform's key codes.
@@ -469,6 +520,114 @@ mod tests {
         })
         .expect("up");
         assert!(!s.is_holding());
+    }
+
+    /// **A moving pointer is not a diverging one.** The host's report arrives
+    /// a round trip late, so comparing during movement would call every
+    /// gesture a divergence — which is why the comparison waits for the
+    /// pointer to settle.
+    #[test]
+    fn a_pointer_still_in_motion_is_never_called_divergent() {
+        let mut s = source();
+        s.translate(&PresentEvent::Pointer { x: 100, y: 100 })
+            .expect("a move");
+        let now = Instant::now();
+        // The host reports somewhere completely different, as it would while
+        // a fast gesture is in flight.
+        let stale = CursorPos {
+            monitor: 0,
+            x: 0,
+            y: 0,
+        };
+        assert!(
+            !s.host_is_not_following(stale, now),
+            "a report arriving mid-gesture is latency, not a grab"
+        );
+        assert!(
+            !s.host_is_not_following(stale, now + SETTLED / 2),
+            "and still is, halfway to settled"
+        );
+    }
+
+    /// Once the pointer has settled, a difference that survives is a host that
+    /// is not following.
+    #[test]
+    fn a_settled_pointer_the_host_ignores_is_divergent() {
+        let mut s = source();
+        s.translate(&PresentEvent::Pointer { x: 960, y: 540 })
+            .expect("a move");
+        let later = Instant::now() + SETTLED + Duration::from_millis(50);
+        let elsewhere = CursorPos {
+            monitor: 0,
+            x: 0,
+            y: 0,
+        };
+        assert!(s.host_is_not_following(elsewhere, later));
+    }
+
+    /// And a host that *is* following is not divergent, even with the
+    /// rounding between two different sizes in the way.
+    #[test]
+    fn a_host_that_followed_is_not_divergent() {
+        let mut s = source();
+        let Some(InputMessage::Pointer(asked)) =
+            s.translate(&PresentEvent::Pointer { x: 960, y: 540 })
+        else {
+            panic!("a pointer message");
+        };
+        let later = Instant::now() + SETTLED + Duration::from_millis(50);
+        // Exactly where it was asked to be.
+        let echo = CursorPos {
+            monitor: asked.monitor,
+            x: asked.x,
+            y: asked.y,
+        };
+        assert!(!s.host_is_not_following(echo, later));
+
+        // And a few units off, which is what converting through two different
+        // monitor sizes produces.
+        let rounded = CursorPos {
+            monitor: asked.monitor,
+            x: asked.x.saturating_add(40),
+            y: asked.y.saturating_sub(40),
+        };
+        assert!(
+            !s.host_is_not_following(rounded, later),
+            "rounding between sizes must not look like a grab"
+        );
+    }
+
+    /// A pointer that has moved to another monitor is not following this one,
+    /// whatever the numbers say.
+    #[test]
+    fn a_pointer_on_another_monitor_is_not_following() {
+        let mut s = source();
+        s.translate(&PresentEvent::Pointer { x: 10, y: 10 })
+            .expect("a move");
+        let later = Instant::now() + SETTLED * 2;
+        assert!(s.host_is_not_following(
+            CursorPos {
+                monitor: 3,
+                x: 0,
+                y: 0
+            },
+            later
+        ));
+    }
+
+    /// **Nothing asked for, nothing to disagree with.** A session that has
+    /// never moved the pointer must not decide the host is holding it.
+    #[test]
+    fn a_session_that_has_not_moved_the_pointer_is_not_divergent() {
+        let s = source();
+        assert!(!s.host_is_not_following(
+            CursorPos {
+                monitor: 0,
+                x: 12345,
+                y: 54321
+            },
+            Instant::now() + SETTLED * 10
+        ));
     }
 
     #[test]

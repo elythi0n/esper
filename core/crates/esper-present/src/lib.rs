@@ -153,6 +153,33 @@ pub trait Presenter: std::fmt::Debug {
     /// `None` hides it, which is what a game or a drawing tool asks for.
     fn set_cursor(&mut self, image: Option<&CursorImage>) -> Result<(), PresentError>;
 
+    /// Draw the pointer into the picture at this position, or leave it to the
+    /// window.
+    ///
+    /// # Two pointers is worse than a slow one
+    ///
+    /// `None` — the usual case in a session being *driven* — leaves the
+    /// pointer to [`Presenter::set_cursor`], which hands it to the window
+    /// server: it is then drawn at the local pointer, at the speed of the
+    /// person's hand.
+    ///
+    /// `Some(position)` composites it into the picture at that position
+    /// instead, **and hides the window's own cursor**, because a worn pointer
+    /// and a drawn one at once is two pointers on screen.
+    ///
+    /// Two cases need the drawn one:
+    ///
+    /// - a session only **watching**, where the host's pointer moves on its
+    ///   own and the local pointer means nothing;
+    /// - a session driving a host that is **holding** the pointer — a game, a
+    ///   drawing tool, anything with a grab — where the local pointer is no
+    ///   longer where the host's is, and a cursor drawn under the person's
+    ///   hand would be a lie.
+    ///
+    /// The position is in picture coordinates, and it is where the pointer
+    /// *points*: the hotspot, not the image's corner.
+    fn draw_cursor_at(&mut self, at: Option<(u32, u32)>) -> Result<(), PresentError>;
+
     /// Report the person's keys and pointer, or keep them.
     ///
     /// **Off by default, and the default is not the interesting case.** A
@@ -192,6 +219,8 @@ pub struct NullPresenter {
     /// The last cursor this was asked to wear: `None` if never asked,
     /// `Some(None)` if asked to hide it.
     pub cursor: Option<Option<CursorImage>>,
+    /// Where it was last asked to *draw* the pointer, if anywhere.
+    pub drawn_at: Option<(u32, u32)>,
     /// Every picture's damage, in order.
     pub shown: Vec<Damage>,
     /// Luma samples that would have been converted, damage taken into account.
@@ -207,6 +236,7 @@ impl NullPresenter {
             size: (width, height),
             forwarding: false,
             cursor: None,
+            drawn_at: None,
             shown: Vec::new(),
             pixels: 0,
             open: true,
@@ -270,6 +300,11 @@ impl Presenter for NullPresenter {
 
     fn set_cursor(&mut self, image: Option<&CursorImage>) -> Result<(), PresentError> {
         self.cursor = Some(image.cloned());
+        Ok(())
+    }
+
+    fn draw_cursor_at(&mut self, at: Option<(u32, u32)>) -> Result<(), PresentError> {
+        self.drawn_at = at;
         Ok(())
     }
 }

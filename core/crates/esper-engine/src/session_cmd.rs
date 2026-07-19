@@ -1420,8 +1420,42 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                             }
                         }
                     }
-                    esper_proto::CursorMessage::Moved(_) => {
+                    esper_proto::CursorMessage::Moved(at) => {
                         cursor_moves = cursor_moves.saturating_add(1);
+                        // **Drawn or worn, and this is where that is decided.**
+                        //
+                        // Worn is better whenever it is honest: the server
+                        // draws the pointer at the person's own hand, with no
+                        // latency at all. It is honest exactly when the local
+                        // pointer *is* the host's pointer — a session that is
+                        // driving, and whose host is following.
+                        //
+                        // Otherwise the host's own position has to be drawn:
+                        // a session only watching has no local pointer to
+                        // speak of, and a host holding its pointer has one
+                        // that is no longer under the person's hand.
+                        let draw = match driving.as_ref() {
+                            None => true,
+                            Some((source, _)) => {
+                                source.host_is_not_following(at, std::time::Instant::now())
+                            }
+                        };
+                        if let Some(p) = presenter.as_mut() {
+                            let showing = link.config();
+                            let where_to =
+                                draw.then(|| at.to_pixels(showing.width, showing.height));
+                            let same_monitor = at.monitor == showing.selected;
+                            // A pointer on another monitor is not in this
+                            // picture: nothing to draw, and nothing to wear
+                            // either — a worn pointer would be showing the
+                            // person a cursor for a screen they cannot see.
+                            let target = if same_monitor { where_to } else { None };
+                            if let Err(e) = p.draw_cursor_at(target)
+                                && cursor_moves == 1
+                            {
+                                println!("  · the pointer cannot be drawn ({e})");
+                            }
+                        }
                     }
                 }
             }
