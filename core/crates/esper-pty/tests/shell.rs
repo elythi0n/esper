@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// A real shell on a real pseudo-terminal, so: Unix.
+#![cfg(unix)]
 
 //! A real shell on a real pseudo-terminal.
 //!
@@ -323,32 +325,41 @@ async fn an_out_of_bounds_resize_is_refused_rather_than_clamped() {
 
 // ── teardown: nothing left behind ───────────────────────────────────────────
 
-/// Read a process's state from /proc. `None` once it is gone.
-#[cfg(target_os = "linux")]
-/// Wait until a process has exited, without reaping it.
+/// Wait until the shell has exited, without reaping it.
 ///
-/// A process that has exited and not been waited on is a zombie, so state `Z`
-/// or the pid disappearing both mean "the shell is done". Deliberately does
-/// **not** call `try_wait`: that would reap the child and take its exit status
-/// with it, and the status is what the test is about.
+/// Reads the master until the kernel reports the session ended, which is what
+/// the last process closing the slave means — so it happens at exit and
+/// **before** the child is reaped, and the exit status is still there to be
+/// read. That is the whole point: `try_wait` would reap the child and take the
+/// status with it, and the status is what the test is about.
 ///
 /// This replaced a fixed sleep. The sleep was 300 ms, which is plenty on an
 /// idle machine and not always plenty with the rest of the suite compiling and
 /// running alongside it — so the test passed locally, passed in isolation
 /// fifteen times out of fifteen, and failed in a full run. A fixed sleep is a
 /// guess about someone else's machine.
-fn wait_until_exited(pid: u32) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        match proc_state(pid) {
-            None => return true,
-            Some('Z') => return true,
-            _ => std::thread::sleep(Duration::from_millis(5)),
+///
+/// It also replaced polling `/proc`, which is a guess about someone else's
+/// kernel: end of session is a fact about pseudo-terminals, and
+/// `is_session_end` already knows that Linux says `EIO` where BSD says `EOF`.
+async fn wait_until_exited(read: &mut ReadHalf) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut buf = [0u8; 4096];
+    loop {
+        let Ok(r) = tokio::time::timeout_at(deadline, read.read(&mut buf)).await else {
+            return false;
+        };
+        if esper_pty::is_session_end(&r) {
+            return true;
+        }
+        if r.is_err() {
+            return false;
         }
     }
-    false
 }
 
+/// Read a process's state from /proc. `None` once it is gone.
+#[cfg(target_os = "linux")]
 fn proc_state(pid: u32) -> Option<char> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The state is the field after the (possibly parenthesised) comm.
@@ -364,6 +375,8 @@ fn alive(pid: u32) -> bool {
 
 /// Wait until a pid is running the named program.
 ///
+/// Reads `/proc`, like the tests that need it.
+///
 /// The barrier that makes the backgrounded-job test deterministic. A shell
 /// prints `$!` as soon as it has *forked*, which is before the child has
 /// execed — so between that print and the exec there is a window in which the
@@ -375,6 +388,7 @@ fn alive(pid: u32) -> bool {
 /// make the window smaller, which under a loaded machine running the whole
 /// suite in parallel is the difference between a test that passes and a test
 /// that passes usually.
+#[cfg(target_os = "linux")]
 fn wait_until_running(pid: u32, program: &str) -> bool {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
@@ -396,7 +410,7 @@ fn wait_until_running(pid: u32, program: &str) -> bool {
 )]
 async fn a_clean_exit_leaves_no_zombie() {
     let t = Terminal::open(&request(80, 24)).expect("open");
-    let (read, mut write, child) = t.into_parts();
+    let (mut read, mut write, child) = t.into_parts();
     let pid = child.id().expect("pid");
 
     write.write_all(b"exit 0\n").await.expect("write");
@@ -405,7 +419,7 @@ async fn a_clean_exit_leaves_no_zombie() {
     // what the first version of this test measured — and a fixed sleep here
     // measured it again under load. See `wait_until_exited`.
     assert!(
-        wait_until_exited(pid),
+        wait_until_exited(&mut read).await,
         "the shell never exited, so the test could not measure what it meant to"
     );
     let status = esper_pty::hang_up(child, read, write).await;

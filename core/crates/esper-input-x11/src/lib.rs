@@ -23,6 +23,11 @@
 //! The alternative is typing gibberish into somebody's machine and leaving
 //! them to work out why.
 
+// The engine only uses the X11 backends on Linux. Elsewhere this crate
+// compiles to nothing rather than being absent, so a workspace build for
+// another target still covers every member.
+#![cfg(target_os = "linux")]
+
 use esper_input::{Held, InputError, InputSink, Point, hid};
 use esper_proto::{Button, KeyEvent, PointerButton, Scroll};
 use x11rb::connection::Connection as _;

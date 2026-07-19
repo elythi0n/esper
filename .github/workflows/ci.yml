@@ -155,8 +155,10 @@ jobs:
           manifest-path: core/Cargo.toml
 
   # Every dependency is either audited by us or covered by a published audit
-  # set we trust. The 36 exemptions are the tree we inherited on day one; they
-  # shrink as they are reviewed, and a new dependency cannot be added silently.
+  # set we trust. The exemptions are the tree we inherited on day one plus what
+  # each phase added; they shrink as they are reviewed, and a new dependency
+  # cannot be added silently. `cargo vet check` prints the current counts —
+  # naming one here only guarantees a stale comment.
   vet:
     name: cargo-vet
     runs-on: ubuntu-latest

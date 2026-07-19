@@ -14,7 +14,14 @@
 //! milliseconds doing almost nothing, which is the price of not having to
 //! reason about how long the session loop might be busy.
 
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+// Nothing in this module runs on a platform with no backend for it: `start`
+// refuses and the session says so. It is still compiled everywhere, which is
+// deliberate — the thread below is generic over the trait, so it is the part a
+// new platform reuses rather than rewrites, and compiling it everywhere is
+// what keeps it honest.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
 use esper_presence::{HostEvent, Presence, Watching};
@@ -106,7 +113,7 @@ pub fn start() -> Result<(Indicator, Presses), String> {
         let armed = presence.panic_key_grabbed();
         let can_show = presence.can_show();
         let backend = esper_presence::Presence::backend(&presence);
-        let (to_thread, commands) = channel();
+        let (to_thread, commands) = std::sync::mpsc::channel();
         // Four deep: a person hitting the key repeatedly should not have
         // presses dropped, and nobody presses it more than a handful of times.
         let (panic_tx, panic_rx) = tokio::sync::mpsc::channel(4);
@@ -178,6 +185,7 @@ mod tests {
 
     use super::*;
     use esper_presence::{NullPresence, Shown};
+    use std::sync::mpsc::channel;
 
     fn watching(controlling: bool) -> Watching {
         Watching {

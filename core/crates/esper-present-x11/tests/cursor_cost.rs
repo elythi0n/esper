@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// The crate under test is Linux-only; so is its test.
+#![cfg(target_os = "linux")]
 
 //! What a pointer costs, measured rather than argued about.
 //!

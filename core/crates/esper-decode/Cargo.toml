@@ -41,8 +41,14 @@ landlock = "0.4"
 [dev-dependencies]
 esper-capture.workspace = true
 esper-encode.workspace = true
+
 # For CLOCK_PROCESS_CPUTIME_ID in the threading measurement. Wall-clock time
 # and CPU time diverge the moment the encoder uses more than one thread, and
 # the design's ceiling is written in CPU time — so measuring the wrong one
 # would report a threaded encoder as three times cheaper than it is.
+#
+# Gated where that clock is known to be there. The measurement is not about
+# Linux and the ceiling applies everywhere; widen this when there is a job on
+# another platform to run it.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 rustix = { version = "1", features = ["time"] }

@@ -603,6 +603,21 @@ pub enum Refusal {
     Malformed,
     /// The host is already holding as many parked sessions as it will.
     TooMany,
+    /// The host has no pseudo-terminal support at all.
+    ///
+    /// Permanent, and separate from [`Refusal::Unavailable`] for that reason:
+    /// one says "not on this machine, ever" and the other says "not right
+    /// now". Retrying is right for exactly one of them, and a controller that
+    /// cannot tell them apart either retries forever or gives up too early.
+    Unsupported,
+    /// The host could not start a shell.
+    ///
+    /// Something on the host ran out or failed — no free pseudo-terminal, no
+    /// shell where one was expected. **A host that could not start a shell
+    /// says so**: the alternative is a control stream that simply closes,
+    /// which leaves the controller to guess between a refusal, a crash and a
+    /// network fault.
+    Unavailable,
 }
 
 impl Refusal {
@@ -614,6 +629,8 @@ impl Refusal {
             Self::Unknown => "that terminal session is no longer available",
             Self::Malformed => "the terminal request was malformed",
             Self::TooMany => "the host is holding too many disconnected terminal sessions",
+            Self::Unsupported => "this machine cannot open a terminal",
+            Self::Unavailable => "the host could not start a shell",
         }
     }
 }

@@ -11,7 +11,14 @@
 //! pointer deserves, and hands over only the messages worth sending. Almost
 //! all of the time there are none: a pointer sitting still says nothing.
 
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+// Nothing in this module runs on a platform with no backend for it: `start`
+// refuses and the session says so. It is still compiled everywhere, which is
+// deliberate — the thread below is generic over the trait, so it is the part a
+// new platform reuses rather than rewrites, and compiling it everywhere is
+// what keeps it honest.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use esper_capture::cursor::CursorSource;
@@ -89,7 +96,7 @@ pub fn start(monitor: (u32, i32, i32, u32, u32)) -> Result<(CursorWatch, Message
     {
         let source = esper_capture_x11::cursor::X11Cursor::open().map_err(|e| e.to_string())?;
         let backend = esper_capture::cursor::CursorSource::backend(&source);
-        let (to_thread, commands) = channel();
+        let (to_thread, commands) = std::sync::mpsc::channel();
         // **Bounded, and a full queue drops the oldest position rather than
         // blocking.** A controller that has stopped reading its control stream
         // must not be able to stall the thread that reads the pointer — and a
@@ -179,6 +186,7 @@ mod tests {
 
     use super::*;
     use esper_capture::cursor::{CursorImage, CursorState, ScriptedCursor};
+    use std::sync::mpsc::channel;
 
     fn state(serial: u32, x: i32, y: i32) -> CursorState {
         CursorState {

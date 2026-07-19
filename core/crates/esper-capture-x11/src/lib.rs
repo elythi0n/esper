@@ -16,6 +16,11 @@
 //! no `unsafe` and links no display library. A headless server can carry the
 //! engine without a desktop being installed anywhere near it.
 
+// The engine only uses the X11 backends on Linux. Elsewhere this crate
+// compiles to nothing rather than being absent, so a workspace build for
+// another target still covers every member.
+#![cfg(target_os = "linux")]
+
 pub mod capturer;
 pub mod cursor;
 pub mod damage;

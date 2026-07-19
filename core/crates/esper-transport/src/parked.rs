@@ -52,6 +52,10 @@ impl std::fmt::Debug for LiveTerminal {
 
 /// What a controller gets back when it returns to a parked session.
 #[derive(Debug)]
+// Made once per session and consumed at once, so boxing the big variant
+// would buy an allocation and nothing else. Over the threshold only where
+// `tokio::process::Child` is large, which is Windows and not Unix.
+#[allow(clippy::large_enum_variant)]
 pub enum Resumed {
     /// The shell is still running.
     Still {
@@ -84,6 +88,10 @@ pub enum Resumed {
 /// and must hang up on it. That is not an error value, it is a handover, and
 /// naming it one keeps callers from reaching for `?` and leaking a shell.
 #[derive(Debug)]
+// Made once per session and consumed at once, so boxing the big variant
+// would buy an allocation and nothing else. Over the threshold only where
+// `tokio::process::Child` is large, which is Windows and not Unix.
+#[allow(clippy::large_enum_variant)]
 pub enum Parked {
     /// Parked, and here is the identifier to give the controller.
     Ok(SessionId),

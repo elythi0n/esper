@@ -25,21 +25,37 @@
 
 #![forbid(unsafe_code)]
 
+// Raw mode is the *controller's* own terminal, and the controller is a Unix
+// program until the Windows one exists. The console equivalent arrives with
+// it; nothing here needs a stub in the meantime.
+#[cfg(unix)]
 pub mod raw;
 
+#[cfg(unix)]
 pub use raw::RawMode;
+
+/// Everything that is a fact about the platform rather than about terminals.
+///
+/// One module per platform, chosen here, so the rest of the crate has no
+/// `cfg` in it at all — and so a host on a platform with no pseudo-terminals
+/// still compiles and still answers.
+#[cfg(unix)]
+#[path = "sys/unix.rs"]
+mod sys;
+#[cfg(not(unix))]
+#[path = "sys/unsupported.rs"]
+mod sys;
 
 use std::ffi::OsString;
 
 use esper_proto::{TerminalExit, TerminalOpen, TerminalResize};
-use pty_process::{Command, OwnedReadPty, OwnedWritePty, Size};
 
 /// The read and write halves, re-exported.
 ///
 /// Callers name these without depending on `pty-process` directly: which crate
 /// owns the pseudo-terminal is this crate's decision, and leaking it into every
 /// caller's `Cargo.toml` would make it everyone's.
-pub use pty_process::{OwnedReadPty as ReadHalf, OwnedWritePty as WriteHalf};
+pub use sys::{ReadHalf, WriteHalf};
 
 /// What can go wrong running a shell.
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +85,16 @@ pub enum PtyError {
     /// A read or write on the pseudo-terminal failed.
     #[error("pseudo-terminal io: {0}")]
     Io(#[from] std::io::Error),
+
+    /// This platform has no pseudo-terminal support in Esper yet.
+    ///
+    /// A distinct variant rather than an `Allocate` with a sad string,
+    /// because the two mean different things to whoever reads it: one is a
+    /// machine that has run out of something, the other is a feature that has
+    /// not been built for this platform. Only the second is answered with a
+    /// refusal that says "not here" rather than "try again".
+    #[error("this platform cannot allocate a pseudo-terminal yet")]
+    Unsupported,
 }
 
 /// A shell running on a pseudo-terminal, split for concurrent read and write.
@@ -77,8 +103,8 @@ pub enum PtyError {
 /// once: a user typing while `cat` floods the screen is the normal case, not an
 /// edge one.
 pub struct Terminal {
-    read: OwnedReadPty,
-    write: OwnedWritePty,
+    read: ReadHalf,
+    write: WriteHalf,
     child: tokio::process::Child,
     shell: OsString,
 }
@@ -92,65 +118,20 @@ impl std::fmt::Debug for Terminal {
     }
 }
 
-/// Choose the shell to run.
-///
-/// `$SHELL` if set, then `/bin/sh`, which POSIX requires to exist. Deliberately
-/// **not** a configured list: a remote-execution surface that lets the caller
-/// name an arbitrary binary is a different feature from a terminal, and it is
-/// one Esper's design documents refuse.
-fn shell_to_run() -> OsString {
-    std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"))
-}
-
 impl Terminal {
     /// Allocate a pseudo-terminal and start a login shell on it.
     ///
     /// The child gets a *screened* environment rather than the parent's:
     /// whatever daemon launched the host may hold anything in its environment,
     /// and passing that wholesale into an interactive shell leaks it to whoever
-    /// is on the far side.
+    /// is on the far side. What is passed, and the shell that is chosen, are
+    /// platform policy and live in the platform module.
     pub fn open(request: &TerminalOpen) -> Result<Self, PtyError> {
         if !request.is_well_formed() {
             return Err(PtyError::Malformed);
         }
 
-        let (pty, pts) = pty_process::open().map_err(|e| PtyError::Allocate(e.to_string()))?;
-        pty.resize(Size::new(request.rows, request.cols))
-            .map_err(|e| PtyError::Allocate(e.to_string()))?;
-
-        let shell = shell_to_run();
-
-        // A consuming builder, so the calls chain.
-        //
-        // `-l` for a login shell: the user gets their own profile, which is
-        // what they would get sitting at the machine.
-        //
-        // `env_clear` first, then only what an interactive shell needs. The
-        // alternative — inheriting — hands the far side whatever the
-        // supervising daemon happened to be holding in its environment, and a
-        // daemon's environment is not something a user chose to share.
-        let mut cmd = Command::new(&shell)
-            .arg("-l")
-            .env_clear()
-            .env("TERM", &request.term);
-
-        for pass in ["HOME", "USER", "LOGNAME", "PATH", "LANG", "SHELL", "TZ"] {
-            if let Some(v) = std::env::var_os(pass) {
-                cmd = cmd.env(pass, v);
-            }
-        }
-        // A shell with no PATH is nearly unusable, and a daemon environment may
-        // legitimately lack one.
-        if std::env::var_os("PATH").is_none() {
-            cmd = cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
-        }
-
-        let child = cmd.spawn(pts).map_err(|e| PtyError::Spawn {
-            tried: shell.to_string_lossy().into_owned(),
-            source: std::io::Error::other(e.to_string()),
-        })?;
-
-        let (read, write) = pty.into_split();
+        let (read, write, child, shell) = sys::open(request)?;
         Ok(Self {
             read,
             write,
@@ -173,7 +154,7 @@ impl Terminal {
 
     /// Split into the parts needed to pump both directions concurrently.
     #[must_use]
-    pub fn into_parts(self) -> (OwnedReadPty, OwnedWritePty, tokio::process::Child) {
+    pub fn into_parts(self) -> (ReadHalf, WriteHalf, tokio::process::Child) {
         (self.read, self.write, self.child)
     }
 
@@ -184,13 +165,11 @@ impl Terminal {
     /// substituting a different size would leave the two ends disagreeing about
     /// where lines wrap — which looks like a rendering bug for the rest of the
     /// session.
-    pub fn resize(write: &OwnedWritePty, r: &TerminalResize) -> Result<(), PtyError> {
+    pub fn resize(write: &WriteHalf, r: &TerminalResize) -> Result<(), PtyError> {
         if !r.is_well_formed() {
             return Err(PtyError::Malformed);
         }
-        write
-            .resize(Size::new(r.rows, r.cols))
-            .map_err(|e| PtyError::Allocate(e.to_string()))
+        sys::resize(write, r.rows, r.cols)
     }
 }
 
@@ -305,14 +284,14 @@ pub async fn hang_up(
         return child.try_wait().ok().flatten().map(|s| exit_status(&s));
     };
     tracing::debug!(pid, "session survived the hangup; signalling its group");
-    signal_group(pid, Signal::Hangup);
+    sys::signal_group(pid, Signal::Hangup);
 
     if let Ok(Ok(status)) = tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
         return Some(exit_status(&status));
     }
 
     tracing::debug!(pid, "session ignored SIGHUP; sending SIGKILL");
-    signal_group(pid, Signal::Kill);
+    sys::signal_group(pid, Signal::Kill);
 
     // Bounded even after SIGKILL: an unreapable child must not hold a task
     // open forever.
@@ -324,48 +303,11 @@ pub async fn hang_up(
 
 /// Which signal to send.
 #[derive(Debug, Clone, Copy)]
-enum Signal {
+pub(crate) enum Signal {
     /// The terminal hung up. Shells exit; programs save and clean up.
     Hangup,
     /// Unignorable.
     Kill,
-}
-
-/// Signal an entire process group.
-///
-/// Best-effort by design: the group may already be gone, which is the common
-/// case and not an error. A failure here must never prevent the rest of
-/// teardown, because the alternative to "signal failed, continue" is "signal
-/// failed, leak the session".
-#[cfg(unix)]
-fn signal_group(leader_pid: u32, signal: Signal) {
-    use rustix::process::{Pid, Signal as RSignal};
-
-    let Ok(raw) = i32::try_from(leader_pid) else {
-        return;
-    };
-    let Some(pid) = Pid::from_raw(raw) else {
-        return;
-    };
-    let sig = match signal {
-        Signal::Hangup => RSignal::HUP,
-        Signal::Kill => RSignal::KILL,
-    };
-
-    // The shell was made a session leader by `pty-process`, so its pid is also
-    // its process group id — which is what makes signalling the group possible
-    // from here at all.
-    if let Err(e) = rustix::process::kill_process_group(pid, sig) {
-        // ESRCH means the group is already gone: the normal outcome.
-        if e != rustix::io::Errno::SRCH {
-            tracing::debug!(pid = leader_pid, ?signal, error = %e, "could not signal process group");
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn signal_group(_leader_pid: u32, _signal: Signal) {
-    // Windows has job objects rather than process groups; Phase 6.
 }
 
 /// Translate a process exit into the wire message.
@@ -374,20 +316,9 @@ fn signal_group(_leader_pid: u32, _signal: Signal) {
 /// scripting a server is most of what terminal mode is for.
 #[must_use]
 pub fn exit_status(status: &std::process::ExitStatus) -> TerminalExit {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        TerminalExit {
-            code: status.code(),
-            signal: status.signal(),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        TerminalExit {
-            code: status.code(),
-            signal: None,
-        }
+    TerminalExit {
+        code: status.code(),
+        signal: sys::exit_signal(status),
     }
 }
 

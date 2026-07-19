@@ -16,6 +16,10 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "sync", "time", "rt"] }
 
+# Both of these are Unix, and so is the code that uses them: the pseudo-terminal
+# and the controller's raw mode. A platform without them gets the `unsupported`
+# arm of `sys`, not a crate that fails to build.
+[target.'cfg(unix)'.dependencies]
 # `rustix` for termios and window size: two transitive crates (bitflags,
 # linux-raw-sys) and **no libc**, which is a smaller footprint than any
 # alternative surveyed.

@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Raw mode is Unix; so is its test.
+#![cfg(unix)]
 
 //! Raw mode, and getting the terminal back.
 //!

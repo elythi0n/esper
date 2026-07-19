@@ -77,6 +77,37 @@ pub enum TerminalError {
     Control(String),
 }
 
+/// Tell a returning controller it has its session back, and replay what it
+/// missed.
+///
+/// One function because the two are one answer: a controller that got the
+/// header and not the backlog has been told it resumed and shown nothing.
+async fn answer_resume(
+    control: &mut Control,
+    session: SessionId,
+    lost: u64,
+    backlog: &[u8],
+) -> Result<(), TerminalError> {
+    control
+        .send(&TerminalStarted::Resumed { session, lost })
+        .await?;
+    replay(control, backlog, lost).await
+}
+
+/// What to tell a peer about a pseudo-terminal that could not be opened.
+///
+/// The distinction that matters is permanent against transient, because it is
+/// the difference between a controller that retries and one that stops.
+const fn refusal_for(e: &esper_pty::PtyError) -> Refusal {
+    match e {
+        esper_pty::PtyError::Malformed => Refusal::Malformed,
+        esper_pty::PtyError::Unsupported => Refusal::Unsupported,
+        esper_pty::PtyError::Allocate(_)
+        | esper_pty::PtyError::Spawn { .. }
+        | esper_pty::PtyError::Io(_) => Refusal::Unavailable,
+    }
+}
+
 impl From<ControlError> for TerminalError {
     fn from(e: ControlError) -> Self {
         Self::Control(e.to_string())
@@ -233,14 +264,40 @@ impl TerminalService {
             return self.refuse(control, Refusal::TooMany).await;
         }
 
-        let terminal = Terminal::open(open)?;
-        let session = parked::new_session_id().map_err(|e| {
-            tracing::error!(error = %e, "no randomness for a session identifier");
-            // Reported to the peer as the host being full. It learns nothing
-            // either way, and the host genuinely cannot keep a session it
-            // cannot name.
-            TerminalError::Refused(Refusal::TooMany)
-        })?;
+        // The identifier is made **before** the shell, so running out of
+        // randomness happens while there is still nothing to tear down.
+        // Afterwards it would need the same hangup dance as every other
+        // failure below, for a case that never happens — and a rare path with
+        // teardown in it is a rare path that leaks a shell.
+        let session = match parked::new_session_id() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "no randomness for a session identifier");
+                // Reported to the peer as the host being full. It learns
+                // nothing either way, and a host that cannot name a session
+                // genuinely cannot keep one.
+                return self.refuse(control, Refusal::TooMany).await;
+            }
+        };
+
+        let terminal = match Terminal::open(open) {
+            Ok(t) => t,
+            Err(e) => {
+                // **Told, not dropped.** Everything else in this function
+                // answers before it fails, and a host that cannot start a
+                // shell is the one case where the failure is the host's own —
+                // so the peer is the party with the least idea what happened
+                // and the most need to be told.
+                tracing::warn!(error = %e, "could not start a shell for a terminal session");
+                let _ = self.log.append(&Entry::now(
+                    peer_key,
+                    Event::Refused {
+                        reason: e.to_string(),
+                    },
+                ));
+                return self.refuse(control, refusal_for(&e)).await;
+            }
+        };
         let started = Instant::now();
 
         // Best-effort: an audit failure must not kill a session. A full disk
@@ -308,10 +365,23 @@ impl TerminalService {
 
                 self.record_resume(peer_key, session, parked_for, lost);
 
-                control
-                    .send(&TerminalStarted::Resumed { session, lost })
-                    .await?;
-                replay(control, &backlog, lost).await?;
+                // **The shell is live from here, so a failure must not drop
+                // it.** The link dying between the answer and the first byte
+                // is the same event as it dying mid-session, and it gets the
+                // same answer: the session goes back to being parked rather
+                // than being quietly killed. Dropping it here would close the
+                // master — which hangs up a shell that respects `SIGHUP` and
+                // leaves one that does not running forever.
+                if let Err(e) = answer_resume(control, session, lost, &backlog).await {
+                    tracing::warn!(error = %e, "a resumed session's link failed before it started");
+                    let (ended, exit) = self
+                        .park(control, terminal, session, peer_key, granted, false)
+                        .await;
+                    if !matches!(ended, Ended::Parked { .. }) {
+                        self.record_close(peer_key, started.elapsed().as_secs(), exit);
+                    }
+                    return Ok(ended);
+                }
 
                 self.run(control, terminal, session, started, peer_key, granted)
                     .await
@@ -513,6 +583,10 @@ async fn replay(control: &mut Control, backlog: &[u8], lost: u64) -> Result<(), 
 }
 
 /// Why the pump stopped, and what is left of the session.
+// Made once per session and consumed at once, so boxing the big variant
+// would buy an allocation and nothing else. Over the threshold only where
+// `tokio::process::Child` is large, which is Windows and not Unix.
+#[allow(clippy::large_enum_variant)]
 enum Outcome {
     /// The shell exited. Already hung up on.
     ShellExited(TerminalExit),

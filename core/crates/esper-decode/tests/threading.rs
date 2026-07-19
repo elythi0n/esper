@@ -4,6 +4,8 @@
     clippy::panic,
     clippy::indexing_slicing
 )]
+// Needs a process CPU-time clock; see the dev-dependency's note.
+#![cfg(target_os = "linux")]
 
 //! What slice-parallel encoding buys, and what it costs.
 //!

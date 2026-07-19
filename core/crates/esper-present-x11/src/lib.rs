@@ -29,6 +29,11 @@
 //! product decisions about a viewer's chrome, and a debug window that quietly
 //! resampled would hide exactly the artefacts it exists to show.
 
+// The engine only uses the X11 backends on Linux. Elsewhere this crate
+// compiles to nothing rather than being absent, so a workspace build for
+// another target still covers every member.
+#![cfg(target_os = "linux")]
+
 use esper_capture::cursor::CursorImage;
 use esper_capture::damage::Damage;
 use esper_capture::frame::PixelFormat;

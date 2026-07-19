@@ -249,7 +249,7 @@ async fn a_usable_shell_over_a_real_connection() {
 #[cfg_attr(miri, ignore = "needs aws-lc-rs and a real pty; MIRI has neither")]
 async fn a_device_without_the_terminal_permission_is_refused() {
     bounded("a_device_without_the_terminal_permission", async {
-        let (_h_ep, _c_ep, mut host_ctl, _ctrl_ctl, peer) = wire().await;
+        let (_h_ep, _c_ep, mut host_ctl, mut ctrl_ctl, peer) = wire().await;
         let dir = tmpdir();
         let log = Log::at(dir.join("sessions.log"));
         let svc = service(&log);
@@ -270,6 +270,14 @@ async fn a_device_without_the_terminal_permission_is_refused() {
             "got {err:?}"
         );
 
+        // **And the controller was told.** Asserting only on the returned
+        // error would pass just as well if the host refused in silence, which
+        // is the failure that actually matters to whoever is waiting.
+        assert_eq!(
+            started(&mut ctrl_ctl).await,
+            TerminalStarted::Refused(Refusal::NotPermitted)
+        );
+
         // And the refusal is recorded: a run of them is what an attack looks
         // like from this side.
         let entries = log.read().expect("read");
@@ -278,6 +286,88 @@ async fn a_device_without_the_terminal_permission_is_refused() {
                 .iter()
                 .any(|e| matches!(e.event, Event::Refused { .. })),
             "the refusal should be in the record: {entries:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    })
+    .await;
+}
+
+/// A host that cannot start a shell **says so**.
+///
+/// The failure this guards against is silence: an `open` that returned early
+/// on a pseudo-terminal error sent the peer nothing at all, and a controller
+/// then sees a control stream that closed — indistinguishable from a crash or
+/// a dropped network. Being told "the host could not start a shell" is the
+/// difference between a message a user can act on and a bug report.
+///
+/// Run in a child process, because the only portable way to make a shell fail
+/// to start is `SHELL`, and an environment is process-wide: setting it here
+/// would reach every other test in this binary.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs aws-lc-rs and a real pty; MIRI has neither")]
+async fn a_host_that_cannot_start_a_shell_refuses_out_loud() {
+    const MARKER: &str = "ESPER_TEST_NO_SHELL";
+    const NAME: &str = "a_host_that_cannot_start_a_shell_refuses_out_loud";
+
+    if std::env::var_os(MARKER).is_none() {
+        let exe = std::env::current_exe().expect("test binary");
+        let out = std::process::Command::new(exe)
+            .args(["--exact", NAME, "--nocapture"])
+            .env(MARKER, "1")
+            .env("SHELL", "/nonexistent/esper-has-no-shell")
+            .output()
+            .expect("re-run this test in a child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "the child failed:\n{stdout}\n{stderr}"
+        );
+        // The child must actually have run the body. Without this the parent
+        // passes when the filter matches nothing, which is a test that cannot
+        // fail.
+        assert!(
+            stdout.contains("1 passed"),
+            "the child ran no test:\n{stdout}\n{stderr}"
+        );
+        return;
+    }
+
+    bounded("no shell", async {
+        let (_h_ep, _c_ep, mut host_ctl, mut ctrl_ctl, peer) = wire().await;
+        let dir = tmpdir();
+        let log = Log::at(dir.join("sessions.log"));
+        let svc = service(&log);
+
+        let err = svc
+            .serve(
+                &mut host_ctl,
+                &open_request(),
+                &peer,
+                &[Permission::Terminal],
+            )
+            .await
+            .expect_err("a shell that cannot start is not a session");
+
+        assert!(
+            matches!(err, TerminalError::Refused(Refusal::Unavailable)),
+            "got {err:?}"
+        );
+        assert_eq!(
+            started(&mut ctrl_ctl).await,
+            TerminalStarted::Refused(Refusal::Unavailable),
+            "the controller must be told, not disconnected"
+        );
+
+        // Recorded with what failed, so the host's own operator can see why
+        // rather than inferring it from a controller's complaint.
+        let entries = log.read().expect("read");
+        assert!(
+            entries.iter().any(|e| match &e.event {
+                Event::Refused { reason } => reason.contains("shell"),
+                _ => false,
+            }),
+            "the reason should be in the record: {entries:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     })

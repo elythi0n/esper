@@ -26,6 +26,11 @@
 //! and a hotkey that works only sometimes is worse than one that does not
 //! exist, because the person will reach for it in an emergency.
 
+// The engine only uses the X11 backends on Linux. Elsewhere this crate
+// compiles to nothing rather than being absent, so a workspace build for
+// another target still covers every member.
+#![cfg(target_os = "linux")]
+
 use esper_presence::{HostEvent, Presence, PresenceError, Watching};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::Event;

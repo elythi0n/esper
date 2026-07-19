@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// The crate under test is Linux-only; so is its test.
+#![cfg(target_os = "linux")]
 
 //! Tests that need a real X server, and that try to defeat what they test.
 //!

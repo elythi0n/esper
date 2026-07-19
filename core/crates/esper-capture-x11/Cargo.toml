@@ -16,13 +16,14 @@ thiserror.workspace = true
 tracing.workspace = true
 x11rb = { workspace = true }
 
-# Declared here rather than at the workspace root, the way esper-pipeline
-# does: `event` is for waiting on the X connection with a deadline, and `fs`
-# and `mm` are for the shared memory segment.
 [dev-dependencies]
 esper-display-lock.workspace = true
 x11rb = { workspace = true }
 esper-capture = { workspace = true, features = [] }
 
-[target.'cfg(unix)'.dependencies]
+# Declared here rather than at the workspace root, the way esper-pipeline
+# does: `event` is for waiting on the X connection with a deadline, and `fs`
+# and `mm` are for the shared memory segment. Gated on the same target as the
+# crate itself, so the manifest and the code agree about where this builds.
+[target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["event", "fs", "mm"] }
