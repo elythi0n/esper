@@ -29,6 +29,7 @@
 //! product decisions about a viewer's chrome, and a debug window that quietly
 //! resampled would hide exactly the artefacts it exists to show.
 
+use esper_capture::cursor::CursorImage;
 use esper_capture::damage::Damage;
 use esper_capture::frame::PixelFormat;
 use esper_capture::geometry::Rect;
@@ -37,9 +38,10 @@ use esper_color::{ColorSpace, I420};
 use esper_present::{PresentError, PresentEvent, Presenter};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
+use x11rb::protocol::render::{ConnectionExt as _, CreatePictureAux};
 use x11rb::protocol::xproto::{
-    AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask,
-    ImageFormat, PropMode, Window, WindowClass,
+    AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
+    CreateWindowAux, EventMask, ImageFormat, PropMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -68,6 +70,11 @@ pub struct X11Presenter {
     /// Whether the person's input is reported. See
     /// [`esper_present::Presenter::forward_input`].
     forwarding: bool,
+    /// The 32-bit ARGB picture format, if this server has one.
+    argb_format: Option<x11rb::protocol::render::Pictformat>,
+    /// The cursor the window is currently wearing, kept so it can be freed
+    /// when it is replaced.
+    cursor: Option<x11rb::protocol::xproto::Cursor>,
     /// `WM_DELETE_WINDOW`, so closing the window is a request rather than a
     /// severed connection.
     delete_window: u32,
@@ -203,6 +210,33 @@ impl X11Presenter {
             .map_err(|e| fail(e.to_string()))?;
         conn.flush().map_err(|e| fail(e.to_string()))?;
 
+        // **The ARGB picture format, found rather than assumed.** A cursor
+        // with an alpha channel is built through RENDER, and RENDER names its
+        // formats by id: the one wanted is 32 bits deep with eight bits of
+        // alpha. A server without it can still show pictures, so this is
+        // `None` rather than a refusal to open.
+        let argb_format = conn
+            .render_query_pict_formats()
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|reply| {
+                reply
+                    .formats
+                    .iter()
+                    .find(|f| {
+                        f.depth == 32
+                            && f.type_ == x11rb::protocol::render::PictType::DIRECT
+                            && f.direct.alpha_mask == 0xFF
+                    })
+                    .map(|f| f.id)
+            });
+        if argb_format.is_none() {
+            tracing::warn!(
+                "no 32-bit ARGB picture format: the remote pointer cannot be worn by the \
+                 window on this server"
+            );
+        }
+
         let stride = (width as usize).saturating_mul(BPP);
         let bytes = stride.saturating_mul(height as usize);
         let segment = match esper_capture_x11::shm::probe(&conn) {
@@ -233,6 +267,8 @@ impl X11Presenter {
             segment,
             open: true,
             forwarding: false,
+            argb_format,
+            cursor: None,
             delete_window,
         })
     }
@@ -431,6 +467,124 @@ impl Presenter for X11Presenter {
 
     fn forward_input(&mut self, on: bool) {
         self.forwarding = on;
+    }
+
+    /// **The window wears the remote pointer.**
+    ///
+    /// Built through RENDER because a cursor with an alpha channel needs it —
+    /// the core protocol's cursors are two colours and a mask — and handed to
+    /// the window as its own cursor, so the server draws it wherever the local
+    /// pointer is. Nothing is composited and there is no position to track:
+    /// the pointer moves at the speed of the hand.
+    ///
+    /// A hidden pointer is a fully transparent cursor, which is exactly how
+    /// applications hide one and so needs no separate mechanism.
+    fn set_cursor(&mut self, image: Option<&CursorImage>) -> Result<(), PresentError> {
+        let fail = |detail: String| PresentError::Backend {
+            backend: BACKEND,
+            detail,
+        };
+        let Some(format) = self.argb_format else {
+            return Err(fail(
+                "this server has no 32-bit ARGB picture format, so a cursor with an                  alpha channel cannot be built"
+                    .to_owned(),
+            ));
+        };
+
+        // A 1x1 transparent cursor for the hidden state: cheaper than a full
+        // transparent bitmap and impossible to get wrong.
+        let (width, height, hotspot, pixels) = match image {
+            Some(i) if i.is_consistent() => (
+                i.width,
+                i.height,
+                (i.hotspot_x, i.hotspot_y),
+                i.rgba.clone(),
+            ),
+            Some(_) => {
+                return Err(fail("the cursor's pixels do not match its size".to_owned()));
+            }
+            None => (1, 1, (0, 0), vec![0, 0, 0, 0]),
+        };
+
+        let pixmap = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .create_pixmap(32, pixmap, self.window, width, height)
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+
+        // The image, as the server wants it: BGRA bytes on a little-endian
+        // server, which is what `image_byte_order` says. Built from the
+        // protocol's named RGBA rather than assumed, so a big-endian server
+        // gets the right bytes too.
+        let mut data = Vec::with_capacity(pixels.len());
+        let big_endian =
+            self.conn.setup().image_byte_order == x11rb::protocol::xproto::ImageOrder::MSB_FIRST;
+        for px in pixels.as_chunks::<4>().0 {
+            let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
+            if big_endian {
+                data.extend_from_slice(&[a, r, g, b]);
+            } else {
+                data.extend_from_slice(&[b, g, r, a]);
+            }
+        }
+
+        let gc = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .create_gc(gc, pixmap, &CreateGCAux::new())
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .put_image(
+                ImageFormat::Z_PIXMAP,
+                pixmap,
+                gc,
+                width,
+                height,
+                0,
+                0,
+                0,
+                32,
+                &data,
+            )
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        let _ = self.conn.free_gc(gc);
+
+        let picture = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .render_create_picture(picture, pixmap, format, &CreatePictureAux::new())
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+
+        let cursor = self.conn.generate_id().map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .render_create_cursor(cursor, picture, hotspot.0, hotspot.1)
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        self.conn
+            .change_window_attributes(
+                self.window,
+                &ChangeWindowAttributesAux::new().cursor(cursor),
+            )
+            .map_err(|e| fail(e.to_string()))?
+            .check()
+            .map_err(|e| fail(e.to_string()))?;
+        self.conn.flush().map_err(|e| fail(e.to_string()))?;
+
+        // The pixmap and the picture have done their work; the cursor holds
+        // its own copy. The *previous* cursor goes now rather than before, so
+        // the window is never briefly without one.
+        let _ = self.conn.render_free_picture(picture);
+        let _ = self.conn.free_pixmap(pixmap);
+        if let Some(old) = self.cursor.replace(cursor) {
+            let _ = self.conn.free_cursor(old);
+        }
+        Ok(())
     }
 
     fn present(&mut self, picture: &I420, damage: &Damage) -> Result<(), PresentError> {

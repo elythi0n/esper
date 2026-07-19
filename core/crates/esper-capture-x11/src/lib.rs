@@ -17,6 +17,7 @@
 //! engine without a desktop being installed anywhere near it.
 
 pub mod capturer;
+pub mod cursor;
 pub mod damage;
 pub mod format;
 pub mod monitors;

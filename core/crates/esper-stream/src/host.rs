@@ -375,8 +375,14 @@ impl HostStream {
                 self.packetizer.set_ssrc(ssrc_for(select.monitor));
                 Ok(Handled::Announce(self.config()))
             }
-            // Host to controller only: a controller announcing a config
-            // would be telling the host what its own screen is.
+            // Host to controller only, both of them: a controller announcing
+            // a config would be telling the host what its own screen is, and
+            // a controller describing the pointer would be describing a
+            // pointer it does not have.
+            MediaMessage::Cursor(_) => Err(StreamError::WrongDirection {
+                role: Role::Controller,
+                what: name_of(message),
+            }),
             MediaMessage::Config(_) => Err(StreamError::WrongDirection {
                 role: Role::Controller,
                 what: name_of(message),
@@ -417,6 +423,7 @@ const fn name_of(message: &MediaMessage) -> &'static str {
         MediaMessage::Select(_) => "a monitor selection",
         MediaMessage::Hint(_) => "a quality hint",
         MediaMessage::Keyframe(_) => "a keyframe request",
+        MediaMessage::Cursor(c) => c.name(),
     }
 }
 

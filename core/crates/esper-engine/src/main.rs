@@ -9,6 +9,7 @@
 //! built on top of that.
 
 mod backend;
+mod cursor_task;
 mod discover_cmd;
 mod injector;
 mod input_source;

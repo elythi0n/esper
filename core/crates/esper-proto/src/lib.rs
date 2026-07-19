@@ -9,6 +9,7 @@
 //! decoded and re-encoded by both languages and must round-trip byte-identical.
 
 pub mod codes;
+pub mod cursor;
 pub mod frame;
 pub mod input;
 pub mod message;
@@ -29,6 +30,7 @@ pub mod replay;
 // the glob is not a shortcut. It is the accurate statement: everything public
 // in these modules is public here.
 pub use codes::*;
+pub use cursor::*;
 pub use frame::*;
 pub use input::*;
 pub use message::*;

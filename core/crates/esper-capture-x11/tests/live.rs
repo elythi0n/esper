@@ -16,12 +16,13 @@
 use std::time::Duration;
 
 use esper_capture::capturer::{Capture, CaptureError, Capturer, MonitorId};
+use esper_capture::cursor::CursorSource as _;
 use esper_capture::damage::Damage;
 use esper_capture_x11::capturer::{Transport, X11Capturer};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xproto::{
-    BackingStore, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, MapState, StackMode,
-    Window, WindowClass,
+    BackingStore, ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, MapState,
+    Rectangle, StackMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -645,6 +646,167 @@ fn switching_to_a_monitor_the_server_does_not_have_is_refused() {
     assert_eq!(cap.monitors().len(), count);
     // And it still captures.
     let _ = first_frame(&mut cap);
+}
+
+/// **The pointer, read the way a session reads it.**
+///
+/// XFIXES answers the whole question at once — shape, hotspot, position and a
+/// serial — which is what makes "send it only when it changes" a comparison
+/// rather than a guess.
+#[test]
+fn the_pointer_can_be_read_with_its_hotspot_and_position() {
+    if std::env::var_os("DISPLAY").is_none() {
+        println!("skipped: no DISPLAY. CI runs these under Xvfb.");
+        return;
+    }
+    let _display = exclusive();
+    let mut source = match esper_capture_x11::cursor::X11Cursor::open() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("skipped: no XFIXES cursor here ({e})");
+            return;
+        }
+    };
+    let Some(state) = source.read().expect("a reading") else {
+        println!("skipped: this display has no pointer (a bare Xvfb has none)");
+        return;
+    };
+    let Some(image) = state.image else {
+        println!("skipped: the pointer is hidden on this display");
+        return;
+    };
+    assert!(
+        image.is_consistent(),
+        "a {}x{} cursor with hotspot {},{} and {} bytes",
+        image.width,
+        image.height,
+        image.hotspot_x,
+        image.hotspot_y,
+        image.rgba.len()
+    );
+    assert!(
+        !image.is_invisible(),
+        "a visible pointer has a visible pixel"
+    );
+    println!(
+        "{}x{} pointer, hotspot {},{}, serial {}, at {},{}",
+        image.width, image.height, image.hotspot_x, image.hotspot_y, state.serial, state.x, state.y
+    );
+}
+
+/// **A hidden pointer, which on X11 means a transparent one.**
+///
+/// There is no request that asks whether the cursor is hidden: an application
+/// hides it by setting a fully transparent cursor, so an invisible image *is*
+/// the hidden state. Set one here and check it is read as hidden rather than
+/// as four bytes of nothing.
+#[test]
+fn a_transparent_cursor_reads_as_hidden() {
+    if std::env::var_os("DISPLAY").is_none() {
+        println!("skipped: no DISPLAY. CI runs these under Xvfb.");
+        return;
+    }
+    if std::env::var_os("ESPER_DISPLAY_TESTS").is_none() {
+        println!(
+            "skipped: set ESPER_DISPLAY_TESTS=1 to allow changing the pointer on this display"
+        );
+        return;
+    }
+    let _display = exclusive();
+    let mut source = match esper_capture_x11::cursor::X11Cursor::open() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("skipped: no XFIXES cursor here ({e})");
+            return;
+        }
+    };
+
+    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let root = conn.setup().roots.get(screen_num).expect("a screen").root;
+    let before = conn
+        .get_window_attributes(root)
+        .expect("attributes")
+        .reply()
+        .map(|_| ())
+        .ok();
+    let _ = before;
+
+    // An invisible cursor: a 1x1 bitmap with nothing in it, used as both the
+    // source and the mask. This is exactly how every application hides the
+    // pointer.
+    let empty = conn.generate_id().expect("an id");
+    conn.create_pixmap(1, empty, root, 1, 1)
+        .expect("pixmap")
+        .check()
+        .expect("created");
+    let gc = conn.generate_id().expect("an id");
+    conn.create_gc(gc, empty, &CreateGCAux::new().foreground(0))
+        .expect("gc")
+        .check()
+        .expect("created");
+    conn.poly_fill_rectangle(
+        empty,
+        gc,
+        &[Rectangle {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }],
+    )
+    .expect("fill")
+    .check()
+    .expect("filled");
+    let invisible = conn.generate_id().expect("an id");
+    conn.create_cursor(invisible, empty, empty, 0, 0, 0, 0, 0, 0, 0, 0)
+        .expect("cursor")
+        .check()
+        .expect("created");
+    conn.change_window_attributes(
+        root,
+        &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().cursor(invisible),
+    )
+    .expect("set")
+    .check()
+    .expect("set");
+    conn.flush().expect("flush");
+
+    let mut hidden = false;
+    for _ in 0..40 {
+        if let Ok(Some(state)) = source.read()
+            && state.image.is_none()
+        {
+            hidden = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // Put a visible pointer back before asserting, so a failure does not
+    // leave the display without one.
+    let restored = conn.generate_id().expect("an id");
+    let font = conn.generate_id().expect("an id");
+    let _ = conn.open_font(font, b"cursor").map(|c| c.check());
+    let _ = conn
+        .create_glyph_cursor(
+            restored, font, font, 68, 69, 0, 0, 0, 0xFFFF, 0xFFFF, 0xFFFF,
+        )
+        .map(|c| c.check());
+    let _ = conn
+        .change_window_attributes(
+            root,
+            &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().cursor(restored),
+        )
+        .map(|c| c.check());
+    let _ = conn.flush();
+    let _ = conn.free_cursor(invisible);
+    let _ = conn.free_gc(gc);
+    let _ = conn.free_pixmap(empty);
+
+    assert!(
+        hidden,
+        "a fully transparent cursor must be read as a hidden pointer"
+    );
 }
 
 /// **The pixels, not just the geometry.**

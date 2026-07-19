@@ -434,6 +434,21 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     })
 }
 
+/// Wait for something to say about the pointer, or for ever when nothing is
+/// watching it.
+///
+/// The same shape as [`wait_for_panic`], and for the same reason: a `select!`
+/// branch needs a future either way, and a host with no cursor source must not
+/// fall out of its loop immediately.
+async fn wait_for_cursor(
+    pointer: Option<&mut crate::cursor_task::Messages>,
+) -> Option<MediaMessage> {
+    match pointer {
+        Some(queue) => queue.recv().await.map(MediaMessage::Cursor),
+        None => std::future::pending().await,
+    }
+}
+
 /// Wait for the panic key, or for ever when there is none.
 ///
 /// A `select!` branch needs a future either way, and a host with no working
@@ -548,6 +563,17 @@ async fn serve_one(
         config.width, config.height, config.max_fps, config.ssrc
     );
 
+    // Where the captured monitor is on the desktop, so a pointer position can
+    // be expressed as a fraction of it. Taken from the config that was just
+    // announced, so both ends are working from the same list.
+    let selected_geometry = config
+        .monitors
+        .iter()
+        .find(|m| m.id == config.selected)
+        .map_or((0, 0, config.width, config.height), |m| {
+            (m.x, m.y, m.width, m.height)
+        });
+
     // **Whether this device may drive the machine, decided here and once.**
     // Read from the paired store rather than from anything the peer said: the
     // controller's own opinion of its permissions is not evidence.
@@ -613,7 +639,45 @@ async fn serve_one(
         });
     }
 
-    let served = serve(link, media, device, parked, stopping, presses, indicator).await;
+    // **The pointer, read on its own schedule.** A cursor sampled at the frame
+    // rate is a cursor sampled at five hertz on a quiet desktop, which is why
+    // this is not part of the sending loop.
+    //
+    // A host with no cursor source — a synthetic screen has no pointer — says
+    // so once and sends nothing, rather than inventing a pointer in the middle
+    // of the picture.
+    let (watch, pointer) = match crate::cursor_task::start((
+        config.selected,
+        selected_geometry.0,
+        selected_geometry.1,
+        selected_geometry.2,
+        selected_geometry.3,
+    )) {
+        Ok((watch, messages)) => {
+            println!("      pointer    {} — sent out of band", watch.backend());
+            (Some(watch), Some(messages))
+        }
+        Err(e) => {
+            println!("      pointer    not sent ({e})");
+            (None, None)
+        }
+    };
+
+    let served = serve(
+        link,
+        media,
+        device,
+        parked,
+        stopping,
+        Attending {
+            indicator,
+            presses,
+            pointer,
+            watch: watch.as_ref(),
+        },
+    )
+    .await;
+    drop(watch);
     if let Some(indicator) = indicator {
         indicator.hide();
     }
@@ -765,14 +829,31 @@ fn monitors_from(config: &esper_proto::StreamConfig) -> Vec<esper_input::Monitor
 
 /// Run a session until it ends, and decide what survives it.
 #[allow(clippy::result_large_err)]
+/// The things a session leans on that are not the session.
+///
+/// Bundled because passing them one by one had grown past the point where a
+/// reader could tell which was which — and because they belong together: each
+/// is something the *host* provides for the duration of a session, owned by
+/// the caller and outliving nothing.
+struct Attending<'a> {
+    /// The session indicator and the panic key.
+    indicator: Option<&'a crate::presence_task::Indicator>,
+    /// Presses of the panic key, taken one at a time.
+    presses: Option<&'a mut crate::presence_task::Presses>,
+    /// What the host's pointer is doing.
+    pointer: Option<crate::cursor_task::Messages>,
+    /// The handle that says which monitor the pointer is watched on.
+    watch: Option<&'a crate::cursor_task::CursorWatch>,
+}
+
+#[allow(clippy::result_large_err)]
 async fn serve(
     link: HostLink,
     media: esper_transport::MediaChannel,
     device: [u8; 32],
     parked: Option<Parked>,
     mut stopping: tokio::sync::watch::Receiver<bool>,
-    mut presses: Option<&mut crate::presence_task::Presses>,
-    indicator: Option<&crate::presence_task::Indicator>,
+    mut attending: Attending<'_>,
 ) -> Served {
     // The controller's messages have to reach the pipeline, which lives on the
     // sending thread; and a monitor switch has to be announced back, which
@@ -886,9 +967,10 @@ async fn serve(
     loop {
         let turn = tokio::select! {
             _ = stopping.changed() => Turn::Stop,
-            () = wait_for_panic(presses.as_deref_mut()) => Turn::Panic,
+            () = wait_for_panic(attending.presses.as_deref_mut()) => Turn::Panic,
             incoming = control.recv::<MediaMessage>() => Turn::FromController(incoming),
             outgoing = from_pipeline.recv() => Turn::ToController(outgoing),
+            cursor = wait_for_cursor(attending.pointer.as_mut()) => Turn::ToController(cursor),
         };
         match turn {
             // **The reason travels.** A controller whose host simply stopped
@@ -912,7 +994,7 @@ async fn serve(
                 // loop, which then found the queue empty — so the session
                 // ended correctly and nothing was said and nothing was
                 // locked.
-                panic_now(indicator);
+                panic_now(attending.indicator);
                 break;
             }
             Turn::FromController(Ok(message)) => {
@@ -923,6 +1005,16 @@ async fn serve(
             // The peer went away, which is the ordinary end of a session.
             Turn::FromController(Err(_)) => break,
             Turn::ToController(Some(message)) => {
+                // **A new config means a new monitor to watch.** Without this
+                // a switch would leave every pointer position expressed as a
+                // fraction of the screen that is no longer on show — drawn at
+                // the right fraction of the wrong monitor.
+                if let MediaMessage::Config(config) = &message
+                    && let Some(watch) = attending.watch
+                    && let Some(m) = config.monitors.iter().find(|m| m.id == config.selected)
+                {
+                    watch.watch(m.id, m.x, m.y, m.width, m.height);
+                }
                 if control.send(&message).await.is_err() {
                     break;
                 }
@@ -1149,6 +1241,8 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let mut closed_by_peer: Option<(esper_proto::Reason, String)> = None;
         let mut pictures = 0u64;
         let mut skipped = 0u64;
+        let mut cursor_shapes = 0u64;
+        let mut cursor_moves = 0u64;
         let mut out = Vec::new();
         // **The deadline comes from the stream, not from here.**
         //
@@ -1283,6 +1377,55 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     }
                 }
             }
+            // **What the host said about its pointer.**
+            //
+            // The shape is handed to the window, which then draws it at the
+            // *local* pointer — so it moves at the speed of the person's hand
+            // rather than at the speed of the link. That is the whole reason
+            // the cursor travels separately from the video.
+            //
+            // The position is not used for drawing in a session being driven:
+            // the local pointer is already where the person put it, and a
+            // second opinion arriving a network away later would only make it
+            // stutter. It is counted so a session can say the pointer was
+            // being tracked.
+            for message in link.take_cursor() {
+                match message {
+                    esper_proto::CursorMessage::Shape(shape) => {
+                        cursor_shapes = cursor_shapes.saturating_add(1);
+                        let image = match &shape.image {
+                            esper_proto::CursorImage::Hidden => None,
+                            esper_proto::CursorImage::Bitmap {
+                                width,
+                                height,
+                                hotspot_x,
+                                hotspot_y,
+                                rgba,
+                            } => Some(esper_capture::cursor::CursorImage {
+                                width: *width,
+                                height: *height,
+                                hotspot_x: *hotspot_x,
+                                hotspot_y: *hotspot_y,
+                                rgba: rgba.clone(),
+                            }),
+                        };
+                        if let Some(p) = presenter.as_mut()
+                            && let Err(e) = p.set_cursor(image.as_ref())
+                        {
+                            // Not fatal: a viewer that cannot wear the remote
+                            // pointer still shows the screen, and saying so
+                            // once beats a line per shape change.
+                            if cursor_shapes == 1 {
+                                println!("  · the window cannot wear the remote pointer ({e})");
+                            }
+                        }
+                    }
+                    esper_proto::CursorMessage::Moved(_) => {
+                        cursor_moves = cursor_moves.saturating_add(1);
+                    }
+                }
+            }
+
             // What the person did in the window: closed it, or drove the
             // host with it.
             let happened = presenter
@@ -1421,6 +1564,12 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let jitter = link.jitter();
         let seconds = started.elapsed().as_secs_f64().max(0.001);
         println!("  pictures   {pictures} shown, {skipped} not shown");
+        if cursor_shapes > 0 || cursor_moves > 0 {
+            println!(
+                "  pointer    {cursor_shapes} shape(s), {cursor_moves} position(s) — out of \
+                 band, drawn locally"
+            );
+        }
         // Said only when it happened. Input this window produced and the
         // protocol has no way to carry — a key HID does not name, a pointer
         // outside the picture — is dropped here rather than approximated, and

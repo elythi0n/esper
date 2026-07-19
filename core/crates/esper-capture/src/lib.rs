@@ -2,6 +2,7 @@
 //! source that needs no display.
 
 pub mod capturer;
+pub mod cursor;
 pub mod damage;
 pub mod frame;
 pub mod gate;

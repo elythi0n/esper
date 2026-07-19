@@ -62,6 +62,14 @@ pub struct ControllerStats {
 }
 
 /// The receiving half of a media session.
+/// The most pointer messages held for a caller that has not drained them.
+///
+/// A pointer produces at most a hundred and twenty-five positions a second and
+/// a caller drains them every time round its loop, so this is reached only by
+/// a caller that has stopped looking — and then the *oldest* position is the
+/// one worth dropping.
+const MAX_PENDING_CURSOR: usize = 256;
+
 pub struct ControllerStream {
     depacketizer: Depacketizer,
     decoder: Option<Box<dyn VideoDecoder>>,
@@ -74,6 +82,8 @@ pub struct ControllerStream {
     awaiting_keyframe: bool,
     /// Requests for the caller to send.
     outbound: Vec<MediaMessage>,
+    /// What the host has said about the pointer, for the caller to act on.
+    cursor: Vec<esper_proto::CursorMessage>,
     /// When to stop waiting for a frame.
     ///
     /// Owned here rather than left to the caller, because a caller that has to
@@ -113,6 +123,7 @@ impl ControllerStream {
             expected: (config.width, config.height),
             awaiting_keyframe: true,
             outbound: Vec::new(),
+            cursor: Vec::new(),
             jitter: Jitter::new(config.max_fps, config.clock_hz),
             stats: ControllerStats::default(),
         };
@@ -442,9 +453,30 @@ impl ControllerStream {
         }
         match message {
             MediaMessage::Config(config) => self.reconfigure(config),
-            // Nothing else may travel host to controller, which
-            // `may_be_sent_by` has already established.
-            _ => Ok(()),
+            // **Kept for the caller rather than acted on here.** What to do
+            // with a pointer is a viewer's decision — wear it, draw it, ignore
+            // it — and this layer has no window to put it in.
+            MediaMessage::Cursor(cursor) => {
+                self.cursor.push(cursor.clone());
+                // Bounded, because a peer that sends pointer messages faster
+                // than a caller drains them must not be able to grow this
+                // without limit. The *oldest* position goes: a stale one is
+                // worth less than the one after it.
+                while self.cursor.len() > MAX_PENDING_CURSOR {
+                    self.cursor.remove(0);
+                }
+                Ok(())
+            }
+            // Listed rather than caught by a wildcard, so a message added to
+            // the protocol later cannot be silently ignored here: the compiler
+            // will not accept a non-exhaustive match.
+            MediaMessage::Select(_) | MediaMessage::Hint(_) | MediaMessage::Keyframe(_) => Ok(()),
         }
+    }
+
+    /// Everything the host has said about the pointer since this was last
+    /// called.
+    pub fn take_cursor(&mut self) -> Vec<esper_proto::CursorMessage> {
+        std::mem::take(&mut self.cursor)
     }
 }

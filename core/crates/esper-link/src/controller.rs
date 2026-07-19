@@ -229,6 +229,12 @@ impl ControllerLink {
         Ok(())
     }
 
+    /// Everything the host has said about the pointer since this was last
+    /// called.
+    pub fn take_cursor(&mut self) -> Vec<esper_proto::CursorMessage> {
+        self.stream.take_cursor()
+    }
+
     /// Wait for the next control message from the host.
     pub async fn recv_control(&mut self) -> Result<MediaMessage, LinkError> {
         Ok(self.control.recv().await?)

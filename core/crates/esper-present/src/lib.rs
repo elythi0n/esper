@@ -21,6 +21,7 @@
 //! is free to ignore it and repaint everything; one that honours it is why a
 //! static screen costs nothing all the way to the glass.
 
+use esper_capture::cursor::CursorImage;
 use esper_capture::damage::Damage;
 use esper_color::I420;
 
@@ -132,6 +133,26 @@ pub trait Presenter: std::fmt::Debug {
     /// Whether the window is still there.
     fn is_open(&self) -> bool;
 
+    /// Wear the remote pointer, or hide it.
+    ///
+    /// # Why this is a cursor and not a composite
+    ///
+    /// The obvious implementation draws the pointer over the picture. The
+    /// better one hands it to the window server as **the window's own
+    /// cursor**: the server then draws it at the local pointer's position,
+    /// which is where the person's hand is, so the pointer moves at the speed
+    /// of the hand and not at the speed of the link. Nothing is composited,
+    /// nothing has to be repainted behind it, and there is no position to keep
+    /// up to date.
+    ///
+    /// That works because in a session being *driven* the local pointer and
+    /// the remote one are the same pointer. A session only being *watched* is
+    /// the other case — the host's pointer moves on its own there — and it
+    /// needs the position drawn into the picture, which is a different job.
+    ///
+    /// `None` hides it, which is what a game or a drawing tool asks for.
+    fn set_cursor(&mut self, image: Option<&CursorImage>) -> Result<(), PresentError>;
+
     /// Report the person's keys and pointer, or keep them.
     ///
     /// **Off by default, and the default is not the interesting case.** A
@@ -168,6 +189,9 @@ pub struct NullPresenter {
     /// Whether input would be forwarded, for a caller checking that a session
     /// turned it on.
     pub forwarding: bool,
+    /// The last cursor this was asked to wear: `None` if never asked,
+    /// `Some(None)` if asked to hide it.
+    pub cursor: Option<Option<CursorImage>>,
     /// Every picture's damage, in order.
     pub shown: Vec<Damage>,
     /// Luma samples that would have been converted, damage taken into account.
@@ -182,6 +206,7 @@ impl NullPresenter {
         Self {
             size: (width, height),
             forwarding: false,
+            cursor: None,
             shown: Vec::new(),
             pixels: 0,
             open: true,
@@ -241,6 +266,11 @@ impl Presenter for NullPresenter {
 
     fn forward_input(&mut self, on: bool) {
         self.forwarding = on;
+    }
+
+    fn set_cursor(&mut self, image: Option<&CursorImage>) -> Result<(), PresentError> {
+        self.cursor = Some(image.cloned());
+        Ok(())
     }
 }
 

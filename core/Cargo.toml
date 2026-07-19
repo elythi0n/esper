@@ -55,6 +55,12 @@ x11rb = { version = "0.14", default-features = false, features = [
     # *clickable*: without an empty input shape, four windows around the edge
     # of the screen would swallow every click on the edge of the screen.
     "shape",
+    # The remote pointer becomes the viewer window's own cursor, which is what
+    # makes it cost nothing: the server draws it at the local pointer, so it
+    # moves at the speed of the hand rather than at the speed of the link. An
+    # ARGB cursor with an alpha channel needs RENDER; the core protocol's
+    # cursors are two-colour.
+    "render",
 ] }
 # Already in the tree through quinn, and already vetted, so this costs nothing
 # new. Wanted for `SO_REUSEPORT` — without it an mDNS responder cannot start on

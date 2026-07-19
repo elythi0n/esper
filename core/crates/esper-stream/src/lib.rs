@@ -24,11 +24,13 @@
 //! eventually make a decision on the transport's behalf.
 
 pub mod controller;
+pub mod cursor;
 pub mod host;
 pub mod jitter;
 pub mod resume;
 
 pub use controller::{ControllerStats, ControllerStream, Decoded};
+pub use cursor::{CursorTracker, POSITION_INTERVAL};
 pub use host::{Handled, HostStep, HostStream, ssrc_for};
 pub use jitter::{Jitter, JitterStats};
 pub use resume::{Expired, PARK_TIMEOUT, Parked, ResumeRefused};

@@ -932,6 +932,14 @@ pub enum MediaMessage {
     Hint(QualityHint),
     /// Send a picture I can start from. Controller to host.
     Keyframe(KeyframeRequest),
+    /// What the pointer looks like and where it is. Host to controller.
+    ///
+    /// On this stream rather than one of its own: a cursor message is a few
+    /// bytes and the only other traffic here is a `Config`, which is rare and
+    /// small. Input got its own stream because a keystroke queued behind a
+    /// monitor list would be a keystroke a person notices; a cursor position
+    /// queued behind one is a position that is about to be superseded anyway.
+    Cursor(crate::CursorMessage),
 }
 
 impl MediaMessage {
@@ -942,6 +950,7 @@ impl MediaMessage {
             Self::Config(c) => c.is_well_formed(),
             Self::Select(_) | Self::Keyframe(_) => true,
             Self::Hint(h) => h.is_well_formed(),
+            Self::Cursor(c) => c.is_well_formed(),
         }
     }
 
@@ -955,7 +964,7 @@ impl MediaMessage {
     #[must_use]
     pub const fn may_be_sent_by(&self, role: Role) -> bool {
         match self {
-            Self::Config(_) => matches!(role, Role::Host),
+            Self::Config(_) | Self::Cursor(_) => matches!(role, Role::Host),
             Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) => {
                 matches!(role, Role::Controller)
             }

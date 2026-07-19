@@ -17,10 +17,25 @@ use esper_capture::geometry::Rect;
 use esper_color::{ColorSpace, I420};
 use esper_present::{PresentEvent, Presenter};
 use esper_present_x11::X11Presenter;
+use std::time::Duration;
 use x11rb::connection::Connection as _;
+use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
 
 /// **X11 windows have no backing store**, so an obscured window's pixels are
+/// Whether this run may move the pointer on the display it can see.
+///
+/// Warping somebody's pointer while they run the test suite is the kind of
+/// thing that gets a suite turned off. CI asks, where the display is an `Xvfb`
+/// nobody is looking at.
+fn may_disturb_the_display() -> bool {
+    if std::env::var_os("ESPER_DISPLAY_TESTS").is_none() {
+        println!("skipped: set ESPER_DISPLAY_TESTS=1 to allow moving the pointer on this display");
+        return false;
+    }
+    true
+}
+
 /// undefined — and every window here is created at the origin, because that is
 /// where a window with no window manager lands. Two of these tests running at
 /// once therefore cover each other and read whichever won.
@@ -336,6 +351,183 @@ fn a_window_cannot_be_resized_to_nothing() {
     assert_eq!(p.size(), (64, 48));
     p.present(&flat(64, 48, 126, 90, 200), &Damage::Everything)
         .expect("unharmed");
+}
+
+/// **The pointer the server is actually drawing.**
+///
+/// There is no request that reads a window's cursor attribute back, so the
+/// question is put to the server the way that does work: put the pointer over
+/// the window, then ask XFIXES for the cursor *in force*. What comes back is
+/// what a person would be looking at — which also settles byte order and
+/// premultiplication, the two things most likely to be quietly wrong.
+#[test]
+fn the_pointer_the_server_draws_is_the_one_it_was_given() {
+    let _screen = exclusive();
+    if !may_disturb_the_display() {
+        return;
+    }
+    let Some(mut p) = open(64, 64) else { return };
+    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    if conn.xfixes_query_version(5, 0).map(|c| c.reply()).is_err() {
+        println!("skipped: no XFIXES on this server");
+        return;
+    }
+    let _ = screen_num;
+
+    // Four pixels, each a different colour, so a channel swap cannot pass and
+    // neither can a row placed wrongly.
+    let want: [[u8; 4]; 4] = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 0, 255],
+    ];
+    let image = esper_capture::cursor::CursorImage {
+        width: 2,
+        height: 2,
+        hotspot_x: 1,
+        hotspot_y: 0,
+        rgba: want.iter().flatten().copied().collect(),
+    };
+    p.set_cursor(Some(&image)).expect("worn");
+
+    // The cursor in force is the one belonging to the window under the
+    // pointer, so the pointer has to be over ours.
+    conn.warp_pointer(x11rb::NONE, p.window(), 0, 0, 0, 0, 20, 20)
+        .expect("warp")
+        .check()
+        .expect("warped");
+    conn.flush().expect("flush");
+
+    let mut seen = None;
+    for _ in 0..40 {
+        if let Ok(cookie) = conn.xfixes_get_cursor_image()
+            && let Ok(reply) = cookie.reply()
+            && reply.width == 2
+            && reply.height == 2
+        {
+            seen = Some(reply);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let Some(reply) = seen else {
+        println!("skipped: the server never reported a 2x2 cursor in force");
+        return;
+    };
+
+    assert_eq!((reply.xhot, reply.yhot), (1, 0), "the hotspot must survive");
+    // XFIXES hands back premultiplied ARGB in a `u32`, which is what was put
+    // in — so the comparison is on the numbers rather than on bytes, and the
+    // byte order this backend chose is what makes them match.
+    let got: Vec<[u8; 4]> = reply
+        .cursor_image
+        .iter()
+        .map(|argb| {
+            [
+                u8::try_from((argb >> 16) & 0xFF).unwrap_or(0),
+                u8::try_from((argb >> 8) & 0xFF).unwrap_or(0),
+                u8::try_from(argb & 0xFF).unwrap_or(0),
+                u8::try_from((argb >> 24) & 0xFF).unwrap_or(0),
+            ]
+        })
+        .collect();
+    assert_eq!(
+        got,
+        want.to_vec(),
+        "the pointer the server is drawing is not the one it was given"
+    );
+}
+
+/// **Hidden is a transparent pointer, and the server agrees it is.**
+#[test]
+fn a_hidden_pointer_is_transparent_to_the_server() {
+    let _screen = exclusive();
+    if !may_disturb_the_display() {
+        return;
+    }
+    let Some(mut p) = open(64, 64) else { return };
+    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    if conn.xfixes_query_version(5, 0).map(|c| c.reply()).is_err() {
+        println!("skipped: no XFIXES on this server");
+        return;
+    }
+    let _ = screen_num;
+    p.set_cursor(None).expect("hidden");
+    conn.warp_pointer(x11rb::NONE, p.window(), 0, 0, 0, 0, 20, 20)
+        .expect("warp")
+        .check()
+        .expect("warped");
+    conn.flush().expect("flush");
+
+    for _ in 0..40 {
+        if let Ok(cookie) = conn.xfixes_get_cursor_image()
+            && let Ok(reply) = cookie.reply()
+            && reply.cursor_image.iter().all(|argb| argb >> 24 == 0)
+        {
+            // Every pixel fully transparent: nothing is drawn.
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("the server is still drawing something where the pointer should be hidden");
+}
+
+/// A cursor whose pixels do not match its size is refused rather than built
+/// from whatever happens to be next to it.
+#[test]
+fn a_cursor_whose_pixels_do_not_match_its_size_is_refused() {
+    let _screen = exclusive();
+    let Some(mut p) = open(64, 64) else { return };
+    let broken = esper_capture::cursor::CursorImage {
+        width: 8,
+        height: 8,
+        hotspot_x: 0,
+        hotspot_y: 0,
+        rgba: vec![0; 12],
+    };
+    assert!(p.set_cursor(Some(&broken)).is_err());
+}
+
+/// **The largest cursor a desktop uses, built for real.** 256 square is what X
+/// servers cap at, and a quarter of a megabyte of pixels is where a stride or
+/// byte-order mistake shows as a refusal rather than a picture.
+#[test]
+fn a_full_size_cursor_is_accepted() {
+    let _screen = exclusive();
+    let Some(mut p) = open(64, 64) else { return };
+    let image = esper_capture::cursor::CursorImage {
+        width: 256,
+        height: 256,
+        hotspot_x: 128,
+        hotspot_y: 128,
+        rgba: (0..256u32 * 256)
+            .flat_map(|i| {
+                let v = u8::try_from(i % 251).unwrap_or(0);
+                [v, v, v, 255]
+            })
+            .collect(),
+    };
+    p.set_cursor(Some(&image)).expect("a 256-square cursor");
+}
+
+/// Replacing the cursor many times must not leak them: each new one is worn
+/// and the previous freed.
+#[test]
+fn cursors_can_be_replaced_repeatedly() {
+    let _screen = exclusive();
+    let Some(mut p) = open(64, 64) else { return };
+    for i in 0..40u8 {
+        let image = esper_capture::cursor::CursorImage {
+            width: 8,
+            height: 8,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            rgba: (0..64).flat_map(|_| [i, i, i, 255]).collect(),
+        };
+        p.set_cursor(Some(&image)).expect("worn");
+    }
+    p.set_cursor(None).expect("hidden");
 }
 
 #[test]
