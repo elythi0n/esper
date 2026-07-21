@@ -269,6 +269,50 @@ else
         printf '%s\n' "$out" | sed 's/^/      /'
         fail=1
       fi
+
+      # **A revocation has to reach a session that is already open.** One that
+      # waits for the revoked device to choose to leave is a request, not a
+      # revocation — and this is the only test that can catch it, because the
+      # two halves are in different processes and the only thing they share is
+      # the device store on disk.
+      echo "  — revoking a device that is connected right now"
+      { printf 'echo holding\n'; sleep 15; } | \
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" TERM=dumb \
+        timeout 60 "$BIN/esper-engine" terminal "$host_addr" > "$term_b/revoked.log" 2>&1 &
+      client=$!
+      sleep 3
+      ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" terminal >/dev/null
+      wait "$client" || true
+      if grep -q 'has been revoked' "$term_b/revoked.log"; then
+        printf '  ✓ a live session ended, and the controller was told why\n'
+      else
+        printf '  ✗ revoking a permission did not reach the open session\n'
+        sed 's/^/      /' "$term_b/revoked.log"
+        fail=1
+      fi
+
+      # Unpairing goes further: that key may not even authenticate. `AnyOf` is
+      # a list taken when the host started, so this is the check that the host
+      # is reading the store rather than a copy of it from startup.
+      echo "  — unpairing a device while the host runs"
+      ESPER_HOME="$term_a" "$BIN/esper-engine" forget "$fp" >/dev/null
+      refused=""
+      for _ in $(seq 1 8); do
+        sleep 1
+        out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 30 "$BIN/esper-engine" connect "$host_addr" --seconds 2 2>&1 || true)
+        if printf '%s' "$out" | grep -q 'does not accept this device'; then
+          refused=yes
+          break
+        fi
+      done
+      if [ -n "$refused" ]; then
+        printf '  ✓ a forgotten device cannot connect, and is told to pair again\n'
+      else
+        printf '  ✗ a forgotten device was still able to open a session\n'
+        printf '%s\n' "$out" | sed 's/^/      /'
+        fail=1
+      fi
     fi
   fi
 fi

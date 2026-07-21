@@ -260,7 +260,9 @@ fn exhaustive_witness(e: &Event) {
     // `variants()` below too, and make sure it carries no session content.
     match e {
         Event::Paired { .. }
+        | Event::Unpaired { .. }
         | Event::Revoked { .. }
+        | Event::PermissionsChanged { .. }
         | Event::SessionOpened { .. }
         | Event::SessionClosed { .. }
         | Event::TerminalOpened
@@ -277,7 +279,13 @@ fn variants() -> Vec<Event> {
         Event::Paired {
             name: "laptop".to_owned(),
         },
+        Event::Unpaired {
+            name: "laptop".to_owned(),
+        },
         Event::Revoked { sessions_closed: 2 },
+        Event::PermissionsChanged {
+            granted: vec![Permission::View, Permission::Terminal],
+        },
         Event::SessionOpened {
             granted: vec![Permission::View],
             tier: "relayed".to_owned(),

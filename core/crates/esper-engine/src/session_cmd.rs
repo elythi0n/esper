@@ -233,14 +233,26 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     // Bound inside the runtime: quinn needs one, and binding outside it fails
     // with "no async runtime found", which says nothing about the cause.
     let runtime = net::runtime()?;
-    let endpoint = runtime.block_on(async {
-        Endpoint::bind(
+    let (stopping, permits, endpoint) = runtime.block_on(async {
+        // Both of these are wanted *before* the endpoint exists: the stop
+        // signal so a `SIGTERM` during startup is honoured, and the watched
+        // store because it is what decides which keys may connect at all.
+        let stopping = net::stop_signal()?;
+        let permits = crate::permits::watch(stopping.clone());
+        let endpoint = Endpoint::bind(
             &identity,
             o.listen,
-            Arc::new(AnyOf::new(keys.clone())),
+            // **Not the list this process started with.** `AnyOf` is a
+            // snapshot, so a device forgotten while the host runs could go on
+            // completing handshakes until it was restarted — authenticating a
+            // device this machine no longer knows. Reading the same watched
+            // store the sessions read means `forget` reaches the TLS layer
+            // within the poll interval and without a restart.
+            Arc::new(PairedNow(permits.clone())),
             Arc::new(NoPeers),
         )
-        .map_err(|e| format!("binding {}: {e}", o.listen))
+        .map_err(|e| format!("binding {}: {e}", o.listen))?;
+        Ok::<_, String>((stopping, permits, endpoint))
     })?;
     let bound = endpoint
         .local_addr()
@@ -300,11 +312,11 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     // owns them belongs to the host and not to one session: a shell parked
     // when a link dropped is resumed by the *next* connection from the same
     // device, and a service created per session would have nowhere to keep it.
-    let terminals = TerminalService::new(
+    let terminals = Arc::new(TerminalService::new(
         log.clone(),
         esper_transport::Limits::default(),
         TerminalPolicy::default(),
-    );
+    ));
     println!();
 
     // A session whose transport went away, waiting for its controller to come
@@ -339,7 +351,18 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
         // Every loop that can wait a long time waits on this too. See
         // `net::stop_signal`: noticing a signal in one place and not another
         // is worse than not noticing it at all.
-        let mut stopping = net::stop_signal()?;
+        let mut stopping = stopping;
+
+        // **A parked shell belongs to a device, whether or not anybody is
+        // connected.** Revoking the terminal permission of a device that is
+        // not connected right now would otherwise leave its shell standing
+        // for the fifteen seconds of the park timeout — and leave it
+        // resumable by that device in the meantime, which is the part that
+        // matters.
+        tokio::spawn(drop_parked_when_revoked(
+            Arc::clone(&terminals),
+            permits.clone(),
+        ));
 
         let outcome = loop {
             // Let go of a parked session nobody came back for, before waiting
@@ -418,11 +441,12 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                 o,
                 parked.take(),
                 stopping.clone(),
-                Standing {
+                Machine {
                     indicator: indicator.as_ref(),
                     presses: presses.as_mut(),
                     terminals: &terminals,
                     log: &log,
+                    permits: permits.clone(),
                 },
             )
             .await
@@ -533,6 +557,25 @@ fn accept_deadline(parked_for: Option<Duration>) -> Option<Duration> {
 // exactly the one worth keeping. Boxing it would allocate on the path whose
 // job is not to lose somebody's session.
 #[allow(clippy::result_large_err)]
+/// What to tell somebody whose device the host would not accept.
+///
+/// The transport already distinguishes "you were refused" from "the network
+/// failed"; this turns the first into something to *do*. A user told
+/// "connection lost" checks their router; a user told the host does not know
+/// this device pairs again.
+pub(crate) fn opening_failed(e: esper_transport::SessionError) -> String {
+    match e {
+        esper_transport::SessionError::Refused(why) => [
+            format!("this host does not accept this device ({why})."),
+            "  It may have been unpaired there. Pair again, on both machines:".to_owned(),
+            "      esper-engine pair --listen <addr>            (on the host)".to_owned(),
+            "      esper-engine pair <host-addr> --code <code>  (here)".to_owned(),
+        ]
+        .join("\n"),
+        other => format!("opening the session: {other}"),
+    }
+}
+
 /// The codec this build can decode, by the name the protocol uses.
 ///
 /// One entry, because software H.264 is what Phase 3 shipped. It is named
@@ -569,6 +612,91 @@ async fn agree(control: &mut Control, device: &[u8; 32]) -> Result<Vec<Permissio
         // The peer has already been told the same reason.
         Ok(Answered::Denied(d)) => Err(format!("refused: {}", d.detail)),
         Err(e) => Err(format!("agreeing what the session may do: {e}")),
+    }
+}
+
+/// The keys this machine is paired with, as they are **now**.
+///
+/// `AnyOf` answers from a list taken when it was built, which is the wrong
+/// answer for a host that runs for weeks: a device unpaired in the meantime
+/// would still be authenticated by the TLS layer, and only refused a session
+/// afterwards. Reading the watched store instead means the two layers agree.
+#[derive(Debug)]
+struct PairedNow(crate::permits::Watching);
+
+impl esper_transport::PeerAuthority for PairedNow {
+    fn is_authorized(&self, public_key: &[u8; 32]) -> bool {
+        // Called during the handshake, so: no I/O and no blocking. A watch
+        // borrow reads a lock the watcher holds only for the length of a
+        // swap, and the answer is a lookup in a list of a handful of devices.
+        self.0.borrow().of(public_key).is_some()
+    }
+
+    fn describe(&self) -> &'static str {
+        "any device in this machine's paired list, as it stands now"
+    }
+}
+
+/// Drop parked shells belonging to devices that may no longer have one.
+///
+/// The other half of [`close_when_revoked`], which only runs while a session
+/// is live. Between them, revoking the terminal permission reaches every shell
+/// that device has on this machine.
+async fn drop_parked_when_revoked(
+    terminals: Arc<TerminalService>,
+    mut permits: crate::permits::Watching,
+) {
+    let mut before = Arc::clone(&*permits.borrow());
+    loop {
+        if permits.changed().await.is_err() {
+            return;
+        }
+        let now = Arc::clone(&*permits.borrow_and_update());
+        for peer in before.lost_since(&now, Permission::Terminal) {
+            let dropped = terminals.revoke(&peer);
+            if dropped > 0 {
+                println!(
+                    "  · dropped {dropped} parked shell(s): that device may no longer have one"
+                );
+            }
+        }
+        before = now;
+    }
+}
+
+/// Close a session when its device stops being allowed to have it.
+///
+/// Returns as soon as it has closed one, so the caller can tell a revocation
+/// from an ordinary ending by whether this finished.
+async fn close_when_revoked(
+    media: esper_transport::MediaChannel,
+    mut live: crate::permits::Live,
+    needs: Permission,
+) {
+    use crate::permits::Standing;
+    loop {
+        live.changed().await;
+        let why = match live.standing() {
+            Standing::Unchanged => continue,
+            Standing::Forgotten => "that device is no longer paired".to_owned(),
+            Standing::Narrowed(lost) => {
+                // Only a withdrawal of what this session *is* ends it. Losing
+                // a permission it is not using — a clipboard it never asked
+                // to read — is applied to the next session, because ending a
+                // working session over something it was not doing is a worse
+                // answer than either.
+                if !lost.contains(&needs) {
+                    continue;
+                }
+                format!(
+                    "{} was taken away",
+                    lost.iter().map(|p| p.name()).collect::<Vec<_>>().join(", ")
+                )
+            }
+        };
+        println!("      · ending this session: {why}");
+        media.close(esper_proto::Reason::REVOKED);
+        return;
     }
 }
 
@@ -628,14 +756,15 @@ async fn serve_one(
     o: &HostOptions,
     parked: Option<Parked>,
     stopping: tokio::sync::watch::Receiver<bool>,
-    standing: Standing<'_>,
+    machine: Machine<'_>,
 ) -> Served {
-    let Standing {
+    let Machine {
         indicator,
         presses,
         terminals,
         log,
-    } = standing;
+        permits,
+    } = machine;
     println!(
         "      peer {}  {}",
         session.peer_fingerprint().hex(),
@@ -670,8 +799,39 @@ async fn serve_one(
     // no presenter — which is the whole claim of terminal mode, and it would
     // not be true if the host set a screen up first and answered the shell
     // request on the side.
+    // What this device may do, re-read whenever it is asked rather than frozen
+    // here. The terminal service uses it to decide whether to *keep* a shell
+    // standing, which is a question about now and not about when the session
+    // opened.
+    let live = crate::permits::Live::new(permits.clone(), device, granted.clone());
+
     if granted.contains(&Permission::Terminal) && !granted.contains(&Permission::View) {
-        let outcome = crate::terminal_cmd::serve(&mut control, terminals, &device, &granted).await;
+        // **A revocation has to reach a session that is already running.**
+        // The watchdog closes the connection; the terminal service then
+        // unwinds through its own teardown, and because it re-reads the grant
+        // when it decides whether to park, a revoked device's shell is hung
+        // up rather than left waiting for it to come back.
+        //
+        // A task rather than a `select!` arm: cancelling the service
+        // mid-session would drop a live pseudo-terminal at whatever await it
+        // happened to be sitting on, and teardown is exactly what must not be
+        // skipped.
+        let watchdog = tokio::spawn(close_when_revoked(
+            media.clone(),
+            live.clone(),
+            Permission::Terminal,
+        ));
+        let outcome = crate::terminal_cmd::serve(&mut control, terminals, &device, &live).await;
+        let was_revoked = watchdog.is_finished();
+        watchdog.abort();
+
+        if was_revoked {
+            // Any *other* shell of theirs, parked from an earlier connection,
+            // goes too. Revoking one session and leaving another standing for
+            // the same device would be half a revocation.
+            let dropped = terminals.revoke(&device);
+            println!("      revoked: {dropped} parked session(s) of theirs ended too");
+        }
 
         // **The last thing the shell said is stream data, not a close
         // reason.** Closing a QUIC connection discards whatever has not been
@@ -801,9 +961,10 @@ async fn serve_one(
             // waiting here would hold up the video.
             let accepting = session.control_acceptor();
             let stopping = stopping.clone();
+            let live = live.clone();
             Some(tokio::spawn(async move {
                 match accepting.accept().await {
-                    Ok(control) => serve_input(control, dispatcher, stopping).await,
+                    Ok(control) => serve_input(control, dispatcher, stopping, live).await,
                     Err(e) => tracing::debug!("no input stream on this session: {e}"),
                 }
             }))
@@ -856,6 +1017,7 @@ async fn serve_one(
             presses,
             pointer,
             watch: watch.as_ref(),
+            live: live.clone(),
         },
     )
     .await;
@@ -920,6 +1082,7 @@ async fn serve_input(
     session_input: esper_transport::Control,
     mut dispatcher: esper_input::Dispatcher,
     mut stopping: tokio::sync::watch::Receiver<bool>,
+    mut live: crate::permits::Live,
 ) {
     let mut control = session_input;
     let mut refusals = 0u64;
@@ -934,14 +1097,31 @@ async fn serve_input(
         //
         // Silence with nothing held is not a signal at all: a person watching
         // a screen types nothing, and that is a session working perfectly.
+        // **Control withdrawn stops injection here, at the source.** The
+        // session ends too, a moment later and for the same reason — but the
+        // thing that must not outlive the permission is the injecting, so it
+        // is stopped by the code doing it rather than by the teardown of
+        // something else.
         let message = if dispatcher.held().is_empty() {
             tokio::select! {
                 _ = stopping.changed() => break,
+                () = live.changed() => {
+                    if !esper_transport::Grants::allows(&live, esper_proto::Permission::Control) {
+                        break;
+                    }
+                    continue;
+                }
                 m = control.recv::<esper_proto::InputMessage>() => m,
             }
         } else {
             tokio::select! {
                 _ = stopping.changed() => break,
+                () = live.changed() => {
+                    if !esper_transport::Grants::allows(&live, esper_proto::Permission::Control) {
+                        break;
+                    }
+                    continue;
+                }
                 m = control.recv::<esper_proto::InputMessage>() => m,
                 _ = tokio::time::sleep(HELD_SILENCE) => {
                     if dispatcher.release_all() {
@@ -1023,7 +1203,7 @@ fn monitors_from(config: &esper_proto::StreamConfig) -> Vec<esper_input::Monitor
 /// key is grabbed before the first connection, and a parked shell is resumed
 /// by a *later* one — so they are borrowed per session rather than created in
 /// it.
-struct Standing<'a> {
+struct Machine<'a> {
     /// The session indicator and the panic key.
     indicator: Option<&'a crate::presence_task::Indicator>,
     /// Presses of the panic key, taken one at a time.
@@ -1032,6 +1212,8 @@ struct Standing<'a> {
     terminals: &'a TerminalService,
     /// What happened, for somebody reading it afterwards.
     log: &'a Log,
+    /// What every paired device may do, as it changes.
+    permits: crate::permits::Watching,
 }
 
 struct Attending<'a> {
@@ -1043,6 +1225,8 @@ struct Attending<'a> {
     pointer: Option<crate::cursor_task::Messages>,
     /// The handle that says which monitor the pointer is watched on.
     watch: Option<&'a crate::cursor_task::CursorWatch>,
+    /// What this session's device may do, as it changes.
+    live: crate::permits::Live,
 }
 
 #[allow(clippy::result_large_err)]
@@ -1157,6 +1341,8 @@ async fn serve(
         Stop,
         /// The person at the host hit the panic key.
         Panic,
+        /// What this device may do changed while the session was running.
+        Permissions,
     }
     // Which reason this side ended it with, if it did. A session the host
     // closed is not one to park — parking is for a controller that has not
@@ -1167,6 +1353,7 @@ async fn serve(
         let turn = tokio::select! {
             _ = stopping.changed() => Turn::Stop,
             () = wait_for_panic(attending.presses.as_deref_mut()) => Turn::Panic,
+            () = attending.live.changed() => Turn::Permissions,
             incoming = control.recv::<MediaMessage>() => Turn::FromController(incoming),
             outgoing = from_pipeline.recv() => Turn::ToController(outgoing),
             cursor = wait_for_cursor(attending.pointer.as_mut()) => Turn::ToController(cursor),
@@ -1196,6 +1383,30 @@ async fn serve(
                 panic_now(attending.indicator);
                 break;
             }
+            // **A revocation reaches the session that device already has.**
+            // Ending it rather than narrowing it: telling a controller
+            // mid-session that it may now do less needs a message on a stream
+            // that can carry one, and the first control stream carries media.
+            // So the session ends with a reason code that says why, and the
+            // controller's next attempt gets the narrower grant.
+            Turn::Permissions => match attending.live.standing() {
+                crate::permits::Standing::Unchanged => continue,
+                crate::permits::Standing::Forgotten => {
+                    println!("      · ending this session: that device is no longer paired");
+                    media.close(esper_proto::Reason::REVOKED);
+                    ours = Some(esper_proto::Reason::REVOKED);
+                    break;
+                }
+                crate::permits::Standing::Narrowed(lost) => {
+                    println!(
+                        "      · ending this session: {} was taken away",
+                        lost.iter().map(|p| p.name()).collect::<Vec<_>>().join(", ")
+                    );
+                    media.close(esper_proto::Reason::REVOKED);
+                    ours = Some(esper_proto::Reason::REVOKED);
+                    break;
+                }
+            },
             Turn::FromController(Ok(message)) => {
                 if to_pipeline.send(message).is_err() {
                     break;
@@ -1320,7 +1531,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             Hello::new(Role::Controller, identity.public_key(), &net::this_device()),
         )
         .await
-        .map_err(|(e, _)| format!("opening the session: {e}"))?;
+        .map_err(|(e, _)| opening_failed(e))?;
 
         let fingerprint = session.peer_fingerprint();
         let known = store

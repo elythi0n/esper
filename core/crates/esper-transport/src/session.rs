@@ -114,23 +114,110 @@ const AUTH_ALERTS: &[u64] = &[
     116, // certificate_required — the peer wanted a key we did not present
 ];
 
+/// Why the peer closed, when it said.
+///
+/// Only an *application* close carries one: that is a decision one side made
+/// and named. A transport failure is not a decision, and reporting a reason
+/// for it would invent an explanation.
+fn peer_close_reason(conn: &quinn::Connection) -> Option<(Reason, String)> {
+    match conn.close_reason()? {
+        quinn::ConnectionError::ApplicationClosed(closed) => {
+            let code = u16::try_from(u64::from(closed.error_code)).unwrap_or(0);
+            Some((
+                Reason(code),
+                // The peer's own words, and it may be a peer that has just
+                // decided something about us.
+                peer_reason(&String::from_utf8_lossy(&closed.reason)),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// A peer's own words, made safe to print.
+///
+/// This string comes from the other end of a connection that has just refused
+/// us, and it ends up in a terminal and in a log. So: control characters
+/// removed, because a refusal must not be able to move somebody's cursor or
+/// clear their screen, and bounded, because "the peer said why" is worth a
+/// sentence and not a megabyte.
+fn peer_reason(raw: &str) -> String {
+    /// One line of explanation. Longer than anything this implementation
+    /// sends, short enough to read.
+    const MOST: usize = 160;
+
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MOST)
+        .collect();
+    let trimmed = cleaned.trim();
+    if raw.chars().count() > MOST {
+        format!("{trimmed}…")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Classify a failure during the opening exchange.
+///
+/// **A stream failing is a symptom; the connection knows the cause.** And the
+/// cause is often "your key was refused": TLS 1.3 finishes the *client's*
+/// handshake before the server verifies the client's certificate, so a
+/// controller whose key is not paired sees `connect()` succeed and then its
+/// first stream fail. Reported as a stream error, that is "connection lost" —
+/// which sends somebody to check their router about a device that simply is
+/// not paired.
+///
+/// So the connection is asked why it closed, and its answer is used **only**
+/// when it is an authentication alert. Anything else keeps the symptom, which
+/// is the more specific description of a genuine transport fault.
+fn during_open(conn: &quinn::Connection, symptom: SessionError) -> SessionError {
+    match conn.close_reason() {
+        Some(cause) => match SessionError::from(cause) {
+            refused @ SessionError::Refused(_) => refused,
+            _ => symptom,
+        },
+        None => symptom,
+    }
+}
+
 impl From<quinn::ConnectionError> for SessionError {
     /// Classify a connection error, separating "you were refused" from
     /// "the network failed".
+    ///
+    /// **Two variants carry a TLS alert, and the difference is which side
+    /// objected.** `TransportError` is our own TLS layer refusing the peer;
+    /// `ConnectionClosed` is the peer's `CONNECTION_CLOSE` frame telling us it
+    /// refused *us*. Only the second reaches a controller whose key is not
+    /// paired — and only the first was inspected here, so the one refusal a
+    /// user actually meets was reported as a broken network for as long as
+    /// this code has existed. Nothing tested it, because the test would have
+    /// had to be about the case nobody had.
     fn from(e: quinn::ConnectionError) -> Self {
-        if let quinn::ConnectionError::TransportError(ref t) = e {
-            let alert = u64::from(t.code).checked_sub(TLS_ALERT_BASE);
-            if alert.is_some_and(|a| AUTH_ALERTS.contains(&a)) {
-                {
-                    // The peer's verifier put its reason in the alert's reason
-                    // string, which is the most useful thing we have.
-                    return Self::Refused(if t.reason.is_empty() {
-                        format!("TLS alert {}", alert.unwrap_or_default())
-                    } else {
-                        t.reason.clone()
-                    });
-                }
+        let alert = match &e {
+            quinn::ConnectionError::TransportError(t) => {
+                Some((u64::from(t.code), t.reason.clone()))
             }
+            quinn::ConnectionError::ConnectionClosed(f) => Some((
+                u64::from(f.error_code),
+                String::from_utf8_lossy(&f.reason).into_owned(),
+            )),
+            _ => None,
+        };
+
+        if let Some((code, reason)) = alert
+            && let Some(number) = code.checked_sub(TLS_ALERT_BASE)
+            && AUTH_ALERTS.contains(&number)
+        {
+            // The peer's verifier put its reason in the alert's reason string,
+            // which is the most useful thing we have — and it is *the peer's*
+            // words, on their way to somebody's terminal.
+            return Self::Refused(if reason.is_empty() {
+                format!("TLS alert {number}")
+            } else {
+                peer_reason(&reason)
+            });
         }
         Self::Connection(e)
     }
@@ -260,11 +347,11 @@ impl Session {
             Role::Controller => conn
                 .open_bi()
                 .await
-                .map_err(|e| SessionError::Stream(e.to_string()))?,
+                .map_err(|e| during_open(conn, SessionError::Stream(e.to_string())))?,
             Role::Host => conn
                 .accept_bi()
                 .await
-                .map_err(|e| SessionError::Stream(e.to_string()))?,
+                .map_err(|e| during_open(conn, SessionError::Stream(e.to_string())))?,
         };
 
         // A framed stream, not `read_to_end`: this stream stays open for the
@@ -274,7 +361,7 @@ impl Session {
         control
             .send(&local)
             .await
-            .map_err(|e| SessionError::Control(e.to_string()))?;
+            .map_err(|e| during_open(conn, SessionError::Control(e.to_string())))?;
 
         // The time bound is applied by `open` around the whole exchange, so
         // there is exactly one deadline rather than several that could each be
@@ -282,8 +369,10 @@ impl Session {
         let peer: Hello = match control.recv().await {
             Ok(h) => h,
             // A peer that refused us closes without sending anything.
-            Err(crate::ControlError::Finished) => return Err(SessionError::NoHello),
-            Err(e) => return Err(SessionError::Control(e.to_string())),
+            Err(crate::ControlError::Finished) => {
+                return Err(during_open(conn, SessionError::NoHello));
+            }
+            Err(e) => return Err(during_open(conn, SessionError::Control(e.to_string()))),
         };
 
         if !peer.version_matches() {
@@ -476,6 +565,17 @@ impl Session {
         }
     }
 
+    /// Why the peer closed, when it said.
+    ///
+    /// The same question [`MediaChannel::peer_close_reason`] answers, asked of
+    /// the session — because a session with no media in it, a terminal, has
+    /// the same need to report that the host ended it deliberately rather than
+    /// that the link broke.
+    #[must_use]
+    pub fn peer_close_reason(&self) -> Option<(Reason, String)> {
+        peer_close_reason(&self.conn)
+    }
+
     /// Close with a reason the peer can act on.
     ///
     /// Both the numeric code and its text are sent: the code so a client can
@@ -574,18 +674,7 @@ impl MediaChannel {
     /// code is what a caller branches on, the string is what a person reads.
     #[must_use]
     pub fn peer_close_reason(&self) -> Option<(Reason, String)> {
-        match self.conn.close_reason()? {
-            quinn::ConnectionError::ApplicationClosed(closed) => {
-                let code = u16::try_from(u64::from(closed.error_code)).unwrap_or(0);
-                Some((
-                    Reason(code),
-                    String::from_utf8_lossy(&closed.reason).into_owned(),
-                ))
-            }
-            // Not a decision either side made, so there is no reason to
-            // report — reporting one would invent an explanation.
-            _ => None,
-        }
+        peer_close_reason(&self.conn)
     }
 
     /// What the transport knows about the path.
@@ -623,5 +712,67 @@ impl ControlAcceptor {
             .await
             .map_err(|e| SessionError::Stream(e.to_string()))?;
         Ok(crate::Control::new(s, r))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn a_peers_refusal_reason_cannot_move_the_cursor_or_fill_the_screen() {
+        // A refusal is printed. It arrives from the far end of a connection
+        // that just declined to talk to us, which is not a reason to trust
+        // its formatting.
+        assert_eq!(
+            peer_reason("peer key is not paired\u{1b}[2J with this device"),
+            "peer key is not paired [2J with this device"
+        );
+        assert_eq!(peer_reason("  spaced  "), "spaced");
+
+        let long = "x".repeat(1000);
+        let bounded = peer_reason(&long);
+        assert!(
+            bounded.chars().count() <= 161,
+            "a peer must not be able to print a thousand characters: {}",
+            bounded.chars().count()
+        );
+        assert!(bounded.ends_with('…'), "truncation should be visible");
+    }
+
+    #[test]
+    fn a_refusal_frame_from_the_peer_is_read_as_a_refusal() {
+        // 0x100 + 40 (handshake_failure) is what a rejected device key
+        // produces, and it arrives in the peer's close frame rather than in a
+        // transport error of our own — which is the distinction this used to
+        // get wrong.
+        let frame = quinn::ConnectionClose {
+            error_code: quinn::TransportErrorCode::crypto(40),
+            frame_type: None,
+            reason: bytes::Bytes::from_static(b"peer key is not paired with this device"),
+        };
+        match SessionError::from(quinn::ConnectionError::ConnectionClosed(frame)) {
+            SessionError::Refused(why) => {
+                assert_eq!(why, "peer key is not paired with this device");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_close_that_is_not_an_authentication_alert_stays_a_transport_failure() {
+        // Mapping every close to "you were refused" would tell somebody their
+        // device is unpaired when the real fault is a protocol mismatch.
+        let frame = quinn::ConnectionClose {
+            error_code: quinn::TransportErrorCode::PROTOCOL_VIOLATION,
+            frame_type: None,
+            reason: bytes::Bytes::from_static(b"something else"),
+        };
+        assert!(matches!(
+            SessionError::from(quinn::ConnectionError::ConnectionClosed(frame)),
+            SessionError::Connection(_)
+        ));
     }
 }

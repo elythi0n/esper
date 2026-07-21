@@ -136,6 +136,45 @@ pub enum Ended {
     Idle,
 }
 
+/// What a device may do, read again whenever it matters.
+///
+/// **Not a slice.** A slice is a snapshot taken when the session opened, and
+/// the one place a snapshot is wrong is the place this is needed: deciding
+/// whether to *keep a shell standing* for a device whose permission may have
+/// been withdrawn since. That check ran against the opening grant before this
+/// existed, so it could not have noticed a withdrawal — the guard was there
+/// and could not fire.
+///
+/// Implemented for `Vec<Permission>` and for arrays, so a caller with a fixed
+/// set — every test, and anything that has not wired a live view yet — passes
+/// what it already has.
+pub trait Grants: Send + Sync {
+    /// What the device may do **now**.
+    fn granted(&self) -> Vec<Permission>;
+
+    /// Whether it may do this now.
+    fn allows(&self, p: Permission) -> bool {
+        self.granted().contains(&p)
+    }
+}
+
+impl Grants for Vec<Permission> {
+    fn granted(&self) -> Vec<Permission> {
+        self.clone()
+    }
+}
+
+// An array, so `&[Permission::Terminal]` at a call site is understood as a
+// fixed set with nothing added around it. Deliberately **not** implemented for
+// `[Permission]`: a slice is already unsized, so `&[Permission]` cannot become
+// a `&dyn Grants` at all, and an implementation that compiles but can never be
+// used is worse than its absence.
+impl<const N: usize> Grants for [Permission; N] {
+    fn granted(&self) -> Vec<Permission> {
+        self.to_vec()
+    }
+}
+
 /// Tunables for a terminal session.
 ///
 /// Separate from [`crate::parked::Limits`], which bounds what the host holds
@@ -212,11 +251,11 @@ impl TerminalService {
         control: &mut Control,
         start: &TerminalStart,
         peer_key: &[u8; KEY_LEN],
-        granted: &[Permission],
+        granted: &dyn Grants,
     ) -> Result<Ended, TerminalError> {
         // Permission is checked on **resume as well as open**. Returning to a
         // shell opened while permitted must not survive losing the permission.
-        if !granted.contains(&Permission::Terminal) {
+        if !granted.allows(Permission::Terminal) {
             // Recorded: a refusal is as interesting as an acceptance, and a
             // run of them is what an attack looks like from this side.
             let _ = self.log.append(&Entry::now(
@@ -255,7 +294,7 @@ impl TerminalService {
         control: &mut Control,
         open: &TerminalOpen,
         peer_key: &[u8; KEY_LEN],
-        granted: &[Permission],
+        granted: &dyn Grants,
     ) -> Result<Ended, TerminalError> {
         // Checked here so a peer at the limit is told up front rather than
         // finding out that its session was not kept. The binding check is
@@ -340,7 +379,7 @@ impl TerminalService {
         cols: u16,
         rows: u16,
         peer_key: &[u8; KEY_LEN],
-        granted: &[Permission],
+        granted: &dyn Grants,
     ) -> Result<Ended, TerminalError> {
         // Authorised by identifier **and** key, and every failure looks the
         // same: an unknown identifier, another device's session and an elapsed
@@ -457,7 +496,7 @@ impl TerminalService {
         session: SessionId,
         started: Instant,
         peer_key: &[u8; KEY_LEN],
-        granted: &[Permission],
+        granted: &dyn Grants,
     ) -> Result<Ended, TerminalError> {
         let outcome = pump(control, terminal, self.policy.idle_timeout).await;
 
@@ -512,13 +551,16 @@ impl TerminalService {
         terminal: LiveTerminal,
         session: SessionId,
         peer_key: &[u8; KEY_LEN],
-        granted: &[Permission],
+        granted: &dyn Grants,
         deliberate: bool,
     ) -> (Ended, Option<TerminalExit>) {
-        // Re-checked at the moment of parking, not only at the start. A
-        // session that began while permitted must not be *left standing* by a
-        // device whose permission was withdrawn mid-session.
-        if !granted.contains(&Permission::Terminal) {
+        // **Re-checked at the moment of parking**, against what the device
+        // may do *now* rather than against the set this session opened with.
+        // A session that began while permitted must not be left standing by a
+        // device whose permission was withdrawn while it ran — and with a
+        // snapshot here that could never have been noticed, which is why
+        // [`Grants`] exists.
+        if !granted.allows(Permission::Terminal) {
             let exit = hang_up(terminal.child, terminal.read, terminal.write).await;
             return (Ended::Disconnected, exit);
         }

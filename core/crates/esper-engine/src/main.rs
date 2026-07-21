@@ -18,6 +18,7 @@ mod loopback;
 mod net;
 mod pairing;
 mod paths;
+mod permits;
 mod presence_task;
 mod serve;
 mod session_cmd;
@@ -136,6 +137,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("forget") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match devices_cmd::forget(&rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-engine forget: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("terminal") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             match terminal_cmd::parse(&rest).and_then(|o| terminal_cmd::run(&o)) {
@@ -216,6 +227,7 @@ fn print_help() {
            devices    list paired devices and what they may do\n  \
            grant      give a paired device a permission\n  \
            revoke     take a permission away\n  \
+           forget     unpair a device entirely\n  \
            host       serve this machine's screen to a paired device\n  \
            connect    show a paired host's screen\n  \
            terminal   open a shell on a paired host\n  \

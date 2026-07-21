@@ -32,8 +32,8 @@ use esper_proto::{
 };
 use esper_pty::RawMode;
 use esper_transport::{
-    AnyOf, Control, Ended, Endpoint, EscapeWatcher, NoPeers, OnlyPeer, PeerAuthority, Session,
-    TerminalService, Typed, request_session, send_resize,
+    AnyOf, Control, Ended, Endpoint, EscapeWatcher, Grants, NoPeers, OnlyPeer, PeerAuthority,
+    Session, TerminalService, Typed, request_session, send_resize,
 };
 use tokio::io::AsyncWriteExt as _;
 
@@ -66,7 +66,7 @@ pub async fn serve(
     control: &mut Control,
     service: &TerminalService,
     peer_key: &[u8; KEY_LEN],
-    granted: &[Permission],
+    granted: &dyn Grants,
 ) -> Result<Finished, String> {
     let start = match tokio::time::timeout(ASK_TIMEOUT, control.recv::<TerminalStart>()).await {
         Ok(Ok(s)) => s,
@@ -221,7 +221,7 @@ pub fn run(o: &Options) -> Result<(), String> {
             Hello::new(Role::Controller, identity.public_key(), &net::this_device()),
         )
         .await
-        .map_err(|(e, _)| format!("opening the session: {e}"))?;
+        .map_err(|(e, _)| crate::session_cmd::opening_failed(e))?;
 
         let known = store
             .iter()
@@ -310,7 +310,7 @@ pub fn run(o: &Options) -> Result<(), String> {
         println!("  detach     press Enter, then ~ .");
         println!();
 
-        let outcome = pump(&mut control, session_id).await;
+        let outcome = pump(&mut control, session_id, &session).await;
 
         // **A close is a message, and a message has to be delivered.**
         // `finish` and `close` only *queue* their frames; a process that
@@ -335,7 +335,7 @@ enum Over {
 }
 
 /// Be the terminal: keystrokes out, output in, until something ends it.
-async fn pump(control: &mut Control, session: SessionId) -> Result<(), String> {
+async fn pump(control: &mut Control, session: SessionId, link: &Session) -> Result<(), String> {
     // **Raw mode before the first keystroke, restored however this ends.**
     // The guard restores on `Drop`, which covers an early return and a panic;
     // the hook covers a panic that aborts.
@@ -427,7 +427,18 @@ async fn pump(control: &mut Control, session: SessionId) -> Result<(), String> {
             println!("  come back with:  esper-engine terminal --resume {session}");
             Ok(())
         }
-        Over::Lost(why) => Err(why),
+        // **A lost link usually said why.** A host that ended the session
+        // deliberately — the operator revoked this device, hit the panic key,
+        // or is shutting down — closed the connection with a reason code, and
+        // reporting the symptom instead ("connection lost") throws away the
+        // one thing the person needs.
+        Over::Lost(why) => Err(match link.peer_close_reason() {
+            Some((code, text)) => {
+                let described = code.describe().unwrap_or(&text);
+                format!("the host ended the session: {described} ({})", code.0)
+            }
+            None => why,
+        }),
     }
 }
 

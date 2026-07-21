@@ -25,5 +25,6 @@ pub use pair::{AnyKeyForPairingOnly, PairError, pairing_authority};
 pub use parked::{Limits, LiveTerminal, Parked, ParkedSessions, Resumed};
 pub use session::{ControlAcceptor, HELLO_TIMEOUT, MediaChannel, Session, SessionError, Stats};
 pub use terminal::{
-    Ended, EscapeWatcher, TerminalError, TerminalPolicy, TerminalService, Typed, send_resize,
+    Ended, EscapeWatcher, Grants, TerminalError, TerminalPolicy, TerminalService, Typed,
+    send_resize,
 };

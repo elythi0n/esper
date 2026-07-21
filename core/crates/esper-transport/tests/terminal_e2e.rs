@@ -17,7 +17,7 @@ use esper_proto::{
     TerminalStart, TerminalStarted,
 };
 use esper_transport::{
-    AnyOf, Control, Ended, Endpoint, Limits, NoPeers, OnlyPeer, Session, TerminalError,
+    AnyOf, Control, Ended, Endpoint, Grants, Limits, NoPeers, OnlyPeer, Session, TerminalError,
     TerminalPolicy, TerminalService,
 };
 
@@ -372,6 +372,98 @@ async fn a_host_that_cannot_start_a_shell_refuses_out_loud() {
         std::fs::remove_dir_all(&dir).ok();
     })
     .await;
+}
+
+/// **A shell is not left standing for a device that may no longer have one.**
+///
+/// The park re-check existed before [`Grants`] did, and it read the set the
+/// session *opened* with — so a permission withdrawn while the session ran was
+/// invisible to it and the shell was parked anyway, resumable by the device
+/// that had just lost the right to it. This is that check, against a grant
+/// that changes underneath it.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs aws-lc-rs and a real pty; MIRI has neither")]
+async fn a_shell_is_not_parked_for_a_device_that_may_no_longer_have_one() {
+    bounded("revoked mid-session", async {
+        let (_h_ep, _c_ep, mut host_ctl, mut ctrl_ctl, peer) = wire().await;
+        let dir = tmpdir();
+        let log = Log::at(dir.join("sessions.log"));
+        let svc = service(&log);
+        let svc_for_host = Arc::clone(&svc);
+
+        // A grant that can be taken away, which is the whole point: a slice
+        // could not have been.
+        let grant = Switch::holding(&[Permission::Terminal]);
+        let grant_for_host = grant.clone();
+
+        let host_task = tokio::spawn(async move {
+            let svc = svc_for_host;
+            svc.serve(&mut host_ctl, &open_request(), &peer, &grant_for_host)
+                .await
+        });
+
+        let _session = opened(&mut ctrl_ctl).await;
+        send_keys(&mut ctrl_ctl, "echo READ\"\"Y\n").await;
+        let _ = read_until(&mut ctrl_ctl, "READY").await;
+
+        // Revoked at the machine, and *then* the link ends the way a dropped
+        // connection ends it. The order matters: this is the case where the
+        // session would otherwise be parked for a device that is no longer
+        // allowed one.
+        grant.withdraw_everything();
+        ctrl_ctl.finish().expect("finish");
+
+        let ended = tokio::time::timeout(Duration::from_secs(20), host_task)
+            .await
+            .expect("the host task should finish")
+            .expect("join")
+            .expect("session");
+        assert_eq!(
+            ended,
+            Ended::Disconnected,
+            "a revoked session must not be parked"
+        );
+        assert_eq!(
+            svc.parked().len(),
+            0,
+            "no shell may be left running for a device that may not have one"
+        );
+
+        // And it is recorded as closed rather than parked, because that is
+        // what happened.
+        let entries = log.read().expect("read the log");
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e.event, Event::TerminalParked { .. })),
+            "a revoked session must not be recorded as parked: {entries:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    })
+    .await;
+}
+
+/// A grant that can be changed while a session holds it.
+///
+/// The shape a host's own live view has: [`Grants`] is asked again every time
+/// it matters, so a test can answer differently the second time.
+#[derive(Debug, Clone)]
+struct Switch(Arc<std::sync::Mutex<Vec<Permission>>>);
+
+impl Switch {
+    fn holding(permissions: &[Permission]) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(permissions.to_vec())))
+    }
+
+    fn withdraw_everything(&self) {
+        self.0.lock().expect("not poisoned").clear();
+    }
+}
+
+impl Grants for Switch {
+    fn granted(&self) -> Vec<Permission> {
+        self.0.lock().map(|g| g.clone()).unwrap_or_default()
+    }
 }
 
 /// Detaching parks the session: the shell keeps running, and the log says a

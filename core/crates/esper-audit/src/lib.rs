@@ -71,8 +71,29 @@ pub enum Event {
         /// What the device was called at pairing. Peer-supplied.
         name: String,
     },
+    /// A device was unpaired: its key is no longer known here.
+    ///
+    /// Distinct from [`Event::Revoked`], which is about the *sessions* a
+    /// revocation closed. Unpairing while nothing is connected closes
+    /// nothing, and would otherwise leave no trace of the most consequential
+    /// thing a person can do to a device record.
+    Unpaired {
+        /// What the device was called. Recorded because the key is unreadable
+        /// and the name is what somebody will be looking for afterwards.
+        name: String,
+    },
     /// A device was revoked, and how many live sessions that closed.
     Revoked { sessions_closed: usize },
+    /// What a device may do was changed by somebody at this machine.
+    ///
+    /// The whole new set, not the difference: a log line saying "control was
+    /// added" leaves a reader working out what that made the total, and a
+    /// sequence of differences is exactly the thing that drifts from the
+    /// record it describes.
+    PermissionsChanged {
+        /// Everything the device may do now.
+        granted: Vec<Permission>,
+    },
     /// A session opened, with what it was actually granted.
     ///
     /// The granted set, not the requested set: what a controller *asked* for is

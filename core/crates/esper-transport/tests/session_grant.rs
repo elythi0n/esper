@@ -261,3 +261,71 @@ async fn a_silent_controller_is_given_up_on() {
     })
     .await;
 }
+
+/// **A device the host does not know is told so.**
+///
+/// TLS 1.3 finishes the client's handshake before the server verifies the
+/// client's certificate, so a controller whose key is not paired sees
+/// `connect()` succeed and discovers the truth when its first stream fails.
+/// Reported as a stream failure that reads "connection lost", which is what
+/// sends somebody to check their router about a device that is simply not
+/// paired — and, until this test existed, what actually happened: the
+/// classification was there and nothing reached it.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs aws-lc-rs, which is C; MIRI cannot call it")]
+async fn a_key_the_host_does_not_know_is_refused_as_a_refusal() {
+    bounded("an unknown key", async {
+        init();
+        let host_id = Identity::generate().expect("host");
+        let ctrl_id = Identity::generate().expect("controller");
+
+        // A host that authorises nobody: the same answer a host gives after
+        // the device it knew was forgotten.
+        let host_ep = Endpoint::bind(
+            &host_id,
+            loopback(),
+            Arc::new(AnyOf::new(Vec::new())),
+            Arc::new(NoPeers),
+        )
+        .expect("host endpoint");
+        let addr = host_ep.local_addr().expect("addr");
+        let ctrl_ep = Endpoint::bind(
+            &ctrl_id,
+            loopback(),
+            Arc::new(NoPeers),
+            Arc::new(OnlyPeer::new(host_id.public_key())),
+        )
+        .expect("controller endpoint");
+
+        // The host accepts and immediately finds the key unauthorised, which
+        // is a TLS alert rather than anything this side sends.
+        let hk = host_id.public_key();
+        let host_side = tokio::spawn(async move {
+            let Some(Ok(conn)) = host_ep.accept().await else {
+                return;
+            };
+            let _ = Session::open(conn, Hello::new(Role::Host, hk, "host")).await;
+        });
+
+        let ck = ctrl_id.public_key();
+        let err = match ctrl_ep.connect(addr).await {
+            // The dial itself may carry the alert, which is also a refusal.
+            Err(e) => esper_transport::SessionError::from(e),
+            Ok(conn) => {
+                Session::open(conn, Hello::new(Role::Controller, ck, "controller"))
+                    .await
+                    .map(|_| ())
+                    .expect_err("a host that authorises nobody must not open a session")
+                    .0
+            }
+        };
+
+        assert!(
+            matches!(err, esper_transport::SessionError::Refused(_)),
+            "an unpaired device must be told it was refused, not that the \
+             network broke: got {err:?}"
+        );
+        host_side.abort();
+    })
+    .await;
+}

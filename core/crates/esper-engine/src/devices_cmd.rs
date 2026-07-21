@@ -14,6 +14,7 @@
 //! than resolved** — picking one of two devices for somebody who was clearly
 //! not sure which they meant is how a permission ends up on the wrong machine.
 
+use esper_audit::{Entry, Event, Log};
 use esper_crypto::{Device, DeviceStore};
 use esper_proto::Permission;
 
@@ -116,7 +117,18 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
     }
     let name = device.name.clone();
     let now = crate::net::permissions(device);
+    let permissions = device.permissions.clone();
     paths::save_devices(&store)?;
+
+    // Recorded, because changing what a device may do is one of the few things
+    // a person does *to* this machine's security posture, and the audit trail
+    // is where somebody looks when they want to know who widened what.
+    record(
+        &key,
+        Event::PermissionsChanged {
+            granted: permissions,
+        },
+    );
 
     let done = match what {
         Change::Grant => "granted",
@@ -132,12 +144,62 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
     );
     println!("  may     {now}");
     if what == Change::Revoke {
-        // Said out loud because it is the difference between this and what a
-        // person may think they just did: a session already open keeps the
-        // permissions it was granted until it ends.
-        println!("  note    a session already open is not changed by this");
+        // A running host re-reads the store while it runs, so this reaches
+        // the session that device already has. Worth saying, because the
+        // alternative — a revocation that waits for the revoked device to
+        // choose to leave — is what people expect from a config file.
+        println!("  note    a session that device already has will close within a second");
     }
     Ok(())
+}
+
+/// Forget a device entirely: unpair it.
+///
+/// Removing the key is what makes the *next* connection impossible. Closing
+/// the one it already has is the host's job — it re-reads this file while it
+/// runs — and that is the half people forget, because a revocation that
+/// leaves the revoked device connected is a request rather than a revocation.
+pub fn forget(args: &[String]) -> Result<(), String> {
+    let [prefix] = args else {
+        return Err("usage: esper-engine forget <fingerprint>".to_owned());
+    };
+
+    let (mut store, dropped) = paths::devices()?;
+    for line in &dropped {
+        eprintln!("  · {line}");
+    }
+    let key = *find(&store, prefix)?;
+    let Some(gone) = store.remove(&key) else {
+        return Err("the device disappeared between finding it and removing it".to_owned());
+    };
+    paths::save_devices(&store)?;
+
+    record(
+        &key,
+        Event::Unpaired {
+            name: gone.name.clone(),
+        },
+    );
+
+    println!("  forgot  {}  {}", gone.fingerprint().hex(), gone.name);
+    println!("  note    that device must pair again to connect at all");
+    println!("  note    a session it already has will close within a second");
+    Ok(())
+}
+
+/// Put one line in the audit trail.
+///
+/// Best-effort and *said* when it fails, rather than silently: a change made
+/// and not recorded is worse than either, because the record is what somebody
+/// will trust later.
+fn record(key: &[u8; 32], event: Event) {
+    let Ok(path) = paths::audit_log() else {
+        eprintln!("  · not recorded: there is nowhere to write the audit log");
+        return;
+    };
+    if let Err(e) = Log::at(path).append(&Entry::now(key, event)) {
+        eprintln!("  · not recorded in the audit log: {e}");
+    }
 }
 
 /// The one device whose fingerprint starts with `prefix`.
