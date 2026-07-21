@@ -664,6 +664,17 @@ async fn drop_parked_when_revoked(
     }
 }
 
+/// Record that a revocation closed a session.
+///
+/// Its own entry beside the session's close, because a `session_closed` that
+/// said only "the session ended" reads exactly like a user finishing — and the
+/// difference between those two is the whole reason a security log exists.
+fn record_revocation(log: &Log, peer: &[u8; 32]) {
+    if let Err(e) = log.append(&Entry::now(peer, Event::Revoked { sessions_closed: 1 })) {
+        tracing::warn!(error = %e, "could not record a revocation");
+    }
+}
+
 /// Close a session when its device stops being allowed to have it.
 ///
 /// Returns as soon as it has closed one, so the caller can tell a revocation
@@ -672,6 +683,8 @@ async fn close_when_revoked(
     media: esper_transport::MediaChannel,
     mut live: crate::permits::Live,
     needs: Permission,
+    log: Log,
+    peer: [u8; 32],
 ) {
     use crate::permits::Standing;
     loop {
@@ -695,6 +708,7 @@ async fn close_when_revoked(
             }
         };
         println!("      · ending this session: {why}");
+        record_revocation(&log, &peer);
         media.close(esper_proto::Reason::REVOKED);
         return;
     }
@@ -820,6 +834,8 @@ async fn serve_one(
             media.clone(),
             live.clone(),
             Permission::Terminal,
+            log.clone(),
+            device,
         ));
         let outcome = crate::terminal_cmd::serve(&mut control, terminals, &device, &live).await;
         let was_revoked = watchdog.is_finished();
@@ -1018,6 +1034,7 @@ async fn serve_one(
             pointer,
             watch: watch.as_ref(),
             live: live.clone(),
+            log,
         },
     )
     .await;
@@ -1227,6 +1244,8 @@ struct Attending<'a> {
     watch: Option<&'a crate::cursor_task::CursorWatch>,
     /// What this session's device may do, as it changes.
     live: crate::permits::Live,
+    /// What happened, for somebody reading it afterwards.
+    log: &'a Log,
 }
 
 #[allow(clippy::result_large_err)]
@@ -1393,6 +1412,7 @@ async fn serve(
                 crate::permits::Standing::Unchanged => continue,
                 crate::permits::Standing::Forgotten => {
                     println!("      · ending this session: that device is no longer paired");
+                    record_revocation(attending.log, &device);
                     media.close(esper_proto::Reason::REVOKED);
                     ours = Some(esper_proto::Reason::REVOKED);
                     break;
@@ -1402,6 +1422,7 @@ async fn serve(
                         "      · ending this session: {} was taken away",
                         lost.iter().map(|p| p.name()).collect::<Vec<_>>().join(", ")
                     );
+                    record_revocation(attending.log, &device);
                     media.close(esper_proto::Reason::REVOKED);
                     ours = Some(esper_proto::Reason::REVOKED);
                     break;
@@ -1522,10 +1543,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // Bound inside the runtime; quinn needs one.
         let endpoint = Endpoint::bind(&identity, net::any_port(o.addr), Arc::new(NoPeers), dial)
             .map_err(|e| format!("binding a local port: {e}"))?;
-        let conn = endpoint
-            .connect(o.addr)
-            .await
-            .map_err(|e| format!("connecting to {}: {e}", o.addr))?;
+        let conn = endpoint.connect(o.addr).await.map_err(|e| e.to_string())?;
         let mut session = Session::open(
             conn,
             Hello::new(Role::Controller, identity.public_key(), &net::this_device()),

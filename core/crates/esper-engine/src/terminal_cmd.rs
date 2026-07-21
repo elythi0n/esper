@@ -212,10 +212,7 @@ pub fn run(o: &Options) -> Result<(), String> {
     net::runtime()?.block_on(async {
         let endpoint = Endpoint::bind(&identity, net::any_port(o.addr), Arc::new(NoPeers), dial)
             .map_err(|e| format!("binding a local port: {e}"))?;
-        let conn = endpoint
-            .connect(o.addr)
-            .await
-            .map_err(|e| format!("connecting to {}: {e}", o.addr))?;
+        let conn = endpoint.connect(o.addr).await.map_err(|e| e.to_string())?;
         let mut session = Session::open(
             conn,
             Hello::new(Role::Controller, identity.public_key(), &net::this_device()),

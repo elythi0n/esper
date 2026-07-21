@@ -44,6 +44,20 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// keeps a mapping alive through the impatient ones with room for a lost packet.
 pub const KEEPALIVE: Duration = Duration::from_secs(10);
 
+/// How long to wait for a handshake before giving up on an address.
+///
+/// **Not the idle timeout.** A session may sit idle for thirty seconds because
+/// somebody is watching a slow build; a *handshake* either completes in a
+/// round trip or two or it is not going to. Waiting out the idle timeout for
+/// an address with nothing behind it means thirty seconds of silence after a
+/// typo, which is how a working product feels broken.
+///
+/// Ten seconds rather than two: QUIC retransmits its first packet with
+/// exponential backoff, and a satellite link with loss deserves a few goes.
+/// Three probe timeouts on a slow path is about where other implementations
+/// put a handshake deadline.
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// What can go wrong setting up or opening a connection.
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -76,6 +90,14 @@ pub enum TransportError {
         #[source]
         source: quinn::ConnectError,
     },
+
+    /// Nothing answered in time.
+    ///
+    /// Its own variant rather than a `Connect` carrying a timeout, because it
+    /// is the one dial failure with an obvious cause worth naming: nothing is
+    /// listening there, or nothing can get to it.
+    #[error("nothing answered at {addr} within {waited:?} — is the host running there?")]
+    NoAnswer { addr: SocketAddr, waited: Duration },
 }
 
 /// An Esper QUIC endpoint: dials out, and accepts if configured to.
@@ -155,11 +177,29 @@ impl Endpoint {
     /// authenticates by key rather than by name, so there is nothing meaningful
     /// to put there and nothing that inspects it.
     pub async fn connect(&self, addr: SocketAddr) -> Result<quinn::Connection, TransportError> {
-        self.inner
+        self.connect_within(addr, DIAL_TIMEOUT).await
+    }
+
+    /// [`Endpoint::connect`], with the deadline as an argument.
+    ///
+    /// Separate so a test can prove the deadline without waiting for it, and
+    /// so a caller that knows better about its own path — a relay it has
+    /// already reached, say — can say so.
+    pub async fn connect_within(
+        &self,
+        addr: SocketAddr,
+        wait: Duration,
+    ) -> Result<quinn::Connection, TransportError> {
+        let attempt = self
+            .inner
             .connect(addr, SERVER_NAME)
-            .map_err(|source| TransportError::Dial { addr, source })?
-            .await
-            .map_err(|source| TransportError::Connect { addr, source })
+            .map_err(|source| TransportError::Dial { addr, source })?;
+
+        match tokio::time::timeout(wait, attempt).await {
+            Ok(Ok(conn)) => Ok(conn),
+            Ok(Err(source)) => Err(TransportError::Connect { addr, source }),
+            Err(_) => Err(TransportError::NoAnswer { addr, waited: wait }),
+        }
     }
 
     /// Move to a different local socket, keeping every live connection.

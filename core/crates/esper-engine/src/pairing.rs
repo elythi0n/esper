@@ -205,7 +205,7 @@ async fn accept(addr: SocketAddr, code: &str) -> Result<(), String> {
     let conn = tokio::time::timeout(WAIT, endpoint.connect(addr))
         .await
         .map_err(|_| format!("{addr} did not answer within {} seconds", WAIT.as_secs()))?
-        .map_err(|e| format!("connecting to {addr}: {e}"))?;
+        .map_err(|e| e.to_string())?;
 
     let mut session = Session::open(
         conn.clone(),
@@ -256,6 +256,25 @@ fn record(public_key: [u8; 32], name: &str) -> Result<Device, String> {
         .insert(device.clone())
         .map_err(|e| format!("recording the device: {e}"))?;
     paths::save_devices(&store)?;
+
+    // **Recorded, because a new device is the most consequential change
+    // anybody makes to this machine's trust.** The counterpart is
+    // `Event::Unpaired`, and a log with one and not the other reads as a
+    // machine that has only ever gained devices.
+    if let Ok(path) = paths::audit_log() {
+        let entry = esper_audit::Entry::now(
+            &public_key,
+            esper_audit::Event::Paired {
+                name: device.name.clone(),
+            },
+        );
+        if let Err(e) = esper_audit::Log::at(path).append(&entry) {
+            eprintln!("  · not recorded in the audit log: {e}");
+        }
+    } else {
+        eprintln!("  · not recorded: there is nowhere to write the audit log");
+    }
+
     Ok(device)
 }
 

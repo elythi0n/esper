@@ -244,3 +244,50 @@ async fn session_keys_are_not_derived_from_the_device_keys() {
     })
     .await;
 }
+
+/// **A dial to nothing gives up rather than waiting out the idle timeout.**
+///
+/// An idle *session* may legitimately sit for thirty seconds; a handshake that
+/// has had no answer is not going to get one. Before this the two shared a
+/// deadline, so a mistyped address bought thirty seconds of silence — which is
+/// how a working product feels broken.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs aws-lc-rs, which is C; MIRI cannot call it")]
+async fn a_dial_with_no_answer_gives_up_on_its_own_deadline() {
+    init();
+    let id = Identity::generate().expect("identity");
+    let endpoint = Endpoint::bind(
+        &id,
+        (Ipv4Addr::LOCALHOST, 0).into(),
+        Arc::new(NoPeers),
+        Arc::new(AnyOf::new(vec![id.public_key()])),
+    )
+    .expect("endpoint");
+
+    // A plain UDP socket, held open and never answering: exactly "nothing is
+    // listening for Esper here", with no race over whether a port is free.
+    let silent = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a socket");
+    let addr = silent.local_addr().expect("its address");
+
+    let wait = Duration::from_millis(250);
+    let started = std::time::Instant::now();
+    let err = endpoint
+        .connect_within(addr, wait)
+        .await
+        .expect_err("nothing is there to answer");
+
+    match err {
+        esper_transport::TransportError::NoAnswer { addr: a, waited } => {
+            assert_eq!(a, addr);
+            assert_eq!(waited, wait);
+        }
+        other => panic!("expected to give up on the deadline, got {other:?}"),
+    }
+    // The deadline, not the idle timeout. Generously bounded so a loaded
+    // machine does not fail it, and far below the thirty seconds it was.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "gave up after {:?}, which is not the deadline it was given",
+        started.elapsed()
+    );
+}

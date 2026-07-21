@@ -20,7 +20,7 @@ pub use authorize::{
 pub use backlog::{Backlog, DEFAULT_BACKLOG};
 pub use control::{Control, ControlError, FrameReader};
 pub use crypto_suite::{KX_GROUP, TLS_VERSIONS, provider};
-pub use endpoint::{ALPN, Endpoint, IDLE_TIMEOUT, KEEPALIVE, TransportError};
+pub use endpoint::{ALPN, DIAL_TIMEOUT, Endpoint, IDLE_TIMEOUT, KEEPALIVE, TransportError};
 pub use pair::{AnyKeyForPairingOnly, PairError, pairing_authority};
 pub use parked::{Limits, LiveTerminal, Parked, ParkedSessions, Resumed};
 pub use session::{ControlAcceptor, HELLO_TIMEOUT, MediaChannel, Session, SessionError, Stats};
