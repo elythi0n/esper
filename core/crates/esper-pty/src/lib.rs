@@ -25,13 +25,18 @@
 
 #![forbid(unsafe_code)]
 
-// Raw mode is the *controller's* own terminal, and the controller is a Unix
-// program until the Windows one exists. The console equivalent arrives with
-// it; nothing here needs a stub in the meantime.
+/// Putting the controller's own terminal into raw mode.
+///
+/// One module per platform, so a controller needs no `cfg` of its own. Off
+/// Unix it refuses rather than pretending — see that arm for why an inert
+/// guard would be the worse answer.
 #[cfg(unix)]
+#[path = "raw/unix.rs"]
+pub mod raw;
+#[cfg(not(unix))]
+#[path = "raw/unsupported.rs"]
 pub mod raw;
 
-#[cfg(unix)]
 pub use raw::RawMode;
 
 /// Everything that is a fact about the platform rather than about terminals.

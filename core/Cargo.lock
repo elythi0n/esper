@@ -416,6 +416,7 @@ dependencies = [
 name = "esper-engine"
 version = "0.0.0"
 dependencies = [
+ "esper-audit",
  "esper-buildinfo",
  "esper-capture",
  "esper-capture-x11",
@@ -434,6 +435,7 @@ dependencies = [
  "esper-present",
  "esper-present-x11",
  "esper-proto",
+ "esper-pty",
  "esper-scale",
  "esper-stream",
  "esper-transport",

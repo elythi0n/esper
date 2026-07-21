@@ -27,7 +27,12 @@ esper-stream.workspace = true
 esper-discovery.workspace = true
 esper-input.workspace = true
 esper-presence.workspace = true
-tokio.workspace = true
+esper-pty.workspace = true
+esper-audit.workspace = true
+# `io-std` for the controller's own terminal: everything else the engine does
+# with tokio is sockets and timers, and standard output is only in the path
+# when this process *is* somebody's terminal.
+tokio = { workspace = true, features = ["io-std"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 esper-buildinfo.workspace = true
 tracing.workspace = true

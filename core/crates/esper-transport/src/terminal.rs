@@ -463,7 +463,14 @@ impl TerminalService {
 
         let (ended, exit) = match outcome {
             Outcome::ShellExited(x) => {
-                let _ = control.send(&TerminalMessage::Exit(x)).await;
+                // Not swallowed. This is the last thing the controller hears
+                // and the only place the exit status exists on the wire: a
+                // failure here is a session that ended without saying how,
+                // and it must be visible to whoever is reading the host's log
+                // rather than inferred from a controller's complaint.
+                if let Err(e) = control.send(&TerminalMessage::Exit(x)).await {
+                    tracing::warn!(error = %e, "could not tell the controller how the shell exited");
+                }
                 let _ = control.finish();
                 (Ended::ShellExited(x), Some(x))
             }

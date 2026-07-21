@@ -60,6 +60,17 @@ pub fn save_devices(store: &DeviceStore) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Where this machine records what happened.
+///
+/// One file next to the identity and the device list, because an audit trail
+/// somebody has to go looking for is an audit trail nobody reads. **Session
+/// content is never in it** — see `esper-pty`'s own note on that.
+pub fn audit_log() -> Result<PathBuf, String> {
+    let dir = home()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    Ok(dir.join("sessions.log"))
+}
+
 /// Seconds since the epoch, for a `paired_at` stamp.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()

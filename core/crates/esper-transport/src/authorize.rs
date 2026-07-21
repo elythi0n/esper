@@ -21,9 +21,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use std::time::Duration;
+
 use esper_crypto::identity::KEY_LEN;
 use esper_crypto::{Device, Fingerprint};
 use esper_proto::{Permission, Reason, SessionDeny, SessionGrant, SessionRequest, SessionResponse};
+
+use crate::control::{Control, ControlError};
 
 /// The verdict on a session request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +151,120 @@ pub fn response(verdict: &Verdict, session_id: [u8; 16]) -> SessionResponse {
             detail: detail.clone(),
         }),
     }
+}
+
+/// How long a host waits for a controller to say what it wants.
+///
+/// A connection that authenticated and then said nothing is holding a capture
+/// backend and a slot in the registry. Ten seconds is far longer than a round
+/// trip and far shorter than the transport's idle timeout, which is the only
+/// thing that would have ended it otherwise.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What answering a session request settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answered {
+    /// The session may open, with exactly these permissions.
+    Granted(SessionGrant),
+    /// Refused. **The peer has already been told the same reason** — that is
+    /// the difference between this and a [`Verdict`], which is only a decision.
+    Denied(SessionDeny),
+}
+
+/// What can go wrong agreeing on a session.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthorizeError {
+    /// The peer authenticated and then said nothing.
+    #[error("the controller did not say what it wanted within {0:?}")]
+    Silent(Duration),
+
+    /// The control stream failed.
+    #[error("control stream: {0}")]
+    Control(#[from] ControlError),
+
+    /// The host refused, and said why.
+    ///
+    /// Controller-side. The host's own refusals are an [`Answered::Denied`],
+    /// because from that side refusing is a normal outcome and not an error.
+    #[error("{}", .0.detail)]
+    Refused(SessionDeny),
+}
+
+/// The controller's half: say what you want, and read the answer.
+///
+/// The grant is authoritative and **may be smaller than the request**. A
+/// controller that renders what it asked for rather than what it holds will
+/// offer a control cursor on a view-only session.
+pub async fn request_session(
+    control: &mut Control,
+    request: &SessionRequest,
+) -> Result<SessionGrant, AuthorizeError> {
+    control.send(request).await?;
+    match control.recv::<SessionResponse>().await? {
+        SessionResponse::Grant(g) => Ok(g),
+        SessionResponse::Deny(d) => Err(AuthorizeError::Refused(d)),
+    }
+}
+
+/// The host's half: read the request, decide, and answer before doing anything.
+///
+/// **The answer goes out before the session starts.** A host that decided
+/// silently and then began — or did not begin — sending leaves the controller
+/// inferring its permissions from what shows up, which is how a client ends up
+/// guessing that a session is view-only because no input took effect.
+///
+/// A malformed request is denied rather than dropped, for the same reason.
+pub async fn answer_session(
+    control: &mut Control,
+    policy: &dyn Policy,
+    device: &Device,
+    session_id: [u8; 16],
+) -> Result<Answered, AuthorizeError> {
+    answer_session_within(control, policy, device, session_id, REQUEST_TIMEOUT).await
+}
+
+/// [`answer_session`], with the wait as an argument.
+///
+/// Separate so the wait can be *tested*: a test that proved a ten-second
+/// timeout by waiting ten seconds is a test nobody runs.
+pub async fn answer_session_within(
+    control: &mut Control,
+    policy: &dyn Policy,
+    device: &Device,
+    session_id: [u8; 16],
+    wait: Duration,
+) -> Result<Answered, AuthorizeError> {
+    let request = match tokio::time::timeout(wait, control.recv::<SessionRequest>()).await {
+        Ok(r) => r?,
+        Err(_) => return Err(AuthorizeError::Silent(wait)),
+    };
+
+    if !request.is_well_formed() {
+        let deny = SessionDeny {
+            reason: Reason::MALFORMED_FRAME,
+            detail: "the session request was outside its bounds".to_owned(),
+        };
+        control.send(&SessionResponse::Deny(deny.clone())).await?;
+        return Ok(Answered::Denied(deny));
+    }
+
+    let (verdict, over_reach) = decide_and_clamp(policy, device, &request);
+    if !over_reach.is_empty() {
+        // A policy that tried to widen is a bug someone should see. The
+        // session still opens with what the device holds.
+        tracing::warn!(
+            ?over_reach,
+            device = %device.fingerprint().hex(),
+            "the session policy granted permissions the device does not hold; clamped"
+        );
+    }
+
+    let answer = response(&verdict, session_id);
+    control.send(&answer).await?;
+    Ok(match answer {
+        SessionResponse::Grant(g) => Answered::Granted(g),
+        SessionResponse::Deny(d) => Answered::Denied(d),
+    })
 }
 
 /// A live session, as the registry sees it.

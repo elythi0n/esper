@@ -185,5 +185,96 @@ else
   fail=1
 fi
 
+# Terminal mode, through the binaries, on a machine with no display. This is
+# Phase 2's exit criterion and it is a *smoke* check for the reason the media
+# one is: every terminal test in the suite calls the service directly, and for
+# two phases nothing else did — the feature was complete and no binary could
+# open a shell. A test that starts below `main` cannot notice that.
+echo "  — opening a shell through the built binaries, with no display"
+term_a=$(mktemp -d); term_b=$(mktemp -d)
+cleanup_terminal() {
+  [ -n "${host_pid:-}" ] && kill "$host_pid" 2>/dev/null
+  rm -rf "$term_a" "$term_b"
+}
+trap cleanup_terminal EXIT
+
+# Pair the two homes. The listener prints the port it took and the code it
+# generated, so nothing here has to pick a port and risk a collision.
+ESPER_HOME="$term_a" timeout 60 "$BIN/esper-engine" pair --listen 127.0.0.1:0 \
+  > "$term_a/pair.log" 2>&1 &
+pair_pid=$!
+code=""; port=""
+for _ in $(seq 1 100); do
+  # `|| true` on every one of these: under `set -e` with `pipefail`, a grep
+  # that has not found its line *yet* is a failed pipeline, and would end the
+  # script rather than round the loop one more time.
+  code=$( { grep -oE '\-\-code [A-Z0-9-]+' "$term_a/pair.log" 2>/dev/null || true; } | head -1 | awk '{print $2}')
+  port=$( { grep -oE 'pair [^ ]*:[0-9]+ --code' "$term_a/pair.log" 2>/dev/null || true; } | head -1 | sed 's/.*://;s/ --code//')
+  [ -n "$code" ] && [ -n "$port" ] && break
+  sleep 0.1
+done
+if [ -z "$code" ] || [ -z "$port" ]; then
+  printf '  ✗ pairing never printed a code and a port\n'
+  sed 's/^/      /' "$term_a/pair.log"
+  fail=1
+else
+  ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" pair "127.0.0.1:$port" --code "$code" \
+    > "$term_b/pair.log" 2>&1 || true
+  wait "$pair_pid" || true
+
+  # Terminal is deliberately **not** a default permission, so it has to be
+  # granted — which is the other half of what this checks.
+  fp=$( { ESPER_HOME="$term_a" "$BIN/esper-engine" devices | grep -oE '^  [0-9a-f]{8,}' || true; } | head -1 | tr -d ' ')
+  if [ -z "$fp" ]; then
+    printf '  ✗ pairing left no device in the list\n'
+    sed 's/^/      /' "$term_a/pair.log" "$term_b/pair.log"
+    fail=1
+  else
+    ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" terminal >/dev/null
+
+    env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+      timeout 120 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+      > "$term_a/host.log" 2>&1 &
+    host_pid=$!
+    host_addr=""
+    for _ in $(seq 1 100); do
+      host_addr=$( { awk '/listening/{print $2}' "$term_a/host.log" 2>/dev/null || true; } | head -1)
+      [ -n "$host_addr" ] && break
+      sleep 0.1
+    done
+
+    if [ -z "$host_addr" ]; then
+      printf '  ✗ the host never said what it was listening on\n'
+      sed 's/^/      /' "$term_a/host.log"
+      fail=1
+    else
+      out=$(printf 'echo smoke-shell-$((6*7))\nexit 3\n' | \
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" TERM=dumb \
+        timeout 60 "$BIN/esper-engine" terminal "$host_addr" 2>&1 || true)
+      # The command ran on the far side: the shell expanded the arithmetic,
+      # so the marker proves a real shell rather than an echo of the input.
+      if printf '%s' "$out" | grep -q 'smoke-shell-42'; then
+        printf '  ✓ a shell ran a command on the host and sent its output back\n'
+      else
+        printf '  ✗ no output came back from the remote shell\n'
+        printf '%s\n' "$out" | sed 's/^/      /'
+        fail=1
+      fi
+      # And the exit status came back, which is most of what scripting a
+      # server needs.
+      if printf '%s' "$out" | grep -q 'the shell exited: code 3'; then
+        printf '  ✓ the shell'"'"'s exit status reached the controller\n'
+      else
+        printf '  ✗ the exit status did not arrive\n'
+        printf '%s\n' "$out" | sed 's/^/      /'
+        fail=1
+      fi
+    fi
+  fi
+fi
+cleanup_terminal
+trap - EXIT
+host_pid=""
+
 if [ "$fail" -ne 0 ]; then echo; echo "  smoke test failed"; exit 1; fi
 echo "  ✓ smoke test passed"

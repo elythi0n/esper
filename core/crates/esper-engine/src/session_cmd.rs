@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use esper_audit::{Entry, Event, Log};
 use esper_capture::gate::Policy;
 use esper_crypto::DeviceStore;
 use esper_encode::budget::Budget;
@@ -29,10 +30,13 @@ use esper_encode::encoder::{EncodeError, EncoderConfig, VideoEncoder};
 use esper_encode::openh264::OpenH264;
 use esper_link::{ControllerLink, HostLink, parts};
 use esper_pipeline::pipeline::Pipeline;
-use esper_proto::{Hello, MediaMessage, Role};
+use esper_proto::{Hello, MediaMessage, Permission, Role};
 use esper_scale::Ceiling;
 use esper_stream::{Decoded, Expired, Handled, HostStep, PARK_TIMEOUT, Parked};
-use esper_transport::{AnyOf, Endpoint, NoPeers, OnlyPeer, Session};
+use esper_transport::{
+    Answered, AnyOf, Control, Endpoint, GrantStoredPermissions, NoPeers, OnlyPeer, Session,
+    TerminalPolicy, TerminalService, answer_session,
+};
 
 use crate::backend::Choice;
 use crate::{net, paths};
@@ -206,7 +210,7 @@ fn encoder_for(config: &EncoderConfig) -> Result<Box<dyn VideoEncoder>, EncodeEr
 /// A host with nothing paired is refused rather than started, because a
 /// listening endpoint that can accept nobody is a listening endpoint whose
 /// only possible outcome is a confusing failure at the far end.
-fn paired() -> Result<(DeviceStore, Vec<[u8; 32]>), String> {
+pub(crate) fn paired() -> Result<(DeviceStore, Vec<[u8; 32]>), String> {
     let (store, dropped) = paths::devices()?;
     for note in &dropped {
         eprintln!("  · the device list needed correcting: {note}");
@@ -283,6 +287,25 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             (None, None)
         }
     };
+
+    // **The audit trail, opened before any session.** A host that recorded
+    // nothing would be a host whose owner cannot answer "who was on this
+    // machine, and when" — which is a question people ask after the fact,
+    // when it is too late to start recording.
+    let log_path = paths::audit_log()?;
+    println!("  audit      {}", log_path.display());
+    let log = Log::at(log_path);
+
+    // **Terminal sessions outlive their connections**, so the service that
+    // owns them belongs to the host and not to one session: a shell parked
+    // when a link dropped is resumed by the *next* connection from the same
+    // device, and a service created per session would have nowhere to keep it.
+    let terminals = TerminalService::new(
+        log.clone(),
+        esper_transport::Limits::default(),
+        TerminalPolicy::default(),
+    );
+    println!();
 
     // A session whose transport went away, waiting for its controller to come
     // back. Held here rather than inside `serve_one` because it has to outlive
@@ -395,8 +418,12 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                 o,
                 parked.take(),
                 stopping.clone(),
-                indicator.as_ref(),
-                presses.as_mut(),
+                Standing {
+                    indicator: indicator.as_ref(),
+                    presses: presses.as_mut(),
+                    terminals: &terminals,
+                    log: &log,
+                },
             )
             .await
             {
@@ -506,6 +533,93 @@ fn accept_deadline(parked_for: Option<Duration>) -> Option<Duration> {
 // exactly the one worth keeping. Boxing it would allocate on the path whose
 // job is not to lose somebody's session.
 #[allow(clippy::result_large_err)]
+/// The codec this build can decode, by the name the protocol uses.
+///
+/// One entry, because software H.264 is what Phase 3 shipped. It is named
+/// rather than left empty: `codecs` is how a controller says what it can
+/// render, and a controller that says nothing is asking the host to guess.
+const fn config_codec_name() -> &'static str {
+    esper_proto::Codec::H264.name()
+}
+
+/// How long a host waits for a controller to close after being told the last
+/// thing it needs to hear.
+///
+/// Long enough for a round trip on any link this product is used over, short
+/// enough that a controller which never closes costs one session's worth of
+/// waiting and not the host.
+const GOODBYE: Duration = Duration::from_secs(2);
+
+/// Agree what this session may do.
+///
+/// The store is read **per session**, not once at startup: a permission
+/// granted or taken away while the host is running has to apply to the next
+/// connection, and a host that had to be restarted for that would be a host
+/// whose permissions nobody trusts.
+async fn agree(control: &mut Control, device: &[u8; 32]) -> Result<Vec<Permission>, String> {
+    let (store, _) = paths::devices()?;
+    let record = store
+        .get(device)
+        .ok_or_else(|| "this device is not in the paired list any more".to_owned())?;
+    let id = esper_transport::parked::new_session_id()
+        .map_err(|e| format!("no randomness for a session identifier: {e}"))?;
+
+    match answer_session(control, &GrantStoredPermissions, record, *id.as_bytes()).await {
+        Ok(Answered::Granted(g)) => Ok(g.granted),
+        // The peer has already been told the same reason.
+        Ok(Answered::Denied(d)) => Err(format!("refused: {}", d.detail)),
+        Err(e) => Err(format!("agreeing what the session may do: {e}")),
+    }
+}
+
+/// An open session in the audit trail, closed however the session ends.
+///
+/// A guard rather than two calls, because a session with an open record and no
+/// close is exactly the gap an audit log exists to not have — and `serve_one`
+/// has eight ways out.
+struct Recorded<'a> {
+    log: &'a Log,
+    peer: [u8; 32],
+    started: Instant,
+}
+
+impl<'a> Recorded<'a> {
+    /// Record the open. Best-effort: a full disk must not end a session.
+    fn open(log: &'a Log, peer: [u8; 32], granted: &[Permission]) -> Self {
+        if let Err(e) = log.append(&Entry::now(
+            &peer,
+            Event::SessionOpened {
+                granted: granted.to_vec(),
+                // The connectivity ladder arrives in Phase 8. Until there is
+                // more than one way to reach a host, saying "direct" is
+                // accurate rather than a placeholder.
+                tier: "direct".to_owned(),
+            },
+        )) {
+            tracing::warn!(error = %e, "could not record the start of a session");
+        }
+        Self {
+            log,
+            peer,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for Recorded<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self.log.append(&Entry::now(
+            &self.peer,
+            Event::SessionClosed {
+                duration_secs: self.started.elapsed().as_secs(),
+                reason: "the session ended".to_owned(),
+            },
+        )) {
+            tracing::warn!(error = %e, "could not record the end of a session");
+        }
+    }
+}
+
 type Served = Result<(String, Option<Parked>), (String, Option<Parked>)>;
 
 #[allow(clippy::result_large_err)]
@@ -514,9 +628,14 @@ async fn serve_one(
     o: &HostOptions,
     parked: Option<Parked>,
     stopping: tokio::sync::watch::Receiver<bool>,
-    indicator: Option<&crate::presence_task::Indicator>,
-    presses: Option<&mut crate::presence_task::Presses>,
+    standing: Standing<'_>,
 ) -> Served {
+    let Standing {
+        indicator,
+        presses,
+        terminals,
+        log,
+    } = standing;
     println!(
         "      peer {}  {}",
         session.peer_fingerprint().hex(),
@@ -524,10 +643,79 @@ async fn serve_one(
     );
 
     let device = *session.peer_key();
-    let (media, control) = match parts(&mut session) {
+    let (media, mut control) = match parts(&mut session) {
         Ok(parts) => parts,
         Err(e) => return Err((e.to_string(), parked)),
     };
+
+    // **What this device may do, agreed before anything starts.** The
+    // controller says what it wants and the host grants a subset of what the
+    // device holds; the answer goes out before a frame or a shell exists, so
+    // the far side never has to infer its permissions from what turns up.
+    let granted = match agree(&mut control, &device).await {
+        Ok(g) => g,
+        Err(e) => return Err((e, parked)),
+    };
+    println!(
+        "      granted {}",
+        granted
+            .iter()
+            .map(|p| p.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let _recorded = Recorded::open(log, device, &granted);
+
+    // **A terminal session is not a screen session.** No capture, no encoder,
+    // no presenter — which is the whole claim of terminal mode, and it would
+    // not be true if the host set a screen up first and answered the shell
+    // request on the side.
+    if granted.contains(&Permission::Terminal) && !granted.contains(&Permission::View) {
+        let outcome = crate::terminal_cmd::serve(&mut control, terminals, &device, &granted).await;
+
+        // **The last thing the shell said is stream data, not a close
+        // reason.** Closing a QUIC connection discards whatever has not been
+        // sent, and dropping the session is what closes it — so the exit
+        // status the controller is waiting for can be thrown away by this
+        // function returning. Waiting for the peer to close first is the
+        // graceful shutdown QUIC asks for, and this is the only place in the
+        // engine where the last message is stream data rather than a close
+        // reason (a `Reason` travels *in* the close frame, which is why the
+        // media path needs nothing like this).
+        //
+        // Only when something is owed. A parked session has nothing queued,
+        // and waiting there would add the whole grace to every detach.
+        //
+        // Honest about the evidence: a session was once observed reporting
+        // "connection lost" for a shell that had exited with code 7, and this
+        // is the mechanism that would explain it — but with this wait removed
+        // again the loss did not reproduce in ten runs, nor with a slow
+        // controller, so what happened that once is not established.
+        if outcome.as_ref().is_ok_and(|f| f.owed) {
+            let _ = tokio::time::timeout(GOODBYE, session.closed()).await;
+        }
+
+        return match outcome {
+            Ok(f) => Ok((f.what, parked)),
+            Err(e) => Err((e, parked)),
+        };
+    }
+    if granted.contains(&Permission::Terminal) {
+        // Granted and not served, so it is said out loud. Two modes on one
+        // connection needs a way to say which control stream is which, and
+        // the protocol has no message for that yet.
+        println!("      terminal granted, but a shell needs a session of its own");
+    }
+    if !granted.contains(&Permission::View) {
+        // Nothing to serve, said with a reason code rather than by dropping
+        // the connection: this is a device that holds control but not view, or
+        // asked for something this host cannot do.
+        session.close(esper_proto::Reason::PERMISSION_DENIED);
+        return Err((
+            "nothing this device is permitted to do can be served".to_owned(),
+            parked,
+        ));
+    }
 
     // A returning controller resumes what it left; anybody else gets a new
     // session and the parked one is not disturbed by their arrival.
@@ -574,19 +762,10 @@ async fn serve_one(
             (m.x, m.y, m.width, m.height)
         });
 
-    // **Whether this device may drive the machine, decided here and once.**
-    // Read from the paired store rather than from anything the peer said: the
-    // controller's own opinion of its permissions is not evidence.
-    let may_control = match paths::devices() {
-        Ok((store, _)) => store
-            .iter()
-            .find(|d| d.public_key == device)
-            .is_some_and(|d| d.permissions.contains(&esper_proto::Permission::Control)),
-        Err(e) => {
-            eprintln!("      · could not read the paired devices ({e}); input refused");
-            false
-        }
-    };
+    // **Whether this device may drive the machine comes from the grant**, and
+    // the grant came from the stored record clamped by the transport — never
+    // from anything the peer said about itself.
+    let may_control = granted.contains(&Permission::Control);
 
     let input = if may_control {
         let chosen = crate::injector::open();
@@ -608,7 +787,10 @@ async fn serve_one(
             None
         }
     } else {
-        println!("      view only: this device does not hold control");
+        // "not granted" rather than "not held": a controller that did not ask
+        // for control and one that asked and was refused both land here, and
+        // only the grant is a fact this side knows.
+        println!("      view only: control is not granted for this session");
         None
     };
 
@@ -835,6 +1017,23 @@ fn monitors_from(config: &esper_proto::StreamConfig) -> Vec<esper_input::Monitor
 /// reader could tell which was which — and because they belong together: each
 /// is something the *host* provides for the duration of a session, owned by
 /// the caller and outliving nothing.
+/// What a host owns for as long as it runs, handed to each session in turn.
+///
+/// The outer half of [`Attending`]: these outlive any one session — the panic
+/// key is grabbed before the first connection, and a parked shell is resumed
+/// by a *later* one — so they are borrowed per session rather than created in
+/// it.
+struct Standing<'a> {
+    /// The session indicator and the panic key.
+    indicator: Option<&'a crate::presence_task::Indicator>,
+    /// Presses of the panic key, taken one at a time.
+    presses: Option<&'a mut crate::presence_task::Presses>,
+    /// Terminal sessions, including the ones nobody is attached to.
+    terminals: &'a TerminalService,
+    /// What happened, for somebody reading it afterwards.
+    log: &'a Log,
+}
+
 struct Attending<'a> {
     /// The session indicator and the panic key.
     indicator: Option<&'a crate::presence_task::Indicator>,
@@ -1136,7 +1335,47 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             println!("      {line}");
         }
 
-        let (media, control) = parts(&mut session).map_err(|e| e.to_string())?;
+        let (media, mut control) = parts(&mut session).map_err(|e| e.to_string())?;
+
+        // **Say what this session is for, and hear what it may actually do.**
+        // The grant may be smaller than the request and the controller renders
+        // what it holds: asking for control and assuming it was given is how a
+        // client offers a cursor that does nothing.
+        let grant = esper_transport::request_session(
+            &mut control,
+            &esper_proto::SessionRequest {
+                want: if o.control {
+                    vec![Permission::View, Permission::Control]
+                } else {
+                    vec![Permission::View]
+                },
+                codecs: vec![config_codec_name().to_owned()],
+                reason: "a screen".to_owned(),
+            },
+        )
+        .await
+        .map_err(|e| match e {
+            esper_transport::AuthorizeError::Refused(d) => {
+                format!("the host refused: {} ({})", d.detail, d.reason.0)
+            }
+            other => format!("agreeing what the session may do: {other}"),
+        })?;
+        println!(
+            "  granted    {}",
+            grant
+                .granted
+                .iter()
+                .map(|p| p.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        // Asked for and not given: said here rather than discovered later by
+        // a keystroke that had no effect.
+        if o.control && !grant.allows(Permission::Control) {
+            println!("  control    refused by the host — this session is view only");
+        }
+        let may_drive = grant.allows(Permission::Control);
+
         let link = ControllerLink::open(media, control)
             .await
             .map_err(|e| format!("the host did not announce a stream: {e}"))?;
@@ -1215,7 +1454,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // to read: said plainly rather than accepted and silently doing
         // nothing.
         let mut driving = None;
-        if o.control {
+        if o.control && may_drive {
             match presenter.as_mut() {
                 Some(p) => match session.open_control().await {
                     Ok(control) => {

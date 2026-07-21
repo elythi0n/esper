@@ -13,7 +13,9 @@ pub mod terminal;
 
 pub use auth::{AnyOf, NoPeers, OnlyPeer, PeerAuthority};
 pub use authorize::{
-    GrantStoredPermissions, Policy, RefuseAll, SessionRegistry, Verdict, decide_and_clamp, response,
+    Answered, AuthorizeError, GrantStoredPermissions, Policy, REQUEST_TIMEOUT, RefuseAll,
+    SessionRegistry, Verdict, answer_session, answer_session_within, decide_and_clamp,
+    request_session, response,
 };
 pub use backlog::{Backlog, DEFAULT_BACKLOG};
 pub use control::{Control, ControlError, FrameReader};
@@ -22,4 +24,6 @@ pub use endpoint::{ALPN, Endpoint, IDLE_TIMEOUT, KEEPALIVE, TransportError};
 pub use pair::{AnyKeyForPairingOnly, PairError, pairing_authority};
 pub use parked::{Limits, LiveTerminal, Parked, ParkedSessions, Resumed};
 pub use session::{ControlAcceptor, HELLO_TIMEOUT, MediaChannel, Session, SessionError, Stats};
-pub use terminal::{Ended, EscapeWatcher, TerminalError, TerminalPolicy, TerminalService, Typed};
+pub use terminal::{
+    Ended, EscapeWatcher, TerminalError, TerminalPolicy, TerminalService, Typed, send_resize,
+};

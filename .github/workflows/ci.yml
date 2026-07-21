@@ -70,7 +70,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb x11-utils
-          Xvfb :99 -screen 0 1600x900x24 -nolisten tcp &
+          # `-noreset` is not optional. An X server without it **resets when
+          # its last client disconnects** — every resource destroyed and every
+          # connection closed — and this suite is a stream of short-lived
+          # clients across parallel tests. Whenever the count reaches zero at
+          # the wrong moment, a connection being established at that instant
+          # dies with ECONNRESET. Measured on this suite: 2 runs in 8 failed
+          # without it, 0 in 8 with a client held open throughout. A real
+          # desktop always has a window manager attached, which is why nothing
+          # outside CI sees this.
+          Xvfb :99 -screen 0 1600x900x24 -nolisten tcp -noreset &
           for _ in $(seq 1 50); do
             if DISPLAY=:99 xdpyinfo >/dev/null 2>&1; then break; fi
             sleep 0.2

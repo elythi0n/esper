@@ -10,6 +10,7 @@
 
 mod backend;
 mod cursor_task;
+mod devices_cmd;
 mod discover_cmd;
 mod injector;
 mod input_source;
@@ -20,6 +21,7 @@ mod paths;
 mod presence_task;
 mod serve;
 mod session_cmd;
+mod terminal_cmd;
 
 use std::process::ExitCode;
 
@@ -107,6 +109,43 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("devices") => match devices_cmd::list() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("esper-engine devices: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Some("grant") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match devices_cmd::change(&rest, devices_cmd::Change::Grant) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-engine grant: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("revoke") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match devices_cmd::change(&rest, devices_cmd::Change::Revoke) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-engine revoke: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("terminal") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match terminal_cmd::parse(&rest).and_then(|o| terminal_cmd::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-engine terminal: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("serve") => match serve::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -174,8 +213,12 @@ fn print_help() {
            identity   print this device's fingerprint\n  \
            discover   list the Esper devices on this network\n  \
            pair       pair with another device, in either direction\n  \
+           devices    list paired devices and what they may do\n  \
+           grant      give a paired device a permission\n  \
+           revoke     take a permission away\n  \
            host       serve this machine's screen to a paired device\n  \
            connect    show a paired host's screen\n  \
+           terminal   open a shell on a paired host\n  \
            serve      speak the control protocol on stdin/stdout\n  \
            version    print version, build time and protocol version\n  \
            help       this text"

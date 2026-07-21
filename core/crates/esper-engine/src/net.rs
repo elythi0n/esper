@@ -105,7 +105,7 @@ pub fn permissions(device: &Device) -> String {
     device
         .permissions
         .iter()
-        .map(|p| format!("{p:?}").to_lowercase())
+        .map(|p| p.name())
         .collect::<Vec<_>>()
         .join(", ")
 }

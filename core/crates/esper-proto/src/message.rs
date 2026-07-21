@@ -151,6 +151,58 @@ pub enum Permission {
 }
 
 impl Permission {
+    /// Every permission there is, in the order a listing should show them.
+    ///
+    /// Exists so help text, listings and a name parser cannot fall behind the
+    /// enum: adding a variant without adding it here is a compile error at the
+    /// exhaustive match in [`Permission::name`] and a failing test here.
+    pub const ALL: [Self; 10] = [
+        Self::View,
+        Self::Control,
+        Self::ClipboardOut,
+        Self::ClipboardIn,
+        Self::FilesOut,
+        Self::FilesIn,
+        Self::Audio,
+        Self::Terminal,
+        Self::Unattended,
+        Self::Record,
+    ];
+
+    /// The name this permission goes by.
+    ///
+    /// **The same string the wire uses**, deliberately: the serde
+    /// representation is `snake_case`, and a permission that is `terminal` on
+    /// the wire and `Terminal` in a log is one rename away from a support
+    /// conversation about two different things.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Control => "control",
+            Self::ClipboardOut => "clipboard_out",
+            Self::ClipboardIn => "clipboard_in",
+            Self::FilesOut => "files_out",
+            Self::FilesIn => "files_in",
+            Self::Audio => "audio",
+            Self::Terminal => "terminal",
+            Self::Unattended => "unattended",
+            Self::Record => "record",
+        }
+    }
+
+    /// Read a permission from a name a person typed.
+    ///
+    /// Accepts a hyphen where the name has an underscore, because a person
+    /// typing on a command line will use whichever they are used to and being
+    /// told "unknown permission clipboard-out" is a poor answer to a request
+    /// that was perfectly clear.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        let wanted = name.trim().to_ascii_lowercase().replace('-', "_");
+        Self::ALL.into_iter().find(|p| p.name() == wanted)
+    }
+
     /// Permissions a freshly paired device receives.
     ///
     /// View and control, prompt on connect, nothing else — and emphatically not
@@ -991,6 +1043,44 @@ impl MediaMessage {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn every_permission_is_in_all_and_parses_back_from_its_name() {
+        // The list is what help text and the name parser iterate; a variant
+        // missing from it would be a permission nobody could grant.
+        assert_eq!(
+            Permission::ALL.len(),
+            10,
+            "a permission was added to the enum and not to ALL"
+        );
+        for p in Permission::ALL {
+            assert_eq!(Permission::parse(p.name()), Some(p), "{p:?}");
+            // The name is the wire form, so it must round-trip through serde
+            // as well. Two vocabularies that drift is the thing the doc on
+            // this enum argues against.
+            let cbor = {
+                let mut buf = Vec::new();
+                ciborium::into_writer(&p, &mut buf).expect("encode");
+                buf
+            };
+            let back: String = ciborium::from_reader(&cbor[..]).expect("a permission is a string");
+            assert_eq!(back, p.name(), "the wire name and the printed name differ");
+        }
+    }
+
+    #[test]
+    fn a_permission_name_is_read_the_way_a_person_types_it() {
+        assert_eq!(
+            Permission::parse("clipboard-out"),
+            Some(Permission::ClipboardOut)
+        );
+        assert_eq!(
+            Permission::parse("  Clipboard_Out "),
+            Some(Permission::ClipboardOut)
+        );
+        assert_eq!(Permission::parse("nonsense"), None);
+        assert_eq!(Permission::parse(""), None);
+    }
     use super::*;
 
     fn hello(caps: &[&str]) -> Hello {

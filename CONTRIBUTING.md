@@ -8,6 +8,34 @@ make ci     # everything CI runs: isolation, format, lint, test
 
 If that is green, your change will pass CI.
 
+## The tests that need a display
+
+The X11 backends — capture, injection, the session indicator, the viewer window
+— can only be tested against a real X server, so those tests **skip when there
+is none**. A green `make ci` on a machine with no `DISPLAY` has not run them.
+
+To run them, give them a display nobody is looking at:
+
+```sh
+Xvfb :99 -screen 0 1600x900x24 -nolisten tcp -noreset &
+DISPLAY=:99 ESPER_DISPLAY_TESTS=1 make ci
+```
+
+Two details in that line are load-bearing:
+
+- **`-noreset`.** An X server without it resets when its *last* client
+  disconnects, destroying every resource and closing every connection. This
+  suite is a stream of short-lived clients across parallel tests, so the count
+  reaches zero regularly — and a connection being established at that instant
+  dies with `ECONNRESET`. Measured: 2 runs in 8 failed without it, 0 in 8 with
+  a client held open throughout. A real desktop always has a window manager
+  attached, which is why only a bare test server shows this.
+- **`ESPER_DISPLAY_TESTS=1`.** Tests that inject keystrokes, take the input
+  focus, or draw over the whole screen are off unless asked for. A suite that
+  did that to your desktop whenever you ran it is a suite you would turn off.
+
+Never point these at a display you are using.
+
 ## The rules that are not negotiable
 
 These are enforced mechanically, and a change that breaks one will fail the
