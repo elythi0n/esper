@@ -163,10 +163,8 @@ pub async fn reach(
     if let Some(seen) = met.seen_at {
         println!("      the broker saw that device at {seen}");
     }
-    println!(
-        "  reached    {} through the broker",
-        session.remote_address()
-    );
+    // Where it was reached and which rung that was is the ladder's line to
+    // print: saying it here as well would say it twice.
     Ok(session)
 }
 

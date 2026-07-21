@@ -91,11 +91,17 @@ pub struct ConnectOptions {
     pub control: bool,
     /// A monitor to ask the host for, when it is not the one announced.
     pub monitor: Option<u32>,
-    /// A broker to be introduced through, instead of dialling an address.
+    /// A broker to be introduced through, when nothing direct works.
     pub via: Option<esper_rendezvous::Via>,
-    /// Which paired host to ask for, by fingerprint prefix. Needed only when
-    /// more than one is paired.
-    pub peer: Option<String>,
+    /// Which paired host, by name or fingerprint prefix.
+    ///
+    /// The alternative to an address, and the usual way in: where a machine
+    /// *is* changes, and which machine it is does not.
+    pub named: Option<String>,
+    /// Ask the segment where it is. On by default, like the host's own
+    /// advertising, and off with `--no-mdns` for somebody who would rather
+    /// not be heard asking.
+    pub mdns: bool,
 }
 
 /// Parse `host` flags.
@@ -201,7 +207,8 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut monitor: Option<u32> = None;
     let mut via_addr: Option<SocketAddr> = None;
     let mut via_key: Option<[u8; 32]> = None;
-    let mut peer: Option<String> = None;
+    let mut named: Option<String> = None;
+    let mut mdns = true;
     let mut i = 0usize;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
@@ -219,13 +226,9 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
                 )?);
                 i += 2;
             }
-            "--peer" => {
-                peer = Some(
-                    args.get(i + 1)
-                        .ok_or_else(|| "--peer needs a fingerprint".to_owned())?
-                        .clone(),
-                );
-                i += 2;
+            "--no-mdns" => {
+                mdns = false;
+                i += 1;
             }
             "--seconds" => {
                 seconds = args
@@ -252,20 +255,19 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
                 );
                 i += 2;
             }
-            other if !other.starts_with('-') && addr.is_none() => {
-                addr = Some(net::parse_addr(other)?);
+            // **An address or a name.** An address says where without saying
+            // which; a name says which without saying where. Both are
+            // ordinary things to type, and the key check settles the identity
+            // either way.
+            other if !other.starts_with('-') && addr.is_none() && named.is_none() => {
+                match net::parse_addr(other) {
+                    Ok(a) => addr = Some(a),
+                    Err(_) => named = Some(other.to_owned()),
+                }
                 i += 1;
             }
             other => return Err(format!("unknown flag {other}")),
         }
-    }
-    let via = broker(via_addr, via_key)?;
-    if addr.is_none() && via.is_none() {
-        return Err(
-            "connect needs either the host's address, as `connect <address>`, or a \
-             broker to be introduced through, as `connect --via <address> --broker-key <key>`"
-                .to_owned(),
-        );
     }
     Ok(ConnectOptions {
         addr,
@@ -273,8 +275,9 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
         present,
         control,
         monitor,
-        via,
-        peer,
+        via: broker(via_addr, via_key)?,
+        named,
+        mdns,
     })
 }
 
@@ -676,6 +679,110 @@ fn accept_deadline(parked_for: Option<Duration>) -> Option<Duration> {
 // exactly the one worth keeping. Boxing it would allocate on the path whose
 // job is not to lose somebody's session.
 #[allow(clippy::result_large_err)]
+/// Dial every direct rung at once and keep the first session that opens.
+///
+/// `None` when there was nothing to try. `Some(Err(..))` names every address
+/// that failed, because a ladder that gave up without saying what it attempted
+/// is the error message this project refuses to print.
+async fn reach_directly(
+    endpoint: &Endpoint,
+    rungs: &[crate::ladder::Rung],
+    hello: Hello,
+) -> Option<Result<(Session, crate::ladder::Tier), Vec<(SocketAddr, String)>>> {
+    if rungs.is_empty() {
+        return None;
+    }
+    let addresses: Vec<SocketAddr> = rungs.iter().map(|r| r.addr).collect();
+    match esper_rendezvous::race_to(endpoint, &addresses, DIAL_EACH).await {
+        Ok(conn) => {
+            let at = conn.remote_address();
+            let tier = rungs
+                .iter()
+                .find(|r| r.addr == at)
+                .map_or(crate::ladder::Tier::Given, |r| r.tier);
+            match Session::open(conn, hello).await {
+                Ok(session) => Some(Ok((session, tier))),
+                // A peer that answered and then refused is not a reason to
+                // try the next address: it is *the* device, and it said no.
+                Err((e, _)) => Some(Err(vec![(at, opening_failed(e))])),
+            }
+        }
+        Err(failures) => Some(Err(failures)),
+    }
+}
+
+/// How long each direct candidate gets.
+///
+/// They are dialled together, so this is how long the slowest may take rather
+/// than a sum. Five seconds is a slow handshake on a bad network.
+const DIAL_EACH: Duration = Duration::from_secs(5);
+
+/// What to say when no rung worked and there is no broker.
+fn no_way_in(failures: &[(SocketAddr, String)], rungs: &[crate::ladder::Rung]) -> String {
+    if rungs.is_empty() {
+        return "there is nowhere to try: that device has not been seen on this network, \
+             has no remembered address, and no broker was named. Give an address, or \
+             `--via <broker> --broker-key <key>`"
+            .to_owned();
+    }
+    let mut out = String::from("could not reach it:");
+    for (addr, why) in failures {
+        let tier = rungs
+            .iter()
+            .find(|r| r.addr == *addr)
+            .map_or("", |r| r.tier.describe());
+        out.push_str(&format!("\n      {addr} ({tier}): {why}"));
+    }
+    out.push_str("\n  No broker was named, so there was nothing else to try.");
+    out
+}
+
+/// Ask the segment where a device is.
+///
+/// A multicast question and whatever answers within [`ladder::LISTEN_FOR`].
+/// Failures are not reported: a machine with no multicast route is a machine
+/// with no LAN rung, which is ordinary, and the other rungs are unaffected.
+async fn on_the_segment(key: &[u8; 32]) -> Vec<SocketAddr> {
+    let wanted = esper_crypto::Fingerprint::of(key).hex();
+    let Ok(mut browser) = esper_discovery::Browser::start().await else {
+        return Vec::new();
+    };
+    if browser.ask().await.is_err() {
+        return Vec::new();
+    }
+    if browser.listen(crate::ladder::LISTEN_FOR).await.is_err() {
+        return Vec::new();
+    }
+    browser
+        .found()
+        .into_iter()
+        .filter(|f| f.fingerprint.as_deref() == Some(wanted.as_str()))
+        .map(|f| f.address)
+        .collect()
+}
+
+/// Remember where a device answered.
+///
+/// Best-effort and quiet: a store that cannot be written is worth a line on
+/// the console but is not a reason to end a session that is working.
+fn remember_where(key: &[u8; 32], addr: SocketAddr) {
+    let Ok((mut store, _)) = paths::devices() else {
+        return;
+    };
+    let Some(device) = store.get_mut(key) else {
+        return;
+    };
+    if device.last_address.as_deref() == Some(addr.to_string().as_str()) {
+        // Nothing changed, so nothing is written: a session should not cost a
+        // disk write for a fact already recorded.
+        return;
+    }
+    device.remember(&addr.to_string(), paths::now_secs());
+    if let Err(e) = paths::save_devices(&store) {
+        eprintln!("      · could not remember where that device was ({e})");
+    }
+}
+
 /// What to tell somebody whose device the host would not accept.
 ///
 /// The transport already distinguishes "you were refused" from "the network
@@ -1647,9 +1754,23 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
     let identity = paths::identity()?;
     let (store, keys) = paired()?;
 
-    // Dial only a paired host. With several paired, any of them may answer at
-    // this address, so all of them are permitted and the *fingerprint* is what
-    // says which one it turned out to be.
+    // **Which device somebody meant.** A name, a fingerprint prefix, or — when
+    // exactly one is paired — the obvious one. An address on the command line
+    // says where without saying which, and the key check is what settles that
+    // either way.
+    let device = match (&o.named, keys.as_slice()) {
+        (Some(named), _) => Some(crate::ladder::device_named(store.iter(), named)?),
+        (None, [_]) => store.iter().next(),
+        (None, _) if o.addr.is_none() => {
+            return Err(format!(
+                "{} devices are paired, so say which: `connect <name>` — \
+                 `esper-engine devices` lists them",
+                keys.len()
+            ));
+        }
+        (None, _) => None,
+    };
+
     // **Whatever this dials, and nothing else.** With a broker in the picture
     // that is the broker as well as the host — one socket does both, because
     // the address a router hands out belongs to the socket and a rendezvous on
@@ -1664,28 +1785,15 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         Arc::new(AnyOf::new(dialable))
     };
 
-    // Which host: the one named, the only one paired, or a refusal that says
-    // so. Named by fingerprint prefix because a key is not something anybody
-    // types.
-    let peer = match (&o.peer, keys.as_slice()) {
-        (Some(prefix), _) => Some(crate::devices_cmd::key_for(&store, prefix)?),
-        (None, [only]) => Some(*only),
-        (None, _) if o.via.is_some() => {
-            return Err(format!(
-                "{} devices are paired, so `--peer <fingerprint>` says which host to ask the \
-                 broker for — `esper-engine devices` lists them",
-                keys.len()
-            ));
-        }
-        (None, _) => None,
-    };
-
-    match (o.addr, o.via) {
+    match (o.addr, device) {
         (Some(addr), _) => println!("📺 esper connect {addr}"),
-        (None, Some(via)) => println!("📺 esper connect via {}", via.addr),
-        (None, None) => return Err("connect needs an address or a broker".to_owned()),
+        (None, Some(d)) => println!("📺 esper connect {}", d.name),
+        (None, None) => return Err("connect needs an address or a device".to_owned()),
     }
     println!();
+
+    let device_key = device.map(|d| d.public_key);
+    let rungs_from_the_store = device.map(|d| crate::ladder::direct_rungs(d, &[]));
 
     net::runtime()?.block_on(async {
         // Bound inside the runtime; quinn needs one. The local port is chosen
@@ -1698,21 +1806,55 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             .map_err(|e| format!("binding a local port: {e}"))?;
         let hello = Hello::new(Role::Controller, identity.public_key(), &net::this_device());
 
-        let mut session = match (o.addr, o.via) {
-            // An address, dialled directly: the tiers below a broker.
-            (Some(addr), _) => {
-                let conn = endpoint.connect(addr).await.map_err(|e| e.to_string())?;
-                Session::open(conn, hello)
-                    .await
-                    .map_err(|(e, _)| opening_failed(e))?
+        // Everywhere worth trying without telling anybody: the address given,
+        // or what the segment says plus where it was last time.
+        let mut rungs: Vec<crate::ladder::Rung> = match o.addr {
+            Some(addr) => vec![crate::ladder::Rung {
+                tier: crate::ladder::Tier::Given,
+                addr,
+            }],
+            None => {
+                let mut rungs = rungs_from_the_store.unwrap_or_default();
+                if o.mdns
+                    && let Some(key) = device_key
+                {
+                    for addr in on_the_segment(&key).await {
+                        // Ahead of what was remembered: a device that has just
+                        // moved is right here and wrong in the store.
+                        if !rungs.iter().any(|r| r.addr == addr) {
+                            rungs.insert(
+                                0,
+                                crate::ladder::Rung {
+                                    tier: crate::ladder::Tier::Lan,
+                                    addr,
+                                },
+                            );
+                        }
+                    }
+                }
+                rungs
             }
-            // No address, so the broker is the way in.
-            (None, Some(via)) => {
-                let peer = peer.ok_or("no host to ask the broker for")?;
+        };
+        rungs.dedup_by_key(|r| r.addr);
+
+        let (mut session, tier) = match reach_directly(&endpoint, &rungs, hello.clone()).await {
+            Some(Ok(found)) => found,
+            // Nothing direct worked, or there was nothing to try. A broker is
+            // asked last on purpose: every rung above it tells nobody
+            // anything, and this one tells the broker who is meeting whom.
+            other => {
+                let direct = match other {
+                    Some(Err(why)) => why,
+                    _ => Vec::new(),
+                };
+                let Some(via) = o.via else {
+                    return Err(no_way_in(&direct, &rungs));
+                };
+                let peer = device_key.ok_or("no device to ask the broker for")?;
                 let bound = endpoint
                     .local_addr()
                     .map_err(|e| format!("reading the bound address: {e}"))?;
-                crate::broker_cmd::reach(
+                let session = crate::broker_cmd::reach(
                     &endpoint,
                     &identity,
                     via,
@@ -1720,10 +1862,20 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     crate::broker_cmd::candidates(bound, via.addr),
                     hello,
                 )
-                .await?
+                .await?;
+                (session, crate::ladder::Tier::Broker)
             }
-            (None, None) => return Err("connect needs an address or a broker".to_owned()),
         };
+        println!(
+            "  reached    {} — {}",
+            session.remote_address(),
+            tier.describe()
+        );
+
+        // **Where it answered, remembered.** A hint for next time, and the
+        // reason a machine that has been reached once is reached instantly
+        // afterwards even with no discovery and no broker.
+        remember_where(session.peer_key(), session.remote_address());
 
         let fingerprint = session.peer_fingerprint();
         let known = store

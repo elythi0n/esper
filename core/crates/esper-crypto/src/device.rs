@@ -33,6 +33,18 @@ pub struct Device {
     pub paired_at: u64,
     /// Unix seconds of the last completed session, if any.
     pub last_seen: Option<u64>,
+    /// Where this device was last reached, if it has been.
+    ///
+    /// **A hint, never an authority.** It is offered to the connection ladder
+    /// as one candidate among several and the key check is what decides, so a
+    /// stale entry costs a failed dial and nothing else. Stored as text
+    /// because it is written for a person to read in this file and because an
+    /// address that no longer parses should not stop the file loading.
+    ///
+    /// Not serialised when absent, so a store written before this existed and
+    /// one written after it look the same until somebody connects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_address: Option<String>,
 }
 
 impl Device {
@@ -45,7 +57,18 @@ impl Device {
             permissions: Permission::defaults(),
             paired_at: now,
             last_seen: None,
+            last_address: None,
         }
+    }
+
+    /// Note that this device was reached, and where.
+    ///
+    /// Both together, because a remembered address with no date is an address
+    /// nobody can judge — "last reached at this address, in March" is a fact
+    /// somebody can act on, and half of it is not.
+    pub fn remember(&mut self, address: &str, now: u64) {
+        self.last_seen = Some(now);
+        self.last_address = Some(address.to_owned());
     }
 
     /// The fingerprint a human reads to confirm this is the right device.
@@ -565,6 +588,42 @@ mod tests {
         let second: Vec<_> = store.iter().map(|d| d.name.clone()).collect();
         assert_eq!(first, second);
         assert_eq!(first.len(), 4);
+    }
+
+    #[test]
+    fn where_a_device_was_reached_is_remembered_with_when() {
+        // A remembered address with no date is an address nobody can judge.
+        let mut d = device(3);
+        assert_eq!(d.last_address, None);
+        assert_eq!(d.last_seen, None);
+
+        d.remember("192.168.1.5:7645", 1_756_700_000);
+        assert_eq!(d.last_address.as_deref(), Some("192.168.1.5:7645"));
+        assert_eq!(d.last_seen, Some(1_756_700_000));
+
+        // And it moves when the device does.
+        d.remember("10.0.0.9:7645", 1_756_800_000);
+        assert_eq!(d.last_address.as_deref(), Some("10.0.0.9:7645"));
+        assert_eq!(d.last_seen, Some(1_756_800_000));
+    }
+
+    #[test]
+    fn a_store_written_before_addresses_were_remembered_still_loads() {
+        // The field is optional on the way in and absent on the way out until
+        // there is something to say, so a file from either version reads.
+        let json = r#"{"version":1,"devices":{"00000000000000000000000000000000000000000000000000000000000000ab":
+            {"public_key":"00000000000000000000000000000000000000000000000000000000000000ab",
+             "name":"laptop","permissions":["view"],"paired_at":0,"last_seen":null}}}"#;
+        let store: DeviceStore = serde_json::from_str(json).expect("decode");
+        let device = store.iter().next().expect("one device");
+        assert_eq!(device.last_address, None);
+
+        // And a store with nothing remembered does not write the field at all.
+        let written = serde_json::to_string(&store).expect("encode");
+        assert!(
+            !written.contains("last_address"),
+            "an empty field should not appear: {written}"
+        );
     }
 
     #[test]

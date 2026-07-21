@@ -16,6 +16,7 @@ mod discover_cmd;
 mod injector;
 mod input_source;
 mod invite_cmd;
+mod ladder;
 mod loopback;
 mod net;
 mod pairing;

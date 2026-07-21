@@ -197,7 +197,8 @@ cleanup_terminal() {
   # runs, and under `set -e` a failed kill at the end of an `&&` list ends the
   # script — which showed up as a smoke test that failed after its last check
   # had passed.
-  for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}" "${invite_pid:-}"; do
+  for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}" "${invite_pid:-}" \
+             "${named_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -322,7 +323,10 @@ else
           out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
             timeout 60 "$BIN/esper-engine" connect --via "$broker_addr" \
             --broker-key "$broker_key" --seconds 2 2>&1 || true)
-          if printf '%s' "$out" | grep -q 'through the broker'; then
+          # The tier is named in the output, so the assertion is about which
+          # rung was used rather than about a phrase that happened to be
+          # printed on the way.
+          if printf '%s' "$out" | grep -q 'an introduction'; then
             printf '  ✓ a controller with no address for the host was introduced to it\n'
           else
             printf '  ✗ the broker did not get the two of them together\n'
@@ -389,6 +393,47 @@ else
         invite_pid=""
       fi
       kill "$broker_pid" 2>/dev/null || true
+
+      # **A machine reached by name, with no address anywhere.** Where a
+      # machine *is* changes; which machine it is does not. The address it
+      # answered on the first time is remembered, and that is what makes the
+      # second connection instant with no discovery and no broker.
+      echo "  — connecting by name, using where it was last time"
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 120 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/named.log" 2>&1 &
+      named_host=$!
+      named_addr=""
+      for _ in $(seq 1 100); do
+        named_addr=$( { awk '/listening/{print $2}' "$term_a/named.log" 2>/dev/null || true; } | head -1)
+        [ -n "$named_addr" ] && break
+        sleep 0.1
+      done
+
+      if [ -z "$named_addr" ]; then
+        printf '  ✗ the host never said where it was listening\n'
+        fail=1
+      else
+        # The first connection is by address, which is what teaches this
+        # machine where that one lives.
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 60 "$BIN/esper-engine" connect "$named_addr" --seconds 1 --no-mdns \
+          > "$term_b/first.log" 2>&1 || true
+        # The device's name, as this machine recorded it at pairing.
+        peer_name=$( { ESPER_HOME="$term_b" "$BIN/esper-engine" devices | grep -oE '^  [0-9a-f]{16}  .+' || true; } \
+          | head -1 | sed 's/^  [0-9a-f]*  //')
+        out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 60 "$BIN/esper-engine" connect "$peer_name" --seconds 1 --no-mdns 2>&1 || true)
+        if printf '%s' "$out" | grep -q 'where it was last time'; then
+          printf '  ✓ a machine named rather than addressed was found where it was last time\n'
+        else
+          printf '  ✗ connecting by name did not use the remembered address\n'
+          printf '%s\n' "$out" | sed 's/^/      /'
+          fail=1
+        fi
+      fi
+      kill "$named_host" 2>/dev/null || true
+      named_host=""
 
       # **A revocation has to reach a session that is already open.** One that
       # waits for the revoked device to choose to leave is a request, not a

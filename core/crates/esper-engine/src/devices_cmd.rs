@@ -202,15 +202,6 @@ fn record(key: &[u8; 32], event: Event) {
     }
 }
 
-/// The key of the one device whose fingerprint starts with `prefix`.
-///
-/// Shared with `connect --peer`, because "which of my devices do you mean" is
-/// the same question wherever it is asked, and two answers to it would be two
-/// ways to name the wrong machine.
-pub fn key_for(store: &DeviceStore, prefix: &str) -> Result<[u8; 32], String> {
-    find(store, prefix).copied()
-}
-
 /// The one device whose fingerprint starts with `prefix`.
 fn find<'a>(store: &'a DeviceStore, prefix: &str) -> Result<&'a [u8; 32], String> {
     let wanted = prefix.trim().to_ascii_lowercase().replace([' ', ':'], "");
