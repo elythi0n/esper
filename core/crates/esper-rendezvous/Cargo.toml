@@ -1,0 +1,39 @@
+[package]
+name = "esper-rendezvous"
+description = "Two peers meeting through a broker they own: the protocol, the server and the client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-proto.workspace = true
+esper-crypto.workspace = true
+esper-transport.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_bytes = "0.11"
+tokio.workspace = true
+# Named because this crate reaches a connection directly rather than through a
+# `Session`: a rendezvous is not a session — no `Hello`, no roles, and the peer
+# on the other end is a broker rather than another device. The same
+# `default-features = false` as the transport, for the same reasons: no
+# certificate authority anywhere in the trust model.
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-aws-lc-rs",
+] }
+
+[dev-dependencies]
+esper-transport.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "aws-lc-rs",
+    "prefer-post-quantum",
+    "std",
+] }

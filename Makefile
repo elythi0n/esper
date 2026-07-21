@@ -205,7 +205,7 @@ miri-full:
 ## and the ten-minute nightly run did not. A list in two places is a list that
 ## disagrees with itself.
 FUZZ_SECONDS ?= 30
-FUZZ_TARGETS = frame_decode messages replay control_frames damage_coalesce decode_bitstream media_packets mdns_packets
+FUZZ_TARGETS = frame_decode messages replay control_frames damage_coalesce decode_bitstream media_packets mdns_packets rendezvous_meet
 
 # `cargo fuzz` sets RUSTFLAGS and **not** CFLAGS, so a C dependency is compiled
 # with neither sanitiser nor coverage instrumentation unless we say so. For the

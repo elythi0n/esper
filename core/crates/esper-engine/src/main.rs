@@ -9,6 +9,7 @@
 //! built on top of that.
 
 mod backend;
+mod broker_cmd;
 mod cursor_task;
 mod devices_cmd;
 mod discover_cmd;
@@ -233,6 +234,10 @@ fn print_help() {
            terminal   open a shell on a paired host\n  \
            serve      speak the control protocol on stdin/stdout\n  \
            version    print version, build time and protocol version\n  \
-           help       this text"
+           help       this text\n\
+         \n\
+         Both `host` and `connect` take `--via <broker> --broker-key <key>` to be\n\
+         introduced through a broker you run. There is no default broker address\n\
+         anywhere in Esper: without one, those tiers do not exist."
     );
 }

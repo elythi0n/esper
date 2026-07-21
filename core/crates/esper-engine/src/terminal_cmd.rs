@@ -83,7 +83,6 @@ pub async fn serve(
         // controller is waiting for it.
         Ok(Ended::ShellExited(exit)) => Ok(Finished {
             what: format!("the shell exited ({})", describe(&exit)),
-            owed: true,
         }),
         Ok(Ended::Parked {
             session,
@@ -97,35 +96,15 @@ pub async fn serve(
                     "waiting for the link to come back"
                 }
             ),
-            owed: false,
         }),
         Ok(Ended::Disconnected) => Ok(Finished {
             what: "the controller went away".to_owned(),
-            owed: false,
         }),
         Ok(Ended::Idle) => Ok(Finished {
             what: "idle for as long as the policy allows".to_owned(),
-            // The idle timeout sends `Exit` before it gives up, and that is
-            // the only way the controller learns why its shell stopped.
-            owed: true,
         }),
         Err(e) => Err(e.to_string()),
     }
-}
-
-/// How a terminal session ended, and whether the controller is still owed
-/// something.
-///
-/// The exit status travels as **stream data**, and a QUIC connection closed
-/// with a frame still queued loses it — so the host waits for the controller
-/// to go first when there is something to lose, and does not when there is
-/// not. Waiting either way would add two seconds to every detach.
-#[derive(Debug, Clone)]
-pub struct Finished {
-    /// What happened, for the host's own console.
-    pub what: String,
-    /// Whether the controller has something left to read.
-    pub owed: bool,
 }
 
 /// An exit status as a sentence.
@@ -135,6 +114,13 @@ fn describe(exit: &esper_proto::TerminalExit) -> String {
         (None, Some(s)) => format!("signal {s}"),
         (None, None) => "no status".to_owned(),
     }
+}
+
+/// How a terminal session ended, for the host's own console.
+#[derive(Debug, Clone)]
+pub struct Finished {
+    /// What happened.
+    pub what: String,
 }
 
 // ── the controller's half ───────────────────────────────────────────────────

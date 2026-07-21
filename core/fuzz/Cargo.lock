@@ -292,6 +292,159 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-audit"
+version = "0.0.0"
+dependencies = [
+ "esper-crypto",
+ "esper-proto",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-capture"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-color"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-crypto"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "esper-proto",
+ "hkdf",
+ "hmac",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spake2",
+ "subtle",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "esper-decode"
+version = "0.0.0"
+dependencies = [
+ "esper-color",
+ "landlock",
+ "linux-raw-sys",
+ "openh264",
+ "rustix",
+ "seccompiler",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-discovery"
+version = "0.0.0"
+dependencies = [
+ "esper-proto",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "esper-fuzz"
+version = "0.0.0"
+dependencies = [
+ "ciborium",
+ "esper-capture",
+ "esper-decode",
+ "esper-discovery",
+ "esper-media",
+ "esper-proto",
+ "esper-rendezvous",
+ "esper-transport",
+ "libfuzzer-sys",
+]
+
+[[package]]
+name = "esper-media"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-proto"
+version = "0.0.0"
+dependencies = [
+ "ciborium",
+ "serde",
+ "serde_bytes",
+ "thiserror",
+]
+
+[[package]]
+name = "esper-pty"
+version = "0.0.0"
+dependencies = [
+ "esper-proto",
+ "pty-process",
+ "rustix",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "esper-rendezvous"
+version = "0.0.0"
+dependencies = [
+ "esper-crypto",
+ "esper-proto",
+ "esper-transport",
+ "quinn",
+ "serde",
+ "serde_bytes",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "esper-transport"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "esper-audit",
+ "esper-crypto",
+ "esper-proto",
+ "esper-pty",
+ "getrandom 0.2.17",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -522,142 +675,6 @@ dependencies = [
  "cc",
  "nasm-rs",
  "walkdir",
-]
-
-[[package]]
-name = "esper-audit"
-version = "0.0.0"
-dependencies = [
- "esper-crypto",
- "esper-proto",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "esper-capture"
-version = "0.0.0"
-dependencies = [
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "esper-color"
-version = "0.0.0"
-dependencies = [
- "esper-capture",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "esper-crypto"
-version = "0.0.0"
-dependencies = [
- "ed25519-dalek",
- "hkdf",
- "hmac",
- "esper-proto",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "sha2",
- "spake2",
- "subtle",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "esper-decode"
-version = "0.0.0"
-dependencies = [
- "landlock",
- "linux-raw-sys",
- "openh264",
- "esper-color",
- "rustix",
- "seccompiler",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "esper-discovery"
-version = "0.0.0"
-dependencies = [
- "esper-proto",
- "socket2",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "esper-fuzz"
-version = "0.0.0"
-dependencies = [
- "libfuzzer-sys",
- "esper-capture",
- "esper-decode",
- "esper-discovery",
- "esper-media",
- "esper-proto",
- "esper-transport",
-]
-
-[[package]]
-name = "esper-media"
-version = "0.0.0"
-dependencies = [
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "esper-proto"
-version = "0.0.0"
-dependencies = [
- "ciborium",
- "serde",
- "serde_bytes",
- "thiserror",
-]
-
-[[package]]
-name = "esper-pty"
-version = "0.0.0"
-dependencies = [
- "esper-proto",
- "pty-process",
- "rustix",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "esper-transport"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "getrandom 0.2.17",
- "esper-audit",
- "esper-crypto",
- "esper-proto",
- "esper-pty",
- "quinn",
- "rustls",
- "rustls-pki-types",
- "serde",
- "subtle",
- "thiserror",
- "tokio",
- "tracing",
- "zeroize",
 ]
 
 [[package]]

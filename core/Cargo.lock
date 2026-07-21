@@ -313,7 +313,12 @@ name = "esper-broker"
 version = "0.0.0"
 dependencies = [
  "esper-buildinfo",
+ "esper-crypto",
  "esper-proto",
+ "esper-rendezvous",
+ "esper-transport",
+ "rustls",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -436,6 +441,7 @@ dependencies = [
  "esper-present-x11",
  "esper-proto",
  "esper-pty",
+ "esper-rendezvous",
  "esper-scale",
  "esper-stream",
  "esper-transport",
@@ -575,6 +581,22 @@ dependencies = [
  "esper-proto",
  "pty-process",
  "rustix",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "esper-rendezvous"
+version = "0.0.0"
+dependencies = [
+ "esper-crypto",
+ "esper-proto",
+ "esper-transport",
+ "quinn",
+ "rustls",
+ "serde",
+ "serde_bytes",
  "thiserror",
  "tokio",
  "tracing",

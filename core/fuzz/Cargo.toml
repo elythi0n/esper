@@ -17,6 +17,8 @@ esper-capture = { path = "../crates/esper-capture" }
 esper-decode = { path = "../crates/esper-decode" }
 esper-media = { path = "../crates/esper-media" }
 esper-discovery = { path = "../crates/esper-discovery" }
+esper-rendezvous = { path = "../crates/esper-rendezvous" }
+ciborium = "0.2"
 
 [[bin]]
 name = "messages"
@@ -73,6 +75,13 @@ bench = false
 [[bin]]
 name = "mdns_packets"
 path = "fuzz_targets/mdns_packets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rendezvous_meet"
+path = "fuzz_targets/rendezvous_meet.rs"
 test = false
 doc = false
 bench = false

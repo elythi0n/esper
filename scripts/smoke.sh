@@ -193,7 +193,13 @@ fi
 echo "  — opening a shell through the built binaries, with no display"
 term_a=$(mktemp -d); term_b=$(mktemp -d)
 cleanup_terminal() {
-  [ -n "${host_pid:-}" ] && kill "$host_pid" 2>/dev/null
+  # `|| true` on the kill: some of these have already exited by the time this
+  # runs, and under `set -e` a failed kill at the end of an `&&` list ends the
+  # script — which showed up as a smoke test that failed after its last check
+  # had passed.
+  for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}"; do
+    if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
+  done
   rm -rf "$term_a" "$term_b"
 }
 trap cleanup_terminal EXIT
@@ -269,6 +275,71 @@ else
         printf '%s\n' "$out" | sed 's/^/      /'
         fail=1
       fi
+
+      # **A host reached through a broker, with no address for it.** Tier 3
+      # of the connectivity ladder, as far as one machine can prove it: the
+      # rendezvous, the pinning, the introduction and the direct path are all
+      # exercised; the hole punch is not, because there is no router between
+      # two sockets on one host.
+      echo "  — reaching a host through a broker, given no address for it"
+      timeout 120 "$BIN/esper-broker" serve --listen 127.0.0.1:0 \
+        --identity "$term_a/broker.key" > "$term_a/broker.log" 2>&1 &
+      broker_pid=$!
+      broker_addr=""
+      broker_key=""
+      for _ in $(seq 1 100); do
+        broker_addr=$( { awk '/listening/{print $2}' "$term_a/broker.log" 2>/dev/null || true; } | head -1)
+        broker_key=$( { awk '/^  key /{print $2}' "$term_a/broker.log" 2>/dev/null || true; } | head -1)
+        [ -n "$broker_addr" ] && [ -n "$broker_key" ] && break
+        sleep 0.1
+      done
+
+      if [ -z "$broker_addr" ] || [ -z "$broker_key" ]; then
+        printf '  ✗ the broker never said where it was listening\n'
+        sed 's/^/      /' "$term_a/broker.log"
+        fail=1
+      else
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+          timeout 120 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          --via "$broker_addr" --broker-key "$broker_key" \
+          > "$term_a/via.log" 2>&1 &
+        via_host=$!
+        waited=""
+        for _ in $(seq 1 100); do
+          if grep -q 'waiting to be found' "$term_a/via.log" 2>/dev/null; then
+            waited=yes
+            break
+          fi
+          sleep 0.1
+        done
+
+        if [ -z "$waited" ]; then
+          printf '  ✗ the host never reached the broker\n'
+          sed 's/^/      /' "$term_a/via.log"
+          fail=1
+        else
+          # **No address for the host anywhere on this command line.**
+          out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect --via "$broker_addr" \
+            --broker-key "$broker_key" --seconds 2 2>&1 || true)
+          if printf '%s' "$out" | grep -q 'through the broker'; then
+            printf '  ✓ a controller with no address for the host was introduced to it\n'
+          else
+            printf '  ✗ the broker did not get the two of them together\n'
+            printf '%s\n' "$out" | sed 's/^/      /'
+            fail=1
+          fi
+          if printf '%s' "$out" | grep -qE '[1-9][0-9]* shown'; then
+            printf '  ✓ and the session that followed carried pictures\n'
+          else
+            printf '  ✗ the session through the broker carried nothing\n'
+            printf '%s\n' "$out" | sed 's/^/      /'
+            fail=1
+          fi
+        fi
+        kill "$via_host" 2>/dev/null || true
+      fi
+      kill "$broker_pid" 2>/dev/null || true
 
       # **A revocation has to reach a session that is already open.** One that
       # waits for the revoked device to choose to leave is a request, not a

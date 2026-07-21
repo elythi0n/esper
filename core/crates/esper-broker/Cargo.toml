@@ -13,5 +13,20 @@ workspace = true
 [dependencies]
 esper-proto.workspace = true
 esper-buildinfo.workspace = true
+esper-crypto.workspace = true
+esper-rendezvous.workspace = true
+esper-transport.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The crypto provider has to be installed by the process that runs, and this
+# is one. The same features as everywhere else in the tree: two
+# implementations of the same primitives in one binary is a question about
+# which one is actually running, and `prefer-post-quantum` is named explicitly
+# because it is a rustls *default* — a `default-features = false` anywhere in
+# the tree would silently move the key exchange back to classical.
+rustls = { version = "0.23", default-features = false, features = [
+    "aws-lc-rs",
+    "prefer-post-quantum",
+    "std",
+] }

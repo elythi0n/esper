@@ -101,6 +101,12 @@ pub enum TransportError {
 }
 
 /// An Esper QUIC endpoint: dials out, and accepts if configured to.
+///
+/// A handle rather than a resource: cloning it gives another way to reach the
+/// *same* socket, which is what several dials at once need — and the socket is
+/// the thing that matters, because a router's mapping belongs to a socket and
+/// not to a program.
+#[derive(Clone)]
 pub struct Endpoint {
     inner: quinn::Endpoint,
     /// Our own public key, so a caller can report which device this is without

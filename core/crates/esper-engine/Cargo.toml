@@ -21,6 +21,7 @@ esper-decode.workspace = true
 esper-proto.workspace = true
 esper-crypto.workspace = true
 esper-transport.workspace = true
+esper-rendezvous.workspace = true
 esper-link.workspace = true
 esper-media.workspace = true
 esper-stream.workspace = true

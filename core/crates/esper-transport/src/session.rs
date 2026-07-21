@@ -565,6 +565,24 @@ impl Session {
         }
     }
 
+    /// Wait for the peer to close, for at most this long.
+    ///
+    /// **The last thing said on a stream is not safe until the peer has read
+    /// it.** Closing a QUIC connection discards whatever has not been sent, and
+    /// dropping a session is what closes it — so a side that answers and
+    /// returns can throw its own answer away. Measured three times in this
+    /// project: a shell's exit status, a broker's refusal, and a session
+    /// denial, each arriving at the far end as "connection lost".
+    ///
+    /// A close *reason* needs none of this: it travels in the close frame
+    /// itself. This is for the stream data that precedes it.
+    ///
+    /// Bounded, because a peer that never closes must not hold anything open;
+    /// and free when the peer has already gone, which is the common case.
+    pub async fn linger(&self, at_most: std::time::Duration) {
+        let _ = tokio::time::timeout(at_most, self.conn.closed()).await;
+    }
+
     /// Why the peer closed, when it said.
     ///
     /// The same question [`MediaChannel::peer_close_reason`] answers, asked of
@@ -677,6 +695,15 @@ impl MediaChannel {
         peer_close_reason(&self.conn)
     }
 
+    /// Wait for the peer to close, for at most this long.
+    ///
+    /// See [`Session::linger`]. On the media half as well because a caller
+    /// that has handed its session on still holds one of these, and the wait
+    /// belongs at the end of everything rather than at the end of whatever
+    /// happens to still own the session.
+    pub async fn linger(&self, at_most: std::time::Duration) {
+        let _ = tokio::time::timeout(at_most, self.conn.closed()).await;
+    }
     /// What the transport knows about the path.
     ///
     /// Available from the media half because both sides of a session want it:

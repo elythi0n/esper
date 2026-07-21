@@ -57,6 +57,10 @@ pub struct HostOptions {
     /// segment that is usually the operator's own house, and it buys the best
     /// thing about the product on a home network.
     pub mdns: bool,
+    /// A broker to wait at, so a controller with no route to this machine can
+    /// still find it. **No default**: if nobody names one, this tier does not
+    /// exist.
+    pub via: Option<esper_rendezvous::Via>,
 }
 
 impl Default for HostOptions {
@@ -70,25 +74,35 @@ impl Default for HostOptions {
             max_resolution: Ceiling::default().long_edge(),
             once: false,
             mdns: true,
+            via: None,
         }
     }
 }
 
 /// What `connect` was asked to do.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ConnectOptions {
-    pub addr: SocketAddr,
+    /// Where the host is, when it is known. `None` with `via` set: the whole
+    /// point of a broker is that the address is what you do not have.
+    pub addr: Option<SocketAddr>,
     pub seconds: u64,
     pub present: bool,
     /// Send this window's keys and pointer to the host.
     pub control: bool,
     /// A monitor to ask the host for, when it is not the one announced.
     pub monitor: Option<u32>,
+    /// A broker to be introduced through, instead of dialling an address.
+    pub via: Option<esper_rendezvous::Via>,
+    /// Which paired host to ask for, by fingerprint prefix. Needed only when
+    /// more than one is paired.
+    pub peer: Option<String>,
 }
 
 /// Parse `host` flags.
 pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
     let mut o = HostOptions::default();
+    let mut via_addr: Option<SocketAddr> = None;
+    let mut via_key: Option<[u8; 32]> = None;
     let mut i = 0usize;
     while let Some(arg) = args.get(i) {
         let value = |name: &str| -> Result<String, String> {
@@ -144,10 +158,38 @@ pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
                 o.mdns = false;
                 i += 1;
             }
+            "--via" => {
+                via_addr = Some(net::parse_addr(&value("--via")?)?);
+                i += 2;
+            }
+            "--broker-key" => {
+                via_key = Some(crate::broker_cmd::parse_key(&value("--broker-key")?)?);
+                i += 2;
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
+    o.via = broker(via_addr, via_key)?;
     Ok(o)
+}
+
+/// A broker is an address **and** a pinned key, or neither.
+///
+/// Refused rather than half-configured: an address with no key would mean
+/// trusting whatever answered there, which is the one thing pinning exists to
+/// prevent — and a key with no address is a peer that cannot say where to go.
+fn broker(
+    addr: Option<SocketAddr>,
+    key: Option<[u8; 32]>,
+) -> Result<Option<esper_rendezvous::Via>, String> {
+    match (addr, key) {
+        (Some(addr), Some(key)) => Ok(Some(esper_rendezvous::Via { addr, key })),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err("--via needs --broker-key: the broker's key is pinned, and \
+             `esper-broker serve` prints it"
+            .to_owned()),
+        (None, Some(_)) => Err("--broker-key needs --via, which is where the broker is".to_owned()),
+    }
 }
 
 /// Parse `connect` flags.
@@ -157,9 +199,34 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut present = false;
     let mut control = false;
     let mut monitor: Option<u32> = None;
+    let mut via_addr: Option<SocketAddr> = None;
+    let mut via_key: Option<[u8; 32]> = None;
+    let mut peer: Option<String> = None;
     let mut i = 0usize;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
+            "--via" => {
+                via_addr =
+                    Some(net::parse_addr(args.get(i + 1).ok_or_else(|| {
+                        "--via needs the broker's address".to_owned()
+                    })?)?);
+                i += 2;
+            }
+            "--broker-key" => {
+                via_key = Some(crate::broker_cmd::parse_key(
+                    args.get(i + 1)
+                        .ok_or_else(|| "--broker-key needs the broker's key".to_owned())?,
+                )?);
+                i += 2;
+            }
+            "--peer" => {
+                peer = Some(
+                    args.get(i + 1)
+                        .ok_or_else(|| "--peer needs a fingerprint".to_owned())?
+                        .clone(),
+                );
+                i += 2;
+            }
             "--seconds" => {
                 seconds = args
                     .get(i + 1)
@@ -192,12 +259,22 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
             other => return Err(format!("unknown flag {other}")),
         }
     }
+    let via = broker(via_addr, via_key)?;
+    if addr.is_none() && via.is_none() {
+        return Err(
+            "connect needs either the host's address, as `connect <address>`, or a \
+             broker to be introduced through, as `connect --via <address> --broker-key <key>`"
+                .to_owned(),
+        );
+    }
     Ok(ConnectOptions {
-        addr: addr.ok_or("connect needs the host's address, as `connect <address>`")?,
+        addr,
         seconds,
         present,
         control,
         monitor,
+        via,
+        peer,
     })
 }
 
@@ -227,7 +304,11 @@ pub(crate) fn paired() -> Result<(DeviceStore, Vec<[u8; 32]>), String> {
 /// Serve video to whoever connects.
 pub fn run_host(o: &HostOptions) -> Result<(), String> {
     net::install_crypto();
-    let identity = paths::identity()?;
+    // Shared rather than cloned: `Identity` is deliberately not `Clone` — a
+    // private key should not be duplicated by a stray `.clone()` — and the
+    // task that waits at a broker needs to sign requests for as long as the
+    // host runs.
+    let identity = Arc::new(paths::identity()?);
     let (store, keys) = paired()?;
 
     // Bound inside the runtime: quinn needs one, and binding outside it fails
@@ -239,6 +320,20 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
         // store because it is what decides which keys may connect at all.
         let stopping = net::stop_signal()?;
         let permits = crate::permits::watch(stopping.clone());
+
+        // **A host dials nobody unless it is using a broker.** Then it dials
+        // exactly two kinds of peer: the broker it waits at, and a device
+        // that has come looking for it — the second only to punch a path
+        // open. Without `--via` the outbound authority stays `NoPeers`, so
+        // the default posture is unchanged.
+        let dial: Arc<dyn esper_transport::PeerAuthority> = match o.via {
+            Some(via) => {
+                let mut may = keys.clone();
+                may.push(via.key);
+                Arc::new(AnyOf::new(may))
+            }
+            None => Arc::new(NoPeers),
+        };
         let endpoint = Endpoint::bind(
             &identity,
             o.listen,
@@ -249,7 +344,7 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             // store the sessions read means `forget` reaches the TLS layer
             // within the poll interval and without a restart.
             Arc::new(PairedNow(permits.clone())),
-            Arc::new(NoPeers),
+            dial,
         )
         .map_err(|e| format!("binding {}: {e}", o.listen))?;
         Ok::<_, String>((stopping, permits, endpoint))
@@ -325,6 +420,30 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     let mut parked: Option<Parked> = None;
 
     runtime.block_on(async {
+        // **Waiting at a broker, if one was named.** Tier 3: a controller with
+        // no route to this machine asks the broker, the broker introduces
+        // them, and the two find a direct path. There is no default broker
+        // anywhere, so this happens only because somebody said so.
+        if let Some(via) = o.via {
+            let candidates = crate::broker_cmd::candidates(bound, via.addr);
+            println!("  broker     {} — waiting to be found", via.addr);
+            println!(
+                "      offering {}",
+                candidates
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            tokio::spawn(crate::broker_cmd::wait_to_be_found(
+                endpoint.clone(),
+                Arc::clone(&identity),
+                via,
+                keys.clone(),
+                candidates,
+            ));
+        }
+
         // Advertised while listening, and taken back when this stops. Without
         // the goodbye, every browser on the segment keeps offering a machine
         // that has gone until the record expires, and somebody clicks a device
@@ -766,6 +885,25 @@ type Served = Result<(String, Option<Parked>), (String, Option<Parked>)>;
 
 #[allow(clippy::result_large_err)]
 async fn serve_one(
+    session: Session,
+    o: &HostOptions,
+    parked: Option<Parked>,
+    stopping: tokio::sync::watch::Receiver<bool>,
+    machine: Machine<'_>,
+) -> Served {
+    // **Whatever happens, the peer gets a chance to read our last word.**
+    // Every refusal and every ending here is a message on a stream, and
+    // returning from this function closes the connection — which discards
+    // what has not been sent. Held before the session is moved on, and waited
+    // on after, so none of the paths inside have to remember.
+    let closer = session.media_channel();
+    let outcome = serve_session(session, o, parked, stopping, machine).await;
+    closer.linger(GOODBYE).await;
+    outcome
+}
+
+#[allow(clippy::result_large_err)]
+async fn serve_session(
     mut session: Session,
     o: &HostOptions,
     parked: Option<Parked>,
@@ -849,28 +987,9 @@ async fn serve_one(
             println!("      revoked: {dropped} parked session(s) of theirs ended too");
         }
 
-        // **The last thing the shell said is stream data, not a close
-        // reason.** Closing a QUIC connection discards whatever has not been
-        // sent, and dropping the session is what closes it — so the exit
-        // status the controller is waiting for can be thrown away by this
-        // function returning. Waiting for the peer to close first is the
-        // graceful shutdown QUIC asks for, and this is the only place in the
-        // engine where the last message is stream data rather than a close
-        // reason (a `Reason` travels *in* the close frame, which is why the
-        // media path needs nothing like this).
-        //
-        // Only when something is owed. A parked session has nothing queued,
-        // and waiting there would add the whole grace to every detach.
-        //
-        // Honest about the evidence: a session was once observed reporting
-        // "connection lost" for a shell that had exited with code 7, and this
-        // is the mechanism that would explain it — but with this wait removed
-        // again the loss did not reproduce in ten runs, nor with a slow
-        // controller, so what happened that once is not established.
-        if outcome.as_ref().is_ok_and(|f| f.owed) {
-            let _ = tokio::time::timeout(GOODBYE, session.closed()).await;
-        }
-
+        // The exit status is stream data and the peer is waiting for it —
+        // covered by the `linger` in `serve_one`, which every ending here
+        // goes through.
         return match outcome {
             Ok(f) => Ok((f.what, parked)),
             Err(e) => Err((e, parked)),
@@ -1531,25 +1650,80 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
     // Dial only a paired host. With several paired, any of them may answer at
     // this address, so all of them are permitted and the *fingerprint* is what
     // says which one it turned out to be.
-    let dial: Arc<dyn esper_transport::PeerAuthority> = if let [only] = keys.as_slice() {
+    // **Whatever this dials, and nothing else.** With a broker in the picture
+    // that is the broker as well as the host — one socket does both, because
+    // the address a router hands out belongs to the socket and a rendezvous on
+    // its own would open a path for a port nothing was going to listen on.
+    let mut dialable = keys.clone();
+    if let Some(via) = o.via {
+        dialable.push(via.key);
+    }
+    let dial: Arc<dyn esper_transport::PeerAuthority> = if let [only] = dialable.as_slice() {
         Arc::new(OnlyPeer::new(*only))
     } else {
-        Arc::new(AnyOf::new(keys.clone()))
+        Arc::new(AnyOf::new(dialable))
     };
-    println!("📺 esper connect {}", o.addr);
+
+    // Which host: the one named, the only one paired, or a refusal that says
+    // so. Named by fingerprint prefix because a key is not something anybody
+    // types.
+    let peer = match (&o.peer, keys.as_slice()) {
+        (Some(prefix), _) => Some(crate::devices_cmd::key_for(&store, prefix)?),
+        (None, [only]) => Some(*only),
+        (None, _) if o.via.is_some() => {
+            return Err(format!(
+                "{} devices are paired, so `--peer <fingerprint>` says which host to ask the \
+                 broker for — `esper-engine devices` lists them",
+                keys.len()
+            ));
+        }
+        (None, _) => None,
+    };
+
+    match (o.addr, o.via) {
+        (Some(addr), _) => println!("📺 esper connect {addr}"),
+        (None, Some(via)) => println!("📺 esper connect via {}", via.addr),
+        (None, None) => return Err("connect needs an address or a broker".to_owned()),
+    }
     println!();
 
     net::runtime()?.block_on(async {
-        // Bound inside the runtime; quinn needs one.
-        let endpoint = Endpoint::bind(&identity, net::any_port(o.addr), Arc::new(NoPeers), dial)
+        // Bound inside the runtime; quinn needs one. The local port is chosen
+        // to match whatever is being dialled first.
+        let toward = o
+            .addr
+            .or(o.via.map(|v| v.addr))
+            .unwrap_or(net::any_port(SocketAddr::from(([127, 0, 0, 1], 0))));
+        let endpoint = Endpoint::bind(&identity, net::any_port(toward), Arc::new(NoPeers), dial)
             .map_err(|e| format!("binding a local port: {e}"))?;
-        let conn = endpoint.connect(o.addr).await.map_err(|e| e.to_string())?;
-        let mut session = Session::open(
-            conn,
-            Hello::new(Role::Controller, identity.public_key(), &net::this_device()),
-        )
-        .await
-        .map_err(|(e, _)| opening_failed(e))?;
+        let hello = Hello::new(Role::Controller, identity.public_key(), &net::this_device());
+
+        let mut session = match (o.addr, o.via) {
+            // An address, dialled directly: the tiers below a broker.
+            (Some(addr), _) => {
+                let conn = endpoint.connect(addr).await.map_err(|e| e.to_string())?;
+                Session::open(conn, hello)
+                    .await
+                    .map_err(|(e, _)| opening_failed(e))?
+            }
+            // No address, so the broker is the way in.
+            (None, Some(via)) => {
+                let peer = peer.ok_or("no host to ask the broker for")?;
+                let bound = endpoint
+                    .local_addr()
+                    .map_err(|e| format!("reading the bound address: {e}"))?;
+                crate::broker_cmd::reach(
+                    &endpoint,
+                    &identity,
+                    via,
+                    peer,
+                    crate::broker_cmd::candidates(bound, via.addr),
+                    hello,
+                )
+                .await?
+            }
+            (None, None) => return Err("connect needs an address or a broker".to_owned()),
+        };
 
         let fingerprint = session.peer_fingerprint();
         let known = store
