@@ -27,7 +27,7 @@ use esper_crypto::identity::KEY_LEN;
 use esper_proto::Hello;
 use esper_transport::{Control, Endpoint, Session, TransportError};
 
-use crate::wire::{Answer, Introduction, Meet, Refusal};
+use crate::wire::{Answer, Introduction, Meet, Refusal, Relayed, Request};
 
 /// What can go wrong meeting somebody.
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +63,22 @@ pub enum ClientError {
     /// The peer answered but the session did not open.
     #[error("the peer answered but the session did not open: {0}")]
     Session(String),
+
+    /// Nothing worked, directly or through the broker.
+    ///
+    /// **Both halves are named.** A ladder that failed and said only "could
+    /// not connect" leaves somebody guessing which rung to look at, and the
+    /// two have different fixes: a direct path that never answers is a
+    /// firewall, and a broker that will not forward is a decision its operator
+    /// made.
+    #[error(
+        "no path to that device.\n      direct: {}\n      relayed: {relay}",
+        describe(direct)
+    )]
+    NoPath {
+        direct: Vec<(SocketAddr, String)>,
+        relay: String,
+    },
 }
 
 /// Every address tried, and why each failed.
@@ -194,18 +210,61 @@ impl Client {
         })
     }
 
-    /// Wait for the next introduction.
+    /// Wait for the next thing the broker has to say.
     ///
     /// A host calls this in a loop for as long as it runs. A controller calls
-    /// it once.
-    pub async fn next(&mut self) -> Result<Met, ClientError> {
+    /// it until it has a path.
+    pub async fn next(&mut self) -> Result<Told, ClientError> {
         match self.control.recv::<Answer>().await {
-            Ok(Answer::Introduced(i)) => Ok(Met::from(i)),
+            Ok(Answer::Introduced(i)) => Ok(Told::Introduced(Met::from(i))),
+            Ok(Answer::Relayed(r)) => Ok(Told::Relayed(r)),
             Ok(Answer::Refused(why)) => Err(ClientError::Refused(why)),
             Err(esper_transport::ControlError::Finished) => Err(ClientError::Silent),
             Err(e) => Err(ClientError::Stream(e.to_string())),
         }
     }
+
+    /// Wait for the next introduction, ignoring anything else.
+    ///
+    /// For the common case, and for a caller that has not asked for a relay
+    /// and so cannot be told about one.
+    pub async fn next_introduction(&mut self) -> Result<Met, ClientError> {
+        loop {
+            match self.next().await? {
+                Told::Introduced(met) => return Ok(met),
+                Told::Relayed(_) => continue,
+            }
+        }
+    }
+
+    /// Ask the broker to forward, because no direct path was found.
+    ///
+    /// The other side is told as well, and does not have to ask.
+    pub async fn ask_relay(&mut self, with: [u8; KEY_LEN]) -> Result<(), ClientError> {
+        self.control
+            .send(&Request::Relay { with })
+            .await
+            .map_err(|e| ClientError::Stream(e.to_string()))
+    }
+
+    /// Wait for the path a relay makes, ignoring anything else.
+    pub async fn next_relay(&mut self, with: [u8; KEY_LEN]) -> Result<Relayed, ClientError> {
+        loop {
+            match self.next().await? {
+                Told::Relayed(r) if r.peer == with => return Ok(r),
+                _ => continue,
+            }
+        }
+    }
+}
+
+/// What a broker had to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Told {
+    /// Somebody named you, and you named them: here is where to try.
+    Introduced(Met),
+    /// A path through the broker, because a direct one was not found.
+    Relayed(Relayed),
 }
 
 /// Meet a peer at a broker and open a session with it.
@@ -231,19 +290,48 @@ pub async fn reach(
     let mut client =
         Client::arrive(endpoint, identity, via.addr, via.key, &[peer], candidates).await?;
 
-    let met = client.next().await?;
+    let met = client.next_introduction().await?;
     if met.peer != peer {
         return Err(ClientError::WrongPeer);
     }
 
-    let where_to = met.everywhere();
-    let conn = race_to(endpoint, &where_to, each)
-        .await
-        .map_err(ClientError::Nowhere)?;
+    // **Tier 3 first: a direct path, which costs the broker nothing further.**
+    let conn = match race_to(endpoint, &met.everywhere(), each).await {
+        Ok(conn) => conn,
+        Err(direct) => {
+            // Nothing answered. Tier 4: ask the broker to forward, which is
+            // the only tier that spends somebody's bandwidth and therefore the
+            // last one tried.
+            tracing::debug!(?direct, "no direct path; asking for a relay");
+            client.ask_relay(peer).await?;
+            let relayed = match client.next_relay(peer).await {
+                Ok(relayed) => relayed,
+                // A broker that will not forward is a complete answer, and the
+                // direct attempts are what the person needs to see alongside
+                // it.
+                Err(ClientError::Refused(why)) => {
+                    return Err(ClientError::NoPath {
+                        direct,
+                        relay: why.message(),
+                    });
+                }
+                Err(other) => return Err(other),
+            };
+            match race_to(endpoint, &[relayed.at], each).await {
+                Ok(conn) => conn,
+                Err(through) => {
+                    return Err(ClientError::NoPath {
+                        direct,
+                        relay: describe(&through),
+                    });
+                }
+            }
+        }
+    };
 
-    // The broker is no longer needed: the two peers have found each other, and
-    // holding the introduction open would keep a place in its table for a
-    // meeting that has happened.
+    // The broker is no longer needed for the introduction: holding it open
+    // would keep a place in its table for a meeting that has happened. A relay
+    // it arranged outlives this, because the *session* is using it.
     drop(client);
 
     match Session::open(conn, hello).await {
@@ -265,12 +353,15 @@ pub async fn reach(
 /// as one. **Untested against real routers**: there is none between two
 /// sockets on one machine, and what two consumer NATs do with this is an open
 /// question until it is tried on two networks.
-pub async fn punch_toward(endpoint: &Endpoint, met: &Met, each: Duration) {
-    let where_to = met.everywhere();
+///
+/// The same call teaches a **relay** where this peer is: a forwarder cannot
+/// learn an address until something has arrived from it, and this is the
+/// something.
+pub async fn punch_at(endpoint: &Endpoint, where_to: &[SocketAddr], each: Duration) {
     if where_to.is_empty() {
         return;
     }
-    match race_to(endpoint, &where_to, each).await {
+    match race_to(endpoint, where_to, each).await {
         // A connection is not what was wanted, and it is not a problem.
         Ok(conn) => {
             conn.close(0u32.into(), b"punch");

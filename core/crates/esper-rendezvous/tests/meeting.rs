@@ -46,11 +46,22 @@ struct Running {
 
 impl Running {
     fn start() -> Self {
+        Self::with(Limits::default())
+    }
+
+    /// A broker that will forward as well as introduce.
+    fn relaying() -> Self {
+        Self::with(Limits {
+            relay: Some(esper_rendezvous::RelayLimits::default()),
+            ..Limits::default()
+        })
+    }
+
+    fn with(limits: Limits) -> Self {
         init();
         let identity = Identity::generate().expect("a broker key");
-        let broker = Arc::new(
-            Broker::bind(&identity, loopback(), Limits::default()).expect("bind the broker"),
-        );
+        let broker =
+            Arc::new(Broker::bind(&identity, loopback(), limits).expect("bind the broker"));
         let addr = broker.local_addr().expect("its address");
         let key = broker.key();
         let (stop, stopping) = tokio::sync::watch::channel(false);
@@ -132,7 +143,7 @@ async fn two_peers_meet_and_each_learns_where_to_try() {
         .await
         .expect("the controller should reach the broker");
 
-    let found = tokio::time::timeout(Duration::from_secs(5), looking.next())
+    let found = tokio::time::timeout(Duration::from_secs(5), looking.next_introduction())
         .await
         .expect("an introduction should not take five seconds")
         .expect("the controller should be introduced");
@@ -141,7 +152,7 @@ async fn two_peers_meet_and_each_learns_where_to_try() {
 
     // And the waiting side is told too — an introduction one peer acts on and
     // the other does not is a hole punch with one fist.
-    let told = tokio::time::timeout(Duration::from_secs(5), waiting.next())
+    let told = tokio::time::timeout(Duration::from_secs(5), waiting.next_introduction())
         .await
         .expect("the host should be told as well")
         .expect("the host should be introduced");
@@ -175,14 +186,14 @@ async fn a_stranger_asking_after_a_host_is_told_nothing() {
 
     // It connected, it asked, and it waits for ever.
     assert!(
-        tokio::time::timeout(Duration::from_millis(400), prying.next())
+        tokio::time::timeout(Duration::from_millis(400), prying.next_introduction())
             .await
             .is_err(),
         "a stranger must be left waiting, not introduced"
     );
     // And the host is not even told that somebody asked.
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), waiting.next())
+        tokio::time::timeout(Duration::from_millis(200), waiting.next_introduction())
             .await
             .is_err(),
         "the host must not learn that a stranger asked after it"
@@ -248,7 +259,7 @@ async fn one_address_is_held_to_its_share_and_told_so() {
     let mut over = arrive_from(&broker, &extra_ep, &extra, &[peer.public_key()], 30000)
         .await
         .expect("the connection is accepted");
-    let refused = tokio::time::timeout(Duration::from_secs(5), over.next())
+    let refused = tokio::time::timeout(Duration::from_secs(5), over.next_introduction())
         .await
         .expect("the broker should answer rather than hang")
         .expect_err("over the share");
@@ -339,7 +350,7 @@ async fn a_controller_given_only_a_broker_reaches_the_host() {
     .await
     .expect("the controller reaches its broker");
 
-    let met = tokio::time::timeout(Duration::from_secs(5), looking.next())
+    let met = tokio::time::timeout(Duration::from_secs(5), looking.next_introduction())
         .await
         .expect("an introduction")
         .expect("introduced");
@@ -351,7 +362,7 @@ async fn a_controller_given_only_a_broker_reaches_the_host() {
     );
 
     // The host is told as well, and would punch towards these.
-    let told = tokio::time::timeout(Duration::from_secs(5), waiting.next())
+    let told = tokio::time::timeout(Duration::from_secs(5), waiting.next_introduction())
         .await
         .expect("the host is told")
         .expect("introduced");
@@ -421,5 +432,206 @@ async fn a_race_that_loses_reports_every_address_it_tried() {
             "an address nobody asked for: {addr}"
         );
         assert!(!why.is_empty(), "a failure with no reason");
+    }
+}
+
+/// **A session through the relay, when no direct path exists.**
+///
+/// The forwarding half, end to end: an allocation, two sockets, each side
+/// learned from the packets it sends, and a QUIC handshake that completes
+/// across it. The relay never sees anything but ciphertext — it does not
+/// terminate the connection, it forwards datagrams — and both peers agree
+/// that the address they are talking to is the relay's.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs aws-lc-rs, which is C; MIRI cannot call it")]
+async fn two_peers_talk_through_the_relay() {
+    let broker = Running::relaying();
+    let host = Identity::generate().unwrap();
+    let ctrl = Identity::generate().unwrap();
+
+    let host_ep = Endpoint::bind(
+        &host,
+        loopback(),
+        Arc::new(AnyOf::new(vec![ctrl.public_key()])),
+        Arc::new(AnyOf::new(vec![broker.key, ctrl.public_key()])),
+    )
+    .expect("the host's endpoint");
+    let host_at = host_ep.local_addr().expect("its address");
+
+    let mut waiting = Client::arrive(
+        &host_ep,
+        &host,
+        broker.addr,
+        broker.key,
+        &[ctrl.public_key()],
+        vec![host_at],
+    )
+    .await
+    .expect("the host reaches its broker");
+    broker.until_waiting(1).await;
+
+    let ctrl_ep = Endpoint::bind(
+        &ctrl,
+        loopback(),
+        Arc::new(NoPeers),
+        Arc::new(AnyOf::new(vec![broker.key, host.public_key()])),
+    )
+    .expect("the controller's endpoint");
+    let ctrl_at = ctrl_ep.local_addr().expect("its address");
+    let mut looking = Client::arrive(
+        &ctrl_ep,
+        &ctrl,
+        broker.addr,
+        broker.key,
+        &[host.public_key()],
+        vec![ctrl_at],
+    )
+    .await
+    .expect("the controller reaches its broker");
+
+    // Both are introduced first — a relay is asked for *after* a direct path
+    // was not found, and this test skips straight to asking.
+    let _ = tokio::time::timeout(Duration::from_secs(5), looking.next_introduction())
+        .await
+        .expect("an introduction")
+        .expect("introduced");
+
+    looking
+        .ask_relay(host.public_key())
+        .await
+        .expect("asking for a relay");
+
+    // The host is told without asking, because a forwarder cannot learn where
+    // it is until it has sent something.
+    let host_path = tokio::time::timeout(
+        Duration::from_secs(5),
+        waiting.next_relay(ctrl.public_key()),
+    )
+    .await
+    .expect("the host is told about the relay")
+    .expect("a path");
+    let ctrl_path = tokio::time::timeout(
+        Duration::from_secs(5),
+        looking.next_relay(host.public_key()),
+    )
+    .await
+    .expect("the controller is told")
+    .expect("a path");
+    assert_ne!(
+        host_path.at, ctrl_path.at,
+        "each side gets its own socket, which is what says who a packet came from"
+    );
+
+    // The host sends first, so the relay learns where it is. Its own dial is
+    // expected to fail — the controller accepts nobody — and the mapping it
+    // leaves behind is the point.
+    let accepting_ep = host_ep.clone();
+    let accepting = tokio::spawn(async move { accepting_ep.accept().await });
+    esper_rendezvous::punch_at(&host_ep, &[host_path.at], Duration::from_millis(400)).await;
+
+    let conn = esper_rendezvous::race_to(&ctrl_ep, &[ctrl_path.at], Duration::from_secs(5))
+        .await
+        .expect("the relay should carry the handshake");
+    assert_eq!(
+        conn.remote_address(),
+        ctrl_path.at,
+        "the controller is talking to the relay, believing it to be the host"
+    );
+
+    let arrived = tokio::time::timeout(Duration::from_secs(5), accepting)
+        .await
+        .expect("the host should see it")
+        .expect("join")
+        .expect("a connection")
+        .expect("a completed handshake");
+    assert_eq!(
+        arrived.remote_address(),
+        host_path.at,
+        "and the host is talking to the relay, believing it to be the controller"
+    );
+    assert_eq!(
+        broker.broker.relaying(),
+        1,
+        "one pair is being forwarded for"
+    );
+}
+
+/// **When nothing works, the failure names both halves of the ladder.**
+///
+/// A direct path is tried first because it costs the broker nothing further;
+/// a relay is asked for only after it fails, because forwarding spends
+/// somebody's bandwidth. This is that order, observed from the outside: the
+/// direct candidates are attempted and named, and the relay is asked for and
+/// refused by a broker that only introduces.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs aws-lc-rs, which is C; MIRI cannot call it")]
+async fn a_path_that_cannot_be_found_names_the_direct_attempts_and_the_relay() {
+    let broker = Running::start(); // introduces, does not forward
+    let host = Identity::generate().unwrap();
+    let ctrl = Identity::generate().unwrap();
+
+    // A host that reaches the broker but accepts nobody, so the address the
+    // broker sees is not a way in either — and one candidate that is a socket
+    // nothing is listening on.
+    let dead = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a socket");
+    let dead_at = dead.local_addr().expect("its address");
+    let host_ep = Endpoint::bind(
+        &host,
+        loopback(),
+        Arc::new(NoPeers),
+        Arc::new(AnyOf::new(vec![broker.key])),
+    )
+    .expect("the host's endpoint");
+    let _waiting = Client::arrive(
+        &host_ep,
+        &host,
+        broker.addr,
+        broker.key,
+        &[ctrl.public_key()],
+        vec![dead_at],
+    )
+    .await
+    .expect("the host reaches its broker");
+    broker.until_waiting(1).await;
+
+    let ctrl_ep = Endpoint::bind(
+        &ctrl,
+        loopback(),
+        Arc::new(NoPeers),
+        Arc::new(AnyOf::new(vec![broker.key, host.public_key()])),
+    )
+    .expect("the controller's endpoint");
+
+    let err = esper_rendezvous::reach(
+        &ctrl_ep,
+        &ctrl,
+        esper_rendezvous::Via {
+            addr: broker.addr,
+            key: broker.key,
+        },
+        host.public_key(),
+        vec![ctrl_ep.local_addr().expect("its address")],
+        esper_proto::Hello::new(
+            esper_proto::Role::Controller,
+            ctrl.public_key(),
+            "controller",
+        ),
+        Duration::from_millis(400),
+    )
+    .await
+    .expect_err("there is no way to that host");
+
+    match err {
+        ClientError::NoPath { direct, relay } => {
+            assert!(
+                direct.iter().any(|(addr, _)| *addr == dead_at),
+                "the candidate the host offered should have been tried: {direct:?}"
+            );
+            assert!(
+                relay.contains("does not forward"),
+                "the relay's answer should be named too: {relay}"
+            );
+        }
+        other => panic!("expected both halves to be named, got {other:?}"),
     }
 }

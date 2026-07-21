@@ -14,6 +14,9 @@
 //!   pure and testable without a socket.
 //! - [`server`] — the broker: a QUIC listener that accepts any key, holds
 //!   nothing across a restart, and forwards introductions.
+//! - [`relay`] — tier 4: forwarding opaque UDP for two peers that could not
+//!   find a path, with a ceiling because it is the one tier that spends
+//!   somebody's bandwidth.
 //! - [`client`] — the engine's half: wait to be found, or go looking.
 //!
 //! # What a broker is not trusted with
@@ -27,11 +30,13 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod relay;
 pub mod server;
 pub mod table;
 pub mod wire;
 
-pub use client::{Client, ClientError, Met, Via, local_candidates, punch_toward, race_to, reach};
+pub use client::{Client, ClientError, Met, Told, Via, local_candidates, punch_at, race_to, reach};
+pub use relay::{Pairs, RelayLimits};
 pub use server::{Broker, BrokerError, Limits};
 pub use table::{Arrival, Table};
 pub use wire::{Answer, Introduction, Meet, RENDEZVOUS_VERSION, Refusal};

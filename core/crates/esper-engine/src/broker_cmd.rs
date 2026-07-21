@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use esper_crypto::identity::KEY_LEN;
-use esper_rendezvous::{Client, Via};
+use esper_rendezvous::{Client, Told, Via};
 use esper_transport::{Endpoint, Session};
 
 /// How long each candidate gets before it is given up on.
@@ -92,12 +92,25 @@ pub async fn wait_to_be_found(
 
     loop {
         match client.next().await {
-            Ok(met) => {
+            Ok(Told::Introduced(met)) => {
                 println!(
                     "  · {} is looking for this machine through the broker",
                     esper_crypto::Fingerprint::of(&met.peer).hex()
                 );
-                esper_rendezvous::punch_toward(&endpoint, &met, PUNCH).await;
+                esper_rendezvous::punch_at(&endpoint, &met.everywhere(), PUNCH).await;
+            }
+            // **The other side could not find a direct path, so the broker is
+            // forwarding.** This side has to send something before a forwarder
+            // can learn where it is, and a peer that was not told has no
+            // reason to send — which is why this arrives without being asked
+            // for.
+            Ok(Told::Relayed(path)) => {
+                println!(
+                    "  · forwarding through the broker for {} at {}",
+                    esper_crypto::Fingerprint::of(&path.peer).hex(),
+                    path.at
+                );
+                esper_rendezvous::punch_at(&endpoint, &[path.at], PUNCH).await;
             }
             Err(e) => {
                 println!("  · the broker is no longer introducing anybody ({e})");

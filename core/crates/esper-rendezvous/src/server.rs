@@ -24,7 +24,7 @@
 //! - **Nothing is written to disk, ever**, so there is nothing to grow and
 //!   nothing to survive a restart.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,8 +33,9 @@ use esper_crypto::identity::KEY_LEN;
 use esper_transport::{Control, Endpoint, NoPeers, pairing_authority};
 use tokio::sync::mpsc;
 
+use crate::relay::{Pairs, RelayLimits, tell_peer};
 use crate::table::{Arrival, Table};
-use crate::wire::{Answer, CLOCK_SLACK_SECS, Introduction, Meet, RENDEZVOUS_VERSION, Refusal};
+use crate::wire::{Answer, CLOCK_SLACK_SECS, Meet, RENDEZVOUS_VERSION, Refusal, Relayed, Request};
 
 /// How long a connection may say nothing before it is dropped.
 ///
@@ -66,6 +67,13 @@ pub struct Limits {
     pub silence: Duration,
     /// How many introductions to queue for one peer.
     pub queue: usize,
+    /// What it will forward, if it forwards at all.
+    ///
+    /// `None` means it introduces and does not relay, which is the default:
+    /// introducing costs a few packets, forwarding costs somebody's
+    /// bandwidth, and an operator who will do the first and not the second is
+    /// making a reasonable choice.
+    pub relay: Option<RelayLimits>,
 }
 
 impl Default for Limits {
@@ -73,6 +81,7 @@ impl Default for Limits {
         Self {
             silence: SILENCE,
             queue: QUEUE,
+            relay: None,
         }
     }
 }
@@ -92,6 +101,11 @@ pub struct Broker {
     key: [u8; KEY_LEN],
     table: Arc<Mutex<Table>>,
     limits: Limits,
+    /// Every pair being forwarded for. Empty and unused unless relaying is on.
+    pairs: Pairs,
+    /// Where this broker was told to listen, for the address it hands out
+    /// when a peer's connection cannot say which of ours it reached.
+    listen: SocketAddr,
 }
 
 impl Broker {
@@ -112,6 +126,8 @@ impl Broker {
             key: identity.public_key(),
             table: Arc::new(Mutex::new(Table::new())),
             limits,
+            pairs: Pairs::new(),
+            listen,
         })
     }
 
@@ -130,6 +146,12 @@ impl Broker {
     #[must_use]
     pub fn waiting(&self) -> usize {
         self.table.lock().map_or(0, |t| t.len())
+    }
+
+    /// How many pairs are being forwarded for.
+    #[must_use]
+    pub fn relaying(&self) -> usize {
+        self.pairs.len()
     }
 
     /// Serve until told to stop.
@@ -155,18 +177,25 @@ impl Broker {
             let table = Arc::clone(&self.table);
             let key = self.key;
             let limits = self.limits;
+            let pairs = self.pairs.clone();
+            let listen = self.listen;
             // A task per peer, because a peer that waits is a peer that waits.
-            tokio::spawn(async move { serve_one(conn, table, key, limits).await });
+            tokio::spawn(async move {
+                serve_one(conn, table, key, limits, pairs, listen).await;
+            });
         }
     }
 }
 
 /// One peer, from its connection to its departure.
+#[allow(clippy::too_many_arguments)]
 async fn serve_one(
     conn: quinn::Connection,
     table: Arc<Mutex<Table>>,
     broker_key: [u8; KEY_LEN],
     limits: Limits,
+    pairs: Pairs,
+    listen: SocketAddr,
 ) {
     // The whole address, not just the host part: the port is the other half
     // of a reflexive candidate, and it is the half a router rewrites.
@@ -206,15 +235,19 @@ async fn serve_one(
 
     // Introductions for this peer arrive here: from its own arrival, and from
     // everybody who turns up later naming it.
-    let (to_peer, mut for_peer) = mpsc::channel::<Introduction>(limits.queue.max(1));
+    let (to_peer, mut for_peer) = mpsc::channel::<Answer>(limits.queue.max(1));
 
     let who = meet.me;
+    // Which of *our* addresses this peer reached us on. Not where it is —
+    // that is `from` — but the one it is known to be able to get to, which is
+    // what a relay address has to be built from.
+    let local = conn.local_ip();
     let arrival = {
         let Ok(mut t) = table.lock() else {
             tracing::error!("the broker's table is unusable");
             return;
         };
-        t.arrive(meet, from, to_peer)
+        t.arrive(meet, from, local, to_peer)
     };
 
     let id = match arrival {
@@ -240,13 +273,35 @@ async fn serve_one(
     loop {
         tokio::select! {
             told = for_peer.recv() => match told {
-                Some(introduction) => {
-                    if control.send(&Answer::Introduced(introduction)).await.is_err() {
+                Some(answer) => {
+                    if control.send(&answer).await.is_err() {
                         break;
                     }
                 }
                 // The table dropped this place. Nothing more is coming.
                 None => break,
+            },
+            // What the peer asks after its first request — at present, only a
+            // relay, which is asked for when a direct path could not be found.
+            asked = control.recv::<Request>() => match asked {
+                Ok(Request::Relay { with }) => {
+                    let answer = arrange_relay(
+                        &table,
+                        &pairs,
+                        &limits,
+                        listen,
+                        conn.local_ip(),
+                        &who,
+                        &with,
+                    );
+                    if control.send(&answer).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(%from, error = %e, "a peer's stream ended");
+                    break;
+                }
             },
             // **The peer's own end of the stream is watched, not ignored.**
             // Without this a controller that got its introduction and left
@@ -272,6 +327,104 @@ async fn say_no(mut control: Control, conn: &quinn::Connection, why: Refusal) {
     // answer still queued, and the peer would learn nothing but that the
     // connection went away.
     let _ = tokio::time::timeout(FAREWELL, conn.closed()).await;
+}
+
+/// Open a path between two peers that could not find one themselves.
+///
+/// Answers the asking peer and **tells the other side too**, because a
+/// forwarder cannot learn where a peer is until that peer has sent something,
+/// and a peer that was not told has no reason to send.
+fn arrange_relay(
+    table: &Arc<Mutex<Table>>,
+    pairs: &Pairs,
+    limits: &Limits,
+    listen: SocketAddr,
+    asker_local: Option<IpAddr>,
+    asker: &[u8; KEY_LEN],
+    wanted: &[u8; KEY_LEN],
+) -> Answer {
+    let Some(relay_limits) = limits.relay else {
+        return Answer::Refused(Refusal::NoRelay);
+    };
+
+    // Mutual, again: a relay is a path between two devices that have named
+    // each other, and asking for one is not a way to reach somebody who has
+    // not asked for you.
+    let (them, their_local) = {
+        let Ok(t) = table.lock() else {
+            return Answer::Refused(Refusal::RelayFull);
+        };
+        match t.mutual_peer(asker, wanted) {
+            Some(found) => found,
+            None => return Answer::Refused(Refusal::Malformed),
+        }
+    };
+
+    let now = std::time::Instant::now();
+    let Some(id) = pairs.open(relay_limits, now) else {
+        return Answer::Refused(Refusal::RelayFull);
+    };
+
+    // A socket each, so which side a packet arrived on says which peer sent
+    // it — which is what removes the need for either peer to send anything a
+    // plain QUIC endpoint cannot send.
+    let bind = SocketAddr::new(listen.ip(), 0);
+    let (Ok(side_a), Ok(side_b)) = (
+        std::net::UdpSocket::bind(bind),
+        std::net::UdpSocket::bind(bind),
+    ) else {
+        pairs.close(id);
+        return Answer::Refused(Refusal::RelayFull);
+    };
+    let (Ok(port_a), Ok(port_b)) = (side_a.local_addr(), side_b.local_addr()) else {
+        pairs.close(id);
+        return Answer::Refused(Refusal::RelayFull);
+    };
+    for socket in [&side_a, &side_b] {
+        if socket.set_nonblocking(true).is_err() {
+            pairs.close(id);
+            return Answer::Refused(Refusal::RelayFull);
+        }
+    }
+    let (Ok(side_a), Ok(side_b)) = (
+        tokio::net::UdpSocket::from_std(side_a),
+        tokio::net::UdpSocket::from_std(side_b),
+    ) else {
+        pairs.close(id);
+        return Answer::Refused(Refusal::RelayFull);
+    };
+
+    tokio::spawn(crate::relay::forward(
+        pairs.clone(),
+        id,
+        side_a,
+        side_b,
+        relay_limits,
+    ));
+
+    // Each side is told the address *it* reached this broker on, with the
+    // other side's port: it sends to the socket that will answer it, which is
+    // what QUIC's address validation needs.
+    let for_asker = tell_peer(asker_local, listen, port_a.port());
+    let for_them = tell_peer(their_local, listen, port_b.port());
+
+    if them
+        .try_send(Answer::Relayed(Relayed {
+            peer: *asker,
+            at: for_them,
+        }))
+        .is_err()
+    {
+        // The other side is not reading, so there is nobody to forward to.
+        pairs.close(id);
+        return Answer::Refused(Refusal::Malformed);
+    }
+
+    tracing::debug!(?for_asker, ?for_them, "forwarding for a pair");
+    Answer::Relayed(Relayed {
+        peer: *wanted,
+        at: for_asker,
+    })
 }
 
 /// Give up a place.

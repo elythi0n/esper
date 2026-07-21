@@ -131,8 +131,43 @@ pub struct KeyBytes(#[serde(with = "key_bytes")] pub [u8; KEY_LEN]);
 pub enum Answer {
     /// Somebody named you, and you named them.
     Introduced(Introduction),
+    /// Send your session traffic here and it will be forwarded.
+    Relayed(Relayed),
     /// The broker will not do it, and why.
     Refused(Refusal),
+}
+
+/// What a peer says **after** its request to meet.
+///
+/// The first message on the stream is always a [`Meet`], which is signed and
+/// proves which device is asking. Everything after it arrives on that same
+/// stream, so it inherits that proof: a second signature would answer a
+/// question nobody asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Request {
+    /// Hole punching did not find a path; please forward instead.
+    ///
+    /// Asked by one side and answered to **both**, because a forwarder cannot
+    /// learn where a peer is until that peer has sent something, and a peer
+    /// that was not told has no reason to send. The two have already named
+    /// each other, so there is nothing further to agree.
+    Relay {
+        /// Which of the peers named in the [`Meet`] this is about.
+        #[serde(with = "key_bytes")]
+        with: [u8; KEY_LEN],
+    },
+}
+
+/// Where to send traffic for a peer the broker will forward to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Relayed {
+    /// Which peer this is a path to.
+    #[serde(with = "key_bytes")]
+    pub peer: [u8; KEY_LEN],
+    /// **Treat this as that peer's address.** What follows is still end to end
+    /// between the two device keys: a relay forwards bytes it cannot read and
+    /// does not try to.
+    pub at: SocketAddr,
 }
 
 /// Who to try, and where.
@@ -180,6 +215,15 @@ pub enum Refusal {
     Full,
     /// Too many from one address.
     TooManyFromYou,
+    /// This broker does not forward, only introduce.
+    ///
+    /// The two are separate because they cost different things: introducing is
+    /// a few packets and a place in a table, forwarding is somebody's
+    /// bandwidth. An operator who will do the first and not the second is
+    /// making a reasonable choice, and a peer should be told which it got.
+    NoRelay,
+    /// The broker is forwarding for as many peers as it will.
+    RelayFull,
 }
 
 impl Refusal {
@@ -201,6 +245,10 @@ impl Refusal {
             Self::TooManyFromYou => {
                 "too many connections to the broker from this address".to_owned()
             }
+            Self::NoRelay => {
+                "that broker introduces peers but does not forward for them".to_owned()
+            }
+            Self::RelayFull => "the broker is forwarding for as many peers as it will".to_owned(),
         }
     }
 }

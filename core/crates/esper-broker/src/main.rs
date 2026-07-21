@@ -21,7 +21,7 @@ use std::sync::Once;
 
 use esper_buildinfo::{BUILD_TIME, VERSION};
 use esper_crypto::Identity;
-use esper_rendezvous::{Broker, Limits};
+use esper_rendezvous::{Broker, Limits, RelayLimits};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -64,11 +64,21 @@ fn main() -> ExitCode {
 struct Options {
     listen: SocketAddr,
     identity: PathBuf,
+    /// What it will forward for, if anything.
+    ///
+    /// **Off unless asked for.** Introducing two peers costs a few packets;
+    /// forwarding for them costs the operator's bandwidth for as long as the
+    /// session lasts, and nobody should discover they are paying for that
+    /// because a default said so.
+    relay: Option<RelayLimits>,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut listen: Option<SocketAddr> = None;
     let mut identity: Option<PathBuf> = None;
+    let mut relay = false;
+    let mut bitrate: Option<u64> = None;
+    let mut pairs: Option<usize> = None;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         match a.as_str() {
@@ -84,6 +94,22 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .ok_or_else(|| "--identity needs a path".to_owned())?;
                 identity = Some(PathBuf::from(raw));
             }
+            "--relay" => relay = true,
+            "--relay-bitrate" => {
+                let raw = rest.next().ok_or_else(|| {
+                    "--relay-bitrate needs a number of bits per second".to_owned()
+                })?;
+                bitrate = Some(bits_per_second(raw)?);
+            }
+            "--relay-pairs" => {
+                let raw = rest
+                    .next()
+                    .ok_or_else(|| "--relay-pairs needs a number".to_owned())?;
+                pairs = Some(
+                    raw.parse()
+                        .map_err(|_| format!("{raw:?} is not a number of pairs"))?,
+                );
+            }
             other => return Err(format!("unexpected argument {other:?}")),
         }
     }
@@ -98,7 +124,46 @@ fn parse(args: &[String]) -> Result<Options, String> {
             Some(path) => path,
             None => default_identity()?,
         },
+        relay: match (relay, bitrate, pairs) {
+            (false, None, None) => None,
+            (false, _, _) => {
+                return Err(
+                    "--relay-bitrate and --relay-pairs are settings for --relay, \
+                     which was not given"
+                        .to_owned(),
+                );
+            }
+            (true, bitrate, pairs) => Some(RelayLimits {
+                ceiling: bitrate.unwrap_or(RelayLimits::default().ceiling),
+                pairs: pairs.unwrap_or(RelayLimits::default().pairs),
+                ..RelayLimits::default()
+            }),
+        },
     })
+}
+
+/// Read a bitrate the way an operator writes one.
+///
+/// Bits per second, because that is what a line is sold in — and converted to
+/// bytes here, because that is what a socket counts. `2M` and `2000000` are
+/// the same thing; getting that wrong by a factor of eight is the classic way
+/// to set a ceiling nobody meant.
+fn bits_per_second(raw: &str) -> Result<u64, String> {
+    let text = raw.trim().to_ascii_lowercase();
+    let (digits, scale) = match text.strip_suffix('m') {
+        Some(d) => (d, 1_000_000u64),
+        None => match text.strip_suffix('k') {
+            Some(d) => (d, 1_000u64),
+            None => (text.as_str(), 1u64),
+        },
+    };
+    let bits: u64 = digits
+        .parse()
+        .map_err(|_| format!("{raw:?} is not a bitrate — try 2M, 500k or a number of bits"))?;
+    let bits = bits
+        .checked_mul(scale)
+        .ok_or_else(|| format!("{raw:?} is more bits than there are"))?;
+    Ok(bits / 8)
 }
 
 /// Read an address, accepting a bare port the way a server operator writes it.
@@ -143,8 +208,15 @@ fn serve(o: &Options) -> Result<(), String> {
         .map_err(|e| format!("starting a runtime: {e}"))?;
 
     runtime.block_on(async {
-        let broker = Broker::bind(&identity, o.listen, Limits::default())
-            .map_err(|e| format!("binding {}: {e}", o.listen))?;
+        let broker = Broker::bind(
+            &identity,
+            o.listen,
+            Limits {
+                relay: o.relay,
+                ..Limits::default()
+            },
+        )
+        .map_err(|e| format!("binding {}: {e}", o.listen))?;
         let bound = broker
             .local_addr()
             .map_err(|e| format!("reading the bound address: {e}"))?;
@@ -167,6 +239,18 @@ fn serve(o: &Options) -> Result<(), String> {
             println!("      {line}");
         }
         println!();
+        match o.relay {
+            Some(limits) => {
+                println!(
+                    "  relaying   up to {} pair(s) at {} Mbit/s each way",
+                    limits.pairs,
+                    limits.ceiling * 8 / 1_000_000
+                );
+                println!("             This spends your bandwidth. It is off unless asked for.");
+            }
+            None => println!("  relaying   off — this broker introduces and does not forward"),
+        }
+        println!();
         println!("  This broker keeps nothing on disk and nothing across a restart.");
         println!("  It learns which device keys asked to meet which, from which");
         println!("  addresses, and when. It cannot read what it introduces.");
@@ -185,7 +269,11 @@ fn serve(o: &Options) -> Result<(), String> {
 
         broker.run(stopping).await;
         signals.abort();
-        println!("  stopped with {} peer(s) waiting", broker.waiting());
+        println!(
+            "  stopped with {} peer(s) waiting and {} pair(s) being forwarded for",
+            broker.waiting(),
+            broker.relaying()
+        );
         Ok(())
     })
 }
@@ -265,6 +353,7 @@ fn print_help() {
          \n\
          Commands:\n  \
            serve      introduce peers: --listen <addr|port> [--identity <path>]\n  \
+                      [--relay] [--relay-bitrate 2M] [--relay-pairs 64]\n  \
            identity   print this broker's fingerprint, which peers pin\n  \
            version    print version, build time and protocol versions\n  \
            help       this text"
@@ -310,9 +399,54 @@ mod tests {
     }
 
     #[test]
+    fn relaying_is_off_unless_it_is_asked_for() {
+        // Forwarding spends the operator's bandwidth for as long as a session
+        // lasts. Nobody should discover they are paying for that because a
+        // default said so.
+        let o = parse(&["--listen".to_owned(), "127.0.0.1:1".to_owned()]).unwrap();
+        assert!(o.relay.is_none());
+
+        let o = parse(&[
+            "--listen".to_owned(),
+            "127.0.0.1:1".to_owned(),
+            "--relay".to_owned(),
+        ])
+        .unwrap();
+        assert!(o.relay.is_some());
+
+        // A ceiling with no relay is a mistake worth naming rather than
+        // silently ignoring: somebody who wrote it meant to forward.
+        let e = parse(&[
+            "--listen".to_owned(),
+            "127.0.0.1:1".to_owned(),
+            "--relay-bitrate".to_owned(),
+            "2M".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(e.contains("--relay"), "{e}");
+    }
+
+    #[test]
+    fn a_bitrate_is_read_in_the_units_a_line_is_sold_in() {
+        // Bits per second in, bytes per second out. Getting that wrong by a
+        // factor of eight is the classic way to set a ceiling nobody meant.
+        assert_eq!(bits_per_second("8").unwrap(), 1);
+        assert_eq!(bits_per_second("2M").unwrap(), 250_000);
+        assert_eq!(bits_per_second("2m").unwrap(), 250_000);
+        assert_eq!(bits_per_second("500k").unwrap(), 62_500);
+        assert_eq!(bits_per_second(" 1000 ").unwrap(), 125);
+        assert!(bits_per_second("fast").is_err());
+        assert!(bits_per_second("").is_err());
+        // And a number that would overflow is refused rather than wrapped.
+        assert!(bits_per_second("99999999999999999999M").is_err());
+    }
+
+    #[test]
     fn a_flag_with_nothing_after_it_is_a_mistake_worth_naming() {
         assert!(parse(&["--listen".to_owned()]).is_err());
         assert!(parse(&["--identity".to_owned()]).is_err());
+        assert!(parse(&["--relay-bitrate".to_owned()]).is_err());
+        assert!(parse(&["--relay-pairs".to_owned()]).is_err());
         assert!(parse(&["--nonsense".to_owned()]).is_err());
     }
 }

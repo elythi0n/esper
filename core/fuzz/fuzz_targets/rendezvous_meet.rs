@@ -63,6 +63,19 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
+    // Everything else a peer may send on that stream, from the same bytes.
+    // Smaller and simpler than a `Meet`, and reached *after* one has been
+    // accepted — so a broker that panicked here would be one an authenticated
+    // peer could stop.
+    if let Ok(request) = ciborium::from_reader::<esper_rendezvous::wire::Request, _>(data) {
+        let mut again = Vec::new();
+        if ciborium::into_writer(&request, &mut again).is_ok() {
+            let round = ciborium::from_reader::<esper_rendezvous::wire::Request, _>(&again[..])
+                .expect("what we wrote, we read");
+            assert_eq!(round, request);
+        }
+    }
+
     // Re-encoding is stable: a request cannot mean one thing to the reader and
     // another after the broker has passed it on.
     let mut again = Vec::new();

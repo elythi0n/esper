@@ -10,12 +10,12 @@
 //! broker that is restarted has forgotten everybody. That is a stated
 //! property of the design and it is cheaper to have than to claim.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use esper_crypto::identity::KEY_LEN;
 use tokio::sync::mpsc::Sender;
 
-use crate::wire::{Introduction, Meet, Refusal};
+use crate::wire::{Answer, Introduction, Meet, Refusal};
 
 /// How many peers one broker will hold at once.
 ///
@@ -44,13 +44,20 @@ struct Waiting {
     from: SocketAddr,
     /// Which connection this is.
     id: u64,
+    /// The address that peer reached this broker on.
+    ///
+    /// Not where it is — that is `from` — but which of *our* addresses it
+    /// used, which is the only one known to work from where it is standing. A
+    /// broker listening on every address has no other way to say which to use
+    /// for a relay.
+    local: Option<IpAddr>,
     /// How to reach the task holding that connection.
     ///
     /// The table does the delivering, which is why it holds these: an
     /// introduction that arrives at one side and not the other is a hole punch
     /// with one fist, and "tell both" is a decision about the meeting rather
     /// than about a socket.
-    to_peer: Sender<Introduction>,
+    to_peer: Sender<Answer>,
 }
 
 /// Everyone currently waiting.
@@ -111,7 +118,8 @@ impl Table {
         &mut self,
         meet: Meet,
         from: SocketAddr,
-        to_peer: Sender<Introduction>,
+        local: Option<IpAddr>,
+        to_peer: Sender<Answer>,
     ) -> Arrival {
         if self.waiting.len() >= MAX_WAITING {
             return Arrival::Refused(Refusal::Full);
@@ -147,7 +155,10 @@ impl Table {
             if !w.meet.mutual_with(&meet) {
                 continue;
             }
-            if w.to_peer.try_send(meet.introduction(Some(from))).is_err() {
+            if w.to_peer
+                .try_send(Answer::Introduced(meet.introduction(Some(from))))
+                .is_err()
+            {
                 gone.push(w.id);
                 continue;
             }
@@ -165,6 +176,7 @@ impl Table {
             meet,
             from,
             id,
+            local,
             to_peer,
         });
 
@@ -177,6 +189,31 @@ impl Table {
     /// Forget a place, because its connection has gone.
     pub fn leave(&mut self, id: u64) {
         self.waiting.retain(|w| w.id != id);
+    }
+
+    /// The peer waiting under this key, if it is here and will meet `asker`.
+    ///
+    /// Mutual again: a relay is a path between two devices that have named
+    /// each other, and asking for one is not a way to reach somebody who has
+    /// not asked for you.
+    #[must_use]
+    pub fn mutual_peer(
+        &self,
+        asker: &[u8; KEY_LEN],
+        wanted: &[u8; KEY_LEN],
+    ) -> Option<(Sender<Answer>, Option<IpAddr>)> {
+        let me = self.waiting.iter().find(|w| w.meet.me == *asker)?;
+        let them = self.waiting.iter().find(|w| w.meet.me == *wanted)?;
+        (me.meet.mutual_with(&them.meet)).then(|| (them.to_peer.clone(), them.local))
+    }
+
+    /// The address one waiting peer reached this broker on.
+    #[must_use]
+    pub fn local_for(&self, key: &[u8; KEY_LEN]) -> Option<IpAddr> {
+        self.waiting
+            .iter()
+            .find(|w| w.meet.me == *key)
+            .and_then(|w| w.local)
     }
 
     /// Who is waiting, for a broker's own status output.
@@ -216,10 +253,18 @@ mod tests {
         who: &Identity,
         with: &[[u8; KEY_LEN]],
         ip: SocketAddr,
-    ) -> (Arrival, Receiver<Introduction>) {
+    ) -> (Arrival, Receiver<Answer>) {
         let (tx, rx) = channel(8);
-        let arrival = table.arrive(meet(who, with), ip, tx);
+        let arrival = table.arrive(meet(who, with), ip, None, tx);
         (arrival, rx)
+    }
+
+    /// The introduction inside an answer, for a test that expects one.
+    fn introduction(answer: Answer) -> Introduction {
+        match answer {
+            Answer::Introduced(i) => i,
+            other => panic!("expected an introduction, got {other:?}"),
+        }
     }
 
     #[test]
@@ -242,9 +287,11 @@ mod tests {
             }
             other => panic!("expected a meeting, got {other:?}"),
         }
-        let told = host_told
-            .try_recv()
-            .expect("the waiting side must be told as well");
+        let told = introduction(
+            host_told
+                .try_recv()
+                .expect("the waiting side must be told as well"),
+        );
         assert_eq!(told.peer, ctrl.public_key());
     }
 
@@ -290,10 +337,7 @@ mod tests {
             let (met, _) = arrive(&mut table, who, &[host.public_key()], from(2));
             assert!(matches!(met, Arrival::Met { .. }), "{met:?}");
             assert_eq!(
-                host_told
-                    .try_recv()
-                    .expect("the host is told each time")
-                    .peer,
+                introduction(host_told.try_recv().expect("the host is told each time")).peer,
                 who.public_key()
             );
         }
@@ -329,7 +373,7 @@ mod tests {
         // are "stopped reading" as far as `try_send` is concerned.
         let (tx, rx) = channel(1);
         drop(rx);
-        table.arrive(meet(&host, &[ctrl.public_key()]), from(1), tx);
+        table.arrive(meet(&host, &[ctrl.public_key()]), from(1), None, tx);
         assert_eq!(table.len(), 1);
 
         let (asked, _) = arrive(&mut table, &ctrl, &[host.public_key()], from(2));
