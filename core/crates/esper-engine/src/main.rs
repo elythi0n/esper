@@ -15,6 +15,7 @@ mod devices_cmd;
 mod discover_cmd;
 mod injector;
 mod input_source;
+mod invite_cmd;
 mod loopback;
 mod net;
 mod pairing;
@@ -138,6 +139,26 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("invite") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match invite_cmd::parse_invite(&rest).and_then(|o| invite_cmd::run_invite(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-engine invite: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("join") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match invite_cmd::run_join(&rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-engine join: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("forget") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             match devices_cmd::forget(&rest) {
@@ -229,6 +250,8 @@ fn print_help() {
            grant      give a paired device a permission\n  \
            revoke     take a permission away\n  \
            forget     unpair a device entirely\n  \
+           invite     offer somebody a way in: one link, through your broker\n  \
+           join       take somebody up on an invitation\n  \
            host       serve this machine's screen to a paired device\n  \
            connect    show a paired host's screen\n  \
            terminal   open a shell on a paired host\n  \

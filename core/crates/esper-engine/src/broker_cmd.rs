@@ -97,7 +97,7 @@ pub async fn wait_to_be_found(
                     "  · {} is looking for this machine through the broker",
                     esper_crypto::Fingerprint::of(&met.peer).hex()
                 );
-                esper_rendezvous::punch_at(&endpoint, &met.everywhere(), PUNCH).await;
+                punch(&endpoint, met.everywhere());
             }
             // **The other side could not find a direct path, so the broker is
             // forwarding.** This side has to send something before a forwarder
@@ -110,7 +110,7 @@ pub async fn wait_to_be_found(
                     esper_crypto::Fingerprint::of(&path.peer).hex(),
                     path.at
                 );
-                esper_rendezvous::punch_at(&endpoint, &[path.at], PUNCH).await;
+                punch(&endpoint, vec![path.at]);
             }
             Err(e) => {
                 println!("  · the broker is no longer introducing anybody ({e})");
@@ -118,6 +118,21 @@ pub async fn wait_to_be_found(
             }
         }
     }
+}
+
+/// Punch towards a peer, without waiting for it.
+///
+/// **Spawned, never awaited.** A punch is fire-and-forget by design, and
+/// waiting for one to fail would be waiting *instead of accepting*: an
+/// incoming handshake is not driven until the application asks for it, so a
+/// side that is busy punching is a side that answers nobody. Measured, in the
+/// invitation flow: the other end dialled, waited five seconds and gave up
+/// while this side was still punching at it.
+fn punch(endpoint: &Endpoint, where_to: Vec<SocketAddr>) {
+    let endpoint = endpoint.clone();
+    tokio::spawn(async move {
+        esper_rendezvous::punch_at(&endpoint, &where_to, PUNCH).await;
+    });
 }
 
 /// Meet a peer at a broker and open a session with it.

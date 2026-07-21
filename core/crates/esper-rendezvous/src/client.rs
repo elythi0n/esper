@@ -191,6 +191,30 @@ impl Client {
         with: &[[u8; KEY_LEN]],
         candidates: Vec<SocketAddr>,
     ) -> Result<Self, ClientError> {
+        Self::invited(
+            endpoint,
+            identity,
+            broker_addr,
+            broker_key,
+            with,
+            candidates,
+            None,
+        )
+        .await
+    }
+
+    /// The same, for two devices meeting on an invitation rather than on keys
+    /// they already have.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn invited(
+        endpoint: &Endpoint,
+        identity: &Identity,
+        broker_addr: SocketAddr,
+        broker_key: [u8; KEY_LEN],
+        with: &[[u8; KEY_LEN]],
+        candidates: Vec<SocketAddr>,
+        token: Option<[u8; KEY_LEN]>,
+    ) -> Result<Self, ClientError> {
         let conn = endpoint.connect(broker_addr).await?;
         let (send, recv) = conn
             .open_bi()
@@ -198,7 +222,14 @@ impl Client {
             .map_err(|e| ClientError::Stream(e.to_string()))?;
         let mut control = Control::new(send, recv);
 
-        let meet = Meet::new(identity, with, candidates, broker_key, crate::now_secs());
+        let meet = Meet::invited(
+            identity,
+            with,
+            candidates,
+            broker_key,
+            crate::now_secs(),
+            token,
+        );
         control
             .send(&meet)
             .await

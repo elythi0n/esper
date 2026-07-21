@@ -109,12 +109,27 @@ pub struct Meet {
     /// The broker this was meant for, so it cannot be replayed at another.
     #[serde(with = "key_bytes")]
     pub broker: [u8; KEY_LEN],
+    /// A secret from an invitation, when neither side can name the other yet.
+    ///
+    /// **The one case where two devices meet without knowing each other's
+    /// keys**: somebody has been sent a link and is about to pair. Both sides
+    /// present the same token and the broker matches on it, so the invitation
+    /// is what admits them — and without it, nothing does. Thirty-two random
+    /// bytes, so it cannot be guessed the way a pairing code could be.
+    ///
+    /// Signed like everything else here, so it cannot be lifted from one
+    /// request into another.
+    pub token: Option<TokenBytes>,
     /// Seconds since the epoch, as the peer sees it.
     pub at: u64,
     /// Over everything above.
     #[serde(with = "sig_bytes")]
     pub signature: [u8; 64],
 }
+
+/// An invitation's token on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenBytes(#[serde(with = "key_bytes")] pub [u8; KEY_LEN]);
 
 /// A device key on the wire.
 ///
@@ -262,12 +277,25 @@ impl Meet {
         broker: [u8; KEY_LEN],
         at: u64,
     ) -> Self {
+        Self::invited(identity, with, candidates, broker, at, None)
+    }
+
+    /// The same, for two devices meeting on an invitation's token.
+    pub fn invited(
+        identity: &Identity,
+        with: &[[u8; KEY_LEN]],
+        candidates: Vec<SocketAddr>,
+        broker: [u8; KEY_LEN],
+        at: u64,
+        token: Option<[u8; KEY_LEN]>,
+    ) -> Self {
         let mut meet = Self {
             version: RENDEZVOUS_VERSION,
             me: identity.public_key(),
             with: with.iter().copied().map(KeyBytes).collect(),
             candidates,
             broker,
+            token: token.map(TokenBytes),
             at,
             signature: [0u8; 64],
         };
@@ -301,6 +329,15 @@ impl Meet {
             out.extend_from_slice(&(text.len() as u64).to_be_bytes());
             out.extend_from_slice(text.as_bytes());
         }
+        // Present or absent is itself signed, so a token cannot be added to a
+        // signed request or taken out of one.
+        match &self.token {
+            Some(TokenBytes(token)) => {
+                out.push(1);
+                out.extend_from_slice(token);
+            }
+            None => out.push(0),
+        }
         out
     }
 
@@ -310,7 +347,10 @@ impl Meet {
     /// unauthenticated by definition.
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
-        !self.with.is_empty()
+        // Naming nobody is legitimate **only** on an invitation: somebody
+        // waiting to be joined does not know who is coming. Without one, a
+        // request that names nobody is a request to meet nobody.
+        (!self.with.is_empty() || self.token.is_some())
             && self.with.len() <= MAX_WITH
             && !self.candidates.is_empty()
             && self.candidates.len() <= MAX_CANDIDATES
@@ -333,9 +373,18 @@ impl Meet {
         self.with.contains(&KeyBytes(*key))
     }
 
-    /// Whether two requests name each other.
+    /// Whether two requests are for each other.
+    ///
+    /// Either they name each other by key — two devices that have already
+    /// paired — or they present the same invitation token, which is how two
+    /// devices meet **before** they have. Nothing else matches, so a peer that
+    /// has neither the other's key nor its invitation waits for ever.
     #[must_use]
     pub fn mutual_with(&self, other: &Self) -> bool {
+        if let (Some(mine), Some(theirs)) = (self.token, other.token) {
+            // Compared as opaque bytes; both sides got it from the same link.
+            return mine == theirs;
+        }
         self.will_meet(&other.me) && other.will_meet(&self.me)
     }
 

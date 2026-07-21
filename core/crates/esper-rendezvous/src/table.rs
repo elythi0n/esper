@@ -439,6 +439,122 @@ mod tests {
     }
 
     #[test]
+    fn two_strangers_with_the_same_invitation_meet() {
+        // **The one case where two devices meet without knowing each other's
+        // keys.** Somebody waiting to be joined cannot name who is coming, and
+        // whoever was sent the link does not have their key yet — the
+        // invitation is what admits them both.
+        let helper = Identity::generate().unwrap();
+        let guest = Identity::generate().unwrap();
+        let token = [42u8; KEY_LEN];
+        let mut table = Table::new();
+
+        let waiting = Meet::invited(
+            &helper,
+            &[],
+            vec![address(7645)],
+            [9u8; KEY_LEN],
+            1_000_000,
+            Some(token),
+        );
+        let (tx, mut helper_told) = channel(8);
+        assert!(matches!(
+            table.arrive(waiting, from(1), None, tx),
+            Arrival::Waiting { .. }
+        ));
+
+        let arriving = Meet::invited(
+            &guest,
+            &[],
+            vec![address(51000)],
+            [9u8; KEY_LEN],
+            1_000_000,
+            Some(token),
+        );
+        let (tx, _) = channel(8);
+        match table.arrive(arriving, from(2), None, tx) {
+            Arrival::Met { theirs, .. } => assert_eq!(theirs.peer, helper.public_key()),
+            other => panic!("expected the invitation to admit them, got {other:?}"),
+        }
+        assert_eq!(
+            introduction(helper_told.try_recv().expect("the waiting side is told")).peer,
+            guest.public_key()
+        );
+    }
+
+    #[test]
+    fn a_different_invitation_is_a_different_meeting() {
+        // Two invitations open at once must not cross. The token is the whole
+        // of what admits somebody, so a token that does not match admits
+        // nobody.
+        let helper = Identity::generate().unwrap();
+        let guest = Identity::generate().unwrap();
+        let mut table = Table::new();
+
+        let (tx, mut helper_told) = channel(8);
+        table.arrive(
+            Meet::invited(
+                &helper,
+                &[],
+                vec![address(7645)],
+                [9u8; KEY_LEN],
+                1_000_000,
+                Some([1u8; KEY_LEN]),
+            ),
+            from(1),
+            None,
+            tx,
+        );
+        let (tx, _) = channel(8);
+        let arrival = table.arrive(
+            Meet::invited(
+                &guest,
+                &[],
+                vec![address(51000)],
+                [9u8; KEY_LEN],
+                1_000_000,
+                Some([2u8; KEY_LEN]),
+            ),
+            from(2),
+            None,
+            tx,
+        );
+        assert!(matches!(arrival, Arrival::Waiting { .. }), "{arrival:?}");
+        assert!(helper_told.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_invitation_does_not_admit_somebody_who_only_knows_a_key() {
+        // A peer that names the helper by key and has no token does not meet
+        // an invitation: the helper named nobody, so there is no mutual
+        // naming, and the token is what stands in for it.
+        let helper = Identity::generate().unwrap();
+        let stranger = Identity::generate().unwrap();
+        let mut table = Table::new();
+
+        let (tx, mut helper_told) = channel(8);
+        table.arrive(
+            Meet::invited(
+                &helper,
+                &[],
+                vec![address(7645)],
+                [9u8; KEY_LEN],
+                1_000_000,
+                Some([7u8; KEY_LEN]),
+            ),
+            from(1),
+            None,
+            tx,
+        );
+        let (arrival, _) = arrive(&mut table, &stranger, &[helper.public_key()], from(2));
+        assert!(matches!(arrival, Arrival::Waiting { .. }), "{arrival:?}");
+        assert!(
+            helper_told.try_recv().is_err(),
+            "and the helper is not even told that somebody asked"
+        );
+    }
+
+    #[test]
     fn naming_somebody_who_does_not_name_you_back_is_not_a_meeting() {
         let a = Identity::generate().unwrap();
         let b = Identity::generate().unwrap();

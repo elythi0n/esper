@@ -197,7 +197,7 @@ cleanup_terminal() {
   # runs, and under `set -e` a failed kill at the end of an `&&` list ends the
   # script — which showed up as a smoke test that failed after its last check
   # had passed.
-  for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}"; do
+  for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}" "${invite_pid:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -338,6 +338,55 @@ else
           fi
         fi
         kill "$via_host" 2>/dev/null || true
+
+        # **The support flow: one link, one paste.** The case the design says
+        # genuinely needs a broker — somebody with no LAN, no overlay and no
+        # patience — and the one where every step removed is a step they will
+        # not get wrong. Two homes that have never met, and no address for
+        # either of them anywhere on these command lines.
+        echo "  — pairing two strangers with one link through the broker"
+        inv_a=$(mktemp -d); inv_b=$(mktemp -d)
+        ESPER_HOME="$inv_a" timeout 120 "$BIN/esper-engine" invite \
+          --via "$broker_addr" --broker-key "$broker_key" --for "a stranger" --expires 5m \
+          > "$inv_a/invite.log" 2>&1 &
+        invite_pid=$!
+        link=""
+        for _ in $(seq 1 100); do
+          link=$( { grep -oE 'esper://join/[A-Za-z0-9_-]+' "$inv_a/invite.log" 2>/dev/null || true; } | head -1)
+          [ -n "$link" ] && break
+          sleep 0.1
+        done
+
+        if [ -z "$link" ]; then
+          printf '  ✗ invite printed no link\n'
+          sed 's/^/      /' "$inv_a/invite.log"
+          fail=1
+        else
+          out=$(ESPER_HOME="$inv_b" timeout 60 "$BIN/esper-engine" join "$link" 2>&1 || true)
+          wait "$invite_pid" || true
+          if printf '%s' "$out" | grep -q 'paired with'; then
+            printf '  ✓ somebody who was sent a link paired through the broker\n'
+          else
+            printf '  ✗ the invitation was not taken up\n'
+            printf '%s\n' "$out" | sed 's/^/      /'
+            sed 's/^/      /' "$inv_a/invite.log"
+            fail=1
+          fi
+          # And both ends recorded it, which is what makes the pairing real
+          # rather than a message on a screen.
+          for home in "$inv_a" "$inv_b"; do
+            if ESPER_HOME="$home" "$BIN/esper-engine" devices | grep -q 'may  view, control'; then
+              :
+            else
+              printf '  ✗ one side did not record the pairing\n'
+              ESPER_HOME="$home" "$BIN/esper-engine" devices | sed 's/^/      /'
+              fail=1
+            fi
+          done
+          printf '  ✓ and both ends recorded it\n'
+        fi
+        rm -rf "$inv_a" "$inv_b"
+        invite_pid=""
       fi
       kill "$broker_pid" 2>/dev/null || true
 

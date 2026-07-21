@@ -239,7 +239,7 @@ async fn accept(addr: SocketAddr, code: &str) -> Result<(), String> {
 }
 
 /// Record a newly paired device.
-fn record(public_key: [u8; 32], name: &str) -> Result<Device, String> {
+pub(crate) fn record(public_key: [u8; 32], name: &str) -> Result<Device, String> {
     let (mut store, dropped) = paths::devices()?;
     for note in &dropped {
         eprintln!("  · the device list needed correcting: {note}");
@@ -279,7 +279,7 @@ fn record(public_key: [u8; 32], name: &str) -> Result<Device, String> {
 }
 
 /// Tell the person what happened, and what to check.
-fn report(device: &Device) {
+pub(crate) fn report(device: &Device) {
     println!("  ✓ paired with {}", device.name);
     println!();
     println!("  Their fingerprint — it must match what the other screen shows:");

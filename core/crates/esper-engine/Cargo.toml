@@ -30,6 +30,10 @@ esper-input.workspace = true
 esper-presence.workspace = true
 esper-pty.workspace = true
 esper-audit.workspace = true
+# Thirty-two random bytes for an invitation's token, and nothing else. Already
+# in the tree through the transport, which wants the same thing for a session
+# identifier.
+getrandom = "0.2"
 # `io-std` for the controller's own terminal: everything else the engine does
 # with tokio is sockets and timers, and standard output is only in the path
 # when this process *is* somebody's terminal.

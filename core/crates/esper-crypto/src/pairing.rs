@@ -208,7 +208,13 @@ impl Offer {
         }
     }
 
-    /// Build an offer with an explicit start time, for tests.
+    /// Build an offer with an explicit start time.
+    ///
+    /// For tests, and for an **invitation**: there the code is minted when the
+    /// link is made and the exchange happens whenever somebody gets round to
+    /// pasting it, so the offer's own sixty seconds have to start on arrival
+    /// rather than on issue. The link's expiry is what bounds the wait; this
+    /// bounds the exchange.
     #[must_use]
     pub fn with_created_at(code: PairingCode, created_at: Instant) -> Self {
         Self {

@@ -445,6 +445,7 @@ dependencies = [
  "esper-scale",
  "esper-stream",
  "esper-transport",
+ "getrandom 0.2.17",
  "rustls",
  "tokio",
  "tracing",
