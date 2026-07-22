@@ -152,7 +152,7 @@ impl Allowlist {
         // **There is no wildcard host.** A port may be `*`, because "this
         // service, whichever port it moves to" is a real thing to mean. A host
         // may not, because "anywhere this machine can reach" is the
-        // unrestricted forward [ADR 0016] refused — and an escape hatch that
+        // unrestricted forward this design refused — and an escape hatch that
         // exists is one somebody eventually writes to make a problem go away.
         // A range of machines is a feature to add deliberately, with a syntax
         // that says what it covers, not a `*` that says everything.

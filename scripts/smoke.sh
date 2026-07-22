@@ -199,7 +199,7 @@ cleanup_terminal() {
   # had passed.
   for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}" "${invite_pid:-}" \
              "${named_host:-}" "${service_pid:-}" "${forward_pid:-}" \
-             "${denied_pid:-}"; do
+             "${denied_pid:-}" "${private_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -440,6 +440,86 @@ else
       # host **remembers where it answered**, and the broker check below needs
       # the rung above the broker to have nothing to remember. A step that
       # quietly changes what a later step is testing is worse than a slow one.
+      # **A path the person already trusts, and Esper saying so.** Tier 1
+      # of the ladder: a machine reached over WireGuard, a tailnet or any
+      # other overlay is on a network its owner already runs, so there is no
+      # hole to punch and nothing for a broker to introduce.
+      #
+      # No CI runner has a tunnel, and this must be checkable anywhere — so
+      # the check names the machine's **own** interface through
+      # `connectivity.overlay_interfaces`, which is the override a person uses
+      # when autodetection has not heard of their VPN client. What is being
+      # tested is everything except the name: the routing question, the
+      # classification, the rung and the word the session reports.
+      echo "  — reaching a host over a network the user already runs"
+      wire_if=$( { ip route get 1.1.1.1 2>/dev/null || true; } | sed -n 's/.* dev \([^ ]*\) .*/\1/p' | head -1)
+      wire_ip=$( { ip route get 1.1.1.1 2>/dev/null || true; } | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -1)
+      if [ -z "$wire_if" ] || [ -z "$wire_ip" ]; then
+        printf '  · no route off this machine, so there is no path to classify\n'
+      else
+        printf 'connectivity.overlay_interfaces = "%s"\n' "$wire_if" > "$term_b/config.toml"
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+          timeout 120 "$BIN/esper-engine" host --listen "$wire_ip:0" --no-mdns \
+          > "$term_a/private.log" 2>&1 &
+        private_host=$!
+        private_addr=""
+        for _ in $(seq 1 100); do
+          private_addr=$( { awk '/listening/{print $2}' "$term_a/private.log" 2>/dev/null || true; } | head -1)
+          [ -n "$private_addr" ] && break
+          sleep 0.1
+        done
+
+        if [ -z "$private_addr" ]; then
+          printf '  ✗ the host never said what it was listening on\n'
+          sed 's/^/      /' "$term_a/private.log"
+          fail=1
+        else
+          out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$private_addr" --seconds 2 --no-mdns 2>&1 || true)
+          if printf '%s' "$out" | grep -q 'a private network you already run'; then
+            printf '  ✓ a path over a named overlay interface is reported as private\n'
+          else
+            printf '  ✗ a path over an overlay was not reported as private\n'
+            printf '%s\n' "$out" | sed 's/^/      /'
+            fail=1
+          fi
+          # And it is remembered as one: the address that works from anywhere
+          # must survive the next session on the LAN, which is why it has a
+          # slot of its own.
+          if grep -q 'overlay_address' "$term_b/devices.json" 2>/dev/null; then
+            printf '  ✓ and remembered in its own slot, not overwriting the last address\n'
+          else
+            printf '  ✗ the private address was not remembered\n'
+            fail=1
+          fi
+
+          # **Being on somebody's private network is not authorisation.** The
+          # claim that a private path skips no crypto and no pairing is worth
+          # nothing as a comment, so here is a device the host has never
+          # paired with, on the path Esper has just called private.
+          #
+          # It knows *where* the host is — the device list is copied — and it
+          # has an identity of its own, generated on first use. That is
+          # exactly the shape of the attack the tier could have invited: an
+          # address on a trusted network, and no pairing behind it.
+          term_c=$(mktemp -d)
+          cp "$term_b/devices.json" "$term_c/devices.json"
+          cp "$term_b/config.toml" "$term_c/config.toml"
+          out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_c" \
+            timeout 60 "$BIN/esper-engine" connect "$private_addr" --seconds 2 --no-mdns 2>&1 || true)
+          if printf '%s' "$out" | grep -q 'does not accept this device'; then
+            printf '  ✓ an unpaired device is refused on a private path like any other\n'
+          else
+            printf '  ✗ an unpaired device was not refused on a private path\n'
+            printf '%s\n' "$out" | sed 's/^/      /'
+            fail=1
+          fi
+          rm -rf "$term_c"
+        fi
+        kill "$private_host" 2>/dev/null || true
+        rm -f "$term_b/config.toml"
+      fi
+
       # **A port forwarded to a service the network cannot see.** The other
       # half of terminal mode: a headless server's useful face is its
       # services, and the whole point is that the service stays bound to

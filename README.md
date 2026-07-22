@@ -18,9 +18,10 @@ default server address compiled into the binary** — so there is nothing to opt
 out of and nothing to take on trust.
 
 On a LAN, machines find each other. On an overlay network — Tailscale,
-WireGuard, ZeroTier, Nebula — Esper notices and rides it. Beyond that you may
-run a broker yourself, and if you don't, Esper does less rather than routing
-you through someone else.
+WireGuard, ZeroTier, Nebula — Esper notices, says so, and rides it: no hole
+punched, no broker asked, because the address already works. Beyond that you
+may run a broker yourself, and if you don't, Esper does less rather than
+routing you through someone else.
 
 Everything is end-to-end encrypted between device keys on every path, including
 your own relay.
@@ -55,7 +56,7 @@ persistent trust between two machines that belong to the same person.
 | Terminal mode | ✅ shells, reattach after a dropped link |
 | Port forwarding | ✅ `ssh -L` and `ssh -W` shapes |
 | Screen, video and input | ✅ Linux, X11 |
-| Finding a host: LAN, remembered address, your own broker | ✅ |
+| Finding a host: LAN, a private network you already run, remembered address, your own broker | ✅ |
 | Windows and macOS hosts | ⏳ |
 | Desktop app, control-plane CLI | ⏳ |
 

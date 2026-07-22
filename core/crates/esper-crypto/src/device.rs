@@ -45,6 +45,19 @@ pub struct Device {
     /// one written after it look the same until somebody connects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_address: Option<String>,
+    /// Where this device was last reached **over a network the user already
+    /// runs** — a WireGuard tunnel, a tailnet — if it ever has been.
+    ///
+    /// Kept apart from `last_address` rather than replacing it, because the
+    /// two answer different questions and the last one to answer would
+    /// otherwise erase the other. A machine reached on the LAN this morning
+    /// and over WireGuard last week is reachable **both** ways: from the sofa
+    /// the LAN address wins, from a hotel only the private one works, and a
+    /// single slot means whichever was used last is the only one tried.
+    ///
+    /// A hint like the other, and never an authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_address: Option<String>,
 }
 
 impl Device {
@@ -58,6 +71,7 @@ impl Device {
             paired_at: now,
             last_seen: None,
             last_address: None,
+            overlay_address: None,
         }
     }
 
@@ -69,6 +83,16 @@ impl Device {
     pub fn remember(&mut self, address: &str, now: u64) {
         self.last_seen = Some(now);
         self.last_address = Some(address.to_owned());
+    }
+
+    /// Note that this device was reached over a private network, and where.
+    ///
+    /// Recorded in its own slot as well as the ordinary one: an address that
+    /// works from anywhere is worth keeping even after a session on the LAN
+    /// has overwritten "where it was last time".
+    pub fn remember_private(&mut self, address: &str, now: u64) {
+        self.remember(address, now);
+        self.overlay_address = Some(address.to_owned());
     }
 
     /// The fingerprint a human reads to confirm this is the right device.
@@ -605,6 +629,26 @@ mod tests {
         d.remember("10.0.0.9:7645", 1_756_800_000);
         assert_eq!(d.last_address.as_deref(), Some("10.0.0.9:7645"));
         assert_eq!(d.last_seen, Some(1_756_800_000));
+    }
+
+    #[test]
+    fn a_private_address_survives_a_session_on_the_lan() {
+        // The case the second slot exists for. A machine reached over
+        // WireGuard last week and on the LAN this morning is reachable both
+        // ways — and with one slot, the LAN session erases the only address
+        // that works from anywhere else.
+        let mut d = device(3);
+        d.remember_private("10.125.225.7:7645", 1_756_700_000);
+        assert_eq!(d.overlay_address.as_deref(), Some("10.125.225.7:7645"));
+        assert_eq!(d.last_address.as_deref(), Some("10.125.225.7:7645"));
+
+        d.remember("192.168.1.5:7645", 1_756_800_000);
+        assert_eq!(d.last_address.as_deref(), Some("192.168.1.5:7645"));
+        assert_eq!(
+            d.overlay_address.as_deref(),
+            Some("10.125.225.7:7645"),
+            "the address that works from anywhere was thrown away"
+        );
     }
 
     #[test]

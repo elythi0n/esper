@@ -18,16 +18,21 @@ fail=0
 note() { printf '  %s\n' "$*"; }
 bad()  { fail=1; printf '\n  ✗ %s\n' "$*"; }
 
-# Files to search: everything tracked by git. Build output is full of absolute
-# paths from the toolchain and is not shipped, so it must never be scanned —
-# .gitignore already covers it, which is why `git ls-files` is the primary path.
+# Files to search: everything tracked by git, **and everything untracked that
+# is not ignored**. Build output is full of absolute paths from the toolchain
+# and is not shipped, so it must never be scanned — .gitignore already covers
+# it, which is why git's own view is the primary path.
 #
-# The fallback exists only before `git init`. It excludes every build directory
-# by pattern rather than by name, because a missed one produces thousands of
-# false positives from cargo's dependency files.
+# `--others --exclude-standard` is not a refinement. Scanning only tracked
+# files means a **new file is never checked until after it is committed**, and
+# a new file is exactly where a reference to the planning tree comes from:
+# somebody writing a module today, with the design document open beside them.
+# Found the honest way — a comment naming an ADR sat in a new file through two
+# green runs of `make ci` and was caught the moment the commit made it
+# tracked.
 files() {
   if git rev-parse --git-dir >/dev/null 2>&1; then
-    git ls-files
+    git ls-files --cached --others --exclude-standard
   else
     find . -type f \
       -not -path '*/.git/*' \

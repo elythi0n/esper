@@ -1,0 +1,24 @@
+[package]
+name = "esper-overlay"
+description = "Which paths are already private: WireGuard, Tailscale and the rest."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing.workspace = true
+# The only way to ask an operating system which of its addresses belongs to
+# which interface. There is no such API in `std`, and the answer is what the
+# whole crate is about: an address on `wg0` is a private path, the same address
+# on `eth0` is not.
+#
+# Chosen over parsing `/proc/net/route` ourselves because that is Linux only
+# and reimplements the kernel's routing decision — policy routing, multiple
+# tables and all — where this asks the kernel for the decision and then only
+# has to name the interface it chose.
+if-addrs = "0.15"

@@ -120,7 +120,17 @@ pub async fn wait_to_be_found(
     }
 }
 
-/// Punch towards a peer, without waiting for it.
+/// Punch towards a peer, without waiting for it — skipping any private path.
+///
+/// **A hole punch on an overlay is a punch through a wall that is not there.**
+/// A packet to a peer on a WireGuard tunnel or a tailnet crosses no NAT that
+/// needs opening: the address already works. Sending anyway would cost two
+/// seconds of packets over somebody's VPN for nothing, and would put traffic
+/// on a network they run for a reason.
+///
+/// The addresses are the peer's own claims, so this is not a security check —
+/// a peer that names a private-looking address gets fewer packets, which is
+/// the only thing it can gain.
 ///
 /// **Spawned, never awaited.** A punch is fire-and-forget by design, and
 /// waiting for one to fail would be waiting *instead of accepting*: an
@@ -129,9 +139,23 @@ pub async fn wait_to_be_found(
 /// invitation flow: the other end dialled, waited five seconds and gave up
 /// while this side was still punching at it.
 fn punch(endpoint: &Endpoint, where_to: Vec<SocketAddr>) {
+    let overlays = crate::settings::overlays();
+    let (private, public): (Vec<SocketAddr>, Vec<SocketAddr>) = where_to
+        .into_iter()
+        .partition(|a| overlays.path_to(a.ip()).is_some());
+    if !private.is_empty() {
+        println!(
+            "  · {} of those are on {} — no hole to punch",
+            private.len(),
+            overlays.describe()
+        );
+    }
+    if public.is_empty() {
+        return;
+    }
     let endpoint = endpoint.clone();
     tokio::spawn(async move {
-        esper_rendezvous::punch_at(&endpoint, &where_to, PUNCH).await;
+        esper_rendezvous::punch_at(&endpoint, &public, PUNCH).await;
     });
 }
 

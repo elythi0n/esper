@@ -803,19 +803,26 @@ async fn on_the_segment(key: &[u8; 32]) -> Vec<SocketAddr> {
 ///
 /// Best-effort and quiet: a store that cannot be written is worth a line on
 /// the console but is not a reason to end a session that is working.
-fn remember_where(key: &[u8; 32], addr: SocketAddr) {
+fn remember_where(key: &[u8; 32], addr: SocketAddr, private: bool) {
     let Ok((mut store, _)) = paths::devices() else {
         return;
     };
     let Some(device) = store.get_mut(key) else {
         return;
     };
-    if device.last_address.as_deref() == Some(addr.to_string().as_str()) {
+    let text = addr.to_string();
+    let known = device.last_address.as_deref() == Some(text.as_str());
+    let private_known = !private || device.overlay_address.as_deref() == Some(text.as_str());
+    if known && private_known {
         // Nothing changed, so nothing is written: a session should not cost a
         // disk write for a fact already recorded.
         return;
     }
-    device.remember(&addr.to_string(), paths::now_secs());
+    if private {
+        device.remember_private(&text, paths::now_secs());
+    } else {
+        device.remember(&text, paths::now_secs());
+    }
     if let Err(e) = paths::save_devices(&store) {
         eprintln!("      · could not remember where that device was ({e})");
     }
@@ -1955,6 +1962,12 @@ pub async fn reach(identity: &esper_crypto::Identity, o: &Reaching<'_>) -> Resul
     };
     rungs.dedup_by_key(|r| r.addr);
 
+    // **Which of these are already private.** A fact about this machine's
+    // routing table rather than about where the address came from, so it is
+    // applied to every rung at once, after they are collected.
+    let overlays = crate::settings::overlays();
+    crate::ladder::label_private(&mut rungs, &overlays);
+
     let (session, tier) = match reach_directly(&endpoint, &rungs, hello.clone()).await {
         Some(Ok(found)) => found,
         // Nothing direct worked, or there was nothing to try. A broker is
@@ -1993,7 +2006,11 @@ pub async fn reach(identity: &esper_crypto::Identity, o: &Reaching<'_>) -> Resul
     // **Where it answered, remembered.** A hint for next time, and the reason
     // a machine that has been reached once is reached instantly afterwards
     // even with no discovery and no broker.
-    remember_where(session.peer_key(), session.remote_address());
+    // Asked about the address that actually answered, rather than read off
+    // the rung it came from: a broker introduction that lands on a private
+    // path is still a private path, and it is the address that gets stored.
+    let privately = overlays.path_to(session.remote_address().ip()).is_some();
+    remember_where(session.peer_key(), session.remote_address(), privately);
 
     let known = store
         .iter()

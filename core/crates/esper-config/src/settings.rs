@@ -259,6 +259,18 @@ pub static SETTINGS: &[Setting] = &[
         about: "Announce this machine on the local network, and look for others.",
     },
     Setting {
+        key: "connectivity.overlay_interfaces",
+        kind: Kind::Text,
+        // **Names Esper missed, never names it should stop believing.** The
+        // escape hatch opens one way on purpose: calling a path private when
+        // it is not costs a wasted dial, and there is no setting that can turn
+        // a public path into one Esper trusts more.
+        default: Value::Text(Cow::Borrowed("")),
+        about: "Interfaces to treat as overlay networks even if their names are not \
+                recognised, separated by commas. Empty means autodetect: wg*, tailscale*, \
+                tun*, utun*, zt* and nebula*.",
+    },
+    Setting {
         key: "broker.address",
         kind: Kind::Address,
         // **No default broker address anywhere in Esper.** Not in the binary,

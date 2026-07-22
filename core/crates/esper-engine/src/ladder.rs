@@ -44,6 +44,14 @@ pub enum Tier {
     Lan,
     /// Where it was last reached.
     Remembered,
+    /// Over a network the person already runs — WireGuard, Tailscale, ZeroTier.
+    ///
+    /// Not where the address *came from*, which is the question every other
+    /// rung answers, but how a packet to it actually leaves this machine. It
+    /// wins over the others when it applies, because "it went over your VPN"
+    /// is the more useful of the two facts: it says why no hole was punched
+    /// and why no broker was asked.
+    Overlay,
     /// Introduced by a broker, on a direct path.
     Broker,
 }
@@ -56,6 +64,7 @@ impl Tier {
             Self::Given => "the address you gave",
             Self::Lan => "this network",
             Self::Remembered => "where it was last time",
+            Self::Overlay => "a private network you already run",
             Self::Broker => "an introduction",
         }
     }
@@ -108,7 +117,41 @@ pub fn direct_rungs(device: &Device, heard: &[(String, SocketAddr)]) -> Vec<Rung
         });
     }
 
+    // **And where it was over a private network, which is a different
+    // question.** A machine reached on the LAN this morning and over
+    // WireGuard last week is reachable both ways; keeping only the last one
+    // used means the sofa erases the answer that works from a hotel.
+    if let Some(addr) = device
+        .overlay_address
+        .as_deref()
+        .and_then(|a| a.parse::<SocketAddr>().ok())
+        && !out.iter().any(|r| r.addr == addr)
+    {
+        out.push(Rung {
+            tier: Tier::Overlay,
+            addr,
+        });
+    }
+
     out
+}
+
+/// Mark the rungs whose path leaves through an overlay.
+///
+/// Applied after the rungs are built rather than while building them, because
+/// it is a fact about *this machine's* routing table and not about where the
+/// address came from: an address somebody typed, one heard on the segment and
+/// one remembered from last week are all private if the packet goes out `wg0`.
+pub fn label_private(rungs: &mut [Rung], overlays: &esper_overlay::Overlays) {
+    if overlays.is_empty() {
+        return;
+    }
+    for rung in rungs {
+        if let Some(over) = overlays.path_to(rung.addr.ip()) {
+            tracing::debug!(addr = %rung.addr, interface = %over.name, "a private path");
+            rung.tier = Tier::Overlay;
+        }
+    }
 }
 
 /// Which paired device somebody meant.
@@ -281,5 +324,79 @@ mod tests {
         for tier in [Tier::Given, Tier::Lan, Tier::Remembered, Tier::Broker] {
             assert!(!tier.describe().is_empty(), "{tier:?}");
         }
+    }
+
+    #[test]
+    fn a_private_address_is_its_own_rung_alongside_the_last_one() {
+        // The two answer different questions: where it was last time, and
+        // where it is from anywhere. Keeping one slot means the sofa erases
+        // the answer that works from a hotel.
+        let mut d = device("study", 1);
+        d.remember(&addr(9).to_string(), 0);
+        d.overlay_address = Some("10.125.225.7:7645".to_owned());
+
+        let rungs = direct_rungs(&d, &[]);
+        assert_eq!(rungs.len(), 2, "{rungs:?}");
+        assert_eq!(rungs.first().map(|r| r.tier), Some(Tier::Remembered));
+        assert_eq!(rungs.get(1).map(|r| r.tier), Some(Tier::Overlay));
+    }
+
+    #[test]
+    fn the_same_address_in_both_slots_is_one_rung() {
+        let mut d = device("study", 1);
+        d.remember_private("10.125.225.7:7645", 0);
+        assert_eq!(direct_rungs(&d, &[]).len(), 1);
+    }
+
+    #[test]
+    fn a_machine_with_no_overlay_changes_no_rung() {
+        let mut rungs = vec![Rung {
+            tier: Tier::Remembered,
+            addr: addr(5),
+        }];
+        label_private(&mut rungs, &esper_overlay::Overlays::none());
+        assert_eq!(rungs.first().map(|r| r.tier), Some(Tier::Remembered));
+    }
+
+    /// A rung whose packets would leave through an overlay is relabelled.
+    ///
+    /// The overlay is invented — this machine's own address, called `wg0` —
+    /// because a test that needed a real tunnel would run on one machine in
+    /// the world. What is *not* invented is the routing answer: the kernel is
+    /// asked which address it would send from, exactly as in production.
+    #[test]
+    fn an_address_reached_through_an_overlay_is_labelled_private() {
+        // TEST-NET-1, which exists to be routed nowhere in particular: asking
+        // for it gets this machine's own outward address, and no packet is
+        // sent to find out.
+        let Some(me) = esper_overlay::source_towards("192.0.2.1".parse().expect("an address"))
+            .filter(|a| !a.is_loopback())
+        else {
+            println!("no route off this machine, so there is no path to classify");
+            return;
+        };
+        let overlays = esper_overlay::Overlays::from_interfaces(&[("wg0".to_owned(), me)], &[]);
+
+        let mut rungs = vec![
+            Rung {
+                tier: Tier::Remembered,
+                addr: SocketAddr::new(me, 7645),
+            },
+            Rung {
+                tier: Tier::Lan,
+                addr: (Ipv4Addr::LOCALHOST, 7645).into(),
+            },
+        ];
+        label_private(&mut rungs, &overlays);
+        assert_eq!(
+            rungs.first().map(|r| r.tier),
+            Some(Tier::Overlay),
+            "the address on the overlay was not labelled"
+        );
+        assert_eq!(
+            rungs.get(1).map(|r| r.tier),
+            Some(Tier::Lan),
+            "loopback is not somebody's private network"
+        );
     }
 }

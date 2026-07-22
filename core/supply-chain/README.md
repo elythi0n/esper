@@ -24,6 +24,18 @@ The value is not in the exemptions. It is in what they make possible:
   between the exempted version and the new one.
 - **The list shrinks.** Every exemption removed is a crate someone read.
 
+## What an audit means here
+
+`audits.toml` holds two kinds of entry: crates whose code was **read**, and
+publishers whose future releases are **trusted** (below).
+
+One audit — `if-addrs` — was performed by an AI agent working on this
+repository rather than by a human, and its record says so in its own notes.
+That is deliberate: the alternative was an exemption saying "not reviewed"
+about code that had been read line by line, which is a worse record in both
+directions. Anybody weighing the entry can see exactly what it is and
+re-review it.
+
 ## Publisher trust
 
 `cargo vet` also permits trusting a *publisher* rather than auditing each of

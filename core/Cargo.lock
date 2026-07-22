@@ -442,6 +442,7 @@ dependencies = [
  "esper-input-x11",
  "esper-link",
  "esper-media",
+ "esper-overlay",
  "esper-pipeline",
  "esper-presence",
  "esper-presence-x11",
@@ -512,6 +513,14 @@ dependencies = [
  "esper-decode",
  "esper-encode",
  "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "esper-overlay"
+version = "0.0.0"
+dependencies = [
+ "if-addrs",
  "tracing",
 ]
 
@@ -782,6 +791,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
+]
+
+[[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

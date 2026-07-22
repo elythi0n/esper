@@ -1,7 +1,36 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.if-addrs]]
+who = "Elythi0n <info@marcosraudkett.com>"
+criteria = "safe-to-deploy"
+version = "0.15.0"
+notes = """
+Read in full apart from its own tests: src/posix.rs, src/sockaddr.rs,
+src/windows.rs, and the two getifaddrs modules in src/lib.rs.
+
+What it does: calls getifaddrs(3) on POSIX and GetAdaptersAddresses on
+Windows, walks the returned list, and copies out names, addresses and
+netmasks. No network, no filesystem, no subprocess, no build script, no
+environment reading. Both allocations are freed in a Drop impl on the same
+path that allocated them. Casts to sockaddr_in / sockaddr_in6 happen only
+after checking sa_family, which is the correct discipline for that union.
+
+Two things a reader should know rather than discover:
+
+  - The POSIX `IfAddrsIterator` carries no lifetime tying it to the `IfAddrs`
+    that owns the list, so an iterator outliving the list would walk freed
+    memory. `mod posix` is private and the only caller iterates within the
+    frame that owns the list, so it is not reachable from the public API. It
+    is a latent soundness weakness, not a live one.
+  - On Windows it panics rather than returning an error when the heap
+    allocation fails.
+
+Caveat on this record: the review was performed by an AI agent working on
+this repository, not by a human maintainer. It is recorded as an audit rather
+than an exemption because the code was actually read, and it is attributed
+plainly so anybody weighing it knows what it is.
+"""
 
 [[trusted.aho-corasick]]
 criteria = "safe-to-deploy"

@@ -32,6 +32,7 @@ esper-pipeline = { path = "crates/esper-pipeline" }
 esper-stream = { path = "crates/esper-stream" }
 esper-link = { path = "crates/esper-link" }
 esper-discovery = { path = "crates/esper-discovery" }
+esper-overlay = { path = "crates/esper-overlay" }
 esper-input = { path = "crates/esper-input" }
 esper-input-x11 = { path = "crates/esper-input-x11" }
 esper-presence = { path = "crates/esper-presence" }
