@@ -242,12 +242,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+      # openh264 compiles Cisco's C and needs nasm for its assembly; without
+      # it the encode crate's build script refuses to build at all, and the
+      # decoder target is in this set.
+      - uses: ilammy/setup-nasm@v1
       - run: cargo install cargo-fuzz --locked
       # Every parser that touches untrusted input gets a target. A short run on
       # each change catches a regression; the nightly workflow runs them long.
+      #
+      # `make fuzz` owns the list, as `make fuzz-targets` says it does. This
+      # job used to name three targets of its own, so six parsers — the control
+      # framing, damage coalescing, the decoder, media packets, mDNS and the
+      # broker's meet — were fuzzed nightly and not on the change that broke
+      # them. A list in two places is a list that disagrees with itself.
       - name: fuzz each target, 30s
-        working-directory: core
-        run: |
-          for t in frame_decode messages replay; do
-            cargo fuzz run "$t" -- -max_total_time=30
-          done
+        run: make fuzz FUZZ_SECONDS=30

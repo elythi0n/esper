@@ -25,7 +25,9 @@ use std::time::Duration;
 
 use esper_crypto::identity::KEY_LEN;
 use esper_crypto::{Device, Fingerprint};
-use esper_proto::{Permission, Reason, SessionDeny, SessionGrant, SessionRequest, SessionResponse};
+use esper_proto::{
+    Permission, Reason, SessionDeny, SessionGrant, SessionKind, SessionRequest, SessionResponse,
+};
 
 use crate::control::{Control, ControlError};
 
@@ -108,6 +110,25 @@ pub fn decide_and_clamp(
     device: &Device,
     request: &SessionRequest,
 ) -> (Verdict, Vec<Permission>) {
+    // **The kind first, because it is the answer somebody can act on.** A
+    // device asking for a shell it may not have is told which permission it
+    // needs; without this it is told "none of what you asked for is granted",
+    // which is true and useless.
+    let needed = request.kind.requires();
+    if !device.may(needed) {
+        return (
+            Verdict::Deny(
+                Reason::PERMISSION_DENIED,
+                format!(
+                    "a {} session needs the {} permission, which this device does not hold",
+                    request.kind.name(),
+                    needed.name()
+                ),
+            ),
+            Vec::new(),
+        );
+    }
+
     let verdict = policy.decide(device, request);
     let Verdict::Grant(proposed) = verdict else {
         return (verdict, Vec::new());
@@ -131,6 +152,25 @@ pub fn decide_and_clamp(
             Verdict::Deny(
                 Reason::PERMISSION_DENIED,
                 "nothing the policy granted is permitted for this device".to_owned(),
+            ),
+            over_reach,
+        );
+    }
+
+    // **And again after the policy has spoken.** The check above is about the
+    // device's own record; this one is about what the policy actually granted,
+    // which can be less — a policy that hands back a subset without the
+    // permission the kind needs would otherwise open a session that cannot do
+    // the one thing it was opened for.
+    if !clamped.contains(&needed) {
+        return (
+            Verdict::Deny(
+                Reason::PERMISSION_DENIED,
+                format!(
+                    "a {} session needs the {} permission, which this device does not hold",
+                    request.kind.name(),
+                    needed.name()
+                ),
             ),
             over_reach,
         );
@@ -164,8 +204,15 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// What answering a session request settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answered {
-    /// The session may open, with exactly these permissions.
-    Granted(SessionGrant),
+    /// The session may open, with exactly these permissions, for what the
+    /// controller said it was for.
+    Granted {
+        grant: SessionGrant,
+        /// What the controller asked to do. Already checked against the
+        /// grant: a kind whose permission was not granted is a
+        /// [`Answered::Denied`], never a grant the caller must re-check.
+        kind: SessionKind,
+    },
     /// Refused. **The peer has already been told the same reason** — that is
     /// the difference between this and a [`Verdict`], which is only a decision.
     Denied(SessionDeny),
@@ -262,7 +309,10 @@ pub async fn answer_session_within(
     let answer = response(&verdict, session_id);
     control.send(&answer).await?;
     Ok(match answer {
-        SessionResponse::Grant(g) => Answered::Granted(g),
+        SessionResponse::Grant(grant) => Answered::Granted {
+            grant,
+            kind: request.kind,
+        },
         SessionResponse::Deny(d) => Answered::Denied(d),
     })
 }
@@ -411,6 +461,7 @@ mod tests {
 
     fn request(want: &[Permission]) -> SessionRequest {
         SessionRequest {
+            kind: esper_proto::SessionKind::Screen,
             want: want.to_vec(),
             codecs: vec!["h264".to_owned()],
             reason: "helping with email".to_owned(),
@@ -440,6 +491,128 @@ mod tests {
         let r = request(&[Permission::Unattended, Permission::FilesIn]);
         assert!(matches!(
             GrantStoredPermissions.decide(&d, &r),
+            Verdict::Deny(Reason::PERMISSION_DENIED, _)
+        ));
+    }
+
+    fn asking_for(kind: SessionKind, want: &[Permission]) -> SessionRequest {
+        SessionRequest {
+            kind,
+            want: want.to_vec(),
+            codecs: Vec::new(),
+            reason: "a session".to_owned(),
+        }
+    }
+
+    /// A session of a kind the device may not open is refused **even when
+    /// something else it asked for would have been granted**.
+    ///
+    /// This is the case the policy alone does not catch. Asking for a forward
+    /// while holding only `view` and requesting both would otherwise produce a
+    /// grant — the intersection is not empty — and the session would open as a
+    /// forward for a device that holds no such permission.
+    #[test]
+    fn a_kind_the_device_may_not_open_is_refused_even_alongside_one_it_may() {
+        let d = device_with(&[Permission::View]);
+        let r = asking_for(
+            SessionKind::Forward,
+            &[Permission::View, Permission::Forward],
+        );
+        let (verdict, _) = decide_and_clamp(&GrantStoredPermissions, &d, &r);
+        match verdict {
+            Verdict::Deny(reason, detail) => {
+                assert_eq!(reason, Reason::PERMISSION_DENIED);
+                // Which permission, by name: "none of what you asked for" is
+                // true and leaves somebody guessing.
+                assert!(detail.contains("forward"), "{detail}");
+            }
+            other => panic!("a forward session opened for a device without it: {other:?}"),
+        }
+
+        // The same for a shell.
+        let r = asking_for(
+            SessionKind::Terminal,
+            &[Permission::View, Permission::Terminal],
+        );
+        assert!(matches!(
+            decide_and_clamp(&GrantStoredPermissions, &d, &r).0,
+            Verdict::Deny(Reason::PERMISSION_DENIED, _)
+        ));
+    }
+
+    /// And the kind it *may* open still opens, with what it holds.
+    #[test]
+    fn a_kind_the_device_holds_opens_with_the_permissions_it_holds() {
+        let d = device_with(&[Permission::View, Permission::Forward]);
+        let r = asking_for(
+            SessionKind::Forward,
+            &[Permission::View, Permission::Forward],
+        );
+        match decide_and_clamp(&GrantStoredPermissions, &d, &r).0 {
+            Verdict::Grant(g) => assert!(g.contains(&Permission::Forward)),
+            other => panic!("expected a grant, got {other:?}"),
+        }
+    }
+
+    /// The kind is settled **before the policy is consulted**.
+    ///
+    /// Both checks refuse the same request with the same sentence, so this is
+    /// what makes the first one worth having: deciding a session is
+    /// impossible is not a question to put to a policy, and the policy this
+    /// product is heading for is a prompt on somebody's screen. Asking a
+    /// person to approve a session that was going to be refused whatever they
+    /// said is how people learn to dismiss prompts.
+    #[test]
+    fn a_kind_the_device_may_not_open_is_refused_without_asking_the_policy() {
+        /// Grants everything, and remembers being asked.
+        struct Noticed(std::sync::atomic::AtomicBool);
+        impl Policy for Noticed {
+            fn decide(&self, device: &Device, _request: &SessionRequest) -> Verdict {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                Verdict::Grant(device.permissions.clone())
+            }
+        }
+
+        let asked = Noticed(std::sync::atomic::AtomicBool::new(false));
+        let d = device_with(&[Permission::View]);
+        let r = asking_for(
+            SessionKind::Forward,
+            &[Permission::View, Permission::Forward],
+        );
+        let (verdict, _) = decide_and_clamp(&asked, &d, &r);
+        assert!(matches!(verdict, Verdict::Deny(..)));
+        assert!(
+            !asked.0.load(std::sync::atomic::Ordering::Relaxed),
+            "the policy was asked about a session that could not open"
+        );
+
+        // And it *is* asked about one that can, so this is not simply a check
+        // that nothing gets through.
+        let asked = Noticed(std::sync::atomic::AtomicBool::new(false));
+        let d = device_with(&[Permission::View, Permission::Forward]);
+        let (verdict, _) = decide_and_clamp(&asked, &d, &r);
+        assert!(matches!(verdict, Verdict::Grant(_)));
+        assert!(asked.0.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// A policy that grants a subset without what the kind needs is refused
+    /// too — the second check, after the policy has spoken.
+    #[test]
+    fn a_policy_that_grants_the_wrong_thing_does_not_open_the_session() {
+        /// Grants view and nothing else, whatever was asked for.
+        struct ViewOnly;
+        impl Policy for ViewOnly {
+            fn decide(&self, _device: &Device, _request: &SessionRequest) -> Verdict {
+                Verdict::Grant(vec![Permission::View])
+            }
+        }
+
+        // The device does hold `forward`, so the first check passes; the
+        // policy is what does not grant it.
+        let d = device_with(&[Permission::View, Permission::Forward]);
+        let r = asking_for(SessionKind::Forward, &[Permission::Forward]);
+        assert!(matches!(
+            decide_and_clamp(&ViewOnly, &d, &r).0,
             Verdict::Deny(Reason::PERMISSION_DENIED, _)
         ));
     }

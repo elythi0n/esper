@@ -218,6 +218,37 @@ pub static SETTINGS: &[Setting] = &[
                 for an hour is working, not idle.",
     },
     Setting {
+        key: "forward.allow",
+        kind: Kind::Text,
+        // **Empty is loopback, never everything.** A forward can be granted
+        // without a shell, so an unrestricted one would make the narrowest
+        // grant the one with the widest reach — every machine on the host's
+        // network, through a host that belongs to somebody else. The shape of
+        // an entry is checked when the host starts, not here: this file's
+        // parser knows about text, and what a forwarding target looks like
+        // belongs with the code that dials one.
+        default: Value::Text(Cow::Borrowed("")),
+        about: "Targets this machine will forward to, as host:port entries separated by \
+                commas — [::1]:5432 for an IPv6 literal, db.internal:* for any port. \
+                Empty means this machine's own loopback and nothing else.",
+    },
+    Setting {
+        key: "forward.max_connections",
+        kind: Kind::Whole {
+            least: 1,
+            // Below the transport's 256 concurrent bidirectional streams, with
+            // room left for the session's own control streams: one forwarded
+            // connection is one stream, and a cap above what the transport
+            // will open would be a promise the connection cannot keep.
+            most: 192,
+        },
+        // Each is a stream, a socket and two copy buffers, so this is a bound
+        // on what one session can make the host hold — checked before the
+        // dial, not after.
+        default: Value::Whole(64),
+        about: "How many forwarded connections one session may have open at once.",
+    },
+    Setting {
         key: "discovery.mdns",
         kind: Kind::Flag,
         // **The one deliberate exception to strict defaults.** It reveals that

@@ -2,7 +2,8 @@
 
 > Secure, private remote desktop. No account, no password, no server.
 
-🚧 **Early development.** Nothing below works yet except the build.
+🚧 **Early development.** Linux hosts work end to end; Windows and macOS
+hosts, the desktop app and the control-plane CLI do not exist yet.
 
 ---
 
@@ -24,6 +25,13 @@ you through someone else.
 Everything is end-to-end encrypted between device keys on every path, including
 your own relay.
 
+A headless server's useful face is not its screen, so terminal mode and port
+forwarding are first-class rather than extras: a shell, and `ssh -L`-shaped
+access to a service bound to the host's loopback that the network cannot see.
+A forward reaches the host's loopback and nothing else unless the host's owner
+writes down a wider target, and `--stdio` gives `ProxyCommand` the `ssh -W`
+shape, so plain ssh, scp, rsync and git ride Esper's pairing and its way in.
+
 ## Why
 
 Every remote desktop product answers "who is allowed to see this screen" with
@@ -43,10 +51,13 @@ persistent trust between two machines that belong to the same person.
 |---|---|
 | Builds, tests, lints | ✅ |
 | Wire protocol framing | ✅ Rust and Go, byte-compatible |
-| Identity, pairing, transport | ⏳ next |
-| Terminal mode | ⏳ |
-| Screen capture and video | ⏳ |
-| Input | ⏳ |
+| Identity, pairing, transport | ✅ |
+| Terminal mode | ✅ shells, reattach after a dropped link |
+| Port forwarding | ✅ `ssh -L` and `ssh -W` shapes |
+| Screen, video and input | ✅ Linux, X11 |
+| Finding a host: LAN, remembered address, your own broker | ✅ |
+| Windows and macOS hosts | ⏳ |
+| Desktop app, control-plane CLI | ⏳ |
 
 ## Building
 

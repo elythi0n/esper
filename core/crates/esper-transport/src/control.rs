@@ -98,6 +98,18 @@ impl FrameReader {
         Ok(Some(payload))
     }
 
+    /// Everything read and not yet handed out as a frame.
+    ///
+    /// For a stream that stops being framed part-way through — a forwarded
+    /// connection, where the request is a frame and everything after it is the
+    /// connection's own bytes. A read large enough to have taken some of those
+    /// bytes along with the frame is the normal case, not a rare one, and
+    /// dropping them would silently truncate the payload.
+    #[must_use]
+    pub fn into_remaining(self) -> Vec<u8> {
+        self.buf
+    }
+
     /// How many bytes are held for a frame not yet complete.
     #[must_use]
     pub fn held(&self) -> usize {
@@ -265,6 +277,17 @@ impl Control {
                 Err(e) => return Err(ControlError::Stream(e.to_string())),
             }
         }
+    }
+
+    /// Give up the framing and hand back the raw stream.
+    ///
+    /// Returns the two halves and **whatever was read past the last frame**,
+    /// which the caller must treat as the first bytes of the raw stream. See
+    /// [`FrameReader::into_remaining`]: a stream that stops being framed
+    /// cannot simply drop the reader.
+    #[must_use]
+    pub fn into_raw(self) -> (SendStream, RecvStream, Vec<u8>) {
+        (self.send, self.recv, self.frames.into_remaining())
     }
 
     /// Finish the send side, telling the peer no more frames are coming.
@@ -451,5 +474,32 @@ mod tests {
                 r.held()
             );
         }
+    }
+
+    /// Bytes that arrived past the last frame survive the switch to raw.
+    ///
+    /// A forwarded connection stops being framed after the reply, and the read
+    /// that took the reply routinely took some payload with it — one packet
+    /// holds both. Dropping the reader would silently swallow the first bytes
+    /// of the connection, which shows up as a protocol that hangs on its own
+    /// greeting rather than as anything that looks like a framing bug.
+    #[test]
+    fn what_arrived_past_the_last_frame_is_handed_back() {
+        let mut r = FrameReader::new();
+        let mut wire = framed(b"the reply");
+        wire.extend_from_slice(b"and the first payload bytes");
+        r.push(&wire);
+
+        assert_eq!(r.take().unwrap().as_deref(), Some(&b"the reply"[..]));
+        assert_eq!(r.into_remaining(), b"and the first payload bytes");
+    }
+
+    /// And nothing is handed back when nothing was read past the frame.
+    #[test]
+    fn a_reader_between_frames_has_nothing_left_over() {
+        let mut r = FrameReader::new();
+        r.push(&framed(b"the reply"));
+        assert!(r.take().unwrap().is_some());
+        assert!(r.into_remaining().is_empty());
     }
 }

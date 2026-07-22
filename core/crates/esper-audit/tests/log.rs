@@ -269,6 +269,9 @@ fn exhaustive_witness(e: &Event) {
         | Event::TerminalClosed { .. }
         | Event::TerminalParked { .. }
         | Event::TerminalResumed { .. }
+        | Event::ForwardOpened { .. }
+        | Event::ForwardClosed { .. }
+        | Event::ForwardRefused { .. }
         | Event::Refused { .. } => {}
     }
 }
@@ -310,6 +313,19 @@ fn variants() -> Vec<Event> {
             session: "0f1e2d3c4b5a69788796a5b4c3d2e1f0".to_owned(),
             parked_secs: 42,
             lost: 0,
+        },
+        Event::ForwardOpened {
+            target: "127.0.0.1:5432".to_owned(),
+        },
+        Event::ForwardClosed {
+            target: "127.0.0.1:5432".to_owned(),
+            duration_secs: 12,
+            sent: 4096,
+            received: 8192,
+        },
+        Event::ForwardRefused {
+            target: "10.0.0.5:22".to_owned(),
+            reason: "that target is not on the host's forwarding allowlist".to_owned(),
         },
         Event::Refused {
             reason: "unknown key".to_owned(),

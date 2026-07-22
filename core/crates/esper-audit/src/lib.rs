@@ -146,6 +146,39 @@ pub enum Event {
         /// here, the bytes themselves never do.
         lost: u64,
     },
+    /// A forwarded connection was opened, and to what.
+    ///
+    /// The target, never the traffic. The same rule as a terminal session and
+    /// the same reason: what goes through a tunnel is the user's, and a
+    /// product that recorded it would be a wiretap that happened to be local.
+    ForwardOpened {
+        /// Where the host connected, as `host:port`.
+        target: String,
+    },
+    /// A forwarded connection ended.
+    ForwardClosed {
+        target: String,
+        duration_secs: u64,
+        /// How much went each way. Counts, not content — the same distinction
+        /// [`Event::TerminalResumed`]'s `lost` makes.
+        sent: u64,
+        received: u64,
+    },
+    /// A forwarded connection was refused on policy grounds.
+    ///
+    /// Only policy: a target that is not on the allowlist, or a device that no
+    /// longer holds the permission. A target that simply was not listening is
+    /// not here, because that is a service being down rather than anything
+    /// about the peer — and it is the one that repeats.
+    ///
+    /// A device that collects several of these in one session is probing, and
+    /// the host ends the session rather than going on refusing it. That bound
+    /// is also what keeps this event from being a way to fill a disk.
+    ForwardRefused {
+        target: String,
+        /// Why, as the sentence the peer was given.
+        reason: String,
+    },
     /// A session was refused, and why.
     ///
     /// Refusals matter as much as acceptances: a run of them is what an attack

@@ -94,6 +94,7 @@ fn device(perms: &[Permission]) -> Device {
 
 fn asking_for(want: &[Permission]) -> SessionRequest {
     SessionRequest {
+        kind: esper_proto::SessionKind::Screen,
         want: want.to_vec(),
         codecs: vec!["h264".to_owned()],
         reason: "helping with email".to_owned(),
@@ -130,7 +131,10 @@ async fn a_controller_is_told_the_permissions_it_actually_holds() {
         );
         assert_eq!(grant.session_id, [1u8; 16]);
         match answered {
-            Answered::Granted(g) => assert_eq!(g.granted, grant.granted),
+            Answered::Granted { grant: g, kind } => {
+                assert_eq!(g.granted, grant.granted);
+                assert_eq!(kind, esper_proto::SessionKind::Screen);
+            }
             other => panic!("the host thought it {other:?} while the controller was granted"),
         }
     })

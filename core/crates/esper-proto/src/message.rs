@@ -144,6 +144,13 @@ pub enum Permission {
     Audio,
     /// Open a terminal session.
     Terminal,
+    /// Forward a TCP connection to a target on the host.
+    ///
+    /// Granted to nobody by default, and separate from [`Permission::Terminal`]
+    /// on purpose: a shell already reaches everything a forward could, but a
+    /// forward can be given *without* a shell, and that is the point — a
+    /// database client on the laptop and no login on the server.
+    Forward,
     /// Connect with nobody present to approve.
     Unattended,
     /// Record the session locally.
@@ -156,7 +163,7 @@ impl Permission {
     /// Exists so help text, listings and a name parser cannot fall behind the
     /// enum: adding a variant without adding it here is a compile error at the
     /// exhaustive match in [`Permission::name`] and a failing test here.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::View,
         Self::Control,
         Self::ClipboardOut,
@@ -165,6 +172,7 @@ impl Permission {
         Self::FilesIn,
         Self::Audio,
         Self::Terminal,
+        Self::Forward,
         Self::Unattended,
         Self::Record,
     ];
@@ -186,6 +194,7 @@ impl Permission {
             Self::FilesIn => "files_in",
             Self::Audio => "audio",
             Self::Terminal => "terminal",
+            Self::Forward => "forward",
             Self::Unattended => "unattended",
             Self::Record => "record",
         }
@@ -407,6 +416,169 @@ pub enum TerminalMessage {
     Exit(TerminalExit),
 }
 
+/// A controller asking the host to dial one TCP target.
+///
+/// The first frame on a forwarded stream and the **last framed thing on it**:
+/// once the host replies [`ForwardReply::Opened`], the stream carries the
+/// connection's own bytes with nothing of ours around them. A tunnel that
+/// re-framed the payload would be inventing a second flow-control scheme on
+/// top of the one QUIC already gives each stream, and getting it wrong is how
+/// a slow reader stalls a whole session instead of its own connection.
+///
+/// `host` is what the *controller* typed. It is matched against the host's
+/// allowlist as written, before anything is resolved or dialled, so a name is
+/// never even looked up unless the host's owner named it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardOpen {
+    /// The target host, as a name or an IP literal. No brackets: `::1`, not
+    /// `[::1]`.
+    pub host: String,
+    /// The target port.
+    pub port: u16,
+}
+
+/// Longest accepted target host.
+///
+/// A DNS name cannot be longer, and the value reaches a resolver.
+pub const MAX_FORWARD_HOST_LEN: usize = 255;
+
+impl ForwardOpen {
+    /// Whether this request is within its bounds and safe to act on.
+    ///
+    /// The character set is deliberately narrow — a host is a name or an
+    /// address, and anything with a slash, a space, a `@` or a control
+    /// character in it is not either of those. Screened here so the string
+    /// that reaches a resolver has already been established to be a host.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.port != 0
+            && !self.host.is_empty()
+            && self.host.len() <= MAX_FORWARD_HOST_LEN
+            && self
+                .host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+    }
+
+    /// The target as a person would write it, for a log line or a refusal.
+    ///
+    /// Bracketed when it is an IPv6 literal, because `::1:5432` is unreadable
+    /// and `[::1]:5432` is what everything else prints.
+    #[must_use]
+    pub fn target(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// Why a forward could not be opened.
+///
+/// Note what these do *not* distinguish: there is no separate code for "no
+/// such host" against "nothing listening". Both are [`ForwardRefusal::DialFailed`],
+/// because the difference is only ever information about the host's network,
+/// and the controller's next move is the same either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardRefusal {
+    /// The device does not hold [`Permission::Forward`].
+    NotPermitted,
+    /// The target is not on this host's allowlist.
+    ///
+    /// **Sent without dialling anything.** The refusal is the whole point of
+    /// the allowlist: a forward grant must not be usable to find out what is
+    /// listening on addresses its owner never named.
+    NotAllowed,
+    /// The target was allowed, and the host could not connect to it.
+    ///
+    /// This does tell a permitted peer whether an allowlisted port is
+    /// listening. Accepted deliberately, and bounded by the allowlist: the
+    /// reach of the probe is exactly the list the host's owner wrote down.
+    DialFailed,
+    /// The session already has as many forwarded connections as it may.
+    TooMany,
+    /// The request was outside its bounds.
+    Malformed,
+}
+
+impl ForwardRefusal {
+    /// A sentence for a user, not a code for a machine.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotPermitted => "this device is not permitted to forward ports to this machine",
+            Self::NotAllowed => "that target is not on the host's forwarding allowlist",
+            Self::DialFailed => "the host could not connect to that target",
+            Self::TooMany => "this session is already forwarding as many connections as it may",
+            Self::Malformed => "the forward request was malformed",
+        }
+    }
+}
+
+/// The host's answer to a [`ForwardOpen`].
+///
+/// Tagged, and sent before any payload byte, so the controller never has to
+/// infer from the first bytes whether it has a connection — and a refusal
+/// arrives as a refusal rather than as a stream that closes.
+///
+/// [`ForwardReply::Opened`] carries nothing. There is nothing honest to put in
+/// it: the controller knows what it asked for, and what the host resolved the
+/// name to is the host's business.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardReply {
+    /// Connected. Everything after this frame is the connection.
+    Opened,
+    /// Refused, with a reason.
+    Refused(ForwardRefusal),
+}
+
+/// Which kind of session a controller is asking for.
+///
+/// **The request says which, rather than the host inferring it.** Before this
+/// existed a host guessed from the shape of the permission set — a device with
+/// `terminal` and not `view` must want a shell — which meant a device holding
+/// both could never open one, and a third session type had nothing left to be
+/// inferred from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    /// The screen, with input if it was granted.
+    #[default]
+    Screen,
+    /// A shell.
+    Terminal,
+    /// TCP connections forwarded to a target on the host.
+    Forward,
+}
+
+impl SessionKind {
+    /// The permission a session of this kind cannot run without.
+    ///
+    /// One place, so the check the host makes and the request the controller
+    /// sends cannot disagree about what a kind requires.
+    #[must_use]
+    pub const fn requires(self) -> Permission {
+        match self {
+            Self::Screen => Permission::View,
+            Self::Terminal => Permission::Terminal,
+            Self::Forward => Permission::Forward,
+        }
+    }
+
+    /// The word for it, for a log line or a prompt.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Screen => "screen",
+            Self::Terminal => "terminal",
+            Self::Forward => "forward",
+        }
+    }
+}
+
 /// A controller asking to open a session.
 ///
 /// Requests are a *maximum*, never a demand. The host grants some subset — see
@@ -414,6 +586,12 @@ pub enum TerminalMessage {
 /// what it asked for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRequest {
+    /// What the controller means to do with the session.
+    ///
+    /// Defaulted rather than required, so a peer built before session kinds
+    /// existed asks for a screen — which is what it meant.
+    #[serde(default)]
+    pub kind: SessionKind,
     /// The permissions the controller would like.
     pub want: Vec<Permission>,
     /// Video codecs the controller can decode, in preference order.
@@ -1050,7 +1228,7 @@ mod tests {
         // missing from it would be a permission nobody could grant.
         assert_eq!(
             Permission::ALL.len(),
-            10,
+            11,
             "a permission was added to the enum and not to ALL"
         );
         for p in Permission::ALL {

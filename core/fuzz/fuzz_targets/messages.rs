@@ -18,9 +18,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use esper_proto::{
-    Hello, InputMessage, MediaMessage, PairConfirm, PairResponse, PairResult, PairSpake, Permission,
-    PermissionChange, Role, SessionDeny, SessionGrant, SessionRequest, SessionResponse,
-    TerminalMessage, decode,
+    ForwardOpen, ForwardRefusal, ForwardReply, Hello, InputMessage, MediaMessage, PairConfirm,
+    PairResponse, PairResult, PairSpake, Permission, PermissionChange, Role, SessionDeny,
+    SessionGrant, SessionRequest, SessionResponse, TerminalMessage, decode,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -40,6 +40,9 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode::<MediaMessage>(data);
     let _ = decode::<TerminalMessage>(data);
     let _ = decode::<InputMessage>(data);
+    let _ = decode::<ForwardOpen>(data);
+    let _ = decode::<ForwardReply>(data);
+    let _ = decode::<ForwardRefusal>(data);
 
     // The validators are what a host actually calls on a decoded message, and
     // they must be as robust as the decoder. A validator that panics on a
@@ -61,6 +64,13 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(m) = decode::<MediaMessage>(data) {
         let _ = m.is_well_formed();
         let _ = m.may_be_sent_by(Role::Controller);
+    }
+    // A forward request is a peer-supplied host name on its way to a
+    // resolver. `target` builds the string a refusal and a log line carry,
+    // from the same field.
+    if let Ok(f) = decode::<ForwardOpen>(data) {
+        let _ = f.is_well_formed();
+        let _ = f.target();
     }
     // Input arrives from a peer on every session that grants control, and the
     // validator is what stands between a hostile field and a platform's

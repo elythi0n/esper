@@ -225,6 +225,7 @@ pub fn run(o: &Options) -> Result<(), String> {
         let grant = request_session(
             &mut control,
             &SessionRequest {
+                kind: esper_proto::SessionKind::Terminal,
                 want: vec![Permission::Terminal],
                 codecs: Vec::new(),
                 reason: "a shell".to_owned(),

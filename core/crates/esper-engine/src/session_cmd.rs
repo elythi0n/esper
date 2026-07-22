@@ -42,7 +42,7 @@ use crate::backend::Choice;
 use crate::{net, paths};
 
 /// What `host` was asked to do.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct HostOptions {
     pub listen: SocketAddr,
     pub backend: Choice,
@@ -61,6 +61,10 @@ pub struct HostOptions {
     /// still find it. **No default**: if nobody names one, this tier does not
     /// exist.
     pub via: Option<esper_rendezvous::Via>,
+    /// The targets a forward may reach. Loopback when nobody says otherwise.
+    pub forward: esper_transport::forward::Allowlist,
+    /// How many forwarded connections one session may hold at once.
+    pub forwards_at_once: usize,
 }
 
 impl HostOptions {
@@ -86,6 +90,18 @@ impl HostOptions {
             once: false,
             mdns: crate::settings::flag("discovery.mdns", true),
             via: crate::settings::broker()?,
+            // **Checked when the host starts, not when a forward asks.** A
+            // typo in the list is a message somebody sees while they are
+            // looking at the file, rather than a refusal on a machine nobody
+            // is watching, hours later.
+            forward: esper_transport::forward::Allowlist::parse(&crate::settings::text(
+                "forward.allow",
+            ))
+            .map_err(|e| format!("forward.allow: {e}"))?,
+            forwards_at_once: usize::try_from(
+                crate::settings::whole("forward.max_connections").unwrap_or(64),
+            )
+            .unwrap_or(64),
         })
     }
 }
@@ -175,6 +191,11 @@ pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
                 o.mdns = false;
                 i += 1;
             }
+            "--forward-allow" => {
+                o.forward = esper_transport::forward::Allowlist::parse(&value("--forward-allow")?)
+                    .map_err(|e| format!("--forward-allow: {e}"))?;
+                i += 2;
+            }
             "--via" => {
                 via_addr = Some(net::parse_addr(&value("--via")?)?);
                 i += 2;
@@ -186,7 +207,7 @@ pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
             other => return Err(format!("unknown flag {other}")),
         }
     }
-    o.via = broker(via_addr, via_key)?;
+    o.via = broker_from(via_addr, via_key)?;
     Ok(o)
 }
 
@@ -195,7 +216,7 @@ pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
 /// Refused rather than half-configured: an address with no key would mean
 /// trusting whatever answered there, which is the one thing pinning exists to
 /// prevent — and a key with no address is a peer that cannot say where to go.
-fn broker(
+pub fn broker_from(
     addr: Option<SocketAddr>,
     key: Option<[u8; 32]>,
 ) -> Result<Option<esper_rendezvous::Via>, String> {
@@ -282,7 +303,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     }
     // A broker on the command line replaces the configured one; without one,
     // whatever the settings say.
-    let via = match broker(via_addr, via_key)? {
+    let via = match broker_from(via_addr, via_key)? {
         Some(via) => Some(via),
         None => crate::settings::broker()?,
     };
@@ -842,7 +863,10 @@ const GOODBYE: Duration = Duration::from_secs(2);
 /// granted or taken away while the host is running has to apply to the next
 /// connection, and a host that had to be restarted for that would be a host
 /// whose permissions nobody trusts.
-async fn agree(control: &mut Control, device: &[u8; 32]) -> Result<Vec<Permission>, String> {
+async fn agree(
+    control: &mut Control,
+    device: &[u8; 32],
+) -> Result<(esper_proto::SessionKind, Vec<Permission>), String> {
     let (store, _) = paths::devices()?;
     let record = store
         .get(device)
@@ -851,7 +875,7 @@ async fn agree(control: &mut Control, device: &[u8; 32]) -> Result<Vec<Permissio
         .map_err(|e| format!("no randomness for a session identifier: {e}"))?;
 
     match answer_session(control, &GrantStoredPermissions, record, *id.as_bytes()).await {
-        Ok(Answered::Granted(g)) => Ok(g.granted),
+        Ok(Answered::Granted { grant, kind }) => Ok((kind, grant.granted)),
         // The peer has already been told the same reason.
         Ok(Answered::Denied(d)) => Err(format!("refused: {}", d.detail)),
         Err(e) => Err(format!("agreeing what the session may do: {e}")),
@@ -962,15 +986,19 @@ async fn close_when_revoked(
 /// A guard rather than two calls, because a session with an open record and no
 /// close is exactly the gap an audit log exists to not have — and `serve_one`
 /// has eight ways out.
-struct Recorded<'a> {
-    log: &'a Log,
+///
+/// Owns its log rather than borrowing it, because a forward session outlives
+/// the function that opened it: the record has to travel into the task that is
+/// still running. A `Log` is a path, so the clone is free.
+struct Recorded {
+    log: Log,
     peer: [u8; 32],
     started: Instant,
 }
 
-impl<'a> Recorded<'a> {
+impl Recorded {
     /// Record the open. Best-effort: a full disk must not end a session.
-    fn open(log: &'a Log, peer: [u8; 32], granted: &[Permission]) -> Self {
+    fn open(log: &Log, peer: [u8; 32], granted: &[Permission]) -> Self {
         if let Err(e) = log.append(&Entry::now(
             &peer,
             Event::SessionOpened {
@@ -984,14 +1012,14 @@ impl<'a> Recorded<'a> {
             tracing::warn!(error = %e, "could not record the start of a session");
         }
         Self {
-            log,
+            log: log.clone(),
             peer,
             started: Instant::now(),
         }
     }
 }
 
-impl Drop for Recorded<'_> {
+impl Drop for Recorded {
     fn drop(&mut self) {
         if let Err(e) = self.log.append(&Entry::now(
             &self.peer,
@@ -1057,31 +1085,75 @@ async fn serve_session(
     // controller says what it wants and the host grants a subset of what the
     // device holds; the answer goes out before a frame or a shell exists, so
     // the far side never has to infer its permissions from what turns up.
-    let granted = match agree(&mut control, &device).await {
+    let (kind, granted) = match agree(&mut control, &device).await {
         Ok(g) => g,
         Err(e) => return Err((e, parked)),
     };
     println!(
-        "      granted {}",
+        "      granted {} — for a {} session",
         granted
             .iter()
             .map(|p| p.name())
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        kind.name()
     );
-    let _recorded = Recorded::open(log, device, &granted);
+    let recorded = Recorded::open(log, device, &granted);
 
-    // **A terminal session is not a screen session.** No capture, no encoder,
-    // no presenter — which is the whole claim of terminal mode, and it would
-    // not be true if the host set a screen up first and answered the shell
-    // request on the side.
     // What this device may do, re-read whenever it is asked rather than frozen
     // here. The terminal service uses it to decide whether to *keep* a shell
     // standing, which is a question about now and not about when the session
     // opened.
     let live = crate::permits::Live::new(permits.clone(), device, granted.clone());
 
-    if granted.contains(&Permission::Terminal) && !granted.contains(&Permission::View) {
+    // **The controller said which kind of session this is, and the permission
+    // it needs was checked before the answer went out.** It used to be
+    // inferred from the shape of the grant — terminal and not view must mean a
+    // shell — which meant a device holding both could never open one and a
+    // third kind had nothing to be inferred from.
+    if kind == esper_proto::SessionKind::Forward {
+        // **A forward does not hold the host.** It is open for as long as
+        // somebody has a database client running, which is all day — and this
+        // loop serves one session at a time, so an awaited forward would mean
+        // no shell, no screen and no second device until it ended. Nothing in
+        // it touches the screen, the capture backend or a parked session, so
+        // it is the one kind that can simply be let go of.
+        let allow = o.forward.clone();
+        let at_once = o.forwards_at_once;
+        let log = log.clone();
+        let live = live.clone();
+        let closer = media.clone();
+        let from = session.remote_address();
+        tokio::spawn(async move {
+            // The control stream the session was agreed on is held for the
+            // life of the forward: dropping it would reset a stream the peer
+            // has no reason to think is finished.
+            let _agreed = control;
+            let watchdog = tokio::spawn(close_when_revoked(
+                closer.clone(),
+                live.clone(),
+                Permission::Forward,
+                log.clone(),
+                device,
+            ));
+            match crate::forward_cmd::serve(&session, &allow, at_once, &live, &log, &device).await {
+                Ok(what) => println!("  · {from} stopped forwarding: {what}"),
+                Err(e) => eprintln!("  · {from} stopped forwarding: {e}"),
+            }
+            watchdog.abort();
+            // The same last word every other ending gets, since this one does
+            // not go back through `serve_one`.
+            closer.linger(GOODBYE).await;
+            drop(recorded);
+        });
+        return Ok(("forwarding, in the background".to_owned(), parked));
+    }
+
+    // **A terminal session is not a screen session.** No capture, no encoder,
+    // no presenter — which is the whole claim of terminal mode, and it would
+    // not be true if the host set a screen up first and answered the shell
+    // request on the side.
+    if kind == esper_proto::SessionKind::Terminal {
         // **A revocation has to reach a session that is already running.**
         // The watchdog closes the connection; the terminal service then
         // unwinds through its own teardown, and because it re-reads the grant
@@ -1119,23 +1191,6 @@ async fn serve_session(
             Err(e) => Err((e, parked)),
         };
     }
-    if granted.contains(&Permission::Terminal) {
-        // Granted and not served, so it is said out loud. Two modes on one
-        // connection needs a way to say which control stream is which, and
-        // the protocol has no message for that yet.
-        println!("      terminal granted, but a shell needs a session of its own");
-    }
-    if !granted.contains(&Permission::View) {
-        // Nothing to serve, said with a reason code rather than by dropping
-        // the connection: this is a device that holds control but not view, or
-        // asked for something this host cannot do.
-        session.close(esper_proto::Reason::PERMISSION_DENIED);
-        return Err((
-            "nothing this device is permitted to do can be served".to_owned(),
-            parked,
-        ));
-    }
-
     // A returning controller resumes what it left; anybody else gets a new
     // session and the parked one is not disturbed by their arrival.
     let (mut link, parked) = match parked {
@@ -1765,28 +1820,82 @@ async fn serve(
     Ok((stats, survivor))
 }
 
-/// Connect to a paired host and show what it sends.
-pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
-    net::install_crypto();
-    let identity = paths::identity()?;
+/// Where to look for a device, and what may be told in the looking.
+///
+/// Shared by every command that has to *get* to a host — a screen, a shell, a
+/// forward. Written once because the ladder is the same ladder: a command that
+/// grew its own copy would be the one that still dials the address in the
+/// store after the machine has moved.
+#[derive(Debug, Clone, Copy)]
+pub struct Reaching<'a> {
+    /// What to print before dialling anything, like `"📺 esper connect"`.
+    pub label: &'a str,
+    /// Where the host is, when somebody knows.
+    pub addr: Option<SocketAddr>,
+    /// Which paired host, by name or fingerprint prefix.
+    pub named: Option<&'a str>,
+    /// A broker to be introduced through, when nothing direct works.
+    pub via: Option<esper_rendezvous::Via>,
+    /// Ask the segment where it is.
+    pub mdns: bool,
+    /// Say all of it on stderr rather than stdout.
+    ///
+    /// For `forward --stdio`, where **stdout is somebody's ssh connection**.
+    /// A banner printed there is not untidy, it is protocol corruption — and
+    /// the one thing that would not have caught it is a test that greps the
+    /// output for what it expected to find.
+    pub aside: bool,
+}
+
+/// A host reached, and how.
+pub struct Reached {
+    /// Held by the caller: dropping it closes the socket under the session.
+    pub endpoint: Endpoint,
+    pub session: Session,
+    pub tier: crate::ladder::Tier,
+}
+
+/// Reach a paired host, by whichever rung answers first.
+///
+/// Prints what it is doing as it goes, because every one of these steps can
+/// take a moment and a program that says nothing while it tries three
+/// addresses looks like a program that has hung.
+pub async fn reach(identity: &esper_crypto::Identity, o: &Reaching<'_>) -> Result<Reached, String> {
     let (store, keys) = paired()?;
+    // Everything this function says goes through here, so `aside` cannot be
+    // honoured in four places and forgotten in the fifth.
+    let say = |line: String| {
+        if o.aside {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
 
     // **Which device somebody meant.** A name, a fingerprint prefix, or — when
     // exactly one is paired — the obvious one. An address on the command line
     // says where without saying which, and the key check is what settles that
     // either way.
-    let device = match (&o.named, keys.as_slice()) {
+    let device = match (o.named, keys.as_slice()) {
         (Some(named), _) => Some(crate::ladder::device_named(store.iter(), named)?),
         (None, [_]) => store.iter().next(),
         (None, _) if o.addr.is_none() => {
             return Err(format!(
-                "{} devices are paired, so say which: `connect <name>` — \
+                "{} devices are paired, so say which: `{} <name>` — \
                  `esper-engine devices` lists them",
-                keys.len()
+                keys.len(),
+                o.label.split_whitespace().last().unwrap_or("connect"),
             ));
         }
         (None, _) => None,
     };
+
+    match (o.addr, device) {
+        (Some(addr), _) => say(format!("{} {addr}", o.label)),
+        (None, Some(d)) => say(format!("{} {}", o.label, d.name)),
+        (None, None) => return Err("there is no address and no device to reach".to_owned()),
+    }
+    say(String::new());
 
     // **Whatever this dials, and nothing else.** With a broker in the picture
     // that is the broker as well as the host — one socket does both, because
@@ -1802,110 +1911,131 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         Arc::new(AnyOf::new(dialable))
     };
 
-    match (o.addr, device) {
-        (Some(addr), _) => println!("📺 esper connect {addr}"),
-        (None, Some(d)) => println!("📺 esper connect {}", d.name),
-        (None, None) => return Err("connect needs an address or a device".to_owned()),
-    }
-    println!();
-
     let device_key = device.map(|d| d.public_key);
     let rungs_from_the_store = device.map(|d| crate::ladder::direct_rungs(d, &[]));
 
-    net::runtime()?.block_on(async {
-        // Bound inside the runtime; quinn needs one. The local port is chosen
-        // to match whatever is being dialled first.
-        let toward = o
-            .addr
-            .or(o.via.map(|v| v.addr))
-            .unwrap_or(net::any_port(SocketAddr::from(([127, 0, 0, 1], 0))));
-        let endpoint = Endpoint::bind(&identity, net::any_port(toward), Arc::new(NoPeers), dial)
-            .map_err(|e| format!("binding a local port: {e}"))?;
-        let hello = Hello::new(Role::Controller, identity.public_key(), &net::this_device());
+    // Bound to match whatever is being dialled first; quinn needs the runtime
+    // that is already under us.
+    let toward = o
+        .addr
+        .or(o.via.map(|v| v.addr))
+        .unwrap_or(net::any_port(SocketAddr::from(([127, 0, 0, 1], 0))));
+    let endpoint = Endpoint::bind(identity, net::any_port(toward), Arc::new(NoPeers), dial)
+        .map_err(|e| format!("binding a local port: {e}"))?;
+    let hello = Hello::new(Role::Controller, identity.public_key(), &net::this_device());
 
-        // Everywhere worth trying without telling anybody: the address given,
-        // or what the segment says plus where it was last time.
-        let mut rungs: Vec<crate::ladder::Rung> = match o.addr {
-            Some(addr) => vec![crate::ladder::Rung {
-                tier: crate::ladder::Tier::Given,
-                addr,
-            }],
-            None => {
-                let mut rungs = rungs_from_the_store.unwrap_or_default();
-                if o.mdns
-                    && let Some(key) = device_key
-                {
-                    for addr in on_the_segment(&key).await {
-                        // Ahead of what was remembered: a device that has just
-                        // moved is right here and wrong in the store.
-                        if !rungs.iter().any(|r| r.addr == addr) {
-                            rungs.insert(
-                                0,
-                                crate::ladder::Rung {
-                                    tier: crate::ladder::Tier::Lan,
-                                    addr,
-                                },
-                            );
-                        }
+    // Everywhere worth trying without telling anybody: the address given, or
+    // what the segment says plus where it was last time.
+    let mut rungs: Vec<crate::ladder::Rung> = match o.addr {
+        Some(addr) => vec![crate::ladder::Rung {
+            tier: crate::ladder::Tier::Given,
+            addr,
+        }],
+        None => {
+            let mut rungs = rungs_from_the_store.unwrap_or_default();
+            if o.mdns
+                && let Some(key) = device_key
+            {
+                for addr in on_the_segment(&key).await {
+                    // Ahead of what was remembered: a device that has just
+                    // moved is right here and wrong in the store.
+                    if !rungs.iter().any(|r| r.addr == addr) {
+                        rungs.insert(
+                            0,
+                            crate::ladder::Rung {
+                                tier: crate::ladder::Tier::Lan,
+                                addr,
+                            },
+                        );
                     }
                 }
-                rungs
             }
-        };
-        rungs.dedup_by_key(|r| r.addr);
-
-        let (mut session, tier) = match reach_directly(&endpoint, &rungs, hello.clone()).await {
-            Some(Ok(found)) => found,
-            // Nothing direct worked, or there was nothing to try. A broker is
-            // asked last on purpose: every rung above it tells nobody
-            // anything, and this one tells the broker who is meeting whom.
-            other => {
-                let direct = match other {
-                    Some(Err(why)) => why,
-                    _ => Vec::new(),
-                };
-                let Some(via) = o.via else {
-                    return Err(no_way_in(&direct, &rungs));
-                };
-                let peer = device_key.ok_or("no device to ask the broker for")?;
-                let bound = endpoint
-                    .local_addr()
-                    .map_err(|e| format!("reading the bound address: {e}"))?;
-                let session = crate::broker_cmd::reach(
-                    &endpoint,
-                    &identity,
-                    via,
-                    peer,
-                    crate::broker_cmd::candidates(bound, via.addr),
-                    hello,
-                )
-                .await?;
-                (session, crate::ladder::Tier::Broker)
-            }
-        };
-        println!(
-            "  reached    {} — {}",
-            session.remote_address(),
-            tier.describe()
-        );
-
-        // **Where it answered, remembered.** A hint for next time, and the
-        // reason a machine that has been reached once is reached instantly
-        // afterwards even with no discovery and no broker.
-        remember_where(session.peer_key(), session.remote_address());
-
-        let fingerprint = session.peer_fingerprint();
-        let known = store
-            .iter()
-            .find(|d| d.public_key == *session.peer_key())
-            .map(|d| d.name.clone());
-        println!(
-            "  host       {}",
-            known.unwrap_or_else(|| "unknown".to_owned())
-        );
-        for line in fingerprint.display().lines() {
-            println!("      {line}");
+            rungs
         }
+    };
+    rungs.dedup_by_key(|r| r.addr);
+
+    let (session, tier) = match reach_directly(&endpoint, &rungs, hello.clone()).await {
+        Some(Ok(found)) => found,
+        // Nothing direct worked, or there was nothing to try. A broker is
+        // asked last on purpose: every rung above it tells nobody anything,
+        // and this one tells the broker who is meeting whom.
+        other => {
+            let direct = match other {
+                Some(Err(why)) => why,
+                _ => Vec::new(),
+            };
+            let Some(via) = o.via else {
+                return Err(no_way_in(&direct, &rungs));
+            };
+            let peer = device_key.ok_or("no device to ask the broker for")?;
+            let bound = endpoint
+                .local_addr()
+                .map_err(|e| format!("reading the bound address: {e}"))?;
+            let session = crate::broker_cmd::reach(
+                &endpoint,
+                identity,
+                via,
+                peer,
+                crate::broker_cmd::candidates(bound, via.addr),
+                hello,
+            )
+            .await?;
+            (session, crate::ladder::Tier::Broker)
+        }
+    };
+    say(format!(
+        "  reached    {} — {}",
+        session.remote_address(),
+        tier.describe()
+    ));
+
+    // **Where it answered, remembered.** A hint for next time, and the reason
+    // a machine that has been reached once is reached instantly afterwards
+    // even with no discovery and no broker.
+    remember_where(session.peer_key(), session.remote_address());
+
+    let known = store
+        .iter()
+        .find(|d| d.public_key == *session.peer_key())
+        .map(|d| d.name.clone());
+    say(format!(
+        "  host       {}",
+        known.unwrap_or_else(|| "unknown".to_owned())
+    ));
+    for line in session.peer_fingerprint().display().lines() {
+        say(format!("      {line}"));
+    }
+
+    Ok(Reached {
+        endpoint,
+        session,
+        tier,
+    })
+}
+
+/// Connect to a paired host and show what it sends.
+pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
+    net::install_crypto();
+    let identity = paths::identity()?;
+
+    net::runtime()?.block_on(async {
+        let Reached {
+            endpoint,
+            mut session,
+            tier: _tier,
+        } = reach(
+            &identity,
+            &Reaching {
+                label: "📺 esper connect",
+                addr: o.addr,
+                named: o.named.as_deref(),
+                via: o.via,
+                mdns: o.mdns,
+                aside: false,
+            },
+        )
+        .await?;
 
         let (media, mut control) = parts(&mut session).map_err(|e| e.to_string())?;
 
@@ -1916,6 +2046,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let grant = esper_transport::request_session(
             &mut control,
             &esper_proto::SessionRequest {
+                kind: esper_proto::SessionKind::Screen,
                 want: if o.control {
                     vec![Permission::View, Permission::Control]
                 } else {

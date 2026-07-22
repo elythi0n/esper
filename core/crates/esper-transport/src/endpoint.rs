@@ -332,10 +332,18 @@ fn transport_config() -> quinn::TransportConfig {
     })));
     t.keep_alive_interval(Some(KEEPALIVE));
 
-    // Stream limits. Control and bulk are the only stream users; media travels
-    // on datagrams. A peer that opens more is misbehaving, and the cap means
-    // that misbehaviour costs it rather than us.
-    t.max_concurrent_bidi_streams(quinn::VarInt::from_u32(16));
+    // Stream limits. Media travels on datagrams; the stream users are the
+    // control streams, bulk transfers, and — the reason this number is not 16
+    // any more — **one bidirectional stream per forwarded TCP connection**.
+    //
+    // Raising it does not multiply memory: the connection-wide receive window
+    // bounds what all streams together can buffer, so what more streams cost
+    // is bookkeeping. The bound that matters for forwarding is the host's own
+    // `forward.max_connections`, which is checked before anything is dialled;
+    // this one sits above it with headroom, so a session that has hit its
+    // forward cap gets a refusal it can read rather than a stream that will
+    // not open.
+    t.max_concurrent_bidi_streams(quinn::VarInt::from_u32(256));
     t.max_concurrent_uni_streams(quinn::VarInt::from_u32(64));
 
     // Datagrams carry media. The receive buffer is sized to hold roughly a

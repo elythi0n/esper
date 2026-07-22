@@ -85,3 +85,10 @@ path = "fuzz_targets/rendezvous_meet.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "forward_allow"
+path = "fuzz_targets/forward_allow.rs"
+test = false
+doc = false
+bench = false

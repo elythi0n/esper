@@ -198,7 +198,8 @@ cleanup_terminal() {
   # script — which showed up as a smoke test that failed after its last check
   # had passed.
   for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}" "${invite_pid:-}" \
-             "${named_host:-}"; do
+             "${named_host:-}" "${service_pid:-}" "${forward_pid:-}" \
+             "${denied_pid:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -434,6 +435,173 @@ else
       fi
       kill "$named_host" 2>/dev/null || true
       named_host=""
+
+      # Placed here, after the ladder's own checks, deliberately: reaching a
+      # host **remembers where it answered**, and the broker check below needs
+      # the rung above the broker to have nothing to remember. A step that
+      # quietly changes what a later step is testing is worse than a slow one.
+      # **A port forwarded to a service the network cannot see.** The other
+      # half of terminal mode: a headless server's useful face is its
+      # services, and the whole point is that the service stays bound to
+      # loopback while the laptop reaches it anyway.
+      #
+      # Through the built binaries, for the reason the shell check above
+      # exists: the unit tests all start below `main`.
+      echo "  — forwarding a port to a service bound to the host's loopback"
+      if ! command -v python3 >/dev/null 2>&1; then
+        printf '  · python3 is not here, so the forwarding checks are skipped\n'
+      else
+        python3 - > "$term_a/service.log" 2>&1 <<'PYSVC' &
+import socketserver
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.request.recv(1024)
+        self.request.sendall(b"smoke-forward-42\n")
+
+server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+PYSVC
+        service_pid=$!
+        svc_port=""
+        for _ in $(seq 1 100); do
+          svc_port=$( { head -1 "$term_a/service.log" 2>/dev/null || true; } | tr -dc '0-9')
+          [ -n "$svc_port" ] && break
+          sleep 0.1
+        done
+
+        # Two free local ports, taken and released: the forwarder binds them a
+        # moment later.
+        lport=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+        lport2=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+
+        if [ -z "$svc_port" ]; then
+          printf '  ✗ the test service never said what port it took\n'
+          sed 's/^/      /' "$term_a/service.log"
+          fail=1
+        else
+          # **Refused before a listener exists.** `forward` is granted to
+          # nobody by default, and this device holds `terminal` and not this.
+          out=$(env ESPER_HOME="$term_b" timeout 30 "$BIN/esper-engine" \
+            forward "$lport:127.0.0.1:$svc_port" "$host_addr" 2>&1 || true)
+          if printf '%s' "$out" | grep -q 'needs the forward permission'; then
+            printf '  ✓ a device without the forward permission is refused\n'
+          else
+            printf '  ✗ a device without the forward permission was not refused\n'
+            printf '%s\n' "$out" | sed 's/^/      /'
+            fail=1
+          fi
+
+          ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" forward >/dev/null
+
+          env ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
+            forward "$lport:127.0.0.1:$svc_port" "$host_addr" \
+            > "$term_b/forward.log" 2>&1 &
+          forward_pid=$!
+          for _ in $(seq 1 100); do
+            grep -q 'ctrl-c to stop' "$term_b/forward.log" 2>/dev/null && break
+            sleep 0.1
+          done
+
+          got=$(python3 -c 'import socket, sys
+c = socket.create_connection(("127.0.0.1", int(sys.argv[1])), 10)
+c.sendall(b"hello\n")
+c.shutdown(socket.SHUT_WR)
+print(c.recv(100).decode().strip())' "$lport" 2>&1 || true)
+          if [ "$got" = "smoke-forward-42" ]; then
+            printf '  ✓ a connection to the local port reached the host'"'"'s loopback service\n'
+          else
+            printf '  ✗ nothing came back through the forward\n'
+            printf '%s\n' "$got" | sed 's/^/      /'
+            sed 's/^/      /' "$term_b/forward.log"
+            fail=1
+          fi
+
+          # The target is in the audit log, and nothing that went through it.
+          if grep -q '"event":"forward_opened"' "$term_a/sessions.log" 2>/dev/null; then
+            printf '  ✓ the forward is in the host'"'"'s audit log, by target\n'
+          else
+            printf '  ✗ the forward is not in the audit log\n'
+            fail=1
+          fi
+
+          # **A target the host never named is refused.** The allowlist is
+          # nothing here, which means loopback and nothing else — so an
+          # address on somebody else's network is refused without being
+          # dialled.
+          env ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
+            forward "$lport2:10.99.99.99:9" "$host_addr" \
+            > "$term_b/forward-denied.log" 2>&1 &
+          denied_pid=$!
+          for _ in $(seq 1 100); do
+            grep -q 'ctrl-c to stop' "$term_b/forward-denied.log" 2>/dev/null && break
+            sleep 0.1
+          done
+          python3 -c 'import socket, sys
+try:
+    c = socket.create_connection(("127.0.0.1", int(sys.argv[1])), 10)
+    c.sendall(b"hello\n")
+    c.recv(100)
+except OSError:
+    pass' "$lport2" >/dev/null 2>&1 || true
+          sleep 0.5
+          if grep -q 'allowlist' "$term_b/forward-denied.log" 2>/dev/null; then
+            printf '  ✓ a target outside the host'"'"'s allowlist is refused\n'
+          else
+            printf '  ✗ a target outside the allowlist was not refused\n'
+            sed 's/^/      /' "$term_b/forward-denied.log"
+            fail=1
+          fi
+          kill "$denied_pid" 2>/dev/null || true
+
+          # **The `ssh -W` shape.** One connection on stdin and stdout, which
+          # is what `ProxyCommand` runs — so plain ssh, scp and git ride the
+          # same pairing and the same ladder.
+          #
+          # The assertion is on the **whole** of stdout, not on finding the
+          # payload somewhere in it: `ProxyCommand` gives this process
+          # somebody's ssh connection to write to, so a progress line printed
+          # there is protocol corruption. A grep would have passed happily
+          # while the banner was still going out with the bytes.
+          got=$(printf 'hello\n' | env ESPER_HOME="$term_b" timeout 30 \
+            "$BIN/esper-engine" forward --stdio "127.0.0.1:$svc_port" "$host_addr" 2>/dev/null || true)
+          if [ "$got" = "smoke-forward-42" ]; then
+            printf '  ✓ --stdio carried one connection, and nothing else, on stdout\n'
+          else
+            printf '  ✗ --stdio put something other than the connection on stdout\n'
+            printf '%s\n' "$got" | sed 's/^/      /'
+            fail=1
+          fi
+
+          # **A revocation reaches a forward that is open right now.** The
+          # listener is still running and the session is still up; taking the
+          # permission away has to end both, and say so — a local port that
+          # goes quiet without a reason sends somebody looking at their
+          # network for an hour.
+          ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" forward >/dev/null
+          ended=""
+          for _ in $(seq 1 100); do
+            if grep -q 'the host ended it' "$term_b/forward.log" 2>/dev/null; then
+              ended=yes
+              break
+            fi
+            sleep 0.1
+          done
+          if [ -n "$ended" ]; then
+            printf '  ✓ revoking forward ended the open forward, with a reason\n'
+          else
+            printf '  ✗ revoking forward did not reach the open forward\n'
+            sed 's/^/      /' "$term_b/forward.log"
+            fail=1
+          fi
+
+          kill "$forward_pid" 2>/dev/null || true
+        fi
+        kill "$service_pid" 2>/dev/null || true
+      fi
 
       # **A revocation has to reach a session that is already open.** One that
       # waits for the revoked device to choose to leave is a request, not a

@@ -44,6 +44,10 @@ secure set, and the file is a list of deliberate departures from them. A key
 that is not a setting is a **startup error**, so a typo stops the service
 rather than quietly leaving something off.
 
+The one setting that widens what a paired device can *reach* is
+`forward.allow`. Empty — the default — means a forward reaches this machine's
+own loopback and nothing else; every other target is a line somebody wrote.
+
 ## Hardening
 
 The unit removes what the engine never uses: no new privileges, a private

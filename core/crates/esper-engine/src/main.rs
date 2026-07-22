@@ -13,6 +13,7 @@ mod broker_cmd;
 mod cursor_task;
 mod devices_cmd;
 mod discover_cmd;
+mod forward_cmd;
 mod injector;
 mod input_source;
 mod invite_cmd;
@@ -216,6 +217,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("forward") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match forward_cmd::parse(&rest).and_then(|o| forward_cmd::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-engine forward: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("serve") => match serve::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -293,6 +304,7 @@ fn print_help() {
            host       serve this machine's screen to a paired device\n  \
            connect    show a paired host's screen\n  \
            terminal   open a shell on a paired host\n  \
+           forward    reach a port on a paired host, ssh -L style\n  \
            serve      speak the control protocol on stdin/stdout\n  \
            version    print version, build time and protocol version\n  \
            help       this text\n\
