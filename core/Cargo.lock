@@ -357,6 +357,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-config"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "esper-crypto"
 version = "0.0.0"
 dependencies = [
@@ -426,6 +433,7 @@ dependencies = [
  "esper-capture",
  "esper-capture-x11",
  "esper-color",
+ "esper-config",
  "esper-crypto",
  "esper-decode",
  "esper-discovery",

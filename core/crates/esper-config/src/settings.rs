@@ -1,0 +1,384 @@
+//! Every setting there is.
+//!
+//! One table, and it is the only place a setting is declared: its name, its
+//! shape, its default and the sentence explaining it. `config show` reads this
+//! table, the file parser validates against it, the environment is derived
+//! from it, and the "did you mean" suggestion searches it — so a setting
+//! cannot exist in one of those and not the others.
+//!
+//! # The defaults are the secure set
+//!
+//! Where a default is a security decision it is the strict one, and the
+//! comment says which decision it is. There is a test asserting each of them,
+//! because a default that quietly relaxes is the failure mode this whole file
+//! exists to prevent.
+
+use std::borrow::Cow;
+
+use crate::value::Value;
+
+/// What shape a setting's value has, and what counts as a good one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Free text.
+    Text,
+    /// True or false.
+    Flag,
+    /// A whole number, within these bounds.
+    Whole { least: u64, most: u64 },
+    /// A number of cores, which may have a fraction.
+    Cores,
+    /// An address to bind or dial: `host:port`.
+    Address,
+    /// A device key, as sixty-four hex characters.
+    Key,
+    /// One of these words.
+    Choice(&'static [&'static str]),
+    /// A length of time: `30m`, `2h`, `90s`, or `none`.
+    Time,
+    /// A whole number or the word `none`.
+    WholeOrNone { least: u64, most: u64 },
+}
+
+impl Kind {
+    /// Read a raw value, or say what is wrong with it.
+    pub fn read(self, raw: &str) -> Result<Value, String> {
+        let text = raw.trim();
+        match self {
+            Self::Text => Ok(Value::owned_text(text)),
+            Self::Flag => match text.to_ascii_lowercase().as_str() {
+                "true" | "yes" | "on" | "1" => Ok(Value::Flag(true)),
+                "false" | "no" | "off" | "0" => Ok(Value::Flag(false)),
+                _ => Err("is not true or false".to_owned()),
+            },
+            Self::Whole { least, most } => {
+                let n: u64 = text
+                    .parse()
+                    .map_err(|_| "is not a whole number".to_owned())?;
+                if n < least || n > most {
+                    return Err(format!("is outside {least} to {most}"));
+                }
+                Ok(Value::Whole(n))
+            }
+            Self::WholeOrNone { least, most } => {
+                if text.eq_ignore_ascii_case("none") {
+                    return Ok(Value::Nothing);
+                }
+                Self::Whole { least, most }.read(text)
+            }
+            Self::Cores => {
+                let x: f64 = text.parse().map_err(|_| "is not a number".to_owned())?;
+                if !x.is_finite() || x <= 0.0 || x > 1024.0 {
+                    return Err("is not a plausible number of cores".to_owned());
+                }
+                Ok(Value::Fraction(x))
+            }
+            Self::Address => {
+                if text.parse::<std::net::SocketAddr>().is_err() {
+                    return Err("is not an address, which is `host:port`".to_owned());
+                }
+                Ok(Value::owned_text(text))
+            }
+            Self::Key => {
+                if text.len() != 64 || !text.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("is not a key, which is sixty-four hex characters".to_owned());
+                }
+                Ok(Value::owned_text(text.to_ascii_lowercase()))
+            }
+            Self::Choice(allowed) => {
+                let lowered = text.to_ascii_lowercase();
+                if allowed.contains(&lowered.as_str()) {
+                    Ok(Value::owned_text(lowered))
+                } else {
+                    Err(format!("is not one of: {}", allowed.join(", ")))
+                }
+            }
+            Self::Time => {
+                if text.eq_ignore_ascii_case("none") || text == "0" {
+                    return Ok(Value::Nothing);
+                }
+                let seconds = read_time(text)?;
+                Ok(Value::Whole(seconds))
+            }
+        }
+    }
+
+    /// How to write one of these, for the file's own comments.
+    #[must_use]
+    pub fn shape(self) -> String {
+        match self {
+            Self::Text => "text".to_owned(),
+            Self::Flag => "true or false".to_owned(),
+            Self::Whole { least, most } => format!("a whole number, {least} to {most}"),
+            Self::WholeOrNone { least, most } => {
+                format!("a whole number, {least} to {most}, or none")
+            }
+            Self::Cores => "a number of cores, such as 1.5".to_owned(),
+            Self::Address => "an address, as host:port".to_owned(),
+            Self::Key => "a key, as sixty-four hex characters".to_owned(),
+            Self::Choice(allowed) => format!("one of: {}", allowed.join(", ")),
+            Self::Time => "a length of time, such as 30m, or none".to_owned(),
+        }
+    }
+}
+
+/// A length of time in seconds, the way somebody writes one.
+fn read_time(text: &str) -> Result<u64, String> {
+    let lowered = text.trim().to_ascii_lowercase();
+    let (digits, unit) = match lowered.chars().last() {
+        Some('s') => (&lowered[..lowered.len() - 1], 1u64),
+        Some('m') => (&lowered[..lowered.len() - 1], 60),
+        Some('h') => (&lowered[..lowered.len() - 1], 3600),
+        Some('d') => (&lowered[..lowered.len() - 1], 86400),
+        _ => (lowered.as_str(), 1),
+    };
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| "is not a length of time, such as 30m or 90s".to_owned())?;
+    n.checked_mul(unit)
+        .ok_or_else(|| "is longer than any length of time needs to be".to_owned())
+}
+
+/// One setting the program knows about.
+#[derive(Debug)]
+pub struct Setting {
+    /// Its name, in the file and, uppercased, in the environment.
+    pub key: &'static str,
+    /// What shape its value has.
+    pub kind: Kind,
+    /// What it is when nobody says.
+    pub default: Value,
+    /// One sentence, for `config show` and for the file's comments.
+    pub about: &'static str,
+}
+
+/// Backends a host may be told to use.
+const BACKENDS: &[&str] = &["auto", "x11", "synthetic"];
+
+/// Every setting there is.
+///
+/// In the order somebody would read them: what this machine *is*, then what it
+/// serves, then how it is found, then how it is reached.
+pub static SETTINGS: &[Setting] = &[
+    Setting {
+        key: "device.name",
+        kind: Kind::Text,
+        default: Value::Text(Cow::Borrowed("")),
+        about: "What to call this machine to the other end. Empty means its hostname.",
+    },
+    Setting {
+        key: "host.listen",
+        kind: Kind::Address,
+        default: Value::Text(Cow::Borrowed("0.0.0.0:7645")),
+        about: "Where the host listens.",
+    },
+    Setting {
+        key: "host.backend",
+        kind: Kind::Choice(BACKENDS),
+        default: Value::Text(Cow::Borrowed("auto")),
+        about: "Which capture backend to use. `auto` falls back and says which it chose; \
+                naming one is a refusal to fall back.",
+    },
+    Setting {
+        key: "host.monitor",
+        kind: Kind::WholeOrNone { least: 0, most: 64 },
+        default: Value::Nothing,
+        about: "Which monitor to send. None means the primary one.",
+    },
+    Setting {
+        key: "host.fps",
+        kind: Kind::Whole {
+            least: 1,
+            most: 240,
+        },
+        default: Value::Whole(30),
+        about: "The most frames a second to send.",
+    },
+    Setting {
+        key: "host.budget",
+        kind: Kind::Cores,
+        default: Value::Fraction(1.0),
+        about: "How much CPU the encoder may use, in cores.",
+    },
+    Setting {
+        key: "host.max_resolution",
+        kind: Kind::WholeOrNone {
+            least: 240,
+            most: 8192,
+        },
+        default: Value::Whole(1440),
+        about: "The longest edge to send, in pixels. None sends the screen's own size.",
+    },
+    Setting {
+        key: "session.idle_timeout",
+        kind: Kind::Time,
+        default: Value::Nothing,
+        about: "End a terminal session after this long with no input and no output. \
+                None is off, which is the default because a build that prints nothing \
+                for an hour is working, not idle.",
+    },
+    Setting {
+        key: "discovery.mdns",
+        kind: Kind::Flag,
+        // **The one deliberate exception to strict defaults.** It reveals that
+        // a machine runs Esper to a network segment that is usually the
+        // operator's own house, and it buys the best thing about the product
+        // on a home network: you open it and your machines are there.
+        default: Value::Flag(true),
+        about: "Announce this machine on the local network, and look for others.",
+    },
+    Setting {
+        key: "broker.address",
+        kind: Kind::Address,
+        // **No default broker address anywhere in Esper.** Not in the binary,
+        // not in the shipped configuration, not in the installer. Without one
+        // the broker tiers do not exist, and that is the product working
+        // correctly rather than a gap.
+        default: Value::Nothing,
+        about: "A broker you run, for when nothing direct works. There is no default.",
+    },
+    Setting {
+        key: "broker.key",
+        kind: Kind::Key,
+        default: Value::Nothing,
+        about: "That broker's key, pinned. `esper-broker serve` prints it.",
+    },
+];
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn every_default_is_the_shape_its_setting_says() {
+        // A default that would be refused if somebody wrote it in a file is a
+        // default nobody could restore.
+        for setting in SETTINGS {
+            if setting.default.is_nothing() {
+                continue;
+            }
+            let written = match &setting.default {
+                Value::Text(t) => t.to_string(),
+                other => other.to_string(),
+            };
+            if written.is_empty() {
+                continue;
+            }
+            assert!(
+                setting.kind.read(&written).is_ok(),
+                "{}'s default ({written}) is not a valid value for it",
+                setting.key
+            );
+        }
+    }
+
+    #[test]
+    fn the_defaults_are_the_secure_set() {
+        // **The test the whole file exists for.** Each of these is a security
+        // decision, and a default that quietly relaxes is the failure this
+        // catches.
+        let get = |key: &str| {
+            SETTINGS
+                .iter()
+                .find(|s| s.key == key)
+                .unwrap_or_else(|| panic!("{key} is not a setting"))
+        };
+
+        // No broker address anywhere: without one, those tiers do not exist.
+        assert!(
+            get("broker.address").default.is_nothing(),
+            "a default broker address would be an endpoint nobody chose"
+        );
+        assert!(get("broker.key").default.is_nothing());
+
+        // Discovery is the one deliberate exception, and it is on.
+        assert_eq!(
+            get("discovery.mdns").default,
+            Value::Flag(true),
+            "discovery is the documented exception to strict defaults"
+        );
+
+        // An idle timeout that killed a working build by default would be
+        // data loss wearing a security feature's clothes.
+        assert!(get("session.idle_timeout").default.is_nothing());
+
+        // A backend that is named is a refusal to fall back; the default
+        // falls back and says so.
+        assert_eq!(
+            get("host.backend").default,
+            Value::Text(Cow::Borrowed("auto"))
+        );
+    }
+
+    #[test]
+    fn a_value_of_the_wrong_shape_says_what_is_wrong_with_it() {
+        assert!(Kind::Flag.read("maybe").is_err());
+        assert!(Kind::Address.read("7645").is_err());
+        assert!(Kind::Address.read("0.0.0.0:7645").is_ok());
+        assert!(Kind::Key.read("abc").is_err());
+        assert!(Kind::Key.read(&"a".repeat(64)).is_ok());
+        assert!(Kind::Key.read(&"z".repeat(64)).is_err());
+        assert!(Kind::Choice(BACKENDS).read("wayland").is_err());
+        assert!(Kind::Choice(BACKENDS).read("X11").is_ok());
+        assert!(Kind::Whole { least: 1, most: 10 }.read("11").is_err());
+        assert!(Kind::Cores.read("0").is_err());
+        assert!(Kind::Cores.read("1.5").is_ok());
+    }
+
+    #[test]
+    fn a_length_of_time_is_read_the_way_somebody_writes_one() {
+        assert_eq!(Kind::Time.read("30m").unwrap(), Value::Whole(1800));
+        assert_eq!(Kind::Time.read("2h").unwrap(), Value::Whole(7200));
+        assert_eq!(Kind::Time.read("90s").unwrap(), Value::Whole(90));
+        assert_eq!(Kind::Time.read("45").unwrap(), Value::Whole(45));
+        // Off, and said as a decision rather than as an absence.
+        assert!(Kind::Time.read("none").unwrap().is_nothing());
+        assert!(Kind::Time.read("0").unwrap().is_nothing());
+        assert!(Kind::Time.read("soon").is_err());
+    }
+
+    #[test]
+    fn true_and_false_are_written_the_way_people_write_them() {
+        for yes in ["true", "TRUE", "yes", "on", "1"] {
+            assert_eq!(Kind::Flag.read(yes).unwrap(), Value::Flag(true), "{yes}");
+        }
+        for no in ["false", "No", "off", "0"] {
+            assert_eq!(Kind::Flag.read(no).unwrap(), Value::Flag(false), "{no}");
+        }
+    }
+
+    #[test]
+    fn every_setting_says_what_it_is_for() {
+        for setting in SETTINGS {
+            assert!(
+                !setting.about.is_empty(),
+                "{} explains nothing",
+                setting.key
+            );
+            assert!(
+                setting.about.ends_with('.'),
+                "{}'s explanation is not a sentence",
+                setting.key
+            );
+            assert!(
+                setting.key.contains('.'),
+                "{} is not grouped under anything",
+                setting.key
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_settings_have_the_same_name() {
+        let mut seen = std::collections::BTreeSet::new();
+        for setting in SETTINGS {
+            assert!(
+                seen.insert(setting.key),
+                "{} is declared twice",
+                setting.key
+            );
+        }
+    }
+}

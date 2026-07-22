@@ -60,6 +60,14 @@ pub fn save_devices(store: &DeviceStore) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Where this machine's settings live.
+///
+/// Next to the identity and the device list, because it is the same directory
+/// somebody backs up or deletes when they mean "this machine's Esper".
+pub fn config_file() -> Result<PathBuf, String> {
+    Ok(home()?.join("config.toml"))
+}
+
 /// Where this machine records what happened.
 ///
 /// One file next to the identity and the device list, because an audit trail

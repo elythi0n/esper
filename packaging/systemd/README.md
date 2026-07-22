@@ -26,6 +26,24 @@ would stop the moment you disconnect — and you could not reconnect to start it
 again. This is the single most common way a working install becomes an
 unreachable one.
 
+## Settings
+
+The unit runs `esper host` with no arguments, because a service manager has
+nowhere to put them. Everything a flag would say lives in
+`~/.esper/config.toml`:
+
+```sh
+esper-engine config example > ~/.esper/config.toml   # every setting, commented out
+$EDITOR ~/.esper/config.toml
+esper-engine config show                             # each value, and where it came from
+systemctl --user restart esper
+```
+
+An empty file — or no file — produces a working system: the defaults are the
+secure set, and the file is a list of deliberate departures from them. A key
+that is not a setting is a **startup error**, so a typo stops the service
+rather than quietly leaving something off.
+
 ## Hardening
 
 The unit removes what the engine never uses: no new privileges, a private

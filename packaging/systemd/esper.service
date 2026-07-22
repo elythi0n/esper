@@ -37,6 +37,12 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+# No flags. A service manager has nowhere to put them, which is what the
+# settings file is for: `~/.esper/config.toml`, and
+# `esper-engine config example` prints one to start from. Everything the flags
+# below would have said — the address, the backend, the frame rate, a broker —
+# is a line in that file, and `esper-engine config show` says which value came
+# from where.
 ExecStart=%h/.local/bin/esper host
 
 # Restart on failure, not on clean exit. `esper host --once` and a deliberate

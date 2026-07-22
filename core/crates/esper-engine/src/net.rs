@@ -85,8 +85,10 @@ pub fn any_port(peer: SocketAddr) -> SocketAddr {
 /// The hostname when there is one. It is a label and nothing more: identity is
 /// the public key, and this is never matched on.
 pub fn this_device() -> String {
-    std::env::var("ESPER_DEVICE_NAME")
-        .ok()
+    // `device.name` in the settings, `ESPER_DEVICE_NAME` in the environment —
+    // the same setting, read in one place, so the two cannot mean different
+    // things.
+    Some(crate::settings::text("device.name"))
         .filter(|n| !n.trim().is_empty())
         .or_else(|| {
             std::fs::read_to_string("/etc/hostname")

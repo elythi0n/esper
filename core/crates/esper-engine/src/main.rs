@@ -25,6 +25,7 @@ mod permits;
 mod presence_task;
 mod serve;
 mod session_cmd;
+mod settings;
 mod terminal_cmd;
 
 use std::process::ExitCode;
@@ -32,6 +33,14 @@ use std::process::ExitCode;
 use esper_buildinfo::{BUILD_TIME, VERSION};
 
 fn main() -> ExitCode {
+    // **Settings first, and a bad one stops here.** A file that is there and
+    // cannot be understood is somebody having meant something; running with
+    // the defaults instead would be running with settings they did not choose.
+    if let Err(e) = settings::load() {
+        eprintln!("esper-engine: {e}");
+        return ExitCode::FAILURE;
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None | Some("version" | "--version" | "-v") => {
@@ -109,6 +118,33 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("connect: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("config") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            let outcome = match rest.first().map(String::as_str) {
+                None | Some("show") => settings::show(),
+                Some("example") => {
+                    settings::print_example();
+                    Ok(())
+                }
+                Some("path") => match paths::config_file() {
+                    Ok(path) => {
+                        println!("{}", path.display());
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                },
+                Some(other) => Err(format!(
+                    "unknown: `config {other}` — try `show`, `example` or `path`"
+                )),
+            };
+            match outcome {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-engine config: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -247,6 +283,7 @@ fn print_help() {
            identity   print this device's fingerprint\n  \
            discover   list the Esper devices on this network\n  \
            pair       pair with another device, in either direction\n  \
+           config     show every setting and where its value came from\n  \
            devices    list paired devices and what they may do\n  \
            grant      give a paired device a permission\n  \
            revoke     take a permission away\n  \

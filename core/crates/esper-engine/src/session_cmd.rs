@@ -63,19 +63,30 @@ pub struct HostOptions {
     pub via: Option<esper_rendezvous::Via>,
 }
 
-impl Default for HostOptions {
-    fn default() -> Self {
-        Self {
-            listen: SocketAddr::from(([0, 0, 0, 0], net::DEFAULT_PORT)),
-            backend: Choice::default(),
-            monitor: None,
-            fps: 30,
-            budget: Budget::default().cores,
-            max_resolution: Ceiling::default().long_edge(),
+impl HostOptions {
+    /// What the settings say, before any flag has been read.
+    ///
+    /// **Not `Default`.** A default is what the program chose; this is what
+    /// somebody configured, and the difference is the whole point of having a
+    /// configuration file — so the flags in `parse_host` override *this*
+    /// rather than a set of literals.
+    fn from_settings() -> Result<Self, String> {
+        Ok(Self {
+            listen: crate::settings::text("host.listen")
+                .parse()
+                .map_err(|_| "host.listen is not an address".to_owned())?,
+            backend: Choice::parse(&crate::settings::text("host.backend"))?,
+            monitor: crate::settings::whole("host.monitor").and_then(|n| u32::try_from(n).ok()),
+            fps: crate::settings::whole("host.fps")
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(30),
+            budget: crate::settings::number("host.budget").unwrap_or(Budget::default().cores),
+            max_resolution: crate::settings::whole("host.max_resolution")
+                .and_then(|n| u32::try_from(n).ok()),
             once: false,
-            mdns: true,
-            via: None,
-        }
+            mdns: crate::settings::flag("discovery.mdns", true),
+            via: crate::settings::broker()?,
+        })
     }
 }
 
@@ -106,7 +117,7 @@ pub struct ConnectOptions {
 
 /// Parse `host` flags.
 pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
-    let mut o = HostOptions::default();
+    let mut o = HostOptions::from_settings()?;
     let mut via_addr: Option<SocketAddr> = None;
     let mut via_key: Option<[u8; 32]> = None;
     let mut i = 0usize;
@@ -208,7 +219,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut via_addr: Option<SocketAddr> = None;
     let mut via_key: Option<[u8; 32]> = None;
     let mut named: Option<String> = None;
-    let mut mdns = true;
+    let mut mdns = crate::settings::flag("discovery.mdns", true);
     let mut i = 0usize;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
@@ -269,13 +280,19 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
             other => return Err(format!("unknown flag {other}")),
         }
     }
+    // A broker on the command line replaces the configured one; without one,
+    // whatever the settings say.
+    let via = match broker(via_addr, via_key)? {
+        Some(via) => Some(via),
+        None => crate::settings::broker()?,
+    };
     Ok(ConnectOptions {
         addr,
         seconds,
         present,
         control,
         monitor,
-        via: broker(via_addr, via_key)?,
+        via,
         named,
         mdns,
     })
