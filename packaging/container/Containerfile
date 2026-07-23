@@ -1,0 +1,74 @@
+# The broker, in a container.
+#
+# The broker is the only part of Esper meant to face the internet, so it is
+# packaged to have as little around it as possible: no shell, no package
+# manager, no root, and a filesystem it cannot write to except the one
+# directory holding its key.
+#
+# Build from the repository root:
+#   docker build -f packaging/container/Containerfile -t esper-broker .
+#
+# Run:
+#   docker volume create esper-broker
+#   docker run -d --name esper-broker \
+#     --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+#     -v esper-broker:/var/lib/esper-broker \
+#     -p 7443:7443/udp esper-broker
+#   docker logs esper-broker        # prints the key to hand out
+#
+# The key is created on first start and kept in the volume. Lose the volume and
+# every user who pinned that key has to be given the new one, which is the
+# point of pinning it.
+
+# ── Build ───────────────────────────────────────────────────────────────────
+#
+# The toolchain is pinned to the same version as `rust-toolchain.toml`: a
+# container that builds with a different compiler than the repository is a
+# container that can fail in a way nothing else reproduces.
+FROM rust:1.98-slim-bookworm AS build
+
+# aws-lc-sys builds C and assembly and asks for cmake and a C compiler. Nothing
+# else in the broker's dependency tree needs a build tool — no codec, no
+# display library — which is most of why the broker is the piece worth
+# containerising first.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends cmake clang perl make \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY core core
+COPY VERSION VERSION
+
+# An empty directory with the right owner, to become the state volume below.
+# A named volume is initialised from the image — contents **and ownership** —
+# and a distroless image has no shell to `mkdir` in, so it is made here.
+RUN mkdir -p /state && chown 65532:65532 /state
+# Built from the workspace so the version and the protocol come from the same
+# place they do everywhere else.
+RUN cd core && cargo build --release -p esper-broker
+
+# ── Run ─────────────────────────────────────────────────────────────────────
+#
+# Distroless: a C runtime and nothing else. No shell means no shell to get,
+# which matters for the one process here that strangers can send packets to.
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+COPY --from=build /src/core/target/release/esper-broker /usr/local/bin/esper-broker
+
+# Owned by the `nonroot` user distroless provides (65532), because a fresh
+# named volume inherits the ownership of the directory it is initialised from
+# — and a root-owned one is a broker that cannot write its own key. Found by
+# running it: the image built, started, and exited 1 with "Permission denied".
+#
+# `--read-only` at run time is what makes the rest of the filesystem
+# unwritable, and this is the one directory that must not be.
+COPY --from=build --chown=65532:65532 /state /var/lib/esper-broker
+VOLUME ["/var/lib/esper-broker"]
+
+# Above 1024, so the process needs no capability to bind it. Put a firewall
+# redirect in front if you want 443.
+EXPOSE 7443/udp
+
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/esper-broker"]
+CMD ["serve", "--listen", "0.0.0.0:7443", "--identity", "/var/lib/esper-broker/broker.key"]

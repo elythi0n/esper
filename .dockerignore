@@ -1,0 +1,15 @@
+# What the daemon does not need, and must not be sent.
+#
+# `core/target` alone is nineteen gigabytes on a machine that has built this
+# once. Without this file the whole of it is copied to the build daemon before
+# the first instruction runs — which is slow enough to look like a hang, and
+# is how a container build fills a disk.
+core/target
+build
+.git
+
+# Nothing in these reaches the binary, and some of it should never leave the
+# machine at all.
+**/*.key
+**/devices.json
+**/sessions.log

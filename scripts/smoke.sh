@@ -40,6 +40,33 @@ check "broker agrees with the control plane on the protocol version" "$brk_proto
 set +e; "$BIN/esper" definitely-not-a-command >/dev/null 2>&1; rc=$?; set -e
 check "esper rejects an unknown command with exit 1" "$rc" "1"
 
+# The shipped unit files, checked by systemd rather than by reading them.
+#
+# A unit that has stopped parsing, or a directive in the wrong section, is
+# silent: systemd ignores what it does not understand where it does not belong.
+# That is how the restart rate limiting was absent from the engine's unit for a
+# while — it was in `[Service]`, where those keys mean nothing.
+#
+# Skipped where there is no systemd, which is most developer machines that are
+# not Linux, and which is why this is a check and not a gate.
+if command -v systemd-analyze >/dev/null 2>&1; then
+  echo "  — checking the shipped unit files parse"
+  for unit in packaging/systemd/*.service; do
+    # The verifier also resolves ExecStart, which is not installed here. That
+    # one line is expected and is filtered rather than silenced wholesale.
+    out=$( { systemd-analyze verify "$unit" 2>&1 || true; } \
+      | grep -F "$unit" \
+      | grep -v 'is not executable' || true)
+    if [ -z "$out" ]; then
+      printf '  ✓ %s parses\n' "$(basename "$unit")"
+    else
+      printf '  ✗ %s has something systemd would ignore\n' "$(basename "$unit")"
+      printf '%s\n' "$out" | sed 's/^/      /'
+      fail=1
+    fi
+  done
+fi
+
 # Esper operates no infrastructure, so a shipped binary must contain nothing
 # it could phone home to. This check is that claim's proof, and the reason the
 # claim is checkable rather than merely stated.

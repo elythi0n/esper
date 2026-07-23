@@ -58,6 +58,11 @@ RestartSec=5s
 # compromise has less to work with.
 
 NoNewPrivileges=true
+# What this program writes is its own: an identity key, a device list, an
+# audit log. The key refuses to load at all if its permissions are wider than
+# 0600, so this is the belt to that pair of braces — and it covers the log and
+# the device list, which have no check of their own.
+UMask=0077
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only

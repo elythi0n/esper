@@ -1,0 +1,115 @@
+# A system service, and the only part of Esper meant to face the internet.
+#
+# The broker introduces two peers to each other and, if asked, forwards bytes
+# between them. It holds no session keys, decrypts nothing, and keeps nothing
+# on disk but its own identity — which is exactly why it is worth hardening:
+# a component with little to steal is still a component with a listening
+# socket, and that socket is reachable from everywhere.
+#
+# Install:
+#   sudo cp esper-broker /usr/local/bin/
+#   sudo cp esper-broker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now esper-broker
+#   sudo systemctl status esper-broker      # prints the key to hand out
+#
+# The key is printed on first start and is what users pin with
+# `--broker-key`. It is not a secret; a broker that could be swapped for
+# another is what pinning it prevents.
+#
+# To forward as well as introduce — off by default, because it costs your
+# bandwidth for as long as a session lasts:
+#   sudo systemctl edit esper-broker
+#   [Service]
+#   ExecStart=
+#   ExecStart=/usr/local/bin/esper-broker serve --listen 0.0.0.0:7443 \
+#       --identity ${STATE_DIRECTORY}/broker.key --relay
+
+[Unit]
+Description=Esper broker — a stateless introducer
+Documentation=https://github.com/elythi0n/esper
+After=network-online.target
+Wants=network-online.target
+
+# Rate-limit restarts, in [Unit] where systemd reads them. A broker that
+# cannot bind its port would otherwise spin forever and fill the journal with
+# one line.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# **No user to create, and none to forget to remove.** systemd allocates a
+# transient unprivileged user for the life of the service and maps
+# StateDirectory to storage only that user can read. The identity key lives
+# there, at /var/lib/esper-broker/broker.key.
+DynamicUser=yes
+StateDirectory=esper-broker
+StateDirectoryMode=0700
+UMask=0077
+
+# The port is above 1024 on purpose: binding one below it would need
+# CAP_NET_BIND_SERVICE, and this service has no capabilities at all. Put a
+# firewall redirect in front if you want 443.
+ExecStart=/usr/local/bin/esper-broker serve --listen 0.0.0.0:7443 --identity ${STATE_DIRECTORY}/broker.key
+
+Restart=on-failure
+RestartSec=5s
+
+# ── Hardening ───────────────────────────────────────────────────────────────
+#
+# This program opens one UDP socket, reads and writes one file, and does
+# arithmetic. Everything below removes something it has never used, so a
+# remote-code-execution bug in a QUIC or CBOR parser lands somewhere with
+# nothing in it.
+
+# No privileges, ever, by any route.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateUsers=yes
+RestrictSUIDSGID=true
+
+# Nothing of the filesystem it does not need.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProcSubset=pid
+
+# Nothing of the kernel or the machine.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+
+# QUIC is UDP over IPv4 and IPv6. Nothing else: no Unix sockets, no netlink,
+# no raw sockets, no packet sockets.
+RestrictAddressFamilies=AF_INET AF_INET6
+SocketBindDeny=any
+SocketBindAllow=udp:7443
+
+# The syscall filter, and the three groups this program has no use for.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallErrorNumber=EPERM
+
+# Bounded, so a flood costs a refusal rather than the machine. A broker holds
+# a little state per waiting peer; these are generous for thousands of them
+# and small enough that nothing else on the host notices.
+LimitNOFILE=8192
+MemoryMax=512M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

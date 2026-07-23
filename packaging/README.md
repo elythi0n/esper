@@ -1,0 +1,103 @@
+# Packaging
+
+Two things get installed, and they are not installed the same way.
+
+| | Who runs it | How |
+|---|---|---|
+| **The engine** on your own machine | you | a **user** service — [`systemd/esper.service`](systemd/esper.service) |
+| **A broker**, if you run one | an operator, on a server | a **system** service — [`systemd/esper-broker.service`](systemd/esper-broker.service) — or a [container](container/Containerfile) |
+
+## The engine is a user service, deliberately
+
+Esper runs as the person whose screen and shell it exposes. It needs no
+privilege to capture a display that user is already looking at, or to start a
+shell as them, and running it as root would turn a compromise of the engine
+into a compromise of the machine rather than of one account.
+
+See [`systemd/README.md`](systemd/README.md) for installing it, for the
+lingering a headless server needs, and for what the hardening in the unit does
+and deliberately does not do.
+
+## The broker is the part that faces the internet
+
+It introduces two peers to each other and, if you ask it to, forwards bytes
+between them. It holds no session keys, decrypts nothing, and keeps nothing on
+disk but its own identity — and it is still the piece worth hardening most,
+because a component with little to steal is still a component with a listening
+socket that strangers can reach.
+
+Both packagings say the same thing in their own dialect:
+
+- **A user of its own**, with no shell and no home. `DynamicUser=yes` in the
+  unit, `nonroot` in the container.
+- **No capabilities, and no way to gain any.** `CapabilityBoundingSet=` and
+  `NoNewPrivileges=` in the unit; `--cap-drop=ALL --security-opt=no-new-privileges`
+  at run time for the container.
+- **A filesystem it cannot write to**, apart from the one directory holding its
+  key: `StateDirectory=` in the unit, `--read-only` plus a volume for the
+  container.
+- **One socket, one family.** UDP over IPv4 and IPv6 and nothing else — no Unix
+  sockets, no netlink, no raw sockets.
+- **A syscall filter** limited to `@system-service`, minus the privileged,
+  resource and obsolete groups.
+
+`systemd-analyze security esper-broker.service` scores it. At the time of
+writing it reports an exposure of **1.1**, and everything left is inherent to
+being a network service: it needs internet sockets, it needs the host's
+network, and it cannot have an IP allow list because anybody may be introduced
+through it.
+
+### Running one
+
+```sh
+sudo cp esper-broker /usr/local/bin/
+sudo cp systemd/esper-broker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now esper-broker
+sudo systemctl status esper-broker      # prints the key
+```
+
+Open **UDP 7443** to it, and give people the address and the key:
+
+```sh
+esper-engine connect elythion --via broker.example.com:7443 --broker-key <the key>
+```
+
+The key is printed on first start and is not a secret. Pinning it is what
+stops somebody else's broker being used instead of yours — which is why the
+address alone is never enough.
+
+### Forwarding is off unless you ask
+
+Introducing two peers costs a few packets. Forwarding for them costs **your**
+bandwidth for as long as their session lasts, so nobody should discover they
+are paying for that because a default said so:
+
+```sh
+sudo systemctl edit esper-broker
+# [Service]
+# ExecStart=
+# ExecStart=/usr/local/bin/esper-broker serve --listen 0.0.0.0:7443 \
+#     --identity ${STATE_DIRECTORY}/broker.key --relay
+```
+
+Even then the broker sees ciphertext: relaying moves bytes between two peers
+that have already agreed keys with each other, and it is not one of them.
+
+### In a container
+
+```sh
+docker build -f packaging/container/Containerfile -t esper-broker .
+docker volume create esper-broker
+docker run -d --name esper-broker \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  -v esper-broker:/var/lib/esper-broker \
+  -p 7443:7443/udp esper-broker
+docker logs esper-broker
+```
+
+The image is distroless: a C runtime and nothing else. No shell means there is
+no shell to get.
+
+Keep the volume. The key lives there, and losing it means every user who
+pinned it has to be given a new one.
