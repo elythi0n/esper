@@ -199,7 +199,7 @@ cleanup_terminal() {
   # had passed.
   for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}" "${invite_pid:-}" \
              "${named_host:-}" "${service_pid:-}" "${forward_pid:-}" \
-             "${denied_pid:-}" "${private_host:-}"; do
+             "${denied_pid:-}" "${private_host:-}" "${invited_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -389,8 +389,84 @@ else
             fi
           done
           printf '  ✓ and both ends recorded it\n'
+
+          # **An invitation is one session, not a key for ever.** Somebody who
+          # pasted a link to get help with their printer should not still be
+          # reachable by that helper next year, and "remember to unpair them"
+          # is a thing people forget while they are relieved the printer
+          # works. So the pairing is spent by the session it was made for.
+          if ESPER_HOME="$inv_a" "$BIN/esper-engine" devices | grep -q 'one session'; then
+            printf '  ✓ the pairing says it lasts one session\n'
+          else
+            printf '  ✗ an invited pairing looks like any other\n'
+            ESPER_HOME="$inv_a" "$BIN/esper-engine" devices | sed 's/^/      /'
+            fail=1
+          fi
+
+          # Taken before the session: the guest as it was when it still had a
+          # pairing nobody had used.
+          inv_c=$(mktemp -d)
+          cp -a "$inv_b/." "$inv_c/"
+
+          env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$inv_a" \
+            timeout 120 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+            > "$inv_a/host.log" 2>&1 &
+          invited_host=$!
+          invited_addr=""
+          for _ in $(seq 1 100); do
+            invited_addr=$( { awk '/listening/{print $2}' "$inv_a/host.log" 2>/dev/null || true; } | head -1)
+            [ -n "$invited_addr" ] && break
+            sleep 0.1
+          done
+
+          if [ -z "$invited_addr" ]; then
+            printf '  ✗ the invited host never said what it was listening on\n'
+            sed 's/^/      /' "$inv_a/host.log"
+            fail=1
+          else
+            out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$inv_b" \
+              timeout 60 "$BIN/esper-engine" connect "$invited_addr" --seconds 2 2>&1 || true)
+            if printf '%s' "$out" | grep -q 'granted'; then
+              printf '  ✓ the one session an invitation buys works\n'
+            else
+              printf '  ✗ the invited device could not open its one session\n'
+              printf '%s\n' "$out" | sed 's/^/      /'
+              fail=1
+            fi
+
+            # **And the second is refused by the host**, which is the half
+            # that matters. The guest's own copy of the pairing is spent too,
+            # so asking again from `$inv_b` would be refused by this side
+            # before a packet left — a real check, and not this one.
+            #
+            # So the retry comes from a copy of the guest's home taken before
+            # the session: the same identity and the same device list, with no
+            # local knowledge that the pairing has been used. That is exactly
+            # what somebody keeping a copy of their `~/.esper` would have.
+            out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$inv_c" \
+              timeout 60 "$BIN/esper-engine" connect "$invited_addr" --seconds 2 2>&1 || true)
+            if printf '%s' "$out" | grep -q 'does not accept this device'; then
+              printf '  ✓ and a second is refused by the host, not by the guest\n'
+            else
+              printf '  ✗ an invited device opened a second session\n'
+              printf '%s\n' "$out" | sed 's/^/      /'
+              fail=1
+            fi
+
+            # The host tidied the record away rather than leaving a spent key
+            # in its list.
+            if ESPER_HOME="$inv_a" "$BIN/esper-engine" devices | grep -q 'no paired devices'; then
+              printf '  ✓ and the host is no longer paired with them at all\n'
+            else
+              printf '  ✗ the spent pairing is still in the host'"'"'s list\n'
+              ESPER_HOME="$inv_a" "$BIN/esper-engine" devices | sed 's/^/      /'
+              fail=1
+            fi
+          fi
+          kill "$invited_host" 2>/dev/null || true
+          invited_host=""
         fi
-        rm -rf "$inv_a" "$inv_b"
+        rm -rf "$inv_a" "$inv_b" "${inv_c:-/nonexistent}"
         invite_pid=""
       fi
       kill "$broker_pid" 2>/dev/null || true

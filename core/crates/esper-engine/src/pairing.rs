@@ -30,7 +30,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use esper_crypto::{Device, Offer, PairingCode};
+use esper_crypto::{Device, DeviceStore, Offer, PairingCode};
 use esper_proto::{Hello, Role};
 use esper_transport::{Control, Endpoint, Session, pair, pairing_authority};
 
@@ -238,8 +238,61 @@ async fn accept(addr: SocketAddr, code: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// How long a pairing made from an invitation lasts if it is never used.
+///
+/// The session it exists for usually follows within minutes. A day is
+/// generous — it covers "call me back after lunch" — and short enough that a
+/// key nobody used is gone by tomorrow rather than sitting in a device list
+/// for ever.
+pub(crate) const INVITED_LASTS: u64 = 24 * 60 * 60;
+
+/// Remove one-session pairings that are used up or have lapsed.
+///
+/// Run when a host starts. Ordinarily the session that spends a pairing also
+/// removes it, but the case this exists for is the one where that did not
+/// happen: a host that crashed mid-session, or an invitation nobody ever took
+/// up. Neither can be used — a spent or lapsed pairing admits nothing — so
+/// this is tidying rather than enforcement, and an operator should not have to
+/// do it by hand.
+///
+/// Returns what was removed, so the host can say so.
+pub(crate) fn sweep(now: u64) -> Vec<String> {
+    let Ok((mut store, _)) = paths::devices() else {
+        return Vec::new();
+    };
+    let names = sweep_store(&mut store, now);
+    if !names.is_empty() && paths::save_devices(&store).is_err() {
+        // Nothing is lost by failing: the pairings still admit nothing, and
+        // the next start tries again.
+        return Vec::new();
+    }
+    names
+}
+
+/// The part of [`sweep`] that is a decision rather than a file.
+fn sweep_store(store: &mut DeviceStore, now: u64) -> Vec<String> {
+    let over: Vec<[u8; 32]> = store
+        .iter()
+        .filter(|d| d.pairing.is_once() && !d.admits(now))
+        .map(|d| d.public_key)
+        .collect();
+    over.iter()
+        .filter_map(|key| store.remove(key).map(|gone| gone.name))
+        .collect()
+}
+
 /// Record a newly paired device.
 pub(crate) fn record(public_key: [u8; 32], name: &str) -> Result<Device, String> {
+    record_as(public_key, name, false)
+}
+
+/// Record a device that was let in by an invitation: **one session, and gone**.
+pub(crate) fn record_invited(public_key: [u8; 32], name: &str) -> Result<Device, String> {
+    record_as(public_key, name, true)
+}
+
+/// Record a newly paired device, kept or invited.
+fn record_as(public_key: [u8; 32], name: &str, invited: bool) -> Result<Device, String> {
     let (mut store, dropped) = paths::devices()?;
     for note in &dropped {
         eprintln!("  · the device list needed correcting: {note}");
@@ -251,7 +304,12 @@ pub(crate) fn record(public_key: [u8; 32], name: &str) -> Result<Device, String>
     } else {
         name.to_owned()
     };
-    let device = Device::new(public_key, shown, paths::now_secs());
+    let now = paths::now_secs();
+    let device = if invited {
+        Device::invited(public_key, shown, now, now.saturating_add(INVITED_LASTS))
+    } else {
+        Device::new(public_key, shown, now)
+    };
     store
         .insert(device.clone())
         .map_err(|e| format!("recording the device: {e}"))?;
@@ -288,9 +346,76 @@ pub(crate) fn report(device: &Device) {
     }
     println!();
     println!("  granted   {}", crate::net::permissions(device));
+    if device.pairing.is_once() {
+        // Said plainly at the moment it is created, because it is the
+        // difference between this pairing and every other one on the machine.
+        println!("  lasts     one session, and then it is gone");
+        println!(
+            "            keep it with:  esper-engine keep {}",
+            short(device)
+        );
+    }
     println!();
     println!(
         "  A pairing proves both sides used the same code. It cannot prove the \
          code reached the person you meant, which is what the fingerprint is for."
     );
+}
+
+/// Enough of a fingerprint to name a device on a command line.
+fn short(device: &Device) -> String {
+    device.fingerprint().hex().chars().take(12).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use esper_crypto::Identity;
+
+    use super::*;
+
+    fn device_named(name: &str) -> Device {
+        let id = Identity::generate().expect("a key");
+        Device::new(id.public_key(), name.to_owned(), 0)
+    }
+
+    fn invited_named(name: &str, expires_at: u64) -> Device {
+        let id = Identity::generate().expect("a key");
+        Device::invited(id.public_key(), name.to_owned(), 0, expires_at)
+    }
+
+    #[test]
+    fn a_sweep_takes_only_the_invitations_that_are_over() {
+        let mut store = DeviceStore::new();
+        store.insert(device_named("laptop")).unwrap();
+        store.insert(invited_named("still-good", 100)).unwrap();
+        store.insert(invited_named("lapsed", 10)).unwrap();
+        let mut used = invited_named("used", 100);
+        used.spend();
+        store.insert(used).unwrap();
+
+        let gone = sweep_store(&mut store, 50);
+        assert_eq!(gone.len(), 2, "{gone:?}");
+        assert!(gone.contains(&"lapsed".to_owned()));
+        assert!(gone.contains(&"used".to_owned()));
+
+        let left: Vec<String> = store.iter().map(|d| d.name.clone()).collect();
+        assert!(
+            left.contains(&"laptop".to_owned()),
+            "a kept pairing was swept"
+        );
+        assert!(
+            left.contains(&"still-good".to_owned()),
+            "an invitation nobody has used yet was swept"
+        );
+    }
+
+    #[test]
+    fn a_sweep_of_nothing_removes_nothing() {
+        let mut store = DeviceStore::new();
+        store.insert(device_named("laptop")).unwrap();
+        assert!(sweep_store(&mut store, u64::MAX).is_empty());
+        assert_eq!(store.iter().count(), 1);
+    }
 }

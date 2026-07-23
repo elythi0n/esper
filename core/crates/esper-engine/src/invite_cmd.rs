@@ -475,7 +475,11 @@ async fn pair_with_whoever_came(
         .map_err(|e| format!("pairing failed: {e}"))?;
 
     let name = session.peer_hello().name.clone();
-    let device = crate::pairing::record(peer_key, &name)?;
+    // **An invitation is one session, not a key for ever.** Somebody who
+    // pasted a link to get help with their printer should not still be
+    // reachable by that helper next year, and "remember to unpair them" is a
+    // thing people forget while they are relieved the printer works.
+    let device = crate::pairing::record_invited(peer_key, &name)?;
     crate::pairing::report(&device);
 
     // The host writes last, so the host must not close first: the exchange
@@ -591,7 +595,11 @@ async fn join(identity: Identity, invitation: Invitation, code: PairingCode) -> 
         .map_err(|e| format!("pairing failed: {e}"))?;
 
     let name = session.peer_hello().name.clone();
-    let device = crate::pairing::record(peer_key, &name)?;
+    // **An invitation is one session, not a key for ever.** Somebody who
+    // pasted a link to get help with their printer should not still be
+    // reachable by that helper next year, and "remember to unpair them" is a
+    // thing people forget while they are relieved the printer works.
+    let device = crate::pairing::record_invited(peer_key, &name)?;
     crate::pairing::report(&device);
 
     // The guest read last, so the guest closes — which is what releases the

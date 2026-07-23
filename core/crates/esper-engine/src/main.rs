@@ -197,6 +197,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("keep") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match devices_cmd::keep(&rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-engine keep: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("forget") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             match devices_cmd::forget(&rest) {
@@ -298,6 +308,7 @@ fn print_help() {
            devices    list paired devices and what they may do\n  \
            grant      give a paired device a permission\n  \
            revoke     take a permission away\n  \
+           keep       make a one-session pairing last\n  \
            forget     unpair a device entirely\n  \
            invite     offer somebody a way in: one link, through your broker\n  \
            join       take somebody up on an invitation\n  \

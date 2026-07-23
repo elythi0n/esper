@@ -44,13 +44,22 @@ pub fn list() -> Result<(), String> {
         return Ok(());
     }
 
+    let now = crate::paths::now_secs();
+    let mut any_once = false;
     for device in store.iter() {
         println!("  {}  {}", device.fingerprint().hex(), device.name);
         println!("      may  {}", crate::net::permissions(device));
+        if device.pairing.is_once() {
+            any_once = true;
+            println!("      for  {}", device.pairing.describe(now));
+        }
     }
     println!();
     println!("  grant more with:  esper-engine grant <fingerprint> <permission>...");
     println!("  permissions:      {}", every_permission());
+    if any_once {
+        println!("  keep a one-session pairing:  esper-engine keep <fingerprint>");
+    }
     Ok(())
 }
 
@@ -150,6 +159,55 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
         // choose to leave — is what people expect from a config file.
         println!("  note    a session that device already has will close within a second");
     }
+    Ok(())
+}
+
+/// Turn a one-session pairing into one that lasts.
+///
+/// The deliberate act the one-session rule leaves room for. It exists because
+/// the alternative to "invited pairings lapse" is not "people remember to
+/// unpair" — it is "people do not" — and the alternative to *this* is somebody
+/// who genuinely wants their helper to come back having to run the whole
+/// invitation again.
+pub fn keep(args: &[String]) -> Result<(), String> {
+    let [prefix] = args else {
+        return Err("usage: esper-engine keep <fingerprint>".to_owned());
+    };
+
+    let (mut store, dropped) = paths::devices()?;
+    for line in &dropped {
+        eprintln!("  · {line}");
+    }
+    let key = *find(&store, prefix)?;
+    let Some(device) = store.get_mut(&key) else {
+        return Err("the device disappeared between finding it and keeping it".to_owned());
+    };
+    if !device.pairing.is_once() {
+        println!(
+            "  {} is already paired for good — nothing to do",
+            device.name
+        );
+        return Ok(());
+    }
+    device.keep();
+    let name = device.name.clone();
+    paths::save_devices(&store)?;
+
+    // Recorded like every other change to what this machine trusts. Widening
+    // a one-session pairing into a permanent one is exactly the kind of thing
+    // somebody should be able to find afterwards.
+    record(
+        &key,
+        Event::PermissionsChanged {
+            granted: store
+                .get(&key)
+                .map(|d| d.permissions.clone())
+                .unwrap_or_default(),
+        },
+    );
+
+    println!("  kept    {name} is now paired like any other device");
+    println!("  note    remove it with `esper-engine forget <fingerprint>`");
     Ok(())
 }
 

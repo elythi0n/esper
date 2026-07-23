@@ -40,7 +40,20 @@ const INTERVAL: Duration = Duration::from_millis(500);
 /// What every paired device may do, as of one reading of the store.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Permits {
-    devices: Vec<([u8; KEY_LEN], Vec<Permission>)>,
+    devices: Vec<Entry>,
+}
+
+/// One device in a reading of the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Entry {
+    key: [u8; KEY_LEN],
+    permissions: Vec<Permission>,
+    /// How long the pairing lasts. Kept apart from the permissions because it
+    /// answers a different question: **whether a new connection is allowed at
+    /// all**, rather than what one may do once it is open. A pairing that has
+    /// been spent still holds its permissions for the session it is running,
+    /// and admits nothing further.
+    pairing: esper_crypto::Pairing,
 }
 
 /// What the store now says about a session that is already open.
@@ -77,7 +90,11 @@ impl Permits {
         Self {
             devices: store
                 .iter()
-                .map(|d| (d.public_key, d.permissions.clone()))
+                .map(|d| Entry {
+                    key: d.public_key,
+                    permissions: d.permissions.clone(),
+                    pairing: d.pairing,
+                })
                 .collect(),
         }
     }
@@ -87,8 +104,23 @@ impl Permits {
     pub fn of(&self, key: &[u8; KEY_LEN]) -> Option<&[Permission]> {
         self.devices
             .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, p)| p.as_slice())
+            .find(|e| e.key == *key)
+            .map(|e| e.permissions.as_slice())
+    }
+
+    /// Whether this device may open a **new** connection, as of `now`.
+    ///
+    /// A different question from [`Permits::of`], and asked at a different
+    /// moment: this one gates the handshake, and `of` describes a session that
+    /// is already running. A one-session pairing that has been spent answers
+    /// no here and still answers with its permissions there — which is what
+    /// lets the session it was spent on finish.
+    #[must_use]
+    pub fn admits(&self, key: &[u8; KEY_LEN], now: u64) -> bool {
+        self.devices
+            .iter()
+            .find(|e| e.key == *key)
+            .is_some_and(|e| e.pairing.admits(now))
     }
 
     /// Devices that held a permission in this reading and do not in `now`.
@@ -99,9 +131,9 @@ impl Permits {
     pub fn lost_since(&self, now: &Self, p: Permission) -> Vec<[u8; KEY_LEN]> {
         self.devices
             .iter()
-            .filter(|(_, had)| had.contains(&p))
-            .filter(|(key, _)| !now.of(key).is_some_and(|has| has.contains(&p)))
-            .map(|(key, _)| *key)
+            .filter(|e| e.permissions.contains(&p))
+            .filter(|e| !now.of(&e.key).is_some_and(|has| has.contains(&p)))
+            .map(|e| e.key)
             .collect()
     }
 
@@ -257,8 +289,52 @@ mod tests {
 
     fn permits(devices: &[([u8; KEY_LEN], &[Permission])]) -> Permits {
         Permits {
-            devices: devices.iter().map(|(k, p)| (*k, p.to_vec())).collect(),
+            devices: devices
+                .iter()
+                .map(|(k, p)| Entry {
+                    key: *k,
+                    permissions: p.to_vec(),
+                    pairing: esper_crypto::Pairing::Kept,
+                })
+                .collect(),
         }
+    }
+
+    fn invited(key: [u8; KEY_LEN], used: bool, expires_at: u64) -> Permits {
+        Permits {
+            devices: vec![Entry {
+                key,
+                permissions: vec![Permission::View],
+                pairing: esper_crypto::Pairing::Once { used, expires_at },
+            }],
+        }
+    }
+
+    #[test]
+    fn a_spent_invitation_admits_nothing_and_still_describes_its_session() {
+        // The two questions this type answers, and why they are separate: the
+        // handshake asks whether a *new* connection is allowed, and a session
+        // that is already running asks what it may do. A pairing spent by the
+        // session it is running must answer no to the first and still answer
+        // the second — otherwise spending it would end it.
+        let key = [4u8; KEY_LEN];
+        let p = invited(key, true, u64::MAX);
+        assert!(!p.admits(&key, 0), "a spent invitation let another in");
+        assert_eq!(p.of(&key), Some(&[Permission::View][..]));
+        assert_eq!(p.standing(&key, &[Permission::View]), Standing::Unchanged);
+    }
+
+    #[test]
+    fn an_unused_invitation_admits_one_and_lapses_on_time() {
+        let key = [5u8; KEY_LEN];
+        let p = invited(key, false, 100);
+        assert!(p.admits(&key, 99));
+        assert!(!p.admits(&key, 100), "it must lapse at its deadline");
+    }
+
+    #[test]
+    fn a_device_that_is_not_there_admits_nothing() {
+        assert!(!permits(&[]).admits(&[7u8; KEY_LEN], 0));
     }
 
     #[test]

@@ -19,6 +19,69 @@ use esper_proto::Permission;
 
 use crate::{Fingerprint, Identity, identity::KEY_LEN};
 
+/// How long a pairing lasts.
+///
+/// **Pairing in person and being let in for one support session are not the
+/// same act**, and until this existed they produced the same record: a key
+/// that works for ever. Somebody who pastes an invitation link to get help
+/// with their printer should not still be reachable by that helper a year
+/// later, and "remember to unpair them afterwards" is not a security
+/// mechanism — it is a thing people forget while they are relieved the
+/// printer works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pairing {
+    /// Until somebody removes it. What pairing in person produces, and the
+    /// answer for a store written before this existed.
+    #[default]
+    Kept,
+    /// One session, and then gone.
+    Once {
+        /// Whether a session has already been opened on it.
+        ///
+        /// Set when the session **opens**, not when it ends. A host that
+        /// spent the pairing on the way out would hand a second session to
+        /// anybody who could crash it at the right moment, and a host that
+        /// crashes should leave a pairing that is used rather than one that
+        /// is fresh.
+        used: bool,
+        /// Unix seconds after which it lapses even if it was never used.
+        ///
+        /// Without this, a helper who paired and then never connected would
+        /// hold a working key indefinitely — which is the same hole the one
+        /// session rule exists to close, reached by not using it.
+        expires_at: u64,
+    },
+}
+
+impl Pairing {
+    /// Whether this pairing still admits a **new** connection.
+    #[must_use]
+    pub const fn admits(self, now: u64) -> bool {
+        match self {
+            Self::Kept => true,
+            Self::Once { used, expires_at } => !used && now < expires_at,
+        }
+    }
+
+    /// Whether it lasts only one session.
+    #[must_use]
+    pub const fn is_once(self) -> bool {
+        matches!(self, Self::Once { .. })
+    }
+
+    /// A phrase for a listing.
+    #[must_use]
+    pub fn describe(self, now: u64) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+            Self::Once { used: true, .. } => "one session, used",
+            Self::Once { expires_at, .. } if now >= expires_at => "one session, lapsed",
+            Self::Once { .. } => "one session",
+        }
+    }
+}
+
 /// A device this machine has paired with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
@@ -58,6 +121,13 @@ pub struct Device {
     /// A hint like the other, and never an authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay_address: Option<String>,
+    /// How long this pairing lasts.
+    ///
+    /// Defaulted rather than required, so a store written before invitations
+    /// could lapse reads as what it was: a list of pairings somebody made in
+    /// person and meant to keep.
+    #[serde(default)]
+    pub pairing: Pairing,
 }
 
 impl Device {
@@ -72,7 +142,46 @@ impl Device {
             last_seen: None,
             last_address: None,
             overlay_address: None,
+            pairing: Pairing::Kept,
         }
+    }
+
+    /// A device let in for one session, lapsing at `expires_at`.
+    #[must_use]
+    pub fn invited(public_key: [u8; KEY_LEN], name: String, now: u64, expires_at: u64) -> Self {
+        let mut device = Self::new(public_key, name, now);
+        device.pairing = Pairing::Once {
+            used: false,
+            expires_at,
+        };
+        device
+    }
+
+    /// Whether this device may open a **new** session now.
+    #[must_use]
+    pub const fn admits(&self, now: u64) -> bool {
+        self.pairing.admits(now)
+    }
+
+    /// Note that the one session this pairing allows has started.
+    ///
+    /// Does nothing to a kept pairing, so a caller does not have to ask first.
+    pub fn spend(&mut self) {
+        if let Pairing::Once { expires_at, .. } = self.pairing {
+            self.pairing = Pairing::Once {
+                used: true,
+                expires_at,
+            };
+        }
+    }
+
+    /// Turn a one-session pairing into one that lasts.
+    ///
+    /// The deliberate act the one-session rule leaves room for: somebody at
+    /// this machine deciding that the person who helped them should be able to
+    /// come back.
+    pub fn keep(&mut self) {
+        self.pairing = Pairing::Kept;
     }
 
     /// Note that this device was reached, and where.
@@ -648,6 +757,77 @@ mod tests {
             d.overlay_address.as_deref(),
             Some("10.125.225.7:7645"),
             "the address that works from anywhere was thrown away"
+        );
+    }
+
+    #[test]
+    fn an_invited_pairing_admits_one_session_and_then_nothing() {
+        let mut d = Device::invited([9u8; KEY_LEN], "helper".to_owned(), 100, 200);
+        assert!(d.admits(100), "a fresh invitation must work");
+
+        d.spend();
+        assert!(!d.admits(100), "a spent pairing let a second connection in");
+    }
+
+    #[test]
+    fn an_invited_pairing_lapses_even_if_it_is_never_used() {
+        // The same hole reached by not using it: a helper who paired and then
+        // never connected would otherwise hold a working key for ever.
+        let d = Device::invited([9u8; KEY_LEN], "helper".to_owned(), 100, 200);
+        assert!(d.admits(199));
+        assert!(!d.admits(200), "it must lapse at its deadline");
+        assert!(!d.admits(1_000_000));
+    }
+
+    #[test]
+    fn a_pairing_made_in_person_lasts() {
+        let mut d = device(3);
+        assert!(d.admits(0));
+        assert!(d.admits(u64::MAX));
+        // And spending is a no-op on it, so a caller need not ask first.
+        d.spend();
+        assert!(d.admits(u64::MAX));
+    }
+
+    #[test]
+    fn a_one_session_pairing_can_be_kept_deliberately() {
+        let mut d = Device::invited([9u8; KEY_LEN], "helper".to_owned(), 100, 200);
+        d.spend();
+        assert!(!d.admits(100));
+        d.keep();
+        assert!(d.admits(1_000_000), "keeping it did not make it last");
+        assert!(!d.pairing.is_once());
+    }
+
+    #[test]
+    fn a_store_written_before_invitations_could_lapse_reads_as_kept() {
+        // The field is defaulted on the way in, so an old file is a list of
+        // pairings somebody made in person and meant to keep — which is what
+        // it was.
+        let json = r#"{"version":1,"devices":{"00000000000000000000000000000000000000000000000000000000000000ab":
+            {"public_key":"00000000000000000000000000000000000000000000000000000000000000ab",
+             "name":"laptop","permissions":["view"],"paired_at":0,"last_seen":null}}}"#;
+        let store: DeviceStore = serde_json::from_str(json).expect("decode");
+        let device = store.iter().next().expect("one device");
+        assert_eq!(device.pairing, Pairing::Kept);
+        assert!(device.admits(u64::MAX));
+    }
+
+    #[test]
+    fn a_one_session_pairing_survives_being_written_and_read() {
+        let mut store = DeviceStore::new();
+        let mut d = Device::invited(device(4).public_key, "helper".to_owned(), 1, 2);
+        d.spend();
+        store.insert(d).expect("insert");
+        let text = serde_json::to_string(&store).expect("encode");
+        let back: DeviceStore = serde_json::from_str(&text).expect("decode");
+        let device = back.iter().next().expect("one device");
+        assert_eq!(
+            device.pairing,
+            Pairing::Once {
+                used: true,
+                expires_at: 2
+            }
         );
     }
 

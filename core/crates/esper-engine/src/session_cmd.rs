@@ -345,6 +345,14 @@ pub(crate) fn paired() -> Result<(DeviceStore, Vec<[u8; 32]>), String> {
 /// Serve video to whoever connects.
 pub fn run_host(o: &HostOptions) -> Result<(), String> {
     net::install_crypto();
+    // **Invitations that are over do not survive a restart.** Ordinarily the
+    // session that spends one also removes it; this is for the times that did
+    // not happen — a host that crashed mid-session, an invitation nobody took
+    // up. They admit nothing either way, so this is tidying, and it is done
+    // where somebody will see it said.
+    for gone in crate::pairing::sweep(paths::now_secs()) {
+        println!("  · the one-session pairing with {gone} is over, and is now removed");
+    }
     // Shared rather than cloned: `Identity` is deliberately not `Clone` — a
     // private key should not be duplicated by a stray `.clone()` — and the
     // task that waits at a broker needs to sign requests for as long as the
@@ -903,11 +911,17 @@ impl esper_transport::PeerAuthority for PairedNow {
         // Called during the handshake, so: no I/O and no blocking. A watch
         // borrow reads a lock the watcher holds only for the length of a
         // swap, and the answer is a lookup in a list of a handful of devices.
-        self.0.borrow().of(public_key).is_some()
+        //
+        // **Whether the pairing still admits a connection**, not merely
+        // whether the device is in the list: a support pairing is spent by the
+        // session it was made for, and the one place that has to be true is
+        // here, before a handshake completes. A check further in would be a
+        // check a spent key had already got past.
+        self.0.borrow().admits(public_key, paths::now_secs())
     }
 
     fn describe(&self) -> &'static str {
-        "any device in this machine's paired list, as it stands now"
+        "any device whose pairing this machine still honours, as it stands now"
     }
 }
 
@@ -985,6 +999,97 @@ async fn close_when_revoked(
         record_revocation(&log, &peer);
         media.close(esper_proto::Reason::REVOKED);
         return;
+    }
+}
+
+/// A one-session pairing, spent when the session opens and removed when it
+/// ends.
+///
+/// **Spent on the way in, not on the way out.** A host that marked the pairing
+/// as used only at the end would hand a second session to anybody who could
+/// end the first one abruptly — a crash, a pulled cable — and the crash case
+/// is exactly when nobody is watching. Written to the store immediately, so a
+/// host that dies mid-session leaves a pairing that is used rather than one
+/// that is fresh.
+///
+/// Removing the record is the tidying, and it is not the security property:
+/// the spent mark already refuses everything.
+struct Spent {
+    peer: [u8; 32],
+    /// False for a pairing that lasts, which makes this a guard the caller can
+    /// hold unconditionally rather than a branch at every exit.
+    lapses: bool,
+}
+
+impl Spent {
+    /// Mark the pairing used, if it is one that is spent by being used.
+    fn open(peer: [u8; 32]) -> Self {
+        Self {
+            peer,
+            lapses: spend_pairing(peer),
+        }
+    }
+}
+
+/// Mark a one-session pairing as used, and say whether it was one.
+///
+/// Written to the store immediately: a host that dies mid-session must leave a
+/// pairing that is used rather than one that is fresh.
+fn spend_pairing(peer: [u8; 32]) -> bool {
+    let Ok((mut store, _)) = paths::devices() else {
+        return false;
+    };
+    let Some(device) = store.get_mut(&peer) else {
+        return false;
+    };
+    if !device.pairing.is_once() {
+        return false;
+    }
+    device.spend();
+    if let Err(e) = paths::save_devices(&store) {
+        // Said, and the session continues: refusing to serve because a disk is
+        // full would be a worse outcome than a pairing spent a moment later.
+        eprintln!("      · could not mark the invitation as used ({e})");
+    }
+    true
+}
+
+/// Remove a device record, quietly. For a pairing that has ended by its own
+/// terms rather than by anybody's decision.
+fn forget(peer: &[u8; 32]) {
+    let Ok((mut store, _)) = paths::devices() else {
+        return;
+    };
+    if store.remove(peer).is_some() {
+        let _ = paths::save_devices(&store);
+    }
+}
+
+impl Drop for Spent {
+    fn drop(&mut self) {
+        if !self.lapses {
+            return;
+        }
+        let Ok((mut store, _)) = paths::devices() else {
+            return;
+        };
+        let Some(gone) = store.remove(&self.peer) else {
+            return;
+        };
+        if let Err(e) = paths::save_devices(&store) {
+            eprintln!("      · could not remove the spent invitation ({e})");
+            return;
+        }
+        println!(
+            "      the invitation is used up: {} is no longer paired",
+            gone.name
+        );
+        if let Ok(path) = paths::audit_log() {
+            let entry = Entry::now(&self.peer, Event::Unpaired { name: gone.name });
+            if let Err(e) = Log::at(path).append(&entry) {
+                eprintln!("      · not recorded in the audit log: {e}");
+            }
+        }
     }
 }
 
@@ -1106,6 +1211,9 @@ async fn serve_session(
         kind.name()
     );
     let recorded = Recorded::open(log, device, &granted);
+    // **One session means this one.** Spent here, at the moment the session is
+    // agreed, and the record removed when this guard drops — however it drops.
+    let spent = Spent::open(device);
 
     // What this device may do, re-read whenever it is asked rather than frozen
     // here. The terminal service uses it to decide whether to *keep* a shell
@@ -1151,7 +1259,7 @@ async fn serve_session(
             // The same last word every other ending gets, since this one does
             // not go back through `serve_one`.
             closer.linger(GOODBYE).await;
-            drop(recorded);
+            drop((recorded, spent));
         });
         return Ok(("forwarding, in the background".to_owned(), parked));
     }
@@ -1897,6 +2005,26 @@ pub async fn reach(identity: &esper_crypto::Identity, o: &Reaching<'_>) -> Resul
         (None, _) => None,
     };
 
+    // **A pairing that is over is said so here, before anything is dialled.**
+    // The host would refuse it anyway, and "the host does not accept this
+    // device" is the wrong sentence for a support pairing that did exactly
+    // what it was meant to do.
+    if let Some(d) = device
+        && !d.admits(paths::now_secs())
+    {
+        let said = format!(
+            "the pairing with {} was for one session, and that session has happened. \
+             Ask them for a new invitation",
+            d.name
+        );
+        // Tidied away as it is refused, so the list does not fill up with
+        // people somebody helped once. The message above is printed first
+        // because it is the only time it can be: from here on the honest
+        // answer is that there is no such device.
+        forget(&d.public_key);
+        return Err(said);
+    }
+
     match (o.addr, device) {
         (Some(addr), _) => say(format!("{} {addr}", o.label)),
         (None, Some(d)) => say(format!("{} {}", o.label, d.name)),
@@ -2023,6 +2151,11 @@ pub async fn reach(identity: &esper_crypto::Identity, o: &Reaching<'_>) -> Resul
     for line in session.peer_fingerprint().display().lines() {
         say(format!("      {line}"));
     }
+
+    // **Spent on this side too.** The host is what enforces one session, but a
+    // controller that kept dialling a pairing which is over would produce a
+    // refusal from the far end instead of an explanation from this one.
+    spend_pairing(*session.peer_key());
 
     Ok(Reached {
         endpoint,
