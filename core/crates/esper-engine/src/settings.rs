@@ -84,13 +84,32 @@ pub fn number(key: &str) -> Option<f64> {
 /// Read here rather than at each use, so a machine's answer to "which of my
 /// paths are already private" is one answer rather than three that can drift.
 #[must_use]
-pub fn overlays() -> esper_overlay::Overlays {
+pub fn overlays() -> esper_interfaces::Overlays {
     let named: Vec<String> = text("connectivity.overlay_interfaces")
         .split(',')
         .map(|n| n.trim().to_owned())
         .filter(|n| !n.is_empty())
         .collect();
-    esper_overlay::Overlays::detect(&named)
+    esper_interfaces::Overlays::detect(&named)
+}
+
+/// The interfaces to announce this machine on.
+///
+/// What somebody named, or every ordinary local network — and an empty answer
+/// is a real one: the caller lets the system choose, which is what this did
+/// before there was anything to choose between.
+#[must_use]
+pub fn mdns_interfaces() -> Vec<std::net::Ipv4Addr> {
+    let named: Vec<String> = text("discovery.mdns_interfaces")
+        .split(',')
+        .map(|n| n.trim().to_owned())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if named.is_empty() {
+        esper_interfaces::ordinary_v4()
+    } else {
+        esper_interfaces::named_v4(&named)
+    }
 }
 
 /// The broker named in the settings, if one is.

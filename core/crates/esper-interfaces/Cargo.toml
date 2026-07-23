@@ -1,6 +1,6 @@
 [package]
-name = "esper-overlay"
-description = "Which paths are already private: WireGuard, Tailscale and the rest."
+name = "esper-interfaces"
+description = "What this machine's network interfaces are: ordinary, overlay, or virtual."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

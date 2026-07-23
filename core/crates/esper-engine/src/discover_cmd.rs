@@ -66,7 +66,7 @@ pub fn run(o: &DiscoverOptions) -> Result<(), String> {
 
     let runtime = net::runtime()?;
     runtime.block_on(async {
-        let mut browser = Browser::start()
+        let mut browser = Browser::start(&crate::settings::mdns_interfaces())
             .await
             .map_err(|e| format!("looking for devices: {e}"))?;
 
@@ -205,6 +205,10 @@ pub fn why_not_advertise(bound: SocketAddr) -> Option<String> {
 #[derive(Debug)]
 pub struct Announcing {
     instance: String,
+    /// Where it is being announced, for the line the host prints. A machine
+    /// with two networks and a machine with a named interface both want to
+    /// know which one this went out on, and "on this network" answers neither.
+    wires: String,
     stop: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -214,6 +218,12 @@ impl Announcing {
     #[must_use]
     pub fn instance(&self) -> &str {
         &self.instance
+    }
+
+    /// Which interfaces it went out on, for the log.
+    #[must_use]
+    pub fn wires(&self) -> &str {
+        &self.wires
     }
 
     /// Say goodbye and stop.
@@ -239,9 +249,11 @@ pub async fn advertise(bound: SocketAddr) -> Result<Announcing, String> {
         .instance()
         .map(|n| n.to_string())
         .map_err(|e| format!("naming this device: {e}"))?;
-    let mut responder = esper_discovery::Responder::start(advertisement)
+    let on = crate::settings::mdns_interfaces();
+    let mut responder = esper_discovery::Responder::start(advertisement, &on)
         .await
         .map_err(|e| e.to_string())?;
+    let wires = responder.describe_interfaces();
 
     let (stop, mut stopping) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
@@ -265,6 +277,7 @@ pub async fn advertise(bound: SocketAddr) -> Result<Announcing, String> {
     });
     Ok(Announcing {
         instance,
+        wires,
         stop,
         task,
     })

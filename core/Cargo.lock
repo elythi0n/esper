@@ -440,9 +440,9 @@ dependencies = [
  "esper-encode",
  "esper-input",
  "esper-input-x11",
+ "esper-interfaces",
  "esper-link",
  "esper-media",
- "esper-overlay",
  "esper-pipeline",
  "esper-presence",
  "esper-presence-x11",
@@ -483,6 +483,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-interfaces"
+version = "0.0.0"
+dependencies = [
+ "if-addrs",
+ "tracing",
+]
+
+[[package]]
 name = "esper-link"
 version = "0.0.0"
 dependencies = [
@@ -513,14 +521,6 @@ dependencies = [
  "esper-decode",
  "esper-encode",
  "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "esper-overlay"
-version = "0.0.0"
-dependencies = [
- "if-addrs",
  "tracing",
 ]
 

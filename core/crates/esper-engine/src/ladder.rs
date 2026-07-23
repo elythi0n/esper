@@ -142,7 +142,7 @@ pub fn direct_rungs(device: &Device, heard: &[(String, SocketAddr)]) -> Vec<Rung
 /// it is a fact about *this machine's* routing table and not about where the
 /// address came from: an address somebody typed, one heard on the segment and
 /// one remembered from last week are all private if the packet goes out `wg0`.
-pub fn label_private(rungs: &mut [Rung], overlays: &esper_overlay::Overlays) {
+pub fn label_private(rungs: &mut [Rung], overlays: &esper_interfaces::Overlays) {
     if overlays.is_empty() {
         return;
     }
@@ -354,7 +354,7 @@ mod tests {
             tier: Tier::Remembered,
             addr: addr(5),
         }];
-        label_private(&mut rungs, &esper_overlay::Overlays::none());
+        label_private(&mut rungs, &esper_interfaces::Overlays::none());
         assert_eq!(rungs.first().map(|r| r.tier), Some(Tier::Remembered));
     }
 
@@ -369,13 +369,13 @@ mod tests {
         // TEST-NET-1, which exists to be routed nowhere in particular: asking
         // for it gets this machine's own outward address, and no packet is
         // sent to find out.
-        let Some(me) = esper_overlay::source_towards("192.0.2.1".parse().expect("an address"))
+        let Some(me) = esper_interfaces::source_towards("192.0.2.1".parse().expect("an address"))
             .filter(|a| !a.is_loopback())
         else {
             println!("no route off this machine, so there is no path to classify");
             return;
         };
-        let overlays = esper_overlay::Overlays::from_interfaces(&[("wg0".to_owned(), me)], &[]);
+        let overlays = esper_interfaces::Overlays::from_interfaces(&[("wg0".to_owned(), me)], &[]);
 
         let mut rungs = vec![
             Rung {

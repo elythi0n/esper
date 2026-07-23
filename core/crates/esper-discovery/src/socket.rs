@@ -29,9 +29,99 @@ pub fn destination() -> SocketAddr {
     SocketAddr::V4(SocketAddrV4::new(GROUP, PORT))
 }
 
+/// A socket, and the interfaces it speaks on.
+///
+/// One socket with several memberships rather than one socket per interface:
+/// the same socket can join the same group through as many interfaces as it
+/// likes, and receiving from all of them on one socket is what keeps the
+/// read loop a read loop instead of a select over a list that changes.
+///
+/// Sending is the part that is per-interface. A multicast datagram leaves
+/// through exactly one interface — whichever `IP_MULTICAST_IF` names — so an
+/// announcement on three networks is three sends.
+#[derive(Debug)]
+pub struct Multicast {
+    socket: tokio::net::UdpSocket,
+    /// The interface addresses to send through, in order. Empty means the one
+    /// the kernel would choose, which is the right answer on a machine with
+    /// one route to the LAN.
+    through: Vec<Ipv4Addr>,
+}
+
+impl Multicast {
+    /// The socket underneath, for reading.
+    #[must_use]
+    pub const fn socket(&self) -> &tokio::net::UdpSocket {
+        &self.socket
+    }
+
+    /// Where this machine announces itself, for a log line.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        if self.through.is_empty() {
+            return "the interface the system chooses".to_owned();
+        }
+        self.through
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Send to one address.
+    ///
+    /// To the group, that means **once through each interface**: a datagram
+    /// goes out one of them, so a machine on two networks that sent once would
+    /// be invisible on one of them. To anything else it is one send, because a
+    /// unicast reply follows the routing table like any other packet.
+    pub async fn send_to(&self, bytes: &[u8], to: SocketAddr) -> std::io::Result<()> {
+        if to != destination() || self.through.is_empty() {
+            self.socket.send_to(bytes, to).await?;
+            return Ok(());
+        }
+        let mut sent = 0usize;
+        let mut last = None;
+        for interface in &self.through {
+            // Set per send rather than once: the socket is shared by every
+            // interface it speaks on, and the option is what says which.
+            if let Err(e) = set_multicast_if(&self.socket, *interface) {
+                last = Some(e);
+                continue;
+            }
+            match self.socket.send_to(bytes, to).await {
+                Ok(_) => sent = sent.saturating_add(1),
+                Err(e) => last = Some(e),
+            }
+        }
+        // One interface working is a working announcement. All of them failing
+        // is a failure, and it is the last error that says why.
+        match (sent, last) {
+            (0, Some(e)) => Err(e),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Point this socket's multicast sends at one interface.
+fn set_multicast_if(socket: &tokio::net::UdpSocket, interface: Ipv4Addr) -> std::io::Result<()> {
+    // socket2 borrows the file descriptor rather than owning it, so the socket
+    // is not closed when this goes out of scope.
+    let borrowed = socket2::SockRef::from(socket);
+    borrowed.set_multicast_if_v4(&interface)
+}
+
 /// Open a socket bound to the multicast port, sharing it with whatever else is
-/// there, and joined to the group.
-pub fn open() -> std::io::Result<tokio::net::UdpSocket> {
+/// there, and joined to the group on each of `interfaces`.
+///
+/// An empty list joins on the interface the kernel chooses, which is what a
+/// machine with one route to the LAN wants and what happens when this machine's
+/// interfaces cannot be listed at all.
+///
+/// A join that fails is **reported and skipped**, not fatal: an interface that
+/// went away between being listed and being joined is ordinary, and so is a
+/// second address on a wire already joined. What would not be ordinary is a
+/// host that refuses to start because one of five networks was busy.
+pub fn open(interfaces: &[Ipv4Addr]) -> std::io::Result<Multicast> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     // Not available everywhere; where it is not, `SO_REUSEADDR` alone is
@@ -40,10 +130,21 @@ pub fn open() -> std::io::Result<tokio::net::UdpSocket> {
     socket.set_reuse_port(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)).into())?;
-    // The unspecified interface lets the kernel choose, which is the right
-    // answer on a machine with one route to the LAN and an acceptable one
-    // elsewhere until `discovery.mdns_interfaces` is implemented.
-    socket.join_multicast_v4(&GROUP, &Ipv4Addr::UNSPECIFIED)?;
+
+    let mut joined: Vec<Ipv4Addr> = Vec::new();
+    for interface in interfaces {
+        match socket.join_multicast_v4(&GROUP, interface) {
+            Ok(()) => joined.push(*interface),
+            Err(e) => tracing::debug!(%interface, error = %e, "could not join the group there"),
+        }
+    }
+    if joined.is_empty() {
+        // Either nobody named an interface, or none of them could be joined.
+        // The kernel's choice is the honest fallback: it is what this did
+        // before there was a choice at all.
+        socket.join_multicast_v4(&GROUP, &Ipv4Addr::UNSPECIFIED)?;
+    }
+
     // 255 because the documents say so. It never leaves the segment — routers
     // do not forward this group — but a lower value is a way to be ignored by
     // an implementation that checks.
@@ -53,7 +154,10 @@ pub fn open() -> std::io::Result<tokio::net::UdpSocket> {
     socket.set_multicast_loop_v4(true)?;
 
     let std: StdSocket = socket.into();
-    tokio::net::UdpSocket::from_std(std)
+    Ok(Multicast {
+        socket: tokio::net::UdpSocket::from_std(std)?,
+        through: joined,
+    })
 }
 
 /// The address this machine would use to reach `peer`, learned without asking

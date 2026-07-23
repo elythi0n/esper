@@ -199,7 +199,8 @@ cleanup_terminal() {
   # had passed.
   for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}" "${invite_pid:-}" \
              "${named_host:-}" "${service_pid:-}" "${forward_pid:-}" \
-             "${denied_pid:-}" "${private_host:-}" "${invited_host:-}"; do
+             "${denied_pid:-}" "${private_host:-}" "${invited_host:-}" \
+             "${announcing:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -516,6 +517,64 @@ else
       # host **remembers where it answered**, and the broker check below needs
       # the rung above the broker to have nothing to remember. A step that
       # quietly changes what a later step is testing is worse than a slow one.
+      # **Announcing and finding a machine, through the built binaries.**
+      # Discovery has unit tests, an interoperability test against an
+      # independent DNS implementation, and — until now — nothing that ran the
+      # two halves as two processes. That is the gap this suite exists for.
+      #
+      # Announced on **loopback only**, by naming the interface: the check
+      # must not put this machine on somebody's actual network every time
+      # somebody runs the test suite, and naming an interface is also the
+      # override that would otherwise go untested.
+      echo "  — announcing this machine and finding it again"
+      wire_ip=$( { ip route get 1.1.1.1 2>/dev/null || true; } | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -1)
+      if [ -z "$wire_ip" ]; then
+        printf '  · no address off loopback, so there is nothing to announce\n'
+      else
+        printf 'discovery.mdns_interfaces = "lo"\n' > "$term_a/config.toml"
+        printf 'discovery.mdns_interfaces = "lo"\n' > "$term_b/config.toml"
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+          timeout 120 "$BIN/esper-engine" host --listen "$wire_ip:0" \
+          > "$term_a/announce.log" 2>&1 &
+        announcing=$!
+        said=""
+        for _ in $(seq 1 100); do
+          if grep -q 'announcing on this network' "$term_a/announce.log" 2>/dev/null; then
+            said=yes
+            break
+          fi
+          sleep 0.1
+        done
+
+        if [ -z "$said" ]; then
+          printf '  ✗ the host never announced itself\n'
+          sed 's/^/      /' "$term_a/announce.log"
+          fail=1
+        else
+          # It says which wire it went out on, which is the answer to "why
+          # can that machine not see me" on a host with three of them.
+          if grep -q 'through 127.0.0.1' "$term_a/announce.log"; then
+            printf '  ✓ the host says which interface it announced through\n'
+          else
+            printf '  ✗ the host did not say where it announced\n'
+            sed 's/^/      /' "$term_a/announce.log"
+            fail=1
+          fi
+          out=$(ESPER_HOME="$term_b" timeout 30 "$BIN/esper-engine" discover 2>&1 || true)
+          if printf '%s' "$out" | grep -q 'ready to connect'; then
+            printf '  ✓ a second engine found it by asking the network\n'
+          else
+            printf '  ✗ nothing was found on the network\n'
+            printf '%s\n' "$out" | sed 's/^/      /'
+            sed 's/^/      /' "$term_a/announce.log"
+            fail=1
+          fi
+        fi
+        kill "$announcing" 2>/dev/null || true
+        announcing=""
+        rm -f "$term_a/config.toml" "$term_b/config.toml"
+      fi
+
       # **A path the person already trusts, and Esper saying so.** Tier 1
       # of the ladder: a machine reached over WireGuard, a tailnet or any
       # other overlay is on a network its owner already runs, so there is no

@@ -501,6 +501,7 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             match crate::discover_cmd::advertise(bound).await {
                 Ok(handle) => {
                     println!("  announcing on this network as {}", handle.instance());
+                    println!("             through {}", handle.wires());
                     println!();
                     Some(handle)
                 }
@@ -790,7 +791,9 @@ fn no_way_in(failures: &[(SocketAddr, String)], rungs: &[crate::ladder::Rung]) -
 /// with no LAN rung, which is ordinary, and the other rungs are unaffected.
 async fn on_the_segment(key: &[u8; 32]) -> Vec<SocketAddr> {
     let wanted = esper_crypto::Fingerprint::of(key).hex();
-    let Ok(mut browser) = esper_discovery::Browser::start().await else {
+    let Ok(mut browser) =
+        esper_discovery::Browser::start(&crate::settings::mdns_interfaces()).await
+    else {
         return Vec::new();
     };
     if browser.ask().await.is_err() {

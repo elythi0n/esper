@@ -259,6 +259,17 @@ pub static SETTINGS: &[Setting] = &[
         about: "Announce this machine on the local network, and look for others.",
     },
     Setting {
+        key: "discovery.mdns_interfaces",
+        kind: Kind::Text,
+        // **Named interfaces, or the ones that look like a local network.**
+        // Empty is not "none": it is "work it out", which on a machine with
+        // one route to the LAN is the same answer anybody would give.
+        default: Value::Text(Cow::Borrowed("")),
+        about: "Interfaces to announce this machine on, separated by commas. Empty means \
+                every ordinary local network — not loopback, not a tunnel, and not a \
+                container bridge.",
+    },
+    Setting {
         key: "connectivity.overlay_interfaces",
         kind: Kind::Text,
         // **Names Esper missed, never names it should stop believing.** The

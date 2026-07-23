@@ -253,15 +253,18 @@ struct Heard {
 /// Sends queries and collects what answers.
 #[derive(Debug)]
 pub struct Browser {
-    socket: tokio::net::UdpSocket,
+    socket: socket::Multicast,
     query: Name,
     seen: Sightings,
 }
 
 impl Browser {
-    /// Open a socket and ask once.
-    pub async fn start() -> Result<Self, DiscoveryError> {
-        let socket = socket::open().map_err(|e| DiscoveryError::Socket(e.to_string()))?;
+    /// Open a socket and ask once, on whichever interfaces were named.
+    ///
+    /// An empty list means the one the system would choose, which is what a
+    /// machine with one route to the LAN wants.
+    pub async fn start(on: &[std::net::Ipv4Addr]) -> Result<Self, DiscoveryError> {
+        let socket = socket::open(on).map_err(|e| DiscoveryError::Socket(e.to_string()))?;
         let me = Self {
             socket,
             query: Name::parse(SERVICE)?,
@@ -308,7 +311,7 @@ impl Browser {
                 return Ok(());
             }
             let mut buffer = vec![0u8; crate::wire::MAX_PACKET];
-            match tokio::time::timeout(left, self.socket.recv_from(&mut buffer)).await {
+            match tokio::time::timeout(left, self.socket.socket().recv_from(&mut buffer)).await {
                 // Time is up, which is the ordinary way this ends.
                 Err(_) => return Ok(()),
                 Ok(Err(e)) => return Err(DiscoveryError::Socket(e.to_string())),

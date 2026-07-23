@@ -1,4 +1,16 @@
-//! Which paths are already private.
+//! What this machine's network interfaces are, and what that means.
+//!
+//! Two questions are asked of the same knowledge, and they are the reason this
+//! is one crate rather than two answers that drift:
+//!
+//! - **Is the path to this address already private?** — the connectivity
+//!   ladder, deciding whether a peer is reachable over a network its owner
+//!   already runs.
+//! - **Which interfaces are an ordinary local network?** — discovery, deciding
+//!   where to announce this machine. A container bridge is not somewhere to
+//!   look for a laptop, and a tunnel does not carry multicast.
+//!
+//! # Paths that are already private
 //!
 //! Somebody who runs WireGuard, Tailscale, ZeroTier or Nebula has already
 //! solved the hard problem: every machine has a stable address that works from
@@ -76,6 +88,136 @@ const OVERLAY_PREFIXES: &[&str] = &[
 pub fn looks_like_overlay(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     OVERLAY_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+/// Interface-name prefixes that mean "this is a local virtual network".
+///
+/// A container bridge, a virtual-machine network, a `veth` pair. They are
+/// **local** in a way an overlay is not: there is no peer on the other side of
+/// `docker0`, only this machine's own containers. Announcing Esper into one is
+/// noise at best, and looking for a laptop there is looking in a room that has
+/// nobody in it.
+///
+/// A machine that runs containers has dozens of these — the one this was
+/// written on has twenty — which is why the list is worth having rather than
+/// treating everything unrecognised as ordinary.
+const VIRTUAL_PREFIXES: &[&str] = &[
+    // Docker: the default bridge, a bridge per user network, and a `veth` for
+    // every container.
+    "docker", "br-", "veth", // libvirt, VirtualBox, VMware, Parallels.
+    "virbr", "vboxnet", "vmnet", "vnic",
+    // LXC/LXD, Podman, and the container network plugins.
+    "lxc", "lxd", "cni", "cilium", "flannel", "kube",
+    // Kernel virtual devices that carry nothing anybody is on.
+    "dummy", "ifb",
+];
+
+/// What kind of network an interface is.
+///
+/// The order of the questions matters: loopback first because it is loopback
+/// whatever it is called, then overlay, then virtual, and **anything left is
+/// ordinary**. That default is deliberate — a physical interface with a naming
+/// scheme nobody here has seen must still be a place to find a laptop, and the
+/// cost of the two mistakes is not symmetric: announcing into a container
+/// network is noise, and failing to announce on somebody's LAN is the feature
+/// not working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// This machine talking to itself.
+    Loopback,
+    /// A network somebody already runs: WireGuard, Tailscale, ZeroTier.
+    Overlay,
+    /// A local virtual network: containers, virtual machines.
+    Virtual,
+    /// An ordinary local network — the one a laptop is on.
+    Ordinary,
+}
+
+/// What kind of network an interface holding this address is.
+#[must_use]
+pub fn kind_of(name: &str, addr: IpAddr) -> Kind {
+    if addr.is_loopback() {
+        return Kind::Loopback;
+    }
+    let lower = name.to_ascii_lowercase();
+    if looks_like_overlay(&lower) {
+        return Kind::Overlay;
+    }
+    if VIRTUAL_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+        return Kind::Virtual;
+    }
+    Kind::Ordinary
+}
+
+/// One address on each of this machine's ordinary local networks.
+///
+/// What discovery announces on. **One per interface, not one per address**: a
+/// machine with two addresses on the same wire is on that wire once, and
+/// joining a multicast group twice through the same interface is an error
+/// rather than a second membership.
+///
+/// Empty is a real answer — a machine with no ordinary network, or one whose
+/// interfaces could not be listed — and the caller is expected to fall back to
+/// letting the kernel choose rather than to announcing nowhere.
+#[must_use]
+pub fn ordinary_v4() -> Vec<std::net::Ipv4Addr> {
+    let Ok(found) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for interface in found {
+        let addr = interface.addr.ip();
+        let IpAddr::V4(v4) = addr else {
+            continue;
+        };
+        // A link-local address is one an interface gave itself because nothing
+        // told it otherwise. Announcing there reaches whatever else has done
+        // the same, which is not nobody — but it is not the LAN either, and a
+        // machine with a real address on the same wire announces there too.
+        if v4.is_link_local() {
+            continue;
+        }
+        if kind_of(&interface.name, addr) == Kind::Ordinary && !seen.contains(&interface.name) {
+            seen.push(interface.name);
+            out.push(v4);
+        }
+    }
+    out
+}
+
+/// The addresses of the interfaces somebody named, whatever kind they are.
+///
+/// The override: a machine whose LAN interface is called something this crate
+/// has never heard of, or one where announcing on exactly one of three is what
+/// the operator wants.
+#[must_use]
+pub fn named_v4(names: &[String]) -> Vec<std::net::Ipv4Addr> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let wanted: Vec<String> = names
+        .iter()
+        .map(|n| n.trim().to_ascii_lowercase())
+        .filter(|n| !n.is_empty())
+        .collect();
+    let Ok(found) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for interface in found {
+        let IpAddr::V4(v4) = interface.addr.ip() else {
+            continue;
+        };
+        // One per interface, for the same reason as above.
+        if wanted.contains(&interface.name.to_ascii_lowercase()) && !seen.contains(&interface.name)
+        {
+            seen.push(interface.name);
+            out.push(v4);
+        }
+    }
+    out
 }
 
 /// One local interface carrying a private network.
@@ -283,6 +425,75 @@ mod tests {
         ] {
             assert!(looks_like_overlay(name), "{name} should be an overlay");
         }
+    }
+
+    #[test]
+    fn what_each_kind_of_interface_is() {
+        let v4 = |s: &str| ip(s);
+        // The ordinary case, and the default for a name nobody here has seen.
+        for name in [
+            "eth0",
+            "en0",
+            "wlan0",
+            "wlp3s0",
+            "enp0s31f6",
+            "bond0",
+            "eno1",
+            "net5",
+        ] {
+            assert_eq!(
+                kind_of(name, v4("192.168.1.5")),
+                Kind::Ordinary,
+                "{name} must be somewhere to find a laptop"
+            );
+        }
+        // Somebody's own network.
+        for name in ["wg0", "tailscale0", "tun0", "utun4", "ztabc", "nebula1"] {
+            assert_eq!(kind_of(name, v4("10.0.0.1")), Kind::Overlay, "{name}");
+        }
+        // This machine's own containers and virtual machines.
+        for name in [
+            "docker0",
+            "br-1e3893e1930b",
+            "veth479a015",
+            "virbr0",
+            "vboxnet0",
+            "lxcbr0",
+            "cni0",
+            "dummy0",
+        ] {
+            assert_eq!(kind_of(name, v4("172.17.0.1")), Kind::Virtual, "{name}");
+        }
+        // Loopback is loopback whatever it is called.
+        assert_eq!(kind_of("lo", v4("127.0.0.1")), Kind::Loopback);
+        assert_eq!(kind_of("tun0", v4("127.0.0.1")), Kind::Loopback);
+    }
+
+    /// Whatever this machine has, the classification does not contradict
+    /// itself.
+    ///
+    /// Runs everywhere and asserts what is true everywhere: nothing loopback
+    /// is ordinary, and nothing named for a container bridge is somewhere to
+    /// announce a laptop.
+    #[test]
+    fn this_machine_has_ordinary_interfaces_and_they_are_not_the_bridges() {
+        let ordinary = ordinary_v4();
+        for addr in &ordinary {
+            assert!(
+                !addr.is_loopback(),
+                "{addr} is loopback and was called ordinary"
+            );
+            assert!(!addr.is_link_local(), "{addr} is link-local");
+        }
+        println!("this machine's ordinary addresses: {ordinary:?}");
+    }
+
+    #[test]
+    fn naming_nothing_selects_nothing() {
+        // The override is an override: an empty list means "decide for me",
+        // never "everything".
+        assert!(named_v4(&[]).is_empty());
+        assert!(named_v4(&[String::new(), "   ".to_owned()]).is_empty());
     }
 
     #[test]
