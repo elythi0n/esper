@@ -93,7 +93,7 @@ func handOff(binary string, args []string) int {
 		fmt.Fprintf(os.Stderr, "esper: %v\n", err)
 		return 1
 	}
-	code, err := engine.Handoff(path, args)
+	code, err := engine.Handoff(path, "esper", args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "esper: %v\n", err)
 		return 1

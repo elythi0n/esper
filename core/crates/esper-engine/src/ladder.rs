@@ -181,7 +181,8 @@ pub fn device_named<'a>(
     match matches.as_slice() {
         [only] => Ok(only),
         [] => Err(format!(
-            "no paired device is called {named:?} — `esper-engine devices` lists them"
+            "no paired device is called {named:?} — `{} devices` lists them",
+            crate::net::me()
         )),
         several => Err(format!(
             "{} paired devices match {named:?}; say which:\n{}",

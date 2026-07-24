@@ -114,7 +114,10 @@ pub fn run(o: &DiscoverOptions) -> Result<(), String> {
         if found.is_empty() {
             println!("  nothing found");
             println!();
-            println!("  Discovery needs the other machine to be running `esper-engine host`");
+            println!(
+                "  Discovery needs the other machine to be running `{} host`",
+                crate::net::me()
+            );
             println!("  on the same network. A device reachable by address works without it.");
         }
 
@@ -127,7 +130,11 @@ pub fn run(o: &DiscoverOptions) -> Result<(), String> {
                     .map(|d| d.name.clone())
                     .unwrap_or_else(|| f.device.clone());
                 println!("      {name}  {}", f.address);
-                println!("          connect with: esper-engine connect {}", f.address);
+                println!(
+                    "          connect with: {} connect {}",
+                    crate::net::me(),
+                    f.address
+                );
             }
             println!();
         }
@@ -139,9 +146,13 @@ pub fn run(o: &DiscoverOptions) -> Result<(), String> {
                 println!("      {}  {}  {fp}", f.device, f.address);
             }
             println!();
-            println!("  To pair, on the other machine:  esper-engine pair --listen 7645");
             println!(
-                "  then here:                      esper-engine pair <its address> --code <code>"
+                "  To pair, on the other machine:  {} pair --listen 7645",
+                crate::net::me()
+            );
+            println!(
+                "  then here:                      {} pair <its address> --code <code>",
+                crate::net::me()
             );
             println!();
         }

@@ -38,7 +38,7 @@ fn main() -> ExitCode {
     // cannot be understood is somebody having meant something; running with
     // the defaults instead would be running with settings they did not choose.
     if let Err(e) = settings::load() {
-        eprintln!("esper-engine: {e}");
+        eprintln!("{}: {e}", net::me());
         return ExitCode::FAILURE;
     }
 
@@ -51,7 +51,7 @@ fn main() -> ExitCode {
         Some("identity") => match print_identity() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("esper-engine: {e}");
+                eprintln!("{}: {e}", net::me());
                 ExitCode::FAILURE
             }
         },
@@ -145,7 +145,7 @@ fn main() -> ExitCode {
             match outcome {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-engine config: {e}");
+                    eprintln!("{} config: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -153,7 +153,7 @@ fn main() -> ExitCode {
         Some("devices") => match devices_cmd::list() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("esper-engine devices: {e}");
+                eprintln!("{} devices: {e}", net::me());
                 ExitCode::FAILURE
             }
         },
@@ -162,7 +162,7 @@ fn main() -> ExitCode {
             match devices_cmd::change(&rest, devices_cmd::Change::Grant) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-engine grant: {e}");
+                    eprintln!("{} grant: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -172,7 +172,7 @@ fn main() -> ExitCode {
             match devices_cmd::change(&rest, devices_cmd::Change::Revoke) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-engine revoke: {e}");
+                    eprintln!("{} revoke: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -182,7 +182,7 @@ fn main() -> ExitCode {
             match invite_cmd::parse_invite(&rest).and_then(|o| invite_cmd::run_invite(&o)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-engine invite: {e}");
+                    eprintln!("{} invite: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -192,7 +192,7 @@ fn main() -> ExitCode {
             match invite_cmd::run_join(&rest) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-engine join: {e}");
+                    eprintln!("{} join: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -202,7 +202,7 @@ fn main() -> ExitCode {
             match devices_cmd::keep(&rest) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-engine keep: {e}");
+                    eprintln!("{} keep: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -212,7 +212,7 @@ fn main() -> ExitCode {
             match devices_cmd::forget(&rest) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-engine forget: {e}");
+                    eprintln!("{} forget: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -222,7 +222,7 @@ fn main() -> ExitCode {
             match terminal_cmd::parse(&rest).and_then(|o| terminal_cmd::run(&o)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-engine terminal: {e}");
+                    eprintln!("{} terminal: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -232,7 +232,7 @@ fn main() -> ExitCode {
             match forward_cmd::parse(&rest).and_then(|o| forward_cmd::run(&o)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-engine forward: {e}");
+                    eprintln!("{} forward: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -240,7 +240,7 @@ fn main() -> ExitCode {
         Some("serve") => match serve::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("esper-engine: {e}");
+                eprintln!("{}: {e}", net::me());
                 ExitCode::FAILURE
             }
         },
@@ -249,7 +249,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(other) => {
-            eprintln!("esper-engine: unknown command {other:?}");
+            eprintln!("{}: unknown command {other:?}", net::me());
             print_help();
             ExitCode::FAILURE
         }

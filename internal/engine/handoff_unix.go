@@ -21,8 +21,13 @@ import (
 //
 // It does not return on success, because there is nothing left to return to.
 // The int in the signature is for Windows, which cannot do this.
-func Handoff(path string, args []string) (int, error) {
-	argv := append([]string{path}, args...)
+//
+// `as` becomes the zeroth argument, which is how a program reached under
+// several names finds out which one was used. The engine reads it and tells
+// people to run the command they typed rather than the name of a binary they
+// have never heard of.
+func Handoff(path string, as string, args []string) (int, error) {
+	argv := append([]string{as}, args...)
 	if err := syscall.Exec(path, argv, os.Environ()); err != nil {
 		return 1, fmt.Errorf("running %s: %w", path, err)
 	}

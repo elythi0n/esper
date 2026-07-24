@@ -342,7 +342,7 @@ pub fn run_invite(o: &InviteOptions) -> Result<(), String> {
     println!();
     println!("      {}", invitation.link());
     println!();
-    println!("  They run:  esper-engine join <the link>");
+    println!("  They run:  {} join <the link>", crate::net::me());
     println!();
     println!("  This device's fingerprint — read it aloud and check it matches:");
     for line in identity.fingerprint().display().lines() {
@@ -493,7 +493,10 @@ async fn pair_with_whoever_came(
 /// Take somebody up on an invitation.
 pub fn run_join(args: &[String]) -> Result<(), String> {
     let [link] = args else {
-        return Err("join takes the link somebody sent you: esper-engine join <link>".to_owned());
+        return Err(format!(
+            "join takes the link somebody sent you: {} join <link>",
+            crate::net::me()
+        ));
     };
     let invitation = Invitation::parse(link)?;
 

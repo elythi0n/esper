@@ -47,13 +47,34 @@ check "esper rejects an unknown command with exit 1" "$rc" "1"
 echo "  — typing a verb at the front door"
 direct=$("$BIN/esper-engine" devices 2>&1 || true)
 front=$("$BIN/esper" devices 2>&1 || true)
-if [ "$direct" = "$front" ]; then
-  printf '  ✓ `esper devices` is `esper-engine devices`, output for output\n'
+# The same report, allowing for the one thing that must differ: which program
+# each tells you to run next.
+if [ "$(printf '%s' "$direct" | sed 's/esper-engine/esper/g')" = "$front" ]; then
+  printf '  ✓ `esper devices` is `esper-engine devices`, line for line\n'
 else
   printf '  ✗ the front door and the engine disagree\n'
   printf '%s\n' "$front" | sed 's/^/      /'
   fail=1
 fi
+# **And the engine names the command the person typed.** Reached through the
+# front door it says `esper pair`; run directly it says `esper-engine pair`.
+# Telling somebody to run a binary they have never heard of is how a first
+# session ends in a search engine.
+if printf '%s' "$front" | grep -q 'run `esper pair`'; then
+  printf '  ✓ and it tells them to run `esper`, not the name of a binary\n'
+else
+  printf '  ✗ the engine named itself in a message reached through the front door\n'
+  printf '%s\n' "$front" | sed 's/^/      /'
+  fail=1
+fi
+if printf '%s' "$direct" | grep -q 'run `esper-engine pair`'; then
+  printf '  ✓ and names itself when it is the program somebody ran\n'
+else
+  printf '  ✗ the engine did not name itself when run directly\n'
+  printf '%s\n' "$direct" | sed 's/^/      /'
+  fail=1
+fi
+
 # A word neither program has is refused by the front door rather than passed
 # through into somebody else's error message.
 set +e

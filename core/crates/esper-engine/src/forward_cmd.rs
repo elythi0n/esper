@@ -306,7 +306,7 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
         }
     }
 
-    let spec = spec.ok_or_else(|| USAGE.to_owned())?;
+    let spec = spec.ok_or_else(usage)?;
     let spec = if stdio {
         let (host, port) = target(&spec)?;
         Spec::Stdio { host, port }
@@ -328,15 +328,23 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
 }
 
 /// What to say when the arguments do not name a forward.
-const USAGE: &str = "usage: esper-engine forward <local>:<host>:<port> [<device>]\n\
-                     \x20      esper-engine forward --stdio <host>:<port> [<device>]\n\
-                     for example: esper-engine forward 8080:localhost:80 elythion";
+///
+/// A function rather than a constant, because it names the program the way the
+/// person invoked it — which is not known until the program is running.
+fn usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} forward <local>:<host>:<port> [<device>]\n\
+         \x20      {me} forward --stdio <host>:<port> [<device>]\n\
+         for example: {me} forward 8080:localhost:80 elythion"
+    )
+}
 
 /// `8080:localhost:80`.
 fn parse_listen(spec: &str) -> Result<Spec, String> {
     let (local, rest) = spec
         .split_once(':')
-        .ok_or_else(|| format!("{spec:?} is not <local>:<host>:<port>\n{USAGE}"))?;
+        .ok_or_else(|| format!("{spec:?} is not <local>:<host>:<port>\n{}", usage()))?;
     let local: u16 = local
         .parse()
         .map_err(|_| format!("{local:?} is not a local port number"))?;
@@ -362,7 +370,7 @@ fn target(spec: &str) -> Result<(String, u16), String> {
     } else {
         let (host, port) = spec
             .rsplit_once(':')
-            .ok_or_else(|| format!("{spec:?} is not <host>:<port>\n{USAGE}"))?;
+            .ok_or_else(|| format!("{spec:?} is not <host>:<port>\n{}", usage()))?;
         // An unbracketed IPv6 literal has no unambiguous split, and guessing
         // is how a forward reaches somewhere other than what it reads as. The
         // brackets are what make it unambiguous, so this applies only here.

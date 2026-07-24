@@ -154,7 +154,10 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
         }
     }
     let addr = addr.ok_or_else(|| {
-        "terminal needs the host's address: esper-engine terminal <addr> [--resume <id>]".to_owned()
+        format!(
+            "terminal needs the host's address: {} terminal <addr> [--resume <id>]",
+            crate::net::me()
+        )
     })?;
     Ok(Options { addr, resume })
 }
@@ -408,7 +411,10 @@ async fn pump(control: &mut Control, session: SessionId, link: &Session) -> Resu
             // deliberate: it parks the shell rather than tearing it down.
             let _ = control.finish();
             println!("  detached — the shell is still running on the host");
-            println!("  come back with:  esper-engine terminal --resume {session}");
+            println!(
+                "  come back with:  {} terminal --resume {session}",
+                crate::net::me()
+            );
             Ok(())
         }
         // **A lost link usually said why.** A host that ended the session

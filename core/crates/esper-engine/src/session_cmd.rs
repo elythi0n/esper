@@ -335,9 +335,11 @@ pub(crate) fn paired() -> Result<(DeviceStore, Vec<[u8; 32]>), String> {
     }
     let keys: Vec<[u8; 32]> = store.iter().map(|d| d.public_key).collect();
     if keys.is_empty() {
-        return Err("no devices are paired, so nobody could connect. Run \
-             `esper-engine pair --listen 7645` and pair one first"
-            .to_owned());
+        return Err(format!(
+            "no devices are paired, so nobody could connect. Run \
+             `{me} pair --listen 7645` and pair one first",
+            me = net::me()
+        ));
     }
     Ok((store, keys))
 }
@@ -850,8 +852,11 @@ pub(crate) fn opening_failed(e: esper_transport::SessionError) -> String {
         esper_transport::SessionError::Refused(why) => [
             format!("this host does not accept this device ({why})."),
             "  It may have been unpaired there. Pair again, on both machines:".to_owned(),
-            "      esper-engine pair --listen <addr>            (on the host)".to_owned(),
-            "      esper-engine pair <host-addr> --code <code>  (here)".to_owned(),
+            format!(
+                "      {} pair --listen <addr>            (on the host)",
+                net::me()
+            ),
+            format!("      {} pair <host-addr> --code <code>  (here)", net::me()),
         ]
         .join("\n"),
         other => format!("opening the session: {other}"),
@@ -2000,9 +2005,10 @@ pub async fn reach(identity: &esper_crypto::Identity, o: &Reaching<'_>) -> Resul
         (None, _) if o.addr.is_none() => {
             return Err(format!(
                 "{} devices are paired, so say which: `{} <name>` — \
-                 `esper-engine devices` lists them",
+                 `{} devices` lists them",
                 keys.len(),
                 o.label.split_whitespace().last().unwrap_or("connect"),
+                net::me(),
             ));
         }
         (None, _) => None,

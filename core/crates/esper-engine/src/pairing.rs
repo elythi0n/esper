@@ -129,7 +129,8 @@ async fn offer(listen: SocketAddr) -> Result<(), String> {
     println!();
     println!("  On the other machine:");
     println!(
-        "      esper-engine pair <this-machine>:{} --code {}",
+        "      {} pair <this-machine>:{} --code {}",
+        crate::net::me(),
         bound.port(),
         offer.code().display()
     );
@@ -351,7 +352,8 @@ pub(crate) fn report(device: &Device) {
         // difference between this pairing and every other one on the machine.
         println!("  lasts     one session, and then it is gone");
         println!(
-            "            keep it with:  esper-engine keep {}",
+            "            keep it with:  {} keep {}",
+            crate::net::me(),
             short(device)
         );
     }

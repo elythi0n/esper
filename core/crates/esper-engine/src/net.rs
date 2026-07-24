@@ -80,6 +80,41 @@ pub fn any_port(peer: SocketAddr) -> SocketAddr {
     }
 }
 
+/// What to call this program when telling somebody what to run.
+///
+/// **The name they typed, not the name of the binary.** `esper` hands its
+/// whole command line to this process and passes `esper` as the zeroth
+/// argument while doing it — the way a program that is reached under several
+/// names has always found out which one — so a person who typed `esper pair`
+/// is told to run `esper pair` rather than the name of an implementation
+/// detail they have never heard of.
+///
+/// Falls back to `esper-engine`, which is the truth when this binary is run
+/// directly, and the safe answer when the zeroth argument is missing or is a
+/// path to something else.
+pub fn me() -> &'static str {
+    static ME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ME.get_or_init(|| named_by(std::env::args().next().as_deref()).to_owned())
+        .as_str()
+}
+
+/// The name to use, given a zeroth argument.
+///
+/// Only the two names this program answers to. Anything else — a symlink
+/// somebody made, a path with a surprise in it, an empty argv — becomes the
+/// honest default rather than being echoed back into a suggestion somebody
+/// would then type.
+fn named_by(argv0: Option<&str>) -> &'static str {
+    let raw = argv0.unwrap_or_default();
+    match std::path::Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+    {
+        Some("esper") => "esper",
+        _ => "esper-engine",
+    }
+}
+
 /// A label for this device, for the peer to show a person.
 ///
 /// The hostname when there is one. It is a label and nothing more: identity is
@@ -217,5 +252,27 @@ mod tests {
     fn a_device_name_is_never_empty() {
         // Whatever the environment, there is always something to show.
         assert!(!this_device().trim().is_empty());
+    }
+
+    #[test]
+    fn the_name_to_suggest_is_the_one_they_typed() {
+        assert_eq!(named_by(Some("esper")), "esper");
+        assert_eq!(named_by(Some("/usr/local/bin/esper")), "esper");
+        assert_eq!(named_by(Some("./build/esper")), "esper");
+    }
+
+    #[test]
+    fn anything_else_is_the_binary_this_is() {
+        // A symlink somebody made, a path with a surprise in it, an argv that
+        // is not there. None of them become a command in a suggestion.
+        assert_eq!(
+            named_by(Some("/usr/local/bin/esper-engine")),
+            "esper-engine"
+        );
+        assert_eq!(named_by(Some("esperanto")), "esper-engine");
+        assert_eq!(named_by(Some("")), "esper-engine");
+        assert_eq!(named_by(None), "esper-engine");
+        assert_eq!(named_by(Some("/")), "esper-engine");
+        assert_eq!(named_by(Some("rm -rf /")), "esper-engine");
     }
 }

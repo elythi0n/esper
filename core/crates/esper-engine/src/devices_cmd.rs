@@ -39,7 +39,10 @@ pub fn list() -> Result<(), String> {
     println!("📇 esper devices");
     println!();
     if store.is_empty() {
-        println!("  no paired devices — run `esper-engine pair` on both machines");
+        println!(
+            "  no paired devices — run `{} pair` on both machines",
+            crate::net::me()
+        );
         println!();
         return Ok(());
     }
@@ -55,10 +58,16 @@ pub fn list() -> Result<(), String> {
         }
     }
     println!();
-    println!("  grant more with:  esper-engine grant <fingerprint> <permission>...");
+    println!(
+        "  grant more with:  {} grant <fingerprint> <permission>...",
+        crate::net::me()
+    );
     println!("  permissions:      {}", every_permission());
     if any_once {
-        println!("  keep a one-session pairing:  esper-engine keep <fingerprint>");
+        println!(
+            "  keep a one-session pairing:  {} keep <fingerprint>",
+            crate::net::me()
+        );
     }
     Ok(())
 }
@@ -82,14 +91,16 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
     };
     let [prefix, names @ ..] = args else {
         return Err(format!(
-            "usage: esper-engine {verb} <fingerprint> <permission>...\n\
+            "usage: {} {verb} <fingerprint> <permission>...\n\
              permissions: {}",
+            crate::net::me(),
             every_permission()
         ));
     };
     if names.is_empty() {
         return Err(format!(
-            "esper-engine {verb} needs at least one permission\npermissions: {}",
+            "{} {verb} needs at least one permission\npermissions: {}",
+            crate::net::me(),
             every_permission()
         ));
     }
@@ -171,7 +182,7 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
 /// invitation again.
 pub fn keep(args: &[String]) -> Result<(), String> {
     let [prefix] = args else {
-        return Err("usage: esper-engine keep <fingerprint>".to_owned());
+        return Err(format!("usage: {} keep <fingerprint>", crate::net::me()));
     };
 
     let (mut store, dropped) = paths::devices()?;
@@ -207,7 +218,10 @@ pub fn keep(args: &[String]) -> Result<(), String> {
     );
 
     println!("  kept    {name} is now paired like any other device");
-    println!("  note    remove it with `esper-engine forget <fingerprint>`");
+    println!(
+        "  note    remove it with `{} forget <fingerprint>`",
+        crate::net::me()
+    );
     Ok(())
 }
 
@@ -219,7 +233,7 @@ pub fn keep(args: &[String]) -> Result<(), String> {
 /// leaves the revoked device connected is a request rather than a revocation.
 pub fn forget(args: &[String]) -> Result<(), String> {
     let [prefix] = args else {
-        return Err("usage: esper-engine forget <fingerprint>".to_owned());
+        return Err(format!("usage: {} forget <fingerprint>", crate::net::me()));
     };
 
     let (mut store, dropped) = paths::devices()?;
@@ -273,7 +287,8 @@ fn find<'a>(store: &'a DeviceStore, prefix: &str) -> Result<&'a [u8; 32], String
     match matches.as_slice() {
         [only] => Ok(&only.public_key),
         [] => Err(format!(
-            "no paired device's fingerprint starts with {wanted:?} — `esper-engine devices` lists them"
+            "no paired device's fingerprint starts with {wanted:?} — `{} devices` lists them",
+            crate::net::me()
         )),
         several => Err(format!(
             "{} paired devices start with {wanted:?}; give more of it:\n{}",

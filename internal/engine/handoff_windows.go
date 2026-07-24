@@ -16,8 +16,13 @@ import (
 // caller that used it would find the program had not run. This spawns and
 // waits instead, which is the same shape with a process in the middle — worse
 // for signals and job control, and the platform's answer rather than ours.
-func Handoff(path string, args []string) (int, error) {
+func Handoff(path string, as string, args []string) (int, error) {
 	cmd := exec.Command(path, args...)
+	// The zeroth argument is how the child learns which name it was reached
+	// under. Windows passes a command line rather than an argv, and Go
+	// reconstructs one from Args — so this is best-effort in a way the Unix
+	// side is not.
+	cmd.Args[0] = as
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	err := cmd.Run()
 	if err == nil {
