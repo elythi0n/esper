@@ -101,6 +101,17 @@ impl ControllerLink {
         self.stream.tick(now, out);
     }
 
+    /// Tell the stream how fast the link answers, so recovery is paced by it.
+    ///
+    /// The round trip is what a keyframe request costs before it can become a
+    /// picture, and it is the transport that knows it — so the link is where
+    /// the two are joined. Called on whatever schedule the caller already
+    /// reads statistics on; the stream keeps the last value.
+    pub fn pace_recovery(&mut self) {
+        let rtt = self.media.stats().rtt;
+        self.stream.set_recovery_pace(rtt);
+    }
+
     /// What the arrivals have looked like.
     #[must_use]
     pub fn jitter(&self) -> esper_stream::JitterStats {

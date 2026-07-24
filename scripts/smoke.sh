@@ -306,7 +306,8 @@ cleanup_terminal() {
   for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}" "${invite_pid:-}" \
              "${named_host:-}" "${service_pid:-}" "${forward_pid:-}" \
              "${denied_pid:-}" "${private_host:-}" "${invited_host:-}" \
-             "${announcing:-}" "${supervised:-}"; do
+             "${announcing:-}" "${supervised:-}" "${relay_pid:-}" \
+             "${small_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1012,6 +1013,80 @@ except OSError:
         printf '  ✓ and asking the supervisor to stop stops both\n'
       fi
       supervised=""
+
+      # **A session on a link that is losing packets.** Two Espers on one
+      # machine talk over a link with no loss and a round trip measured in
+      # microseconds; every number that comes out of that says the pipeline
+      # works and none of them say what happens on a hotel wifi.
+      #
+      # `flaky-link.py` sits between them and makes the link worse on purpose.
+      # Five per cent each way is a bad wireless network, and the session has
+      # to keep showing pictures on it.
+      if command -v python3 >/dev/null 2>&1; then
+        echo "  — a session through five per cent packet loss"
+        # **Its own host, with the ladder pinned small.** Frame size is what
+        # decides whether loss is survivable: a frame is given up on when any
+        # of its datagrams is missing, so a 720p frame spanning twenty of them
+        # survives five per cent loss about a third of the time while a
+        # 640x360 frame spanning three survives it six times as often. The
+        # measurements are written up in the findings; what this guards is
+        # that the recovery path does not get worse than it is.
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+          timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          --max-resolution 640 --fps 15 > "$term_a/small.log" 2>&1 &
+        small_host=$!
+        small_addr=""
+        for _ in $(seq 1 100); do
+          small_addr=$( { awk '/listening/{print $2}' "$term_a/small.log" 2>/dev/null || true; } | head -1)
+          [ -n "$small_addr" ] && break
+          sleep 0.1
+        done
+        lossy=$(python3 -c 'import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1]); s.close()')
+        python3 scripts/flaky-link.py --listen "127.0.0.1:$lossy" --to "$small_addr" \
+          --loss 5 --seed 7 > "$term_b/flaky.log" 2>&1 &
+        relay_pid=$!
+        sleep 0.5
+        out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 60 "$BIN/esper-engine" connect "127.0.0.1:$lossy" --seconds 6 2>&1 || true)
+        # Anchored, and the last match: the skip notice says "reference
+        # pictures are missing", which a looser pattern reads as a count.
+        shown=$(printf '%s' "$out" | awk '/^  pictures /{n=$2} END{print n}')
+        asks=$(printf '%s' "$out" | awk '/^  frames /{k=$4} END{print k}')
+        kill "$relay_pid" 2>/dev/null || true
+        relay_pid=""
+        kill "$small_host" 2>/dev/null || true
+        small_host=""
+        # A number rather than "it did not crash": a session that showed one
+        # picture and then went black would pass any assertion about survival.
+        # **Two thresholds, and neither of them is a measurement.** How many
+        # pictures arrive depends on how loaded the machine is — the CPU
+        # ladder moves the resolution, and frame size is what decides whether
+        # loss is survivable — so this suite cannot measure that and does not
+        # try. The numbers are in the findings, taken on an idle machine.
+        #
+        # What is asserted here is the two collapses: a session that shows
+        # *nothing*, and a request storm — both real, both stable to check on
+        # any machine. The bar on requests is deliberately far above what an
+        # unpaced controller produces in these conditions: it catches a
+        # storm, and what catches the *pace* being removed is the unit test
+        # that drives a clock rather than a suite that shares a CPU.
+        if [ -n "$shown" ] && [ "$shown" -gt 0 ]; then
+          printf '  ✓ %s pictures arrived through a link losing five per cent\n' "$shown"
+        else
+          printf '  ✗ a link at five per cent loss showed no pictures at all\n'
+          printf '%s\n' "$out" | sed 's/^/      /'
+          fail=1
+        fi
+        if [ -n "$asks" ] && [ "$asks" -lt 40 ]; then
+          printf '  ✓ and %s keyframes were asked for, not a request per loss\n' "$asks"
+        else
+          printf '  ✗ %s keyframe requests in six seconds is a request storm\n' "${asks:-no}"
+          printf '%s\n' "$out" | sed 's/^/      /'
+          fail=1
+        fi
+      fi
 
       # **A revocation has to reach a session that is already open.** One that
       # waits for the revoked device to choose to leave is a request, not a

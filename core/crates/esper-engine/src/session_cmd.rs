@@ -2437,6 +2437,11 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     // is as complete as it is going to get. `tick` does
                     // nothing if the deadline has not really passed.
                     link.tick(std::time::Instant::now(), &mut out);
+                    // **And the recovery pace, from the link that measured
+                    // it.** Here rather than on every datagram: the round trip
+                    // moves over seconds, and this branch runs whenever the
+                    // stream is quiet, which is exactly when it changed.
+                    link.pace_recovery();
                     // A host that closed with a reason has said why, and
                     // saying it back is the difference between "the session
                     // ended" and "something went wrong, we think".

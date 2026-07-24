@@ -46,6 +46,17 @@ pub enum Decoded {
     /// A frame was lost. A keyframe has been asked for.
     Lost { timestamp: u32, why: &'static str },
 }
+/// How often a keyframe may be asked for when nothing has said otherwise.
+///
+/// A conservative round trip: a caller that never sets a pace is one whose
+/// link is unknown, and on an unknown link the storm is the worse failure.
+const DEFAULT_PACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The floor, so a link measured at nothing still paces.
+const SHORTEST_PACE: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// The ceiling, so a bad measurement cannot leave a session black.
+const LONGEST_PACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Running totals, for the stats a session reports.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -80,6 +91,10 @@ pub struct ControllerStream {
     ///
     /// Coalesces the asking: a burst of loss produces one request.
     awaiting_keyframe: bool,
+    /// The soonest another keyframe may be asked for, and how often at most.
+    /// See [`ControllerStream::set_recovery_pace`].
+    pace: std::time::Duration,
+    last_ask: Option<std::time::Instant>,
     /// Requests for the caller to send.
     outbound: Vec<MediaMessage>,
     /// What the host has said about the pointer, for the caller to act on.
@@ -122,6 +137,8 @@ impl ControllerStream {
             decoder: None,
             expected: (config.width, config.height),
             awaiting_keyframe: true,
+            pace: DEFAULT_PACE,
+            last_ask: None,
             outbound: Vec::new(),
             cursor: Vec::new(),
             jitter: Jitter::new(config.max_fps, config.clock_hz),
@@ -129,7 +146,9 @@ impl ControllerStream {
         };
         // A fresh receiver has no reference picture, so say so immediately
         // rather than waiting for the host's periodic keyframe.
-        me.ask(KeyframeReason::Joined);
+        // Joining is not loss recovery: there is nothing to show until a
+        // keyframe arrives, so this one is never paced.
+        me.ask_now(KeyframeReason::Joined);
         Ok(me)
     }
 
@@ -171,7 +190,7 @@ impl ControllerStream {
     pub fn tick(&mut self, now: std::time::Instant, out: &mut Vec<Decoded>) {
         if self.jitter.is_due(now) {
             self.jitter.fired();
-            self.flush(out);
+            self.flush_at(now, out);
         }
     }
 
@@ -214,29 +233,47 @@ impl ControllerStream {
         std::mem::take(&mut self.outbound)
     }
 
-    /// Ask the host for a keyframe, unless one is already outstanding.
+    /// Ask the host for a keyframe, unless one is already outstanding or one
+    /// was asked for too recently.
     ///
-    /// # This is the whole coalescing
+    /// # This is the whole recovery policy, and it has three rules
     ///
     /// A controller that asked per lost frame would make the host send nothing
     /// but keyframes — the largest and most expensive frames there are —
-    /// turning a lossy link into an unusable one. So a burst of loss produces
-    /// one ask.
+    /// turning a lossy link into an unusable one.
     ///
-    /// The rule is **one unsent request outstanding**: a request still in the
-    /// queue absorbs the rest of the burst, and a new one becomes possible
-    /// once the caller has sent it.
+    /// **One unsent request outstanding.** A request still in the queue
+    /// absorbs the rest of a burst, and a new one becomes possible once the
+    /// caller has sent it.
     ///
-    /// Not "one until a keyframe arrives", which was the first attempt and
-    /// deadlocks: on a link bad enough to lose the keyframes as well, a
+    /// **And not more than one per [`ControllerStream::set_recovery_pace`].**
+    /// The queue rule alone is only as good as how often the caller drains it:
+    /// on a link with a long round trip it drains immediately, so every lost
+    /// frame becomes another request while the first keyframe is still in
+    /// flight — and each of those produces a keyframe, which is large, which
+    /// is more likely to lose a datagram, which produces another request.
+    ///
+    /// Measured, before this rule existed: 5% loss on its own showed 113
+    /// pictures of 146; a 200 ms round trip on its own showed 136. **The two
+    /// together showed three**, with 75 keyframes asked for in ten seconds. It
+    /// is a request storm, and the pace is what stops it.
+    ///
+    /// **Never "one until a keyframe arrives".** That was the first attempt
+    /// and it deadlocks: on a link bad enough to lose the keyframes as well, a
     /// controller that had already asked would never ask again and the session
-    /// would stay black for good.
+    /// would stay black for good. The pace expires, so another ask always
+    /// becomes possible.
+    /// Ask now, whatever the pace says.
     ///
-    /// So during sustained loss this asks about once per turn, and the host is
-    /// the second half of the coalescing — `request_keyframe` is idempotent
-    /// until the next frame, so thirty requests inside one frame interval
-    /// produce one keyframe.
-    fn ask(&mut self, reason: KeyframeReason) {
+    /// For the two reasons that are not loss recovery — joining a stream and a
+    /// reconfiguration — where there is nothing to show until a keyframe
+    /// arrives and pacing would only make the wait longer.
+    fn ask_now(&mut self, reason: KeyframeReason) {
+        self.last_ask = None;
+        self.ask(reason, std::time::Instant::now());
+    }
+
+    fn ask(&mut self, reason: KeyframeReason, now: std::time::Instant) {
         let queued = self
             .outbound
             .iter()
@@ -244,10 +281,31 @@ impl ControllerStream {
         if queued {
             return;
         }
+        if let Some(last) = self.last_ask
+            && now.saturating_duration_since(last) < self.pace
+        {
+            return;
+        }
+        self.last_ask = Some(now);
         self.awaiting_keyframe = true;
         self.stats.keyframes_requested = self.stats.keyframes_requested.saturating_add(1);
         self.outbound
             .push(MediaMessage::Keyframe(KeyframeRequest { reason }));
+    }
+
+    /// How often, at most, to ask for a keyframe while a link is losing
+    /// frames.
+    ///
+    /// **A round trip is the right unit**, because that is how long it takes
+    /// for an ask to become a picture: the request goes out, the host encodes
+    /// a keyframe, and it comes back. Asking again before then is asking for
+    /// something already on its way.
+    ///
+    /// The caller sets it from the link's measured round trip. Bounded at both
+    /// ends: too small is the storm this exists to prevent, and too large is a
+    /// session that stays black long after the link recovered.
+    pub fn set_recovery_pace(&mut self, pace: std::time::Duration) {
+        self.pace = pace.clamp(SHORTEST_PACE, LONGEST_PACE);
     }
 
     /// A hint for the caller to send, if it wants to.
@@ -286,7 +344,9 @@ impl ControllerStream {
         self.awaiting_keyframe = false;
         self.outbound
             .retain(|m| !matches!(m, MediaMessage::Keyframe(_)));
-        self.ask(KeyframeReason::Reconfigured);
+        // Nor is a reconfiguration: the stream has changed shape and the
+        // pictures in hand are of the old one.
+        self.ask_now(KeyframeReason::Reconfigured);
         Ok(())
     }
 
@@ -330,7 +390,7 @@ impl ControllerStream {
             .iter()
             .any(|f| matches!(f, Reassembled::Frame { .. }));
         for frame in frames {
-            self.absorb(frame, out);
+            self.absorb(frame, now, out);
         }
         // A frame that completed on its own needs no deadline; one still being
         // assembled does.
@@ -349,14 +409,14 @@ impl ControllerStream {
     /// so the deadline that exists to make a static screen appear released the
     /// frame and then threw it away. The two paths differ in *when* they run,
     /// never in what they do.
-    fn absorb(&mut self, frame: Reassembled, out: &mut Vec<Decoded>) {
+    fn absorb(&mut self, frame: Reassembled, now: std::time::Instant, out: &mut Vec<Decoded>) {
         match frame {
             Reassembled::Lost { timestamp, why } => {
                 self.stats.frames_lost = self.stats.frames_lost.saturating_add(1);
                 // **The flag is not cleared first.** It used to be, which
                 // defeated the coalescing on the very next line: every
                 // lost frame produced its own request.
-                self.ask(KeyframeReason::LostSync);
+                self.ask(KeyframeReason::LostSync, now);
                 out.push(Decoded::Lost {
                     timestamp,
                     why: why.reason(),
@@ -412,7 +472,7 @@ impl ControllerStream {
                         // frame is bad; either way a keyframe is the answer
                         // and the session continues.
                         self.stats.frames_skipped = self.stats.frames_skipped.saturating_add(1);
-                        self.ask(KeyframeReason::LostSync);
+                        self.ask(KeyframeReason::LostSync, now);
                         tracing::debug!("the decoder refused a frame: {e}");
                         out.push(Decoded::Skipped {
                             timestamp,
@@ -438,8 +498,16 @@ impl ControllerStream {
     /// is why it is not a timer in here. What is in here is the guarantee that
     /// calling it produces whatever there was to produce.
     pub fn flush(&mut self, out: &mut Vec<Decoded>) {
+        self.flush_at(std::time::Instant::now(), out);
+    }
+
+    /// [`Self::flush`], with the clock as an argument.
+    ///
+    /// Separate so the deadline path and the recovery pace read the same time
+    /// as the rest of the turn, rather than one a microsecond later.
+    pub fn flush_at(&mut self, now: std::time::Instant, out: &mut Vec<Decoded>) {
         if let Some(frame) = self.depacketizer.flush() {
-            self.absorb(frame, out);
+            self.absorb(frame, now, out);
         }
     }
 

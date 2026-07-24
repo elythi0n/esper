@@ -201,11 +201,19 @@ fn a_lossy_link_recovers_and_keeps_delivering() {
     let mut lost = 0u32;
     let mut asks = 0u32;
     let mut out = Vec::new();
-    for _ in 0..150 {
+    // **The controller is given the same clock the host is stepped on.**
+    // Recovery is paced in wall time — a keyframe takes a round trip to
+    // arrive, and asking again before then asks for something already on its
+    // way — so a test that stepped the stream by a simulated second while the
+    // controller saw a real microsecond would be measuring the pace against
+    // the wrong clock.
+    let start = std::time::Instant::now();
+    for turn in 0..150u32 {
+        let now = start + Duration::from_secs(u64::from(turn));
         let _ = h.step(Duration::from_secs(1), &mut link).expect("a step");
         let arrived = std::mem::take(&mut link.sent);
         for datagram in arrived {
-            c.receive(&datagram, &mut out).expect("received");
+            c.receive_at(&datagram, now, &mut out).expect("received");
         }
         for d in out.drain(..) {
             match d {
@@ -581,6 +589,86 @@ fn a_burst_of_loss_produces_one_keyframe_request() {
         asks, 1,
         "{lost} lost frames produced {asks} keyframe requests; a burst must coalesce to one"
     );
+}
+
+/// **The request storm, and the rule that stops it.**
+///
+/// The queue rule alone is only as good as how often the caller drains it. A
+/// caller that drains every turn — which is what a real one does — turns every
+/// lost frame into another request while the first keyframe is still in
+/// flight, and each of those produces a keyframe, which is large, which is
+/// more likely to lose a datagram.
+///
+/// Measured on a real link before the pace existed: 5% loss alone showed 113
+/// pictures of 146, a 200 ms round trip alone showed 136, and the two together
+/// showed **three**, with 75 keyframes asked for in ten seconds.
+#[test]
+fn sustained_loss_asks_no_faster_than_the_pace() {
+    let mut h = host(30);
+    let mut c = controller(&h);
+    c.set_recovery_pace(Duration::from_millis(200));
+    // Losing most of them, so the link loses more frames per second than the
+    // pace allows requests. A gentler link cannot test a rate limit: it never
+    // reaches the limit.
+    let mut link = LossySink::new(70);
+    let _ = c.take_outbound();
+
+    let start = std::time::Instant::now();
+    let mut asks = 0u32;
+    let mut lost = 0u32;
+    let mut out = Vec::new();
+    // Forty turns of twenty-five milliseconds: one second of link at thirty
+    // frames a second, drained every turn like a real caller. Fine-grained on
+    // purpose — the storm this prevents is one request per lost frame, so the
+    // test has to lose more frames per second than the pace allows requests.
+    for turn in 0..40u32 {
+        let now = start + Duration::from_millis(u64::from(turn) * 25);
+        let _ = h
+            .step(Duration::from_millis(25), &mut link)
+            .expect("a step");
+        for datagram in std::mem::take(&mut link.sent) {
+            c.receive_at(&datagram, now, &mut out).expect("received");
+        }
+        lost += out
+            .drain(..)
+            .filter(|d| matches!(d, Decoded::Lost { .. }))
+            .count() as u32;
+        asks += c.take_outbound().len() as u32;
+    }
+
+    println!(
+        "{} dropped, {lost} lost, {asks} asks in one second",
+        link.dropped
+    );
+    assert!(
+        lost >= 8,
+        "only {lost} frames were lost in a second; this cannot test pacing"
+    );
+    // One second at one per 200 ms: five, and a sixth would need the clock to
+    // have moved further than this loop moves it.
+    assert!(
+        asks <= 6,
+        "{lost} lost frames produced {asks} requests in one second, at a pace of 200 ms"
+    );
+    // And it does not stop asking: a link that keeps losing must keep
+    // recovering, or a session that lost one keyframe stays black for good.
+    assert!(asks >= 2, "sustained loss produced only {asks} request(s)");
+}
+
+/// Joining is not loss recovery, and is never paced.
+///
+/// There is nothing to show until the first keyframe arrives, so making
+/// somebody wait a round trip for the *request* would be adding the one delay
+/// the pace exists to remove.
+#[test]
+fn joining_asks_immediately() {
+    let h = host(30);
+    let mut c = controller(&h);
+    let asked = c
+        .take_outbound()
+        .iter()
+        .any(|m| matches!(m, MediaMessage::Keyframe(_)));
+    assert!(asked, "a fresh stream did not ask for a keyframe");
 }
 
 /// The direction rule is stated twice — once in the protocol as
