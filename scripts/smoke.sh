@@ -40,6 +40,27 @@ check "broker agrees with the control plane on the protocol version" "$brk_proto
 set +e; "$BIN/esper" definitely-not-a-command >/dev/null 2>&1; rc=$?; set -e
 check "esper rejects an unknown command with exit 1" "$rc" "1"
 
+# **The front door.** `esper` is the program a person has; the engine is an
+# implementation detail with its own binary. A verb the engine owns must work
+# when typed at `esper`, with the same output and the same exit code — which
+# is what handing the process over rather than wrapping it buys.
+echo "  — typing a verb at the front door"
+direct=$("$BIN/esper-engine" devices 2>&1 || true)
+front=$("$BIN/esper" devices 2>&1 || true)
+if [ "$direct" = "$front" ]; then
+  printf '  ✓ `esper devices` is `esper-engine devices`, output for output\n'
+else
+  printf '  ✗ the front door and the engine disagree\n'
+  printf '%s\n' "$front" | sed 's/^/      /'
+  fail=1
+fi
+# A word neither program has is refused by the front door rather than passed
+# through into somebody else's error message.
+set +e
+"$BIN/esper" definitely-not-a-verb >/dev/null 2>&1; rc=$?
+set -e
+check "esper refuses a verb it does not have" "$rc" "1"
+
 # **The control plane asking the engine what this machine can do.**
 #
 # The seam between the two binaries carried a handshake and nothing else until

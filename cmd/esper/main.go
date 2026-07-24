@@ -43,11 +43,62 @@ func run(args []string) int {
 		return cmdVersion(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
+	case "broker":
+		return handOff("esper-broker", args[1:])
 	default:
+		if isEngineCommand(args[0]) {
+			return handOff("esper-engine", args)
+		}
 		fmt.Fprintf(os.Stderr, "esper: unknown command %q\n\n", args[0])
 		printHelp()
 		return 1
 	}
+}
+
+// engineCommands are the verbs the engine owns.
+//
+// **A list, not "anything we have never heard of".** Passing unknown words
+// through would turn a typo into the engine's error message about a command
+// `esper` never had, and would make the two programs' vocabularies drift
+// silently as either grew.
+var engineCommands = map[string]bool{
+	"identity": true,
+	"discover": true,
+	"pair":     true,
+	"config":   true,
+	"devices":  true,
+	"grant":    true,
+	"revoke":   true,
+	"keep":     true,
+	"forget":   true,
+	"invite":   true,
+	"join":     true,
+	"host":     true,
+	"connect":  true,
+	"terminal": true,
+	"forward":  true,
+}
+
+func isEngineCommand(name string) bool { return engineCommands[name] }
+
+// handOff replaces this process with another of Esper's binaries.
+//
+// The session verbs own a terminal — raw mode, a pipe that is somebody's ssh
+// connection, Ctrl-C — so `esper` gets out of the way entirely rather than
+// sitting in the middle forwarding signals it will eventually forward wrongly.
+// On Windows, where there is no exec, it waits and passes the exit status back.
+func handOff(binary string, args []string) int {
+	path, err := engine.Locate(binary)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "esper: %v\n", err)
+		return 1
+	}
+	code, err := engine.Handoff(path, args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "esper: %v\n", err)
+		return 1
+	}
+	return code
 }
 
 func cmdVersion(args []string) int {
@@ -224,9 +275,31 @@ func printHelp() {
 Usage:
   esper <command> [flags]
 
-Commands:
+Getting connected
+  pair               pair with another device, in either direction
+  devices            list paired devices and what they may do
+  discover           list the Esper devices on this network
+  invite             offer somebody a way in: one link, through your broker
+  join               take somebody up on an invitation
+
+Using a machine
+  connect            show a paired host's screen
+  terminal           open a shell on a paired host
+  forward            reach a port on a paired host, ssh -L style
+  host               serve this machine's screen to a paired device
+
+Deciding who may
+  grant              give a paired device a permission
+  revoke             take a permission away
+  keep               make a one-session pairing last
+  forget             unpair a device entirely
+
+This machine
+  config             show every setting and where its value came from
+  identity           print this device's fingerprint
+  doctor             check what this machine can do, and what it cannot
+  broker             run an introducer for your own machines
   version [--json]   print the release, build time and protocol version
-  doctor             check the engine is present and the seam works
   help               this text
 
 Esper operates no infrastructure. There is no account, no password, and no
