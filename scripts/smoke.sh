@@ -40,6 +40,43 @@ check "broker agrees with the control plane on the protocol version" "$brk_proto
 set +e; "$BIN/esper" definitely-not-a-command >/dev/null 2>&1; rc=$?; set -e
 check "esper rejects an unknown command with exit 1" "$rc" "1"
 
+# **The control plane asking the engine what this machine can do.**
+#
+# The seam between the two binaries carried a handshake and nothing else until
+# now. This is the first command that crosses it, and the answer is *probed* —
+# the encoder really encodes a frame — so a report that says the encoder works
+# is a report that watched it work.
+echo "  — asking the engine what this machine can do"
+out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY "$BIN/esper" doctor 2>/dev/null || true)
+# The assertion is on the **evidence** — the size of the keyframe it produced —
+# not on the tick. A version that declared the encoder working without running
+# it would print a tick, and a check that accepted one would agree with it.
+if printf '%s' "$out" | grep -qE 'encoder  ✓.*[0-9]+ bytes for one keyframe'; then
+  printf '  ✓ doctor probed the encoder by encoding a frame\n'
+else
+  printf '  ✗ doctor did not report a working encoder\n'
+  printf '%s\n' "$out" | sed 's/^/      /'
+  fail=1
+fi
+# With no display there is no screen to capture, and the honest report says so
+# rather than calling the synthetic fallback a screen.
+if printf '%s' "$out" | grep -q 'screen   ✗'; then
+  printf '  ✓ and reported no screen where there is none, rather than a test pattern\n'
+else
+  printf '  ✗ doctor called something a screen with no display present\n'
+  printf '%s\n' "$out" | sed 's/^/      /'
+  fail=1
+fi
+# The report goes to stdout and the engine's own output to stderr with its
+# origin on it, so `esper doctor > file` is a file of report.
+noise=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY "$BIN/esper" doctor 2>/dev/null | grep -c 'OpenH264' || true)
+if [ "$noise" = "0" ]; then
+  printf '  ✓ the report on stdout has none of the engine'"'"'s own output in it\n'
+else
+  printf '  ✗ the engine'"'"'s output is mixed into the report\n'
+  fail=1
+fi
+
 # The shipped unit files, checked by systemd rather than by reading them.
 #
 # A unit that has stopped parsing, or a directive in the wrong section, is

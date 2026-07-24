@@ -13,6 +13,7 @@
 package engine
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -142,13 +143,22 @@ func (s *Supervisor) Start(ctx context.Context, local proto.Hello) error {
 	if err != nil {
 		return fmt.Errorf("engine stdout: %w", err)
 	}
-	cmd.Stderr = os.Stderr
+	// **The engine's stderr is relayed, not inherited.** Inherited, it
+	// interleaves with whatever the control plane is printing — a C library's
+	// warning lands in the middle of a report, attributed to nobody. Relayed,
+	// every line says where it came from, and a command that writes a report
+	// on stdout keeps that report clean.
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("engine stderr: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting %s: %w", s.path, err)
 	}
 	s.cmd, s.stdin, s.stdout, s.running = cmd, stdin, stdout, true
 	s.log("engine started: %s (pid %d)", s.path, cmd.Process.Pid)
+	go s.relay(stderr)
 
 	remote, err := s.handshake(local)
 	if err != nil {
@@ -159,6 +169,27 @@ func (s *Supervisor) Start(ctx context.Context, local proto.Hello) error {
 	s.log("engine handshake ok: %s protocol %d", remote.Engine, remote.Proto)
 	return nil
 }
+
+// relay copies the engine's stderr into the log, a line at a time, until the
+// pipe closes — which happens when the process ends.
+//
+// Bounded: a line longer than the scanner's buffer is truncated rather than
+// grown into, because a process printing a megabyte without a newline is
+// misbehaving and must not be able to make the supervisor allocate for it.
+func (s *Supervisor) relay(stderr io.Reader) {
+	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 0, 4096), maxLogLine)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		s.log("engine: %s", line)
+	}
+}
+
+// maxLogLine bounds one relayed line.
+const maxLogLine = 16 * 1024
 
 // handshake sends our Hello and validates the engine's reply.
 func (s *Supervisor) handshake(local proto.Hello) (proto.Hello, error) {
@@ -181,6 +212,54 @@ func (s *Supervisor) handshake(local proto.Hello) (proto.Hello, error) {
 		return remote, fmt.Errorf("engine sent an unacceptable name")
 	}
 	return remote, nil
+}
+
+// Status asks the engine what this machine can do.
+//
+// One command, one report, on the channel the handshake opened. The engine
+// **probes** rather than answering from build flags — an encoder that is
+// compiled in and cannot start is the failure this exists to find — so this
+// takes as long as those probes take, tens of milliseconds rather than the
+// microseconds a pipe would suggest.
+//
+// The lock is held across the exchange on purpose. This is a request/response
+// channel with no message identifiers: two callers interleaving would each
+// read the other's answer, and adding identifiers to solve a problem that one
+// mutex solves is how a local pipe grows a protocol.
+func (s *Supervisor) Status(ctx context.Context) (*proto.Status, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running {
+		return nil, ErrNotRunning
+	}
+
+	// A deadline the caller chose, kept by closing the pipe rather than by
+	// leaving a goroutine reading a socket nobody is waiting for. An engine
+	// that has stopped answering is not one to keep talking to.
+	if deadline, ok := ctx.Deadline(); ok {
+		type deadliner interface{ SetReadDeadline(time.Time) error }
+		if d, ok := s.stdout.(deadliner); ok {
+			_ = d.SetReadDeadline(deadline)
+			defer func() { _ = d.SetReadDeadline(time.Time{}) }()
+		}
+	}
+
+	if err := proto.WriteFrame(s.stdin, proto.CommandStatus); err != nil {
+		return nil, fmt.Errorf("asking the engine for its status: %w", err)
+	}
+	var report proto.Report
+	if err := proto.ReadFrame(s.stdout, &report); err != nil {
+		return nil, fmt.Errorf("reading the engine's status: %w", err)
+	}
+	switch {
+	case report.Failed != nil:
+		return nil, fmt.Errorf("the engine refused: %s", report.Failed.Detail)
+	case report.Status == nil:
+		// An empty report is not an answer, and treating it as one would put
+		// zeroes on a diagnostic screen as though they were measurements.
+		return nil, errors.New("the engine sent a report with nothing in it")
+	}
+	return report.Status, nil
 }
 
 // Hello returns the engine's Hello, or nil if the handshake has not completed.

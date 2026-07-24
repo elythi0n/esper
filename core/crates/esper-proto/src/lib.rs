@@ -12,7 +12,8 @@ pub mod codes;
 pub mod cursor;
 pub mod frame;
 pub mod input;
-pub mod message;
+pub mod local;
+mod message;
 pub mod replay;
 
 // Glob re-exports, deliberately.
@@ -33,6 +34,7 @@ pub use codes::*;
 pub use cursor::*;
 pub use frame::*;
 pub use input::*;
+pub use local::*;
 pub use message::*;
 pub use replay::*;
 

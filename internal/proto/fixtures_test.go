@@ -84,3 +84,83 @@ func TestHelloFieldOrderIsLocked(t *testing.T) {
 		last = at
 	}
 }
+
+// expectedStatus mirrors the Rust side's `expected_status` in
+// core/crates/esper-proto/tests/fixtures.rs. Both must describe the same
+// value, and the fixture is what makes disagreeing a failure.
+func expectedStatus() Report {
+	broker := "broker.example.com:7443"
+	return Report{Status: &Status{
+		Engine:   "0.0.0",
+		Capture:  Capability{Available: true, Detail: "x11"},
+		Encoder:  Capability{Available: false, Detail: "openh264 starts and cannot encode"},
+		Input:    Capability{Available: true, Detail: "x11 xtest: in use"},
+		Overlays: []string{"wg0", "tailscale0"},
+		MDNS:     true,
+		Broker:   &broker,
+		Paired:   3,
+	}}
+}
+
+func TestFixtureStatusDecodesToExpectedValue(t *testing.T) {
+	var got Report
+	if err := ReadFrame(bytes.NewReader(fixture(t, "status_report.cbor")), &got); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	want := expectedStatus()
+	if got.Status == nil {
+		t.Fatalf("decoded %+v, want a status report", got)
+	}
+	if got.Failed != nil {
+		t.Fatalf("a status report decoded as a failure as well: %+v", got)
+	}
+	g, w := *got.Status, *want.Status
+	if g.Engine != w.Engine || g.MDNS != w.MDNS || g.Paired != w.Paired {
+		t.Fatalf("status decoded to %+v, want %+v", g, w)
+	}
+	if g.Capture != w.Capture || g.Encoder != w.Encoder || g.Input != w.Input {
+		t.Fatalf("capabilities decoded to %+v, want %+v", g, w)
+	}
+	if strings.Join(g.Overlays, ",") != strings.Join(w.Overlays, ",") {
+		t.Fatalf("overlays decoded to %v, want %v", g.Overlays, w.Overlays)
+	}
+	if g.Broker == nil || *g.Broker != *w.Broker {
+		t.Fatalf("broker decoded to %v, want %v", g.Broker, *w.Broker)
+	}
+}
+
+// The same contract as TestWireByteCompatibility, for the channel that never
+// leaves the machine. It drifts just as silently.
+func TestStatusReportByteCompatibility(t *testing.T) {
+	want := fixture(t, "status_report.cbor")
+
+	var decoded Report
+	if err := ReadFrame(bytes.NewReader(want), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := WriteFrame(&out, decoded); err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Fatalf("re-encoded bytes differ from the fixture\n got: %s\nwant: %s",
+			hex.EncodeToString(out.Bytes()), hex.EncodeToString(want))
+	}
+}
+
+// A command is a bare string on the wire, and must stay one: the Rust enum's
+// variants carry nothing, and an externally tagged enum represents those as
+// strings rather than maps.
+func TestCommandIsAString(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteFrame(&out, CommandStatus); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	// 4 bytes of length, then a CBOR text string of 6 characters: 0x66.
+	body := out.Bytes()[4:]
+	if len(body) == 0 || body[0] != 0x66 {
+		t.Fatalf("a command encoded to %s, which is not a six-character string",
+			hex.EncodeToString(body))
+	}
+}

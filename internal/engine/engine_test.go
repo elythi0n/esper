@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,4 +236,118 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// Status is the first command the seam carries, and the engine answers it by
+// probing rather than by reporting what it was built with.
+func TestStatusReportsWhatThisMachineCanDo(t *testing.T) {
+	s, err := New(Options{Path: engineBinary(t)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.Start(ctx, controlPlaneHello()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	status, err := s.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	// Asserted on shape, not on outcome: whether this machine has a screen
+	// depends on whether it has a screen, and a test that demanded one would
+	// fail on every server this product exists for.
+	if status.Engine == "" {
+		t.Error("the engine did not say what version it is")
+	}
+	for name, c := range map[string]proto.Capability{
+		"capture": status.Capture,
+		"encoder": status.Encoder,
+		"input":   status.Input,
+	} {
+		if c.Detail == "" {
+			t.Errorf("%s answered with no detail — the useful half of a no is why", name)
+		}
+	}
+	// The encoder is the one capability that needs nothing from the machine
+	// but a CPU, so it is the one that can be asserted — and what is asserted
+	// is the evidence rather than the verdict. A report that declared the
+	// encoder working without running it would set the same boolean.
+	if !status.Encoder.Available {
+		t.Errorf("the encoder could not encode a frame: %s", status.Encoder.Detail)
+	}
+	if !strings.Contains(status.Encoder.Detail, "bytes for one keyframe") {
+		t.Errorf("the encoder answered %q, which is not the size of a frame it encoded",
+			status.Encoder.Detail)
+	}
+}
+
+// The channel has no message identifiers, so the second exchange is the one
+// that proves the first left the reader in the right place.
+func TestStatusCanBeAskedTwice(t *testing.T) {
+	s, err := New(Options{Path: engineBinary(t)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.Start(ctx, controlPlaneHello()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	first, err := s.Status(ctx)
+	if err != nil {
+		t.Fatalf("first Status: %v", err)
+	}
+	second, err := s.Status(ctx)
+	if err != nil {
+		t.Fatalf("second Status: %v", err)
+	}
+	if first.Engine != second.Engine {
+		t.Errorf("two answers disagreed about the engine: %q then %q", first.Engine, second.Engine)
+	}
+}
+
+func TestStatusNeedsARunningEngine(t *testing.T) {
+	s, err := New(Options{Path: engineBinary(t)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Status(context.Background()); !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("Status without a started engine = %v, want ErrNotRunning", err)
+	}
+}
+
+// Everything the engine writes to stderr is attributed and bounded.
+//
+// Attributed, because a C library's warning that lands in the middle of a
+// report with nothing to say where it came from is worse than no warning.
+// Bounded, because a process printing a megabyte without a newline must not be
+// able to make the supervisor allocate for it.
+func TestEngineOutputIsRelayedWithItsOrigin(t *testing.T) {
+	var lines []string
+	s, err := New(Options{Path: engineBinary(t), Log: func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	s.relay(strings.NewReader("first\n\nsecond\n" + strings.Repeat("x", maxLogLine*2) + "\n"))
+
+	if len(lines) < 2 {
+		t.Fatalf("relayed %d lines, want at least the two non-empty ones: %v", len(lines), lines)
+	}
+	if lines[0] != "engine: first" || lines[1] != "engine: second" {
+		t.Errorf("relayed %v, want each line attributed to the engine", lines[:2])
+	}
+	for _, l := range lines {
+		if len(l) > maxLogLine+len("engine: ") {
+			t.Errorf("a relayed line was %d bytes, which is unbounded", len(l))
+		}
+	}
 }

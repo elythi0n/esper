@@ -7,7 +7,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::codes::Reason;
-use serde_bytes;
 
 /// Which side of a session a peer is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
