@@ -447,3 +447,47 @@ fn refusals_are_recorded_too() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The tag a program branches on and the tag serde writes are the same word.
+///
+/// `Event::tag` is written by hand, and the serialised name comes from serde.
+/// Two spellings of one thing is exactly the drift that makes a log somebody
+/// greps disagree with a list somebody reads.
+#[test]
+#[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+fn every_tag_is_the_name_serde_writes() {
+    for ev in variants() {
+        let json = serde_json::to_value(&ev).expect("encode");
+        let written = json
+            .get("event")
+            .and_then(|v| v.as_str())
+            .expect("every event carries its tag");
+        assert_eq!(ev.tag(), written, "{ev:?}");
+    }
+}
+
+/// Every event says something, and says it without the session in it.
+#[test]
+#[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+fn every_event_renders_a_line_a_person_can_read() {
+    for ev in variants() {
+        let line = ev.detail();
+        assert!(!line.is_empty(), "{ev:?} rendered nothing");
+        // The same screen the entries themselves get: a rendering is another
+        // place session content could arrive, and it is read by more people
+        // than the raw log is.
+        for forbidden in [
+            "keystroke",
+            "stdin",
+            "stdout",
+            "typed",
+            "traffic",
+            "content",
+        ] {
+            assert!(
+                !line.contains(forbidden),
+                "the rendering of {ev:?} contains {forbidden:?}: {line}"
+            );
+        }
+    }
+}

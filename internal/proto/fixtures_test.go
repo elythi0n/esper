@@ -164,3 +164,78 @@ func TestCommandIsAString(t *testing.T) {
 			hex.EncodeToString(body))
 	}
 }
+
+// expectedSessions mirrors the Rust side's `expected_sessions`.
+func expectedSessions() Report {
+	list := []Happening{
+		{
+			At:     1756700000,
+			Peer:   "giraffe tapestry geyser rifle jersey domain razor oboe",
+			Key:    "be41344cf00e55422005b232a03d3a0d192df96c55b0fe9ba39f4a0791376a4c",
+			Device: "laptop",
+			Event:  "session_opened",
+			Detail: "session opened over direct, granted view, control",
+		},
+		{
+			At:     1756700042,
+			Peer:   "giraffe tapestry geyser rifle jersey domain razor oboe",
+			Key:    "be41344cf00e55422005b232a03d3a0d192df96c55b0fe9ba39f4a0791376a4c",
+			Device: "",
+			Event:  "session_closed",
+			Detail: "session ended after 42 seconds, the session ended",
+		},
+	}
+	return Report{Sessions: &list}
+}
+
+func TestFixtureSessionsDecodesToExpectedValue(t *testing.T) {
+	var got Report
+	if err := ReadFrame(bytes.NewReader(fixture(t, "sessions_report.cbor")), &got); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if got.Sessions == nil {
+		t.Fatalf("decoded %+v, want a list of sessions", got)
+	}
+	want := *expectedSessions().Sessions
+	if len(*got.Sessions) != len(want) {
+		t.Fatalf("decoded %d lines, want %d", len(*got.Sessions), len(want))
+	}
+	for i, g := range *got.Sessions {
+		if g != want[i] {
+			t.Errorf("line %d decoded to %+v, want %+v", i, g, want[i])
+		}
+	}
+}
+
+func TestSessionsReportByteCompatibility(t *testing.T) {
+	want := fixture(t, "sessions_report.cbor")
+
+	var decoded Report
+	if err := ReadFrame(bytes.NewReader(want), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := WriteFrame(&out, decoded); err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Fatalf("re-encoded bytes differ from the fixture\n got: %s\nwant: %s",
+			hex.EncodeToString(out.Bytes()), hex.EncodeToString(want))
+	}
+}
+
+// The command carrying a field is a one-key map, not a string — the shape an
+// externally tagged enum gives a variant with contents.
+func TestSessionsCommandIsAMap(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteFrame(&out, AskForSessions(20)); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	body := out.Bytes()[4:]
+	// 0xa1: a map with one pair.
+	if len(body) == 0 || body[0] != 0xa1 {
+		t.Fatalf("a sessions command encoded to %s, which is not a one-key map",
+			hex.EncodeToString(body))
+	}
+}

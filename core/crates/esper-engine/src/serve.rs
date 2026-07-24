@@ -54,7 +54,59 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn answer(command: &Command) -> Report {
     match command {
         Command::Status => Report::Status(status()),
+        Command::Sessions { most } => sessions(*most),
     }
+}
+
+/// The most lines of history the engine will read out, whatever was asked for.
+///
+/// A control plane asking for everything must not be able to make this read a
+/// year of log into memory — and nobody scrolls past a few hundred lines of
+/// anything.
+const MOST_HAPPENINGS: usize = 500;
+
+/// What has happened on this machine lately, most recent last.
+fn sessions(most: u32) -> Report {
+    let path = match crate::paths::audit_log() {
+        Ok(p) => p,
+        Err(e) => return Report::Failed { detail: e },
+    };
+    let entries = match esper_audit::Log::at(path).read() {
+        Ok(entries) => entries,
+        // A log that cannot be read is worth saying rather than an empty list
+        // that reads as "nothing has ever happened here".
+        Err(e) => {
+            return Report::Failed {
+                detail: e.to_string(),
+            };
+        }
+    };
+
+    // The names are looked up once for the whole list rather than per line:
+    // the store is small, and reading it fourteen times to render fourteen
+    // lines is the kind of thing that is fine until somebody has a thousand.
+    let store = crate::paths::devices().map(|(store, _)| store).ok();
+
+    let most = (most as usize).min(MOST_HAPPENINGS);
+    let from = entries.len().saturating_sub(most);
+    Report::Sessions(
+        entries
+            .get(from..)
+            .unwrap_or(&[])
+            .iter()
+            .map(|entry| esper_proto::Happening {
+                at: entry.at,
+                peer: entry.peer.clone(),
+                key: entry.peer_key.clone(),
+                event: entry.event.tag().to_owned(),
+                detail: entry.event.detail(),
+                device: store
+                    .as_ref()
+                    .and_then(|store| named(store, &entry.peer_key))
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    )
 }
 
 /// What this machine can actually do, established by trying it.
@@ -82,6 +134,20 @@ fn status() -> Status {
             .map(|(store, _)| u32::try_from(store.iter().count()).unwrap_or(u32::MAX))
             .unwrap_or(0),
     }
+}
+
+/// What the device with this key is called now, if it is still paired.
+fn named(store: &esper_crypto::DeviceStore, key_hex: &str) -> Option<String> {
+    store
+        .iter()
+        .find(|d| {
+            d.public_key
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+                == key_hex
+        })
+        .map(|d| d.name.clone())
 }
 
 /// Open a capturer and say what it turned out to be.

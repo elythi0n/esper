@@ -924,6 +924,28 @@ except OSError:
         kill "$service_pid" 2>/dev/null || true
       fi
 
+      # **What has happened on this machine.** The audit log is a file of JSON
+      # nobody reads with `jq`, and a record nobody reads is a record that is not
+      # doing its job. This is the log rendered, over the same seam as `doctor`.
+      echo "  — asking what has happened on this machine"
+      out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        "$BIN/esper" sessions 2>/dev/null || true)
+      if printf '%s' "$out" | grep -q 'session opened over'; then
+        printf '  ✓ sessions renders the audit log as lines a person reads\n'
+      else
+        printf '  ✗ sessions showed nothing after a suite of sessions\n'
+        printf '%s\n' "$out" | sed 's/^/      /'
+        fail=1
+      fi
+      # It says which question it is answering. A list that quietly omitted a
+      # session in progress would be worse than one that says it only has history.
+      if printf '%s' "$out" | grep -q 'not what is happening now'; then
+        printf '  ✓ and says it is history rather than what is happening now\n'
+      else
+        printf '  ✗ sessions did not say what it was showing\n'
+        fail=1
+      fi
+
       # **A revocation has to reach a session that is already open.** One that
       # waits for the revoked device to choose to leave is a request, not a
       # revocation — and this is the only test that can catch it, because the

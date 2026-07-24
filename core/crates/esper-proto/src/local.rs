@@ -20,6 +20,35 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One line of what has happened on this machine.
+///
+/// A rendering of an audit entry, not the entry itself. The audit vocabulary
+/// is the engine's and it grows; mirroring the whole of it in a second
+/// language would be two enums to keep in step for the sake of one screen.
+/// What crosses the seam is what a person needs to read: when, who, what kind
+/// of thing, and one line of specifics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Happening {
+    /// Unix seconds.
+    pub at: u64,
+    /// The peer's fingerprint in the word form a person can compare against
+    /// what a device list shows them.
+    pub peer: String,
+    /// The peer's key as hex, so a line can be matched to a device exactly.
+    pub key: String,
+    /// What that device is called **now**, or empty if it is not paired any
+    /// more. The log records what happened; the name is looked up when the
+    /// line is read, so an unpaired device reads as one rather than as a name
+    /// that no longer means anything.
+    pub device: String,
+    /// What kind of thing happened, as the audit log's own tag. Stable, and
+    /// safe to branch on: an unknown one is printed rather than dropped.
+    pub event: String,
+    /// The specifics, in one line. Rendered here because the vocabulary lives
+    /// here.
+    pub detail: String,
+}
+
 /// What the control plane asks the engine to do.
 ///
 /// Tagged, and it will stay tagged: a channel whose messages are distinguished
@@ -34,6 +63,17 @@ pub enum Command {
     /// reporting what it was built with: an encoder that is compiled in and
     /// cannot start is the failure this exists to find.
     Status,
+    /// What has happened on this machine lately?
+    ///
+    /// Answered with [`Report::Sessions`], most recent last — the order a
+    /// person reading a log expects, and the order a terminal leaves at the
+    /// bottom of the screen.
+    Sessions {
+        /// How many lines at most. Bounded by the engine as well: a control
+        /// plane asking for everything must not be able to make it read a
+        /// year of log into memory.
+        most: u32,
+    },
 }
 
 /// What the engine says back.
@@ -42,6 +82,8 @@ pub enum Command {
 pub enum Report {
     /// The answer to [`Command::Status`].
     Status(Status),
+    /// The answer to [`Command::Sessions`], most recent last.
+    Sessions(Vec<Happening>),
     /// The command could not be carried out, and why.
     ///
     /// A sentence rather than a code: these are read by a person running

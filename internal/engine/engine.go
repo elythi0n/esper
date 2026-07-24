@@ -227,12 +227,35 @@ func (s *Supervisor) handshake(local proto.Hello) (proto.Hello, error) {
 // read the other's answer, and adding identifiers to solve a problem that one
 // mutex solves is how a local pipe grows a protocol.
 func (s *Supervisor) Status(ctx context.Context) (*proto.Status, error) {
+	report, err := s.ask(ctx, proto.CommandStatus)
+	if err != nil {
+		return nil, err
+	}
+	if report.Status == nil {
+		// An empty report is not an answer, and treating it as one would put
+		// zeroes on a diagnostic screen as though they were measurements.
+		return nil, errors.New("the engine answered something other than a status")
+	}
+	return report.Status, nil
+}
+
+// ask is exchange with the lock taken, for callers that are whole commands.
+func (s *Supervisor) ask(ctx context.Context, command any) (*proto.Report, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.running {
 		return nil, ErrNotRunning
 	}
+	return s.exchange(ctx, command)
+}
 
+// exchange sends one command and reads one report. The caller holds the lock.
+//
+// **The lock is held across the whole exchange**, deliberately. This is a
+// request/response channel with no message identifiers: two callers
+// interleaving would each read the other's answer, and adding identifiers to
+// solve what one mutex solves is how a local pipe grows a protocol.
+func (s *Supervisor) exchange(ctx context.Context, command any) (*proto.Report, error) {
 	// A deadline the caller chose, kept by closing the pipe rather than by
 	// leaving a goroutine reading a socket nobody is waiting for. An engine
 	// that has stopped answering is not one to keep talking to.
@@ -244,22 +267,36 @@ func (s *Supervisor) Status(ctx context.Context) (*proto.Status, error) {
 		}
 	}
 
-	if err := proto.WriteFrame(s.stdin, proto.CommandStatus); err != nil {
-		return nil, fmt.Errorf("asking the engine for its status: %w", err)
+	if err := proto.WriteFrame(s.stdin, command); err != nil {
+		return nil, fmt.Errorf("asking the engine: %w", err)
 	}
 	var report proto.Report
 	if err := proto.ReadFrame(s.stdout, &report); err != nil {
-		return nil, fmt.Errorf("reading the engine's status: %w", err)
+		return nil, fmt.Errorf("reading the engine's answer: %w", err)
 	}
-	switch {
-	case report.Failed != nil:
+	if report.Failed != nil {
 		return nil, fmt.Errorf("the engine refused: %s", report.Failed.Detail)
-	case report.Status == nil:
-		// An empty report is not an answer, and treating it as one would put
-		// zeroes on a diagnostic screen as though they were measurements.
+	}
+	if report.IsEmpty() {
 		return nil, errors.New("the engine sent a report with nothing in it")
 	}
-	return report.Status, nil
+	return &report, nil
+}
+
+// Sessions asks the engine what has happened on this machine lately, most
+// recent last.
+//
+// The same exchange as Status and the same reason for the lock: one channel,
+// no message identifiers.
+func (s *Supervisor) Sessions(ctx context.Context, most uint32) ([]proto.Happening, error) {
+	report, err := s.ask(ctx, proto.AskForSessions(most))
+	if err != nil {
+		return nil, err
+	}
+	if report.Sessions == nil {
+		return nil, errors.New("the engine answered something other than a list of sessions")
+	}
+	return *report.Sessions, nil
 }
 
 // Hello returns the engine's Hello, or nil if the handshake has not completed.

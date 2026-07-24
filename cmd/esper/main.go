@@ -9,8 +9,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +45,8 @@ func run(args []string) int {
 		return cmdVersion(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
+	case "sessions":
+		return cmdSessions(args[1:])
 	case "broker":
 		return handOff("esper-broker", args[1:])
 	default:
@@ -139,11 +143,7 @@ func cmdDoctor(_ []string) int {
 	// Engine output goes to stderr with its origin on it, so the report on
 	// stdout stays a report — `esper doctor > file` should not have a codec's
 	// warning in the middle of it.
-	sup, err := engine.New(engine.Options{
-		Log: func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, format+"\n", args...)
-		},
-	})
+	sup, err := engine.New(engine.Options{Log: logToStderr})
 	if err != nil {
 		fmt.Printf("  ✗ %v\n", err)
 		fmt.Println()
@@ -261,6 +261,96 @@ func otherBinariesOnPath(name string) []string {
 	return found
 }
 
+// cmdSessions prints what has happened on this machine.
+//
+// Recent, from the audit log. **Not live** — this machine's host runs as its
+// own process today and nothing here can see inside it, and a list that
+// silently omitted a session in progress would be worse than one that says
+// which question it is answering.
+func cmdSessions(args []string) int {
+	most := uint32(20)
+	if len(args) > 0 {
+		n, err := strconv.ParseUint(args[0], 10, 32)
+		if err != nil || n == 0 {
+			fmt.Fprintf(os.Stderr, "esper sessions: %q is not a number of lines\n", args[0])
+			return 1
+		}
+		most = uint32(n)
+	}
+
+	sup, err := engine.New(engine.Options{Log: logToStderr})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "esper sessions: %v\n", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sup.Start(ctx, proto.NewHello(proto.RoleController, nil, hostname(), version)); err != nil {
+		fmt.Fprintf(os.Stderr, "esper sessions: %v\n", err)
+		return 1
+	}
+	defer func() { _ = sup.Stop() }()
+
+	happenings, err := sup.Sessions(ctx, most)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "esper sessions: %v\n", err)
+		return 1
+	}
+
+	fmt.Println("🗂  esper sessions")
+	fmt.Println()
+	if len(happenings) == 0 {
+		fmt.Println("  nothing has happened on this machine yet")
+		fmt.Println()
+		fmt.Println("  Sessions, pairings and refusals are recorded as they happen.")
+		return 0
+	}
+	for _, h := range happenings {
+		fmt.Printf("  %s  %s  %s\n", when(h.At), who(h), h.Detail)
+	}
+	fmt.Println()
+	fmt.Println("  This is what was recorded, not what is happening now: a session in")
+	fmt.Println("  progress appears here when it ends.")
+	return 0
+}
+
+// who names the device a line is about.
+//
+// The name it has now, with enough of its key to tell two of the same name
+// apart — and where a device has been unpaired since, the key alone, because
+// the honest answer to "who was that" is that this machine no longer knows.
+func who(h proto.Happening) string {
+	short := h.Key
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	if h.Device == "" {
+		return fmt.Sprintf("%-14s", short)
+	}
+	name := h.Device
+	if len(name) > 14 {
+		name = name[:14]
+	}
+	return fmt.Sprintf("%-14s", name)
+}
+
+// when renders a timestamp in local time, to the minute.
+//
+// To the minute because that is the resolution somebody reads a log at, and
+// local because the question is "was that me, an hour ago".
+func when(at uint64) string {
+	if at > math.MaxInt64 {
+		return "—"
+	}
+	return time.Unix(int64(at), 0).Format("2006-01-02 15:04")
+}
+
+// logToStderr sends supervision events and the engine's own output to stderr,
+// so a report on stdout stays a report.
+func logToStderr(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
 func hostname() string {
 	n, err := os.Hostname()
 	if err != nil {
@@ -298,6 +388,7 @@ This machine
   config             show every setting and where its value came from
   identity           print this device's fingerprint
   doctor             check what this machine can do, and what it cannot
+  sessions [n]       what has happened here: sessions, pairings, refusals
   broker             run an introducer for your own machines
   version [--json]   print the release, build time and protocol version
   help               this text

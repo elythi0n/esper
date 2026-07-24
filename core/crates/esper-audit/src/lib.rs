@@ -222,6 +222,136 @@ impl Entry {
     }
 }
 
+impl Event {
+    /// The tag this event goes by in the log.
+    ///
+    /// The same string serde writes, deliberately: a log line somebody greps
+    /// for and a value a program branches on must not be two different words
+    /// for one thing.
+    #[must_use]
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            Self::Paired { .. } => "paired",
+            Self::Unpaired { .. } => "unpaired",
+            Self::Revoked { .. } => "revoked",
+            Self::PermissionsChanged { .. } => "permissions_changed",
+            Self::SessionOpened { .. } => "session_opened",
+            Self::SessionClosed { .. } => "session_closed",
+            Self::TerminalOpened => "terminal_opened",
+            Self::TerminalClosed { .. } => "terminal_closed",
+            Self::TerminalParked { .. } => "terminal_parked",
+            Self::TerminalResumed { .. } => "terminal_resumed",
+            Self::ForwardOpened { .. } => "forward_opened",
+            Self::ForwardClosed { .. } => "forward_closed",
+            Self::ForwardRefused { .. } => "forward_refused",
+            Self::Refused { .. } => "refused",
+        }
+    }
+
+    /// One line of specifics, for somebody reading a list.
+    ///
+    /// **Never the contents of a session** — the same rule as the log itself.
+    /// What a person needs from a line is what happened and to what: which
+    /// permissions, which target, how long, why.
+    #[must_use]
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Paired { name } => format!("paired with {name}"),
+            Self::Unpaired { name } => format!("unpaired {name}"),
+            Self::Revoked { sessions_closed } => match sessions_closed {
+                0 => "revoked, with nothing connected".to_owned(),
+                1 => "revoked, ending 1 session".to_owned(),
+                n => format!("revoked, ending {n} sessions"),
+            },
+            Self::PermissionsChanged { granted } => format!("may now {}", names(granted)),
+            Self::SessionOpened { granted, tier } => {
+                format!("session opened over {tier}, granted {}", names(granted))
+            }
+            Self::SessionClosed {
+                duration_secs,
+                reason,
+            } => format!("session ended after {}, {reason}", how_long(*duration_secs)),
+            Self::TerminalOpened => "a shell started".to_owned(),
+            Self::TerminalClosed {
+                duration_secs,
+                exit_code,
+                exit_signal,
+            } => {
+                let how = match (exit_code, exit_signal) {
+                    (Some(c), _) => format!("code {c}"),
+                    (None, Some(s)) => format!("signal {s}"),
+                    (None, None) => "no status".to_owned(),
+                };
+                format!("the shell ended after {} ({how})", how_long(*duration_secs))
+            }
+            Self::TerminalParked {
+                session,
+                deliberate,
+            } => format!(
+                "the shell was left running ({}), session {}",
+                if *deliberate {
+                    "detached"
+                } else {
+                    "link dropped"
+                },
+                short(session)
+            ),
+            Self::TerminalResumed {
+                session,
+                parked_secs,
+                lost,
+            } => format!(
+                "came back to session {} after {}, {lost} bytes of output lost",
+                short(session),
+                how_long(*parked_secs)
+            ),
+            Self::ForwardOpened { target } => format!("forwarding to {target}"),
+            Self::ForwardClosed {
+                target,
+                duration_secs,
+                sent,
+                received,
+            } => format!(
+                "the forward to {target} ended after {}, {sent} up and {received} down",
+                how_long(*duration_secs)
+            ),
+            Self::ForwardRefused { target, reason } => {
+                format!("refused a forward to {target}: {reason}")
+            }
+            Self::Refused { reason } => format!("refused: {reason}"),
+        }
+    }
+}
+
+/// Permission names, for a sentence.
+fn names(granted: &[Permission]) -> String {
+    if granted.is_empty() {
+        return "nothing".to_owned();
+    }
+    granted
+        .iter()
+        .map(|p| p.name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A duration a person reads rather than counts.
+fn how_long(secs: u64) -> String {
+    match secs {
+        0 => "no time at all".to_owned(),
+        1 => "1 second".to_owned(),
+        s if s < 60 => format!("{s} seconds"),
+        s if s < 3600 => format!("{} minutes", s / 60),
+        s => format!("{} hours", s / 3600),
+    }
+}
+
+/// Enough of a session identifier to recognise, since the whole thing is
+/// thirty-two characters nobody reads.
+fn short(session: &str) -> String {
+    session.chars().take(8).collect()
+}
+
 /// Seconds since the epoch, or 0 if the clock is before it.
 fn unix_now() -> u64 {
     std::time::SystemTime::now()

@@ -53,6 +53,24 @@ type Status struct {
 	Paired uint32  `cbor:"paired"`
 }
 
+// Happening is one line of what has happened on this machine.
+//
+// A rendering of an audit entry, not the entry itself: the audit vocabulary is
+// the engine's and it grows, and mirroring the whole of it here would be two
+// enums to keep in step for the sake of one screen.
+type Happening struct {
+	At   uint64 `cbor:"at"`
+	Peer string `cbor:"peer"`
+	Key  string `cbor:"key"`
+	// Device is what that device is called now, or empty if it is not paired
+	// any more — looked up when the line is read, so a device somebody
+	// unpaired reads as one rather than as a name that no longer means
+	// anything.
+	Device string `cbor:"device"`
+	Event  string `cbor:"event"`
+	Detail string `cbor:"detail"`
+}
+
 // Failure is the engine saying it could not carry a command out.
 //
 // A sentence rather than a code: these are read by a person running
@@ -67,10 +85,30 @@ type Failure struct {
 // struct of pointers with omitempty and exactly one of them set. Treating it
 // as a map[string]any would decode anything and tell the caller nothing.
 type Report struct {
-	Status *Status  `cbor:"status,omitempty"`
-	Failed *Failure `cbor:"failed,omitempty"`
+	Status   *Status      `cbor:"status,omitempty"`
+	Sessions *[]Happening `cbor:"sessions,omitempty"`
+	Failed   *Failure     `cbor:"failed,omitempty"`
 }
 
 // Which reports the engine actually sent, for a caller that must not treat an
 // empty report as an answer.
-func (r Report) IsEmpty() bool { return r.Status == nil && r.Failed == nil }
+func (r Report) IsEmpty() bool {
+	return r.Status == nil && r.Sessions == nil && r.Failed == nil
+}
+
+// SessionsCommand asks for the last `most` things that happened here.
+//
+// A struct because the Rust variant carries a field, which an externally
+// tagged enum represents as a one-key map — the same shape as Report.
+type SessionsCommand struct {
+	Sessions struct {
+		Most uint32 `cbor:"most"`
+	} `cbor:"sessions"`
+}
+
+// AskForSessions builds the command asking for the last `most` lines.
+func AskForSessions(most uint32) SessionsCommand {
+	var c SessionsCommand
+	c.Sessions.Most = most
+	return c
+}
