@@ -306,7 +306,7 @@ cleanup_terminal() {
   for pid in "${host_pid:-}" "${via_host:-}" "${broker_pid:-}" "${invite_pid:-}" \
              "${named_host:-}" "${service_pid:-}" "${forward_pid:-}" \
              "${denied_pid:-}" "${private_host:-}" "${invited_host:-}" \
-             "${announcing:-}"; do
+             "${announcing:-}" "${supervised:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -945,6 +945,73 @@ except OSError:
         printf '  ✗ sessions did not say what it was showing\n'
         fail=1
       fi
+
+      # **The host comes back.** `esper host` is the one verb that runs for
+      # weeks on a machine nobody is looking at, so it is supervised rather
+      # than handed over: the difference between a crash that comes back and
+      # a crash discovered next Tuesday is a supervisor.
+      #
+      # Killed hard, because that is what a crash looks like. A `SIGTERM` is
+      # somebody asking it to stop, and starting it again over the top of a
+      # shutdown would be the bug.
+      echo "  — killing the engine under a supervised host"
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 60 "$BIN/esper" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/supervised.log" 2>&1 &
+      supervised=$!
+      for _ in $(seq 1 100); do
+        [ "$( { grep -c listening "$term_a/supervised.log" 2>/dev/null || true; } )" -ge 1 ] && break
+        sleep 0.1
+      done
+      # The engine is found by walking down from this supervisor rather than
+      # by name: other hosts are running by now, and killing the wrong one
+      # would make this pass for the wrong reason.
+      #
+      # Two levels, because `timeout` is holding the pid `$!` gave us and
+      # `esper` is its child. And the name is checked before anything is
+      # killed — the first version of this walked one level and killed the
+      # supervisor, which reads exactly like the engine failing to come back.
+      front_pid=$( { pgrep -P "$supervised" 2>/dev/null || true; } | head -1)
+      engine_pid=$( { pgrep -P "${front_pid:-0}" 2>/dev/null || true; } | head -1)
+      if [ -n "$engine_pid" ] && [ "$( { ps -p "$engine_pid" -o comm= 2>/dev/null || true; } )" != "esper-engine" ]; then
+        printf '  ✗ found %s under the supervisor, which is not the engine\n' "$engine_pid"
+        engine_pid=""
+        fail=1
+      fi
+      if [ -z "$engine_pid" ]; then
+        printf '  ✗ the supervisor started no engine\n'
+        sed 's/^/      /' "$term_a/supervised.log"
+        fail=1
+      else
+        kill -9 "$engine_pid" 2>/dev/null || true
+        came_back=""
+        for _ in $(seq 1 150); do
+          if [ "$( { grep -c listening "$term_a/supervised.log" 2>/dev/null || true; } )" -ge 2 ]; then
+            came_back=yes
+            break
+          fi
+          sleep 0.1
+        done
+        if [ -n "$came_back" ]; then
+          printf '  ✓ a crashed engine is started again, and says why\n'
+        else
+          printf '  ✗ the engine did not come back after being killed\n'
+          sed 's/^/      /' "$term_a/supervised.log"
+          fail=1
+        fi
+      fi
+      # And asking it to stop stops it, rather than restarting it over the top
+      # of its own shutdown.
+      kill "$supervised" 2>/dev/null || true
+      sleep 2
+      if kill -0 "$supervised" 2>/dev/null; then
+        printf '  ✗ the supervisor kept running after being asked to stop\n'
+        kill -9 "$supervised" 2>/dev/null || true
+        fail=1
+      else
+        printf '  ✓ and asking the supervisor to stop stops both\n'
+      fi
+      supervised=""
 
       # **A revocation has to reach a session that is already open.** One that
       # waits for the revoked device to choose to leave is a request, not a

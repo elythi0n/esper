@@ -49,6 +49,8 @@ func run(args []string) int {
 		return cmdSessions(args[1:])
 	case "broker":
 		return handOff("esper-broker", args[1:])
+	case "host":
+		return cmdHost(args[1:])
 	default:
 		if isEngineCommand(args[0]) {
 			return handOff("esper-engine", args)
@@ -65,6 +67,11 @@ func run(args []string) int {
 // through would turn a typo into the engine's error message about a command
 // `esper` never had, and would make the two programs' vocabularies drift
 // silently as either grew.
+//
+// Being in this list means the engine has the verb, not that the front door
+// hands it straight over: `host` is here and is supervised instead, because it
+// is the one verb that runs for weeks. One list with one meaning; the
+// dispatcher above decides what to do with each.
 var engineCommands = map[string]bool{
 	"identity": true,
 	"discover": true,
@@ -259,6 +266,31 @@ func otherBinariesOnPath(name string) []string {
 		found = append(found, p)
 	}
 	return found
+}
+
+// cmdHost runs the engine's host, and keeps it running.
+//
+// **The one verb that is supervised rather than handed over.** Everything else
+// is a person doing something for a minute; this one runs for weeks on a
+// machine nobody is looking at, and the difference between a crash that comes
+// back and a crash that is discovered next Tuesday is a supervisor.
+//
+// The engine keeps its own stdio: `esper host` prints a live report of what it
+// is serving, and putting that through a logger would turn a layout into a
+// transcript.
+func cmdHost(args []string) int {
+	sup, err := engine.New(engine.Options{Log: logToStderr})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "esper host: %v\n", err)
+		return 1
+	}
+	// The engine is told the name it was reached under like every other verb,
+	// so its messages say `esper` rather than the name of a binary.
+	if err := sup.Supervise(context.Background(), append([]string{"host"}, args...), engine.Watch{}); err != nil {
+		fmt.Fprintf(os.Stderr, "esper host: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // cmdSessions prints what has happened on this machine.
