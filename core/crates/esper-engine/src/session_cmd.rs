@@ -1750,8 +1750,19 @@ async fn serve(
             let now_sending = pump.config();
             if (now_sending.width, now_sending.height) != announced {
                 announced = (now_sending.width, now_sending.height);
+                // **Why, not just what.** Two different things lower a
+                // picture — this machine running out of CPU, and the
+                // controller asking for smaller frames because the link is
+                // losing them — and an operator told "the CPU budget moved"
+                // when it was the network goes looking in the wrong place.
+                let why = match pump.asked_ceiling() {
+                    Some(edge) if edge >= now_sending.width.max(now_sending.height) => {
+                        "the controller asked for smaller frames: it is losing them"
+                    }
+                    _ => "the CPU budget moved",
+                };
                 println!(
-                    "      now sending {}x{} (the CPU budget moved)",
+                    "      now sending {}x{} ({why})",
                     now_sending.width, now_sending.height
                 );
                 if to_controller
@@ -2654,6 +2665,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             }
         }
         let stats = link.stats();
+        let link_capped = link.link_ceiling();
         println!();
         // **Why it ended, in the vocabulary the protocol has for it.** Every
         // reason code used to be a failure, so a session ending normally
@@ -2748,6 +2760,14 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             jitter.worst_gap.as_secs_f64() * 1000.0,
             jitter.deadlines
         );
+        // **Why the picture was smaller than the screen.** A session that
+        // stepped down and never said so leaves somebody comparing a blurry
+        // window against a machine that was working perfectly well.
+        if let Some(edge) = link_capped {
+            println!(
+                "  link       asked for {edge} pixels on the long edge: frames were being lost"
+            );
+        }
         Ok(())
     })
 }

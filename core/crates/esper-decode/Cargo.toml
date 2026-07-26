@@ -38,6 +38,13 @@ linux-raw-sys = { version = "0.12", default-features = false, features = [
 # automatically a gap in the other.
 landlock = "0.4"
 
+# **The worker is this test binary, re-executed.** libtest owns `argv` and
+# would read the worker's argument as a test filter, so this target brings its
+# own `main` and dispatches the way the engine does.
+[[test]]
+name = "worker_recovery"
+harness = false
+
 [dev-dependencies]
 esper-capture.workspace = true
 esper-encode.workspace = true

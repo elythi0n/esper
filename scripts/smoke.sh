@@ -20,9 +20,15 @@ done
 
 expected_version=$(cat VERSION)
 
-go_version=$("$BIN/esper" version | head -1 | awk '{print $2}')
-eng_version=$("$BIN/esper-engine" version | head -1 | awk '{print $2}')
-brk_version=$("$BIN/esper-broker" version | head -1 | awk '{print $2}')
+# `awk NR==1` rather than `| head -1`, and the difference is a flake.
+#
+# `head` closes the pipe after the first line, and a Go program writing to a
+# closed pipe **dies of SIGPIPE** — which `pipefail` turns into the whole
+# script exiting 141 with nothing printed. It is a race with three short
+# lines, and it lost once here after passing all day. `awk` reads to the end.
+go_version=$("$BIN/esper" version | awk 'NR==1{print $2}')
+eng_version=$("$BIN/esper-engine" version | awk 'NR==1{print $2}')
+brk_version=$("$BIN/esper-broker" version | awk 'NR==1{print $2}')
 
 check "esper reports the VERSION file"        "$go_version"  "$expected_version"
 check "esper-engine reports the VERSION file" "$eng_version" "$expected_version"
@@ -340,7 +346,7 @@ else
 
   # Terminal is deliberately **not** a default permission, so it has to be
   # granted — which is the other half of what this checks.
-  fp=$( { ESPER_HOME="$term_a" "$BIN/esper-engine" devices | grep -oE '^  [0-9a-f]{8,}' || true; } | head -1 | tr -d ' ')
+  fp=$( { ESPER_HOME="$term_a" "$BIN/esper-engine" devices | grep -oE '^  [0-9a-f]{8,}' || true; } | awk 'NR==1{print}' | tr -d ' ')
   if [ -z "$fp" ]; then
     printf '  ✗ pairing left no device in the list\n'
     sed 's/^/      /' "$term_a/pair.log" "$term_b/pair.log"
@@ -606,7 +612,7 @@ else
           > "$term_b/first.log" 2>&1 || true
         # The device's name, as this machine recorded it at pairing.
         peer_name=$( { ESPER_HOME="$term_b" "$BIN/esper-engine" devices | grep -oE '^  [0-9a-f]{16}  .+' || true; } \
-          | head -1 | sed 's/^  [0-9a-f]*  //')
+          | awk 'NR==1{print}' | sed 's/^  [0-9a-f]*  //')
         out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
           timeout 60 "$BIN/esper-engine" connect "$peer_name" --seconds 1 --no-mdns 2>&1 || true)
         if printf '%s' "$out" | grep -q 'where it was last time'; then
@@ -1053,32 +1059,44 @@ print(s.getsockname()[1]); s.close()')
         # Anchored, and the last match: the skip notice says "reference
         # pictures are missing", which a looser pattern reads as a count.
         shown=$(printf '%s' "$out" | awk '/^  pictures /{n=$2} END{print n}')
+        not_shown=$(printf '%s' "$out" | awk '/^  pictures /{n=$4} END{print n}')
         asks=$(printf '%s' "$out" | awk '/^  frames /{k=$4} END{print k}')
         kill "$relay_pid" 2>/dev/null || true
         relay_pid=""
         kill "$small_host" 2>/dev/null || true
         small_host=""
-        # A number rather than "it did not crash": a session that showed one
-        # picture and then went black would pass any assertion about survival.
-        # **Two thresholds, and neither of them is a measurement.** How many
-        # pictures arrive depends on how loaded the machine is — the CPU
-        # ladder moves the resolution, and frame size is what decides whether
-        # loss is survivable — so this suite cannot measure that and does not
-        # try. The numbers are in the findings, taken on an idle machine.
+        # **A ratio, not a count.** How many pictures arrive depends on how
+        # loaded the machine is — the CPU ladder spends framerate first — so
+        # this suite cannot assert a number and does not try. The numbers are
+        # in the findings, taken on an idle machine.
         #
-        # What is asserted here is the two collapses: a session that shows
-        # *nothing*, and a request storm — both real, both stable to check on
-        # any machine. The bar on requests is deliberately far above what an
-        # unpaced controller produces in these conditions: it catches a
-        # storm, and what catches the *pace* being removed is the unit test
-        # that drives a clock rather than a suite that shares a CPU.
-        if [ -n "$shown" ] && [ "$shown" -gt 0 ]; then
-          printf '  ✓ %s pictures arrived through a link losing five per cent\n' "$shown"
+        # What load does *not* change is the share of what arrived that could
+        # be shown. A working session on this link shows three to fifteen
+        # times as many frames as it discards; a session whose decoder has
+        # stopped accepting keyframes discards six to twelve times more than
+        # it shows. So: more shown than not.
+        #
+        # This replaced `shown > 0`, which was written to be robust on a
+        # loaded runner and succeeded so thoroughly that it could no longer
+        # fail. A session showing eight frames of ninety, having refused every
+        # keyframe sent to it for six seconds, passed a check whose entire
+        # purpose was to catch a session that did not work.
+        if [ -n "$shown" ] && [ -n "$not_shown" ] && [ "$shown" -gt 0 ] &&
+          [ "$shown" -gt "$not_shown" ]; then
+          printf '  ✓ %s pictures shown and %s discarded: the session recovered from loss\n' \
+            "$shown" "$not_shown"
         else
-          printf '  ✗ a link at five per cent loss showed no pictures at all\n'
+          printf '  ✗ %s pictures shown against %s discarded at five per cent loss\n' \
+            "${shown:-no}" "${not_shown:-no}"
           printf '%s\n' "$out" | sed 's/^/      /'
           fail=1
         fi
+        # And the storm, which is the other collapse. The bar is deliberately
+        # far above what a paced controller produces here — four to nine — and
+        # far below what a session in trouble produced, which was sixty. What
+        # catches the pace being removed is a unit test that drives its own
+        # clock; what catches the framerate half of it is a test of the
+        # arithmetic, because no session can tell that one apart.
         if [ -n "$asks" ] && [ "$asks" -lt 40 ]; then
           printf '  ✓ and %s keyframes were asked for, not a request per loss\n' "$asks"
         else

@@ -23,10 +23,7 @@
 //! | Luma PSNR | the whole thing being subtly wrong in a way no single pixel reveals |
 //! | Dimensions survive | a resolution the decoder invented |
 
-use esper_capture::damage::Damage;
-use esper_capture::frame::{Frame, PixelFormat};
 use esper_capture::pattern::Pattern;
-use esper_capture::pool::Pixels;
 use esper_color::convert::{reference_yuv, whole_frame};
 use esper_color::{ColorSpace, I420};
 use esper_decode::decoder::{DecoderConfig, VideoDecoder};
@@ -34,25 +31,8 @@ use esper_decode::openh264::OpenH264Decoder;
 use esper_encode::encoder::{EncoderConfig, VideoEncoder};
 use esper_encode::openh264::OpenH264;
 
-/// Render the pattern into a frame, the way a capture backend would.
-fn captured(pattern: &Pattern, index: u64) -> Frame {
-    let (w, h) = (pattern.width(), pattern.height());
-    let format = PixelFormat::Bgrx8;
-    let bpp = format.bytes_per_pixel();
-    // A padded stride, because no real backend is tightly packed.
-    let stride = (w as usize) * bpp + 64;
-    let mut buf = vec![0u8; stride * h as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let [r, g, b] = pattern.pixel(x, y, index);
-            let at = y as usize * stride + x as usize * bpp;
-            buf[at] = b;
-            buf[at + 1] = g;
-            buf[at + 2] = r;
-        }
-    }
-    Frame::new(w, h, stride, format, Damage::Everything, Pixels::owned(buf)).expect("a valid frame")
-}
+mod common;
+use common::captured;
 
 /// One end-to-end pass.
 struct Pipeline {

@@ -177,6 +177,13 @@ pub struct HostPump {
 }
 
 impl HostPump {
+    /// What the controller has asked the picture to be capped at, if
+    /// anything. See [`esper_stream::HostStream::asked_ceiling`].
+    #[must_use]
+    pub const fn asked_ceiling(&self) -> Option<u32> {
+        self.stream.asked_ceiling()
+    }
+
     /// Run one turn.
     pub fn pump(&mut self, timeout: Duration) -> Result<HostStep, LinkError> {
         Ok(self.stream.step(timeout, &mut self.sink)?)

@@ -84,9 +84,21 @@ impl Default for DecoderConfig {
 
 /// What went wrong.
 ///
-/// Every variant is a reason to drop the stream rather than retry, except
-/// [`DecodeError::NeedMoreData`], which is not an error at all — see
-/// [`VideoDecoder::decode`].
+/// **Every variant is about one frame, and none of them ends the session.**
+/// The frame is dropped rather than retried — re-feeding the same bytes to the
+/// same C parser is how one parsing bug becomes a sustained one — and the
+/// receiver asks for a keyframe, which is the only thing that can put a
+/// decoder back in step.
+///
+/// This used to be stated the other way round, as a method that answered
+/// "fatal to the stream?" with an unconditional yes. Nothing called it, and
+/// the belief it recorded was wrong in a way that cost real pictures: the
+/// sandboxed worker acted on it, so the first frame whose reference had been
+/// lost — the ordinary event on any lossy link — ended the video for the rest
+/// of the session. See `tests/worker_recovery.rs`.
+///
+/// What *is* unrecoverable is the worker process being gone or out of step,
+/// which is not a decode error and is handled where it happens.
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     /// The packet is larger than [`MAX_PACKET`].
@@ -124,19 +136,6 @@ pub enum DecodeError {
     },
 }
 
-impl DecodeError {
-    /// Whether this stream can continue.
-    ///
-    /// Nothing here is recoverable, and saying so explicitly matters: a caller
-    /// that retried on a malformed packet would be feeding the same bytes to
-    /// the same C parser in a loop, which turns one parsing bug into a
-    /// sustained one.
-    #[must_use]
-    pub const fn is_fatal_to_the_stream(&self) -> bool {
-        true
-    }
-}
-
 /// Running totals, for the session HUD and the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DecodeStats {
@@ -152,6 +151,19 @@ pub struct DecodeStats {
     /// Worth counting separately: a session where this is non-zero is a
     /// session being sent things it did not ask for.
     pub refused: u64,
+    /// Frames the decoder looked at and could not decode.
+    ///
+    /// **Ordinary on a lossy link, and not fatal.** A frame whose reference
+    /// pictures were lost cannot be decoded and must not be concealed; the
+    /// answer is the keyframe the receiver asks for.
+    ///
+    /// Separate from `refused`, which is about packets that should never have
+    /// arrived at all — a session where *that* is non-zero is being sent
+    /// things it did not ask for, which is a different conversation. What a
+    /// person is told about this one travels with the frame, as the reason on
+    /// a skipped picture; this is the running total, and what the recovery
+    /// tests assert on.
+    pub undecodable: u64,
 }
 
 impl DecodeStats {
@@ -294,32 +306,6 @@ mod tests {
         let modest = 1280 * 720;
         assert!(check_size(1280, 720, modest).is_ok());
         assert!(check_size(1920, 1080, modest).is_err());
-    }
-
-    /// Retrying a malformed packet would feed the same bytes to the same C
-    /// parser in a loop, turning one parsing bug into a sustained one.
-    #[test]
-    fn every_failure_is_fatal_to_the_stream() {
-        let errors = [
-            DecodeError::PacketTooLarge { len: 1 },
-            DecodeError::PictureTooLarge {
-                width: 1,
-                height: 1,
-                max: 0,
-            },
-            DecodeError::ImpossiblePicture {
-                width: 0,
-                height: 0,
-            },
-            DecodeError::ShortPlane { needed: 2, got: 1 },
-            DecodeError::Backend {
-                backend: "test",
-                detail: "x".to_owned(),
-            },
-        ];
-        for e in errors {
-            assert!(e.is_fatal_to_the_stream(), "{e:?}");
-        }
     }
 
     #[test]

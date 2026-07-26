@@ -5,11 +5,11 @@
 //! # It asks for keyframes; it does not wait for them
 //!
 //! Loss is reported by the reassembler rather than hidden, and every report
-//! turns into a [`KeyframeRequest`](esper_proto::KeyframeRequest) for the
-//! caller to send. The requests are *coalesced*: a burst of loss produces one
-//! ask, not one per frame. A controller on a bad link that asked per frame
-//! would make the host send nothing but keyframes, which is the largest and
-//! most expensive kind of frame — turning a lossy link into an unusable one.
+//! turns into a [`KeyframeRequest`] for the caller to send. The requests are
+//! *coalesced*: a burst of loss produces one ask, not one per frame. A
+//! controller on a bad link that asked per frame would make the host send
+//! nothing but keyframes, which is the largest and most expensive kind of
+//! frame — turning a lossy link into an unusable one.
 //!
 //! # Frames it can prove complete but cannot decode
 //!
@@ -21,6 +21,13 @@
 //! decoder is a large C parser configured to refuse rather than conceal, and
 //! feeding it frames already known to be undecodable is strictly more
 //! attacker-shaped input for no benefit.
+//!
+//! **All of which assumes a keyframe can put the decoder back in step.** It
+//! could not, for a while: the decoder's own worker treated the first frame it
+//! could not decode as the end of the stream and refused every frame after it,
+//! so the ask this module makes was answered and then discarded a layer down.
+//! Worth knowing about from here, because nothing in this file can detect it —
+//! a session simply stops showing anything and goes on asking politely.
 
 use esper_decode::decoder::VideoDecoder;
 use esper_media::{Depacketizer, Reassembled};
@@ -46,17 +53,64 @@ pub enum Decoded {
     /// A frame was lost. A keyframe has been asked for.
     Lost { timestamp: u32, why: &'static str },
 }
-/// How often a keyframe may be asked for when nothing has said otherwise.
+/// The resolutions a controller will ask for when the link is losing frames.
 ///
-/// A conservative round trip: a caller that never sets a pace is one whose
-/// link is unknown, and on an unknown link the storm is the worse failure.
-const DEFAULT_PACE: std::time::Duration = std::time::Duration::from_millis(200);
+/// **Frame size is what decides whether loss is survivable.** A frame is given
+/// up on when any of its datagrams is missing, so a frame spanning three of
+/// them survives 5% loss 86% of the time and one spanning forty survives it
+/// 13% of the time. That arithmetic is the whole argument, and it is why the
+/// same five per cent that is a working session at 640x360 showed one picture
+/// at 1280x720 in the smoke test's own environment.
+///
+/// Coarse rungs, because each step has to be worth the reconfiguration it
+/// costs the encoder, and because a ladder with many rungs spends its time
+/// between them.
+const RUNGS: &[u32] = &[1920, 1280, 960, 640, 480, 320];
+
+/// How long a window of loss is judged over.
+const WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Frames lost in a window that mean the link cannot carry this frame size.
+///
+/// Two rather than one: a single lost frame is a packet, and a ladder that
+/// moved on one would spend a clean session stepping down and up.
+const LOSSES_TO_STEP_DOWN: u64 = 2;
+
+/// Clean windows before asking for more again.
+///
+/// **Down fast, up slow.** Stepping down costs a resolution somebody may not
+/// notice; stepping up too eagerly costs the collapse this ladder exists to
+/// prevent, and then costs it again a second later.
+const CLEAN_WINDOWS_TO_STEP_UP: u32 = 5;
+
+/// What to assume the round trip is until something measures it.
+///
+/// Conservative: a caller that never says is one whose link is unknown, and
+/// on an unknown link the storm is the worse failure.
+const UNKNOWN_ROUND_TRIP: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The floor, so a link measured at nothing still paces.
+///
+/// Rarely the binding constraint, because the pace also includes the time to
+/// make a frame — but a stream announcing a very high framerate is still
+/// entitled to a floor.
 const SHORTEST_PACE: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// The ceiling, so a bad measurement cannot leave a session black.
 const LONGEST_PACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long between frames at an announced framerate.
+///
+/// A ceiling on the rate is a floor on the interval, which is the direction
+/// that matters here: the question is the *soonest* a keyframe could arrive.
+/// A framerate of zero is not well-formed, but arithmetic that divides by it
+/// would be, so it falls back to the slowest interval this cares about.
+fn frame_interval(max_fps: u16) -> std::time::Duration {
+    if max_fps == 0 {
+        return LONGEST_PACE;
+    }
+    std::time::Duration::from_secs(1) / u32::from(max_fps)
+}
 
 /// Running totals, for the stats a session reports.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -91,10 +145,19 @@ pub struct ControllerStream {
     ///
     /// Coalesces the asking: a burst of loss produces one request.
     awaiting_keyframe: bool,
-    /// The soonest another keyframe may be asked for, and how often at most.
-    /// See [`ControllerStream::set_recovery_pace`].
-    pace: std::time::Duration,
+    /// What the link's round trip was measured at.
+    /// See [`ControllerStream::set_round_trip`].
+    round_trip: std::time::Duration,
+    /// The soonest the host could produce the next frame, from the framerate
+    /// it announced. Half of the pace, and the half a LAN does not supply.
+    frame_interval: std::time::Duration,
     last_ask: Option<std::time::Instant>,
+    /// The link ladder: which rung of [`RUNGS`] has been asked for, if any,
+    /// and what the window of loss looks like so far.
+    rung: Option<usize>,
+    window_ends: Option<std::time::Instant>,
+    lost_when_window_began: u64,
+    clean_windows: u32,
     /// Requests for the caller to send.
     outbound: Vec<MediaMessage>,
     /// What the host has said about the pointer, for the caller to act on.
@@ -137,8 +200,13 @@ impl ControllerStream {
             decoder: None,
             expected: (config.width, config.height),
             awaiting_keyframe: true,
-            pace: DEFAULT_PACE,
+            round_trip: UNKNOWN_ROUND_TRIP,
+            frame_interval: frame_interval(config.max_fps),
             last_ask: None,
+            rung: None,
+            window_ends: None,
+            lost_when_window_began: 0,
+            clean_windows: 0,
             outbound: Vec::new(),
             cursor: Vec::new(),
             jitter: Jitter::new(config.max_fps, config.clock_hz),
@@ -246,17 +314,20 @@ impl ControllerStream {
     /// absorbs the rest of a burst, and a new one becomes possible once the
     /// caller has sent it.
     ///
-    /// **And not more than one per [`ControllerStream::set_recovery_pace`].**
+    /// **And not more than one per [`ControllerStream::pace`].**
     /// The queue rule alone is only as good as how often the caller drains it:
     /// on a link with a long round trip it drains immediately, so every lost
     /// frame becomes another request while the first keyframe is still in
     /// flight — and each of those produces a keyframe, which is large, which
     /// is more likely to lose a datagram, which produces another request.
     ///
-    /// Measured, before this rule existed: 5% loss on its own showed 113
-    /// pictures of 146; a 200 ms round trip on its own showed 136. **The two
-    /// together showed three**, with 75 keyframes asked for in ten seconds. It
-    /// is a request storm, and the pace is what stops it.
+    /// The first measurements of this claimed the pace was what stood between
+    /// a session and a collapse. They were taken against a decoder worker that
+    /// gave up permanently on the first frame it could not decode, so they
+    /// were a coin flip rather than a reading, and the collapse was mostly
+    /// that. What the pace demonstrably does is bound the refusal-driven ask:
+    /// a frame that arrives whole and cannot be decoded asks too, so without a
+    /// pace a session in trouble asks once per arriving frame.
     ///
     /// **Never "one until a keyframe arrives".** That was the first attempt
     /// and it deadlocks: on a link bad enough to lose the keyframes as well, a
@@ -282,7 +353,7 @@ impl ControllerStream {
             return;
         }
         if let Some(last) = self.last_ask
-            && now.saturating_duration_since(last) < self.pace
+            && now.saturating_duration_since(last) < self.pace()
         {
             return;
         }
@@ -291,6 +362,88 @@ impl ControllerStream {
         self.stats.keyframes_requested = self.stats.keyframes_requested.saturating_add(1);
         self.outbound
             .push(MediaMessage::Keyframe(KeyframeRequest { reason }));
+    }
+
+    /// Move the link ladder if a window has closed.
+    ///
+    /// **The quality ladder the host runs answers a different question.** It
+    /// spends framerate, then quality, then resolution when the *CPU* cannot
+    /// keep up, and it cannot see the link at all: every frame it produces
+    /// leaves the machine. Only the controller knows how many arrived.
+    ///
+    /// So this is the other half, and it moves the only lever that changes
+    /// whether loss is survivable — frame size. Down after a window that lost
+    /// frames, up after several that did not, and never above what the host
+    /// announced it was sending.
+    fn step_ladder(&mut self, now: std::time::Instant) {
+        let Some(ends) = self.window_ends else {
+            self.window_ends = Some(now + WINDOW);
+            self.lost_when_window_began = self.stats.frames_lost;
+            return;
+        };
+        if now < ends {
+            return;
+        }
+        let lost = self
+            .stats
+            .frames_lost
+            .saturating_sub(self.lost_when_window_began);
+        self.window_ends = Some(now + WINDOW);
+        self.lost_when_window_began = self.stats.frames_lost;
+
+        if lost >= LOSSES_TO_STEP_DOWN {
+            self.clean_windows = 0;
+            self.step(true);
+        } else if lost == 0 {
+            self.clean_windows = self.clean_windows.saturating_add(1);
+            if self.clean_windows >= CLEAN_WINDOWS_TO_STEP_UP {
+                self.clean_windows = 0;
+                self.step(false);
+            }
+        }
+    }
+
+    /// One rung down, or one up, and tell the host if anything changed.
+    fn step(&mut self, down: bool) {
+        // The first step down starts from the size the host is actually
+        // sending rather than from the top of the list, so a session already
+        // at 640 does not spend three windows asking for sizes larger than it
+        // has.
+        let current = self.rung.unwrap_or_else(|| {
+            let widest = self.expected.0.max(self.expected.1);
+            RUNGS
+                .iter()
+                .position(|r| *r <= widest)
+                .unwrap_or(RUNGS.len().saturating_sub(1))
+        });
+        let next = if down {
+            current.saturating_add(1).min(RUNGS.len().saturating_sub(1))
+        } else if self.rung.is_none() {
+            // Nothing has been asked for, so there is nothing to relax.
+            return;
+        } else {
+            current.saturating_sub(1)
+        };
+        if Some(next) == self.rung {
+            return;
+        }
+        self.rung = Some(next);
+        let Some(edge) = RUNGS.get(next).copied() else {
+            return;
+        };
+        // A hint, not a demand: the host takes the tighter of this and its
+        // own limit, so this can only ever ask for less than the machine's
+        // owner allowed.
+        self.hint(None, Some(edge), Profile::Balanced);
+    }
+
+    /// Which resolution the link ladder is asking for, if any.
+    ///
+    /// For a caller that wants to say so on a screen: a session that has
+    /// stepped down should be able to explain why it looks softer.
+    #[must_use]
+    pub fn link_ceiling(&self) -> Option<u32> {
+        self.rung.and_then(|r| RUNGS.get(r).copied())
     }
 
     /// How often, at most, to ask for a keyframe while a link is losing
@@ -304,8 +457,40 @@ impl ControllerStream {
     /// The caller sets it from the link's measured round trip. Bounded at both
     /// ends: too small is the storm this exists to prevent, and too large is a
     /// session that stays black long after the link recovered.
-    pub fn set_recovery_pace(&mut self, pace: std::time::Duration) {
-        self.pace = pace.clamp(SHORTEST_PACE, LONGEST_PACE);
+    pub fn set_round_trip(&mut self, rtt: std::time::Duration) {
+        self.round_trip = rtt;
+    }
+
+    /// How long to wait before asking again.
+    ///
+    /// **A round trip is half of it, and on a LAN it is the smaller half.**
+    /// The first version of this used the round trip alone, which reads
+    /// correctly and is wrong wherever the link is fast: on loopback the round
+    /// trip is a third of a millisecond, so the pace fell to its 20 ms floor
+    /// and a stream at fifteen frames a second could be asked for a keyframe
+    /// three times over before it had the chance to make one. Not the storm
+    /// the pace exists to prevent — the asks were still bounded by how often
+    /// frames were lost — but a pace that does not pace is not one.
+    ///
+    /// The host answers a request by making the *next* frame a keyframe, so
+    /// the wait is the request's flight, plus however long until that frame,
+    /// plus the flight back. Round trip plus one frame interval, which is
+    /// slightly optimistic — it leaves out the encode — and being optimistic
+    /// here costs one extra request rather than a black session.
+    ///
+    /// **It changed no measured session, and that is worth stating.** An ask
+    /// is made when a frame is lost or refused, so the ask rate cannot exceed
+    /// the rate frames arrive at — a pace shorter than a frame interval is
+    /// indistinguishable from one equal to it, and six-second sessions at 5%
+    /// loss ask for the same four to nine keyframes either way. What this
+    /// fixes is a pace that permitted asks for something that could not have
+    /// arrived yet, and it derives the number from the framerate the host
+    /// announced instead of leaning on [`SHORTEST_PACE`], which was an
+    /// arbitrary stand-in for exactly this quantity.
+    fn pace(&self) -> std::time::Duration {
+        self.round_trip
+            .saturating_add(self.frame_interval)
+            .clamp(SHORTEST_PACE, LONGEST_PACE)
     }
 
     /// A hint for the caller to send, if it wants to.
@@ -340,6 +525,10 @@ impl ControllerStream {
         // trying to interpret the old sequence space.
         self.depacketizer = Depacketizer::new(config.ssrc);
         self.expected = (config.width, config.height);
+        // The framerate is part of how long a keyframe takes to arrive, and a
+        // reconfiguration is where it changes: the host's own ladder spends
+        // framerate first.
+        self.frame_interval = frame_interval(config.max_fps);
         // A different stream, so any ask outstanding was about the old one.
         self.awaiting_keyframe = false;
         self.outbound
@@ -399,6 +588,7 @@ impl ControllerStream {
         }
         self.jitter
             .arrived(now, timestamp, self.depacketizer.is_assembling());
+        self.step_ladder(now);
         Ok(())
     }
 
@@ -468,15 +658,19 @@ impl ControllerStream {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        // The decoder refused. Its references are gone or the
-                        // frame is bad; either way a keyframe is the answer
-                        // and the session continues.
+                        // The decoder could not use it. Its references are
+                        // gone or the frame is damaged; either way a keyframe
+                        // is the answer and the session continues.
                         self.stats.frames_skipped = self.stats.frames_skipped.saturating_add(1);
                         self.ask(KeyframeReason::LostSync, now);
                         tracing::debug!("the decoder refused a frame: {e}");
                         out.push(Decoded::Skipped {
                             timestamp,
-                            why: "the decoder refused it",
+                            // Said the way it actually happens: after loss
+                            // this is the ordinary case, and "the decoder
+                            // refused it" reads like a fault in the decoder.
+                            why: "the decoder could not use it: its reference \
+                                  pictures were lost, or the frame was damaged",
                         });
                     }
                 }
@@ -509,6 +703,9 @@ impl ControllerStream {
         if let Some(frame) = self.depacketizer.flush() {
             self.absorb(frame, now, out);
         }
+        // A link that has gone quiet is exactly when a window closes with
+        // losses in it, so the ladder is asked here as well as on arrival.
+        self.step_ladder(now);
     }
 
     /// A host message a controller is allowed to receive.
@@ -546,5 +743,89 @@ impl ControllerStream {
     /// called.
     pub fn take_cursor(&mut self) -> Vec<esper_proto::CursorMessage> {
         std::mem::take(&mut self.cursor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// **The pace has to be derived from the framerate, not from a floor.**
+    ///
+    /// This is a test of the arithmetic rather than of a session, deliberately:
+    /// the ask rate is bounded by how often frames arrive, so no session can
+    /// distinguish a pace of twenty milliseconds from one of sixty-six. What
+    /// can be distinguished is whether the number comes from the stream or from
+    /// a constant that was standing in for it.
+    #[test]
+    fn a_pace_on_an_instant_link_is_still_a_frame_long() {
+        // Exact division, so a fifteenth of a second is 66.666… ms rather
+        // than 66: the pace is a duration, not a millisecond count.
+        assert_eq!(frame_interval(15), Duration::from_secs(1) / 15);
+        assert_eq!(frame_interval(30), Duration::from_secs(1) / 30);
+        assert_eq!(frame_interval(60), Duration::from_secs(1) / 60);
+        assert!(frame_interval(15) > Duration::from_millis(66));
+        assert!(frame_interval(15) < Duration::from_millis(67));
+        // Not well formed, and arithmetic that divided by it would not be
+        // either. The slowest interval this cares about, rather than a panic.
+        assert_eq!(frame_interval(0), LONGEST_PACE);
+    }
+
+    /// A stream to receive, announced the way a host announces one.
+    fn announced(max_fps: u16) -> esper_proto::StreamConfig {
+        esper_proto::StreamConfig {
+            monitors: vec![esper_proto::MonitorDescription {
+                id: 0,
+                name: "test-0".to_owned(),
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 360,
+                scale_percent: 100,
+                primary: true,
+            }],
+            selected: 0,
+            codec: esper_proto::Codec::H264,
+            width: 640,
+            height: 360,
+            max_fps,
+            clock_hz: 90_000,
+            ssrc: 1,
+        }
+    }
+
+    /// A round trip long enough to matter is added to it, not replaced by it.
+    #[test]
+    fn a_slow_link_waits_for_the_round_trip_and_the_frame() {
+        let mut c = ControllerStream::new(&announced(15)).expect("a well-formed config");
+
+        // Nothing measured yet: conservative, plus the frame.
+        assert_eq!(c.pace(), UNKNOWN_ROUND_TRIP + frame_interval(15));
+
+        // An instant link is still a frame away from a keyframe.
+        c.set_round_trip(Duration::ZERO);
+        assert_eq!(c.pace(), frame_interval(15));
+        assert!(
+            c.pace() > SHORTEST_PACE,
+            "the floor must not be what decides this"
+        );
+
+        // A transatlantic one waits for both.
+        c.set_round_trip(Duration::from_millis(200));
+        assert_eq!(c.pace(), Duration::from_millis(200) + frame_interval(15));
+
+        // **And the framerate follows a reconfiguration.** The host's own
+        // ladder spends framerate first, so this is where it changes — and a
+        // pace still counting the old rate would be waiting for a frame that
+        // is no longer the next one.
+        c.reconfigure(&announced(5)).expect("a well-formed config");
+        assert_eq!(c.pace(), Duration::from_millis(200) + frame_interval(5));
+
+        // And a link measured absurdly slowly does not leave a session black
+        // for ever.
+        c.set_round_trip(Duration::from_secs(30));
+        assert_eq!(c.pace(), LONGEST_PACE);
     }
 }

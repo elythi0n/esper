@@ -235,10 +235,24 @@ impl VideoDecoder for SandboxedDecoder {
             }
             Ok(FromDecoder::NoPicture) => Ok(None),
             Ok(FromDecoder::Failed(why)) => {
-                // Fatal to the stream, which is the decoder's policy and not
-                // this layer's to soften: error concealment is off precisely
-                // so a broken frame is refused rather than invented.
-                self.poisoned = Some(why.clone());
+                // **One frame, not the session.** Error concealment is off, so
+                // a frame whose reference pictures were lost is refused rather
+                // than invented — and that refusal is the *ordinary* thing on a
+                // lossy link, which is why the receiver asks for a keyframe
+                // when it happens.
+                //
+                // This used to poison the worker, which made the ask
+                // meaningless: the first frame with a missing reference ended
+                // the video for the rest of the session, keyframes included,
+                // without them even being sent to the child. Measured on a link
+                // losing five per cent: 39 of 41 keyframes that arrived whole
+                // were never looked at, and the session showed 8 pictures where
+                // it now shows 70.
+                //
+                // The child keeps its decoder, which is what makes this sound:
+                // openh264 recovers on the next keyframe by itself, and
+                // `a_keyframe_rescues_a_decoder_that_lost_sync` is the proof.
+                self.stats.undecodable = self.stats.undecodable.saturating_add(1);
                 Err(failed(why))
             }
             Ok(FromDecoder::Ready { .. }) => {

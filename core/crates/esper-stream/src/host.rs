@@ -64,6 +64,20 @@ pub struct HostStream {
     bytes: u64,
     /// Reused, so a frame's datagrams are not a fresh allocation each time.
     scratch: Vec<Vec<u8>>,
+    /// The caps **this machine's owner** set, kept apart from the ones a
+    /// controller asks for.
+    ///
+    /// Without the separation, a controller's request could only ever tighten
+    /// the cap: `min(asked, current)` remembers the tightest thing ever asked
+    /// for, so a viewer that lowered the resolution to survive a bad minute
+    /// could never have it back. Two values and a `min` keeps the property
+    /// that matters — **a viewer can never raise a limit this machine set** —
+    /// while letting it relax its own.
+    owner_ceiling: Ceiling,
+    owner_fps: u32,
+    /// What the controller has asked for, if anything.
+    asked_ceiling: Option<u32>,
+    asked_fps: Option<u32>,
 }
 
 impl std::fmt::Debug for HostStream {
@@ -134,6 +148,8 @@ impl HostStream {
         let monitor = pipeline.selected_monitor().0;
         let packetizer = Packetizer::new(ssrc_for(monitor), mtu)?;
         Ok(Self {
+            owner_ceiling: pipeline.ceiling(),
+            owner_fps: pipeline.requested_fps(),
             pipeline,
             packetizer,
             monitor,
@@ -141,7 +157,21 @@ impl HostStream {
             datagrams: 0,
             bytes: 0,
             scratch: Vec::new(),
+            asked_ceiling: None,
+            asked_fps: None,
         })
+    }
+
+    /// What the controller has asked the picture to be capped at, if
+    /// anything.
+    ///
+    /// For saying **why** a session got smaller. Every resize used to be
+    /// reported as the CPU budget moving, which was true until a controller
+    /// could lower the ceiling on a link that was losing frames — and an
+    /// operator told "the CPU budget moved" goes looking at their CPU.
+    #[must_use]
+    pub const fn asked_ceiling(&self) -> Option<u32> {
+        self.asked_ceiling
     }
 
     /// What this host will send, to announce to a controller.
@@ -246,6 +276,8 @@ impl HostStream {
             Ok(mut packetizer) => {
                 packetizer.set_sequence(sequence);
                 Ok(Self {
+                    owner_ceiling: pipeline.ceiling(),
+                    owner_fps: pipeline.requested_fps(),
                     pipeline,
                     packetizer,
                     monitor,
@@ -253,6 +285,11 @@ impl HostStream {
                     datagrams: 0,
                     bytes: 0,
                     scratch: Vec::new(),
+                    // A resumed session is a new agreement about what the
+                    // controller wants: it asks again if it still wants
+                    // something, and until then this machine's own caps apply.
+                    asked_ceiling: None,
+                    asked_fps: None,
                 })
             }
             Err(e) => Err((pipeline, e.into())),
@@ -398,17 +435,29 @@ impl HostStream {
     /// A protocol where the viewer could demand more would let a viewer make
     /// somebody else's laptop unusable by opening a window.
     fn apply(&mut self, max_fps: Option<u16>, max_long_edge: Option<u32>, profile: Profile) {
-        if let Some(fps) = max_fps {
-            let asked = u32::from(fps);
-            self.pipeline
-                .set_requested_fps(asked.min(self.pipeline.requested_fps()));
-        }
-        if let Some(edge) = max_long_edge {
-            // The tighter of what the controller asked for and what the host
-            // already decided.
-            let current = self.pipeline.ceiling().long_edge().unwrap_or(u32::MAX);
-            self.pipeline.set_ceiling(Ceiling::of(edge.min(current)));
-        }
+        // **What the controller asked for is remembered, not merged in.** The
+        // effective cap is the tighter of the two, recomputed each time, so a
+        // controller can relax its own request and cannot loosen this
+        // machine's.
+        self.asked_fps = max_fps.map(u32::from);
+        self.asked_ceiling = max_long_edge;
+
+        let fps = match self.asked_fps {
+            Some(asked) => asked.min(self.owner_fps),
+            None => self.owner_fps,
+        };
+        self.pipeline.set_requested_fps(fps);
+
+        let owner = self.owner_ceiling.long_edge().unwrap_or(u32::MAX);
+        let ceiling = match self.asked_ceiling {
+            Some(asked) => asked.min(owner),
+            None => owner,
+        };
+        self.pipeline.set_ceiling(if ceiling == u32::MAX {
+            self.owner_ceiling
+        } else {
+            Ceiling::of(ceiling)
+        });
         // The profile is a hint about content, and what to do with it is the
         // encoder's business. Recorded so the governor can read it; acting on
         // it is Phase 12's rate control.

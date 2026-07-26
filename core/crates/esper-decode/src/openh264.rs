@@ -97,13 +97,19 @@ impl VideoDecoder for OpenH264Decoder {
         self.stats.bytes = self.stats.bytes.saturating_add(packet.len() as u64);
 
         let at = Instant::now();
-        let decoded = self
-            .inner
-            .decode(packet)
-            .map_err(|e| DecodeError::Backend {
-                backend: BACKEND,
-                detail: e.to_string(),
-            })?;
+        let decoded = match self.inner.decode(packet) {
+            Ok(v) => v,
+            Err(e) => {
+                // A frame whose references were lost, most often. Counted and
+                // reported; the session recovers on the next keyframe rather
+                // than ending. See `SandboxedDecoder::decode`.
+                self.stats.undecodable = self.stats.undecodable.saturating_add(1);
+                return Err(DecodeError::Backend {
+                    backend: BACKEND,
+                    detail: e.to_string(),
+                });
+            }
+        };
         let took = at.elapsed();
 
         // No picture yet. Ordinary: parameter sets arrive without one, and a

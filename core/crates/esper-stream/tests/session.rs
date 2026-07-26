@@ -49,6 +49,23 @@ fn host(fps: u32) -> HostStream {
     HostStream::new(pipeline, MTU).expect("a host stream")
 }
 
+/// A host whose **owner** set a resolution cap, as `--max-resolution` does.
+fn host_capped(fps: u32, long_edge: u32) -> HostStream {
+    let capturer = SyntheticCapturer::new(W, H, 1_000_000).expect("a valid size");
+    let pipeline = Pipeline::new(
+        Box::new(capturer),
+        &encoder_for,
+        Budget::of(100.0),
+        Policy {
+            max_fps: fps,
+            ..Policy::default()
+        },
+    )
+    .expect("a pipeline")
+    .with_ceiling(Ceiling::of(long_edge));
+    HostStream::new(pipeline, MTU).expect("a host stream")
+}
+
 /// A host with two monitors of **different sizes**, so a switch is visible in
 /// the frame rather than taken on trust.
 fn host_with_two_monitors(fps: u32) -> HostStream {
@@ -247,54 +264,203 @@ fn a_lossy_link_recovers_and_keeps_delivering() {
     );
 }
 
-/// A controller that asks for less must get less. The reverse must not work.
+/// **The link ladder.** A controller that keeps losing frames asks for smaller
+/// ones, because frame size is what decides whether loss is survivable — and
+/// nothing else in the system can see the link at all. The host's own ladder
+/// spends framerate, then quality, then resolution when the *CPU* cannot keep
+/// up; every frame it produces leaves the machine, so it cannot know how many
+/// arrived.
 #[test]
-fn a_quality_hint_can_only_lower_what_the_host_was_going_to_do() {
+fn sustained_loss_asks_for_smaller_frames() {
+    let mut h = host(30);
+    let mut c = controller(&h);
+    let mut link = LossySink::new(60);
+    let _ = c.take_outbound();
+    assert_eq!(c.link_ceiling(), None, "a fresh stream asks for nothing");
+
+    let start = std::time::Instant::now();
+    let mut out = Vec::new();
+    let mut hints = Vec::new();
+    // Four seconds of a link losing most of it, a window a second.
+    for turn in 0..160u32 {
+        let now = start + Duration::from_millis(u64::from(turn) * 25);
+        let _ = h
+            .step(Duration::from_millis(25), &mut link)
+            .expect("a step");
+        for datagram in std::mem::take(&mut link.sent) {
+            c.receive_at(&datagram, now, &mut out).expect("received");
+        }
+        out.clear();
+        for m in c.take_outbound() {
+            if let MediaMessage::Hint(hint) = &m {
+                hints.push(hint.max_long_edge);
+            }
+            h.handle(&m).expect("accepted");
+        }
+    }
+
+    println!("asked for {hints:?}");
+    let asked = c.link_ceiling().expect("the ladder should have moved");
+    assert!(
+        !hints.is_empty(),
+        "four seconds of heavy loss produced no hint at all"
+    );
+    // The first step starts from the size the host is actually sending — this
+    // synthetic screen is 320 wide — rather than from the top of the list, so
+    // a small session does not spend three windows asking for sizes larger
+    // than it has. There is nowhere below 320, so one hint is the whole
+    // ladder here; the rung count is what the recovery test exercises.
+    assert!(
+        asked <= 320,
+        "the ladder asked for {asked} after four seconds of heavy loss"
+    );
+    // And the host is now capped at what was asked for, which is the point:
+    // smaller frames span fewer datagrams and survive loss.
+    assert_eq!(h.pipeline().ceiling().long_edge(), Some(asked));
+}
+
+/// And it gives the picture back when the link recovers.
+///
+/// Down fast, up slow — but never stuck: a session that survived a bad minute
+/// at 320 pixels and stayed there for the rest of the afternoon would be a
+/// worse product than one that never stepped down.
+#[test]
+fn a_link_that_recovers_gets_its_resolution_back() {
+    let mut h = host(30);
+    let mut c = controller(&h);
+    let mut link = LossySink::new(60);
+    let _ = c.take_outbound();
+
+    let start = std::time::Instant::now();
+    let mut out = Vec::new();
+    let mut turn = 0u32;
+    // Two seconds of loss to move the ladder down.
+    while turn < 80 {
+        let now = start + Duration::from_millis(u64::from(turn) * 25);
+        let _ = h
+            .step(Duration::from_millis(25), &mut link)
+            .expect("a step");
+        for datagram in std::mem::take(&mut link.sent) {
+            c.receive_at(&datagram, now, &mut out).expect("received");
+        }
+        out.clear();
+        for m in c.take_outbound() {
+            h.handle(&m).expect("accepted");
+        }
+        turn += 1;
+    }
+    let stepped_down = c.link_ceiling().expect("the ladder should have moved down");
+
+    // Then a clean link for long enough to earn it back.
+    let mut clean = LossySink::new(0);
+    while turn < 560 {
+        let now = start + Duration::from_millis(u64::from(turn) * 25);
+        let _ = h
+            .step(Duration::from_millis(25), &mut clean)
+            .expect("a step");
+        for datagram in std::mem::take(&mut clean.sent) {
+            c.receive_at(&datagram, now, &mut out).expect("received");
+        }
+        out.clear();
+        for m in c.take_outbound() {
+            h.handle(&m).expect("accepted");
+        }
+        turn += 1;
+    }
+
+    let recovered = c.link_ceiling().expect("still on the ladder");
+    println!("stepped down to {stepped_down}, recovered to {recovered}");
+    assert!(
+        recovered > stepped_down,
+        "a link that recovered stayed at {recovered}"
+    );
+}
+
+/// **A controller may never exceed what this machine's owner allowed, and may
+/// always relax its own request back to it.**
+///
+/// Two values and a `min`, rather than one value that only ever tightens. The
+/// difference matters because a controller has a reason to lower the ceiling
+/// and then raise it: a link losing frames wants smaller frames, and a link
+/// that has recovered wants the picture back. With one value, "the tightest
+/// thing ever asked for" is permanent, and a viewer that survived a bad minute
+/// spends the rest of the session at 320 pixels.
+///
+/// What is preserved is the property the one-value version was protecting: a
+/// viewer cannot make somebody else's laptop work harder than its owner said.
+#[test]
+fn a_hint_is_bounded_by_the_owner_and_not_by_its_own_past() {
     let mut h = host(60);
     assert_eq!(h.pipeline().requested_fps(), 60);
 
     // Asking for less is honoured.
     h.handle(&MediaMessage::Hint(esper_proto::QualityHint {
         max_fps: Some(15),
-        max_long_edge: None,
+        max_long_edge: Some(640),
         profile: Profile::Text,
     }))
     .expect("accepted");
     assert_eq!(h.pipeline().requested_fps(), 15);
+    assert_eq!(h.pipeline().ceiling().long_edge(), Some(640));
 
-    // **Asking for more is not.** A viewer must not be able to make somebody
-    // else's laptop work harder by opening a window.
+    // **Asking for more than the owner allowed is not.**
     h.handle(&MediaMessage::Hint(esper_proto::QualityHint {
         max_fps: Some(240),
-        max_long_edge: None,
+        max_long_edge: Some(4096),
         profile: Profile::Motion,
     }))
     .expect("accepted");
     assert_eq!(
         h.pipeline().requested_fps(),
-        15,
-        "a hint raised the frame rate the host had settled on"
+        60,
+        "a hint raised the frame rate above what this machine's owner allowed"
     );
-
-    // The same for resolution.
-    h.handle(&MediaMessage::Hint(esper_proto::QualityHint {
-        max_fps: None,
-        max_long_edge: Some(640),
-        profile: Profile::Balanced,
-    }))
-    .expect("accepted");
-    assert_eq!(h.pipeline().ceiling().long_edge(), Some(640));
-    h.handle(&MediaMessage::Hint(esper_proto::QualityHint {
-        max_fps: None,
-        max_long_edge: Some(4096),
-        profile: Profile::Balanced,
-    }))
-    .expect("accepted");
+    // This pipeline's owner set **no** resolution cap, so the controller's own
+    // number is the only limit and asking for a larger one is honoured. That
+    // is the relaxation the two-value model exists for: what it may not do is
+    // exceed a cap the owner set, which the next test is about.
     assert_eq!(
         h.pipeline().ceiling().long_edge(),
-        Some(640),
-        "a hint raised the resolution ceiling the host had settled on"
+        Some(4096),
+        "a controller could not relax a cap it had set itself"
     );
+
+    // And relaxing to nothing at all leaves the owner's own values in force.
+    h.handle(&MediaMessage::Hint(esper_proto::QualityHint {
+        max_fps: None,
+        max_long_edge: None,
+        profile: Profile::Balanced,
+    }))
+    .expect("accepted");
+    assert_eq!(h.pipeline().requested_fps(), 60);
+    assert_eq!(h.pipeline().ceiling().long_edge(), None);
+}
+
+/// The owner's cap holds against a controller that asks for more, at every
+/// point — including after the controller has already asked for less.
+#[test]
+fn an_owners_resolution_cap_is_never_exceeded() {
+    let mut h = host_capped(30, 960);
+    assert_eq!(h.pipeline().ceiling().long_edge(), Some(960));
+
+    for asked in [640u32, 4096, 1920, 320] {
+        h.handle(&MediaMessage::Hint(esper_proto::QualityHint {
+            max_fps: None,
+            max_long_edge: Some(asked),
+            profile: Profile::Balanced,
+        }))
+        .expect("accepted");
+        let effective = h.pipeline().ceiling().long_edge().expect("a cap");
+        assert!(
+            effective <= 960,
+            "asking for {asked} produced a ceiling of {effective}, above the owner's 960"
+        );
+        assert_eq!(
+            effective,
+            asked.min(960),
+            "asking for {asked} should give the tighter of it and the owner's 960"
+        );
+    }
 }
 
 /// Direction is part of the protocol, and a peer sending the wrong way is
@@ -599,14 +765,17 @@ fn a_burst_of_loss_produces_one_keyframe_request() {
 /// flight, and each of those produces a keyframe, which is large, which is
 /// more likely to lose a datagram.
 ///
-/// Measured on a real link before the pace existed: 5% loss alone showed 113
-/// pictures of 146, a 200 ms round trip alone showed 136, and the two together
-/// showed **three**, with 75 keyframes asked for in ten seconds.
+/// What it bounds is the ask driven by *refusal*: a frame that arrives whole
+/// and cannot be decoded asks for a keyframe too, so a session in trouble
+/// would otherwise ask once per arriving frame. The numbers first recorded
+/// here — three pictures in ten seconds — came from runs against a decoder
+/// worker that gave up permanently on its first undecodable frame, and were a
+/// coin flip rather than a measurement of this rule.
 #[test]
 fn sustained_loss_asks_no_faster_than_the_pace() {
     let mut h = host(30);
     let mut c = controller(&h);
-    c.set_recovery_pace(Duration::from_millis(200));
+    c.set_round_trip(Duration::from_millis(200));
     // Losing most of them, so the link loses more frames per second than the
     // pace allows requests. A gentler link cannot test a rate limit: it never
     // reaches the limit.

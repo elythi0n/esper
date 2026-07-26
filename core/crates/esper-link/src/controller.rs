@@ -103,13 +103,24 @@ impl ControllerLink {
 
     /// Tell the stream how fast the link answers, so recovery is paced by it.
     ///
-    /// The round trip is what a keyframe request costs before it can become a
-    /// picture, and it is the transport that knows it — so the link is where
-    /// the two are joined. Called on whatever schedule the caller already
+    /// The round trip is part of what a keyframe request costs before it can
+    /// become a picture, and it is the transport that knows it — so the link
+    /// is where the two are joined. The other part is the framerate, which the
+    /// stream already has. Called on whatever schedule the caller already
     /// reads statistics on; the stream keeps the last value.
     pub fn pace_recovery(&mut self) {
         let rtt = self.media.stats().rtt;
-        self.stream.set_recovery_pace(rtt);
+        self.stream.set_round_trip(rtt);
+    }
+
+    /// What the link ladder is asking the host for, if anything.
+    ///
+    /// So a session can say why it looks softer than it started: the honest
+    /// answer is "the link was losing frames and this asked for smaller
+    /// ones", and without it the only visible fact is a blurrier picture.
+    #[must_use]
+    pub fn link_ceiling(&self) -> Option<u32> {
+        self.stream.link_ceiling()
     }
 
     /// What the arrivals have looked like.
