@@ -222,6 +222,26 @@ async fn a_refusal_is_reported_as_authentication_not_as_a_network_problem() {
                         esper_proto::Reason::UNKNOWN_PEER_KEY,
                         "a refusal must map to an authentication reason, got: {e}"
                     );
+                    // **And it presents as the TLS alert, which is the
+                    // unambiguous variant.**
+                    //
+                    // Worth pinning, because the reasoning around here used to
+                    // say something else: that TLS 1.3 lets our handshake
+                    // finish before the peer's verifier runs, so a refusal
+                    // arrives as *silence*. Measured, it does not — it arrives
+                    // as `Refused`, carrying the peer's own words.
+                    //
+                    // The distinction is the whole reason the timeout is now a
+                    // variant of its own. Silence is ambiguous: a peer that
+                    // refused us and a link that could not carry the exchange
+                    // look identical, and a person accused of the first when
+                    // it was the second re-pairs a device that was paired
+                    // perfectly well. So a refusal must keep arriving as a
+                    // refusal, and this is what notices if it stops.
+                    assert!(
+                        matches!(e, SessionError::Refused(_)),
+                        "a refusal must arrive as itself, not as silence: {e:?}"
+                    );
                     let msg = e.to_string();
                     assert!(
                         msg.contains("refused our device key") || msg.contains("not paired"),

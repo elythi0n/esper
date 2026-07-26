@@ -30,24 +30,75 @@ use esper_proto::{Hello, Reason, Role};
 /// happens *before* authentication is established, so an unauthenticated peer
 /// is what this limit exists to contain.
 ///
-/// A timeout here is a **rejection**, not a network problem to retry through: a
-/// peer that accepted us acts immediately, and one that refused us goes silent.
-/// Retrying would turn a refusal into a slow loop.
+/// A timeout here is *usually* a **rejection** rather than a network problem to
+/// retry through: a peer that accepted us acts immediately, and one that
+/// refused us goes silent. Retrying would turn a refusal into a slow loop.
+///
+/// Usually, not always — see [`SessionError::HelloTimedOut`], which is what
+/// the ambiguous case is called.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A round trip a person can read, in whole milliseconds.
+fn readable(rtt: Duration) -> String {
+    format!("{:.0} ms", rtt.as_secs_f64() * 1000.0)
+}
 
 /// What can go wrong opening a session.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    /// The peer did not send its `Hello` in time.
+    /// The peer closed the exchange without saying anything.
     ///
-    /// Overwhelmingly means the peer refused our key: TLS 1.3 lets our
-    /// handshake complete before their verifier runs, so a refusal presents as
-    /// silence. Treated as authentication failure rather than a transport hiccup.
-    #[error(
-        "peer sent no hello within {:?} — it most likely refused our device key",
-        HELLO_TIMEOUT
-    )]
+    /// **Not the ordinary refusal**, which arrives as
+    /// [`SessionError::Refused`] carrying the peer's own TLS alert — measured,
+    /// and pinned by `a_refusal_is_reported_as_authentication_not_as_a_network_problem`.
+    /// The reasoning here used to claim otherwise: that TLS 1.3 lets our
+    /// handshake finish before the peer's verifier runs, so a refusal presents
+    /// as silence. It can, but it is not what this codebase does.
+    ///
+    /// What reaches here is a peer that got as far as the control stream and
+    /// then finished it without a word — which is still most likely a refusal,
+    /// and unlike a *timeout* it is at least a positive act rather than an
+    /// absence.
+    #[error("peer closed the session without a hello — it refused our device key")]
     NoHello,
+
+    /// The peer said nothing at all within [`HELLO_TIMEOUT`].
+    ///
+    /// **Two causes with one symptom, and the round trip tells them apart.** A
+    /// peer that refused us goes silent, and so does a link too slow to carry
+    /// the exchange in five seconds — a hundred-kilobit uplink with a full
+    /// buffer takes longer than that to get the bytes across.
+    ///
+    /// This used to be reported as the refusal, in those words, which sends
+    /// somebody on a slow link off to re-pair a device that is paired
+    /// perfectly well. Measured: a session over a 100 kbit/s link with a
+    /// second of queue was told its device key had most likely been refused —
+    /// the handshake's own datagrams had filled the queue and six of them were
+    /// dropped, so the exchange never finished.
+    ///
+    /// **Both causes are named, and neither is ranked, because nothing here
+    /// can tell them apart.** Two candidate discriminators were tried against
+    /// a real 100 kbit/s link and both failed:
+    ///
+    /// - The **round trip** reads 16 ms. By the time the deadline passes the
+    ///   sender has stopped, so the queue that broke the handshake has
+    ///   drained and the path looks healthy.
+    /// - **Packets lost** reads zero. The relay dropped six of the
+    ///   handshake's own datagrams, but with a handful of packets in flight
+    ///   QUIC has not inferred their loss within five seconds — loss
+    ///   detection needs acknowledgements it never got.
+    ///
+    /// So the numbers are reported as evidence rather than as a verdict. A
+    /// wrong verdict here is expensive: told its key was refused, somebody
+    /// re-pairs a device that was paired perfectly well, and the actual
+    /// problem — a link that cannot carry a handshake — goes unexamined.
+    #[error(
+        "peer sent no hello within {:?} — either it refused our device key, or the link \
+         did not finish carrying the exchange (round trip {}, {lost} packet(s) lost)",
+        HELLO_TIMEOUT,
+        readable(*rtt)
+    )]
+    HelloTimedOut { rtt: Duration, lost: u64 },
 
     /// The peer speaks a different protocol version.
     #[error("protocol version mismatch: we speak {ours}, peer speaks {theirs}")]
@@ -240,7 +291,12 @@ impl SessionError {
     #[must_use]
     pub const fn reason(&self) -> Reason {
         match self {
-            Self::NoHello | Self::KeyMismatch => Reason::UNKNOWN_PEER_KEY,
+            // The timeout goes here too: with no `Hello` there is nothing
+            // better to say, and the guess a *reason code* carries matters
+            // less than the sentence a person reads.
+            Self::NoHello | Self::HelloTimedOut { .. } | Self::KeyMismatch => {
+                Reason::UNKNOWN_PEER_KEY
+            }
             Self::VersionMismatch { .. } => Reason::PROTOCOL_VERSION_MISMATCH,
             Self::BadHello(_) | Self::RoleConflict(_) => Reason::MALFORMED_FRAME,
             Self::Refused(_) => Reason::UNKNOWN_PEER_KEY,
@@ -307,9 +363,21 @@ impl Session {
         // stalls at any of them — connects and opens no stream, opens one and
         // sends nothing — must cost a timer rather than a task held open.
         let outcome =
-            tokio::time::timeout(HELLO_TIMEOUT, Self::negotiate(&conn, local, local_role))
+            match tokio::time::timeout(HELLO_TIMEOUT, Self::negotiate(&conn, local, local_role))
                 .await
-                .unwrap_or(Err(SessionError::NoHello));
+            {
+                Ok(outcome) => outcome,
+                // The round trip as the path last measured it, which is the one
+                // piece of evidence available for telling a refusal from a link
+                // that is merely slow.
+                Err(_) => {
+                    let path = conn.stats().path;
+                    Err(SessionError::HelloTimedOut {
+                        rtt: path.rtt,
+                        lost: path.lost_packets,
+                    })
+                }
+            };
 
         match outcome {
             Ok((peer_key, peer_hello, control)) => Ok(Self {
