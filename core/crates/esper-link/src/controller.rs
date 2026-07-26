@@ -11,6 +11,15 @@ use esper_transport::{Control, MediaChannel};
 use crate::LinkError;
 
 /// The receiving side of a media session.
+/// How often the transport's statistics are worth re-reading.
+///
+/// Fifty milliseconds: twenty samples a second, against a ladder that judges
+/// what it sees over windows of one. Frequent enough that the smallest round
+/// trip in a window is really the smallest, and rare enough that a link
+/// delivering five hundred datagrams a second does not spend its time taking
+/// the transport's lock.
+const OBSERVE_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub struct ControllerLink {
     stream: ControllerStream,
     media: MediaChannel,
@@ -18,6 +27,9 @@ pub struct ControllerLink {
     config: StreamConfig,
     /// An announcement the caller has not seen yet.
     announced: Option<StreamConfig>,
+    /// When the transport's statistics were last read. See
+    /// [`ControllerLink::observe_link`].
+    observed_at: Option<std::time::Instant>,
 }
 
 impl std::fmt::Debug for ControllerLink {
@@ -49,6 +61,7 @@ impl ControllerLink {
             // The opening config is not an announcement: the caller has it
             // already, as the return of this function.
             announced: None,
+            observed_at: None,
         };
         // A fresh controller has no reference picture, so it asks at once.
         //
@@ -101,16 +114,44 @@ impl ControllerLink {
         self.stream.tick(now, out);
     }
 
-    /// Tell the stream how fast the link answers, so recovery is paced by it.
+    /// Tell the stream what the round trip is, which is two things at once.
     ///
-    /// The round trip is part of what a keyframe request costs before it can
-    /// become a picture, and it is the transport that knows it — so the link
-    /// is where the two are joined. The other part is the framerate, which the
-    /// stream already has. Called on whatever schedule the caller already
-    /// reads statistics on; the stream keeps the last value.
-    pub fn pace_recovery(&mut self) {
+    /// It is part of what a keyframe request costs before it can become a
+    /// picture, and it is the *signal* that a queue is filling — the one loss
+    /// cannot give, because a bufferbloated link hands back every byte it is
+    /// given and simply hands it back late. The transport is the only thing
+    /// that knows the number, so the link is where the two are joined.
+    ///
+    /// **Called on every turn, not only when the stream is quiet.** It used to
+    /// be read in the caller's timeout branch, which is exactly the branch a
+    /// busy link does not reach — so on the link where the signal matters most
+    /// it was sampled least.
+    ///
+    /// Self-limiting, because a stats snapshot takes a lock inside the
+    /// transport and a datagram can arrive five hundred times a second, while
+    /// the thing reading this judges it over windows of a second.
+    pub fn observe_link(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(last) = self.observed_at
+            && now.saturating_duration_since(last) < OBSERVE_EVERY
+        {
+            return;
+        }
+        self.observed_at = Some(now);
         let rtt = self.media.stats().rtt;
         self.stream.set_round_trip(rtt);
+    }
+
+    /// What the bloat ladder is asking the host for, if anything.
+    #[must_use]
+    pub fn link_fps(&self) -> Option<u16> {
+        self.stream.link_fps()
+    }
+
+    /// The round trip this path costs with nothing queued on it.
+    #[must_use]
+    pub fn baseline_round_trip(&self) -> Option<std::time::Duration> {
+        self.stream.baseline_round_trip()
     }
 
     /// What the link ladder is asking the host for, if anything.
@@ -195,6 +236,7 @@ impl ControllerLink {
             Arrived::Datagram(datagram) => self.stream.receive(&datagram, out)?,
             Arrived::Said(message) => self.handle(&message)?,
         }
+        self.observe_link();
         self.flush_outbound().await
     }
 

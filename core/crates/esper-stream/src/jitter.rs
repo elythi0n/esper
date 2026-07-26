@@ -38,9 +38,29 @@
 //! changes twice a minute would otherwise derive a deadline from a number that
 //! has nothing to do with how often frames actually arrive.
 //!
-//! This is the **fixed** buffer the plan calls for. The adaptive one belongs
-//! with the rest of the quality work, and what it will need is measurements —
-//! so the jitter is measured here even though nothing acts on it yet.
+//! # And where the rest of it comes from
+//!
+//! The framerate is only half the answer, and for a while it was the whole of
+//! it. It answers "how long until the next frame would have started", which is
+//! right on a link fast enough that a frame arrives all at once. It is the
+//! wrong question when a single frame takes longer to come down the wire than
+//! the gap between frames — a five-kilobyte keyframe on a two-hundred-kilobit
+//! uplink occupies it for two hundred milliseconds — and then a sixty-six
+//! millisecond deadline cuts that frame into three pieces and discards each as
+//! incomplete. Every keyframe, for ever, because keyframes are always the
+//! largest frames. Measured: a session showing nothing at all while the link
+//! delivered every byte of it.
+//!
+//! So the deadline also follows what the arrivals show, and the quantity that
+//! matters turned out **not to be jitter**. Jitter is variation *between*
+//! frames; this module measured it faithfully, reported it in every session
+//! summary, and waited for an adaptive version to act on it. What abandons a
+//! frame is how long that frame's own datagrams take. See [`Jitter::wait`] for
+//! the rule and [`Jitter::fired`] for why the evidence cannot come only from
+//! frames that completed.
+//!
+//! The jitter estimate stays, because it is the honest RFC 3550 number and it
+//! is what a person reads to tell a link that varies from one that is slow.
 
 use std::time::{Duration, Instant};
 
@@ -63,6 +83,31 @@ pub const MAX_WAIT: Duration = Duration::from_millis(80);
 /// Two. One is not enough to distinguish "the next frame is late" from "there
 /// is no next frame", which is the distinction the deadline exists to make.
 const INTERVALS: u32 = 2;
+
+/// The most a link whose frames genuinely take that long may be given.
+///
+/// **A different quantity from [`MAX_WAIT`], which is why it is a different
+/// number.** `MAX_WAIT` bounds what a *healthy* link should ever wait for a
+/// late packet, and eighty milliseconds is already at the edge of feeling
+/// direct. This bounds something else: how long a frame's own datagrams take
+/// to come down a slow wire. A five-kilobyte keyframe on a two-hundred
+/// kilobit link occupies it for two hundred milliseconds, and a deadline
+/// shorter than that abandons the frame while it is still arriving — every
+/// time, for ever, because keyframes are always the largest frames.
+///
+/// Measured: on such a link the receiver abandoned each keyframe in three
+/// pieces — four datagrams, then two, then one — and showed **nothing at
+/// all** for the whole session while the link delivered every byte.
+///
+/// Four hundred milliseconds is past interactive, and that is the point: the
+/// choice on such a link is a late picture or no picture.
+pub const MAX_SLOW_WAIT: Duration = Duration::from_millis(400);
+
+/// How many frames' worth of evidence the deadline is sized from.
+///
+/// Sixteen: long enough that one unusual frame does not move it, short enough
+/// that a link which improves is noticed within a second or two.
+const EVIDENCE: usize = 16;
 
 /// What the arrival pattern looks like, for the adaptive version to use later.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -90,12 +135,21 @@ pub struct JitterStats {
 /// The deadline policy for one stream.
 #[derive(Debug)]
 pub struct Jitter {
-    wait: Duration,
+    /// Two frame intervals at the announced framerate: the healthy-link
+    /// number, and the floor under everything below.
+    from_fps: Duration,
     clock_hz: u32,
     /// When the frame being assembled first showed up.
     opened_at: Option<Instant>,
+    /// The last datagram that belonged to it, which is how a frame still
+    /// arriving is told from one that has stopped.
+    last_for_frame: Option<Instant>,
     /// The previous datagram's arrival and RTP timestamp, for the estimator.
     previous: Option<(Instant, u32)>,
+    /// How long recent frames took to arrive, first datagram to last. See
+    /// [`Jitter::wait`].
+    evidence: [Duration; EVIDENCE],
+    evidence_at: usize,
     stats: JitterStats,
 }
 
@@ -104,18 +158,58 @@ impl Jitter {
     #[must_use]
     pub fn new(max_fps: u16, clock_hz: u32) -> Self {
         Self {
-            wait: derive_wait(max_fps),
+            from_fps: derive_wait(max_fps),
             clock_hz: clock_hz.max(1),
             opened_at: None,
+            last_for_frame: None,
             previous: None,
+            evidence: [Duration::ZERO; EVIDENCE],
+            evidence_at: 0,
             stats: JitterStats::default(),
         }
     }
 
     /// The deadline in force.
+    ///
+    /// **The larger of what the framerate says and what the link has shown.**
+    /// The framerate answers "how long until the next frame would have
+    /// started", which is the right question on a link fast enough that a
+    /// frame arrives all at once. It is the wrong question when a single frame
+    /// takes longer to come down the wire than the gap between frames, and
+    /// then the only number that works is the one the arrivals themselves
+    /// give.
+    ///
+    /// This is the adaptive buffer `capture-and-codec.md` §3 asks for, sized
+    /// from measurement rather than from a constant — and the measurement it
+    /// needed turned out not to be jitter. Jitter is variation *between*
+    /// frames; what abandons a keyframe is how long its own datagrams take.
     #[must_use]
-    pub const fn wait(&self) -> Duration {
-        self.wait
+    pub fn wait(&self) -> Duration {
+        let shown = self
+            .evidence
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(Duration::ZERO);
+        self.from_fps.max(shown.min(MAX_SLOW_WAIT))
+    }
+
+    /// The widest recent evidence, for a session that wants to say why it is
+    /// waiting longer than its framerate would suggest.
+    #[must_use]
+    pub fn widest_arrival(&self) -> Duration {
+        self.evidence
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(Duration::ZERO)
+    }
+
+    fn remember(&mut self, spread: Duration) {
+        if let Some(slot) = self.evidence.get_mut(self.evidence_at) {
+            *slot = spread;
+        }
+        self.evidence_at = self.evidence_at.saturating_add(1) % EVIDENCE;
     }
 
     /// What the arrivals have looked like.
@@ -168,6 +262,9 @@ impl Jitter {
             (false, _) => self.opened_at = None,
             (true, Some(_)) => {}
         }
+        if assembling {
+            self.last_for_frame = Some(now);
+        }
     }
 
     /// How long is left before the deadline, or `None` when nothing is waiting.
@@ -177,7 +274,7 @@ impl Jitter {
     pub fn due_in(&self, now: Instant) -> Option<Duration> {
         let opened = self.opened_at?;
         Some(
-            self.wait
+            self.wait()
                 .saturating_sub(now.saturating_duration_since(opened)),
         )
     }
@@ -189,19 +286,57 @@ impl Jitter {
     }
 
     /// Note that a deadline was acted on, and stop timing.
-    pub fn fired(&mut self) {
+    ///
+    /// **This is where the evidence has to come from, or it never comes.** A
+    /// deadline that abandons every large frame leaves only small ones to
+    /// measure, so an estimate built from frames that *completed* can never
+    /// grow past the deadline that is cutting them short. So a frame abandoned
+    /// while its datagrams were still coming records more than the deadline it
+    /// hit, and the estimate climbs until frames start completing.
+    ///
+    /// "Still coming" means a datagram for it arrived in the second half of
+    /// the wait. That distinguishes the two cases that matter: a frame on a
+    /// slow wire has a datagram arriving every few tens of milliseconds right
+    /// up to the deadline, while a frame that lost a packet on a fast link
+    /// stopped arriving near the beginning of it — and lengthening the
+    /// deadline for the second one would only add latency to a link that is
+    /// merely lossy.
+    pub fn fired(&mut self, now: Instant) {
+        let wait = self.wait();
+        let opened = self.opened_at;
+        let still_coming = self
+            .last_for_frame
+            .is_some_and(|t| now.saturating_duration_since(t) < wait / 2);
+        let evidence = if still_coming {
+            wait.saturating_mul(3) / 2
+        } else {
+            match (opened, self.last_for_frame) {
+                (Some(opened), Some(last)) => last.saturating_duration_since(opened),
+                _ => Duration::ZERO,
+            }
+        };
+        self.remember(evidence);
         self.opened_at = None;
+        self.last_for_frame = None;
         self.stats.deadlines = self.stats.deadlines.saturating_add(1);
     }
 
     /// A frame completed on its own, so there is nothing to time.
-    pub fn settled(&mut self) {
+    ///
+    /// And it is the honest evidence: the time from its first datagram to its
+    /// last is exactly what the deadline has to be longer than.
+    pub fn settled(&mut self, now: Instant) {
+        if let (Some(opened), Some(last)) = (self.opened_at, self.last_for_frame) {
+            let _ = now;
+            self.remember(last.saturating_duration_since(opened));
+        }
         self.opened_at = None;
+        self.last_for_frame = None;
     }
 
     /// The stream's framerate changed, so the deadline should too.
     pub fn retarget(&mut self, max_fps: u16) {
-        self.wait = derive_wait(max_fps);
+        self.from_fps = derive_wait(max_fps);
     }
 
     fn ticks(&self, d: Duration) -> f64 {
@@ -274,13 +409,125 @@ mod tests {
         );
     }
 
+    /// **A frame that takes longer to arrive than the deadline must lengthen
+    /// it, or it can never arrive at all.**
+    ///
+    /// The failure this prevents was measured end to end: on a 200 kbit/s
+    /// link a five-kilobyte keyframe occupies the wire for two hundred
+    /// milliseconds, the deadline was sixty-six, and the receiver abandoned
+    /// every keyframe in three pieces — four datagrams, then two, then one —
+    /// for the whole of a ten-second session, showing nothing while the link
+    /// delivered every byte.
+    #[test]
+    fn a_deadline_grows_for_a_frame_still_arriving() {
+        let mut j = Jitter::new(30, 90_000);
+        let start = Instant::now();
+        let from_fps = j.wait();
+        assert_eq!(
+            from_fps,
+            derive_wait(30),
+            "it starts where the framerate says"
+        );
+
+        // A frame whose datagrams keep coming right up to the deadline. Each
+        // arrival is well inside the wait, so nothing here looks like loss.
+        let mut now = start;
+        for _ in 0..6 {
+            j.arrived(now, 0, true);
+            now += from_fps / 3;
+        }
+        assert!(j.is_due(now), "the deadline should have passed by now");
+        j.fired(now);
+
+        assert!(
+            j.wait() > from_fps,
+            "a frame cut short while still arriving left the deadline at {:?}",
+            j.wait()
+        );
+    }
+
+    /// And it keeps growing until frames start completing — because a
+    /// deadline that abandons every large frame leaves only small ones to
+    /// measure, so evidence taken from completed frames alone can never
+    /// exceed the deadline cutting them short.
+    #[test]
+    fn it_climbs_until_the_frames_fit_and_stops_at_a_ceiling() {
+        let mut j = Jitter::new(30, 90_000);
+        let mut now = Instant::now();
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            let wait = j.wait();
+            // Datagrams arriving steadily, always still coming when the
+            // deadline lands.
+            let mut at = now;
+            while at < now + wait {
+                j.arrived(at, 0, true);
+                at += wait / 4;
+            }
+            now = at;
+            j.fired(now);
+            seen.push(j.wait());
+        }
+        assert!(
+            seen.windows(2).any(|w| matches!(w, [a, b] if b > a)),
+            "the deadline never grew: {seen:?}"
+        );
+        assert_eq!(
+            j.wait(),
+            MAX_SLOW_WAIT,
+            "and it should settle at the ceiling rather than climbing for ever"
+        );
+    }
+
+    /// **But a merely lossy link must not lengthen it.**
+    ///
+    /// A frame that loses a packet on a fast link stops arriving near the
+    /// start of the wait and then nothing comes. Growing the deadline for
+    /// that would add latency to every session on a link that is not slow at
+    /// all — so the evidence is the spread of what actually arrived, which is
+    /// small.
+    #[test]
+    fn a_lost_packet_on_a_fast_link_does_not_lengthen_it() {
+        let mut j = Jitter::new(30, 90_000);
+        let from_fps = j.wait();
+        let start = Instant::now();
+        for _ in 0..8 {
+            // Two datagrams close together, then silence until the deadline.
+            j.arrived(start, 0, true);
+            j.arrived(start + Duration::from_millis(2), 0, true);
+            j.fired(start + from_fps + Duration::from_millis(1));
+        }
+        assert_eq!(
+            j.wait(),
+            from_fps,
+            "a link that merely loses packets must not pay for a slow one"
+        );
+    }
+
+    /// A frame that completes contributes the honest number: first datagram
+    /// to last.
+    #[test]
+    fn a_frame_that_completes_is_measured_as_it_arrived() {
+        let mut j = Jitter::new(60, 90_000);
+        let start = Instant::now();
+        let spread = Duration::from_millis(120);
+        j.arrived(start, 0, true);
+        j.arrived(start + spread, 0, true);
+        j.settled(start + spread);
+        assert_eq!(j.widest_arrival(), spread);
+        assert!(
+            j.wait() >= spread,
+            "the deadline must be at least as long as a frame takes to arrive"
+        );
+    }
+
     #[test]
     fn a_frame_that_settles_stops_the_clock() {
         let mut j = Jitter::new(30, 90_000);
         let start = Instant::now();
         j.arrived(start, 0, true);
         assert!(j.due_in(start).is_some());
-        j.settled();
+        j.settled(start);
         assert_eq!(j.due_in(start + Duration::from_secs(1)), None);
     }
 
@@ -299,7 +546,7 @@ mod tests {
         let start = Instant::now();
         j.arrived(start, 0, true);
         assert!(j.is_due(start + Duration::from_millis(100)));
-        j.fired();
+        j.fired(start + Duration::from_millis(100));
         assert_eq!(j.stats().deadlines, 1);
         assert!(!j.is_due(start + Duration::from_secs(1)));
     }
@@ -370,7 +617,7 @@ mod tests {
         let t = Instant::now();
         k.arrived(t, 0, true);
         k.arrived(t + Duration::from_millis(8), 0, true);
-        k.settled();
+        k.settled(t + Duration::from_millis(8));
         // Four seconds of nothing, then a new frame starts.
         k.arrived(t + Duration::from_secs(4), 3000, true);
         assert_eq!(

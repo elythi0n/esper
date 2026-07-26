@@ -83,6 +83,47 @@ const LOSSES_TO_STEP_DOWN: u64 = 2;
 /// prevent, and then costs it again a second later.
 const CLEAN_WINDOWS_TO_STEP_UP: u32 = 5;
 
+/// The framerates a controller will ask for when the link is queueing.
+///
+/// **A different lever for a different problem.** Loss is per packet, so
+/// against loss the thing to change is how many packets a frame spans — frame
+/// size. A queue filling is about bytes per second, and against that the
+/// cheapest thing to give up is how often a frame is sent: a screen at ten
+/// frames a second is still a screen somebody can read, where the same screen
+/// at half the pixels is not.
+///
+/// Which is also the order `capture-and-codec.md` asks for — framerate first,
+/// then resolution — for the reason it gives: text staying readable is worth
+/// more than motion staying smooth.
+const FPS_RUNGS: &[u16] = &[60, 30, 20, 15, 10, 5];
+
+/// Queueing delay at which the link is judged to be filling.
+///
+/// **Above the baseline, not absolute.** A satellite link with a 600 ms round
+/// trip and no queue at all is a fine link, and an absolute trigger would
+/// spend its framerate for nothing. What matters is the round trip *growing*,
+/// which is a queue with this session's own bytes in it.
+///
+/// A tenth of a second, because that is roughly where an interactive session
+/// stops feeling like one — and because a queue that deep is already holding
+/// three frames nobody will ever see.
+const BLOAT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// And the queueing delay at which it is judged to have drained.
+///
+/// Lower than [`BLOAT`] on purpose. Stepping back up at the same threshold
+/// that stepped down is how a controller oscillates: it would raise the
+/// framerate, refill the queue, lower it, and spend the session doing that.
+const CALM: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// How many windows of round trips the baseline is the smallest of.
+///
+/// A sliding minimum rather than the session's: ten seconds is long enough
+/// that a queue cannot hide inside it, and short enough that a session which
+/// *began* with somebody else's download in the queue learns the truth once
+/// it drains.
+const BASELINE_WINDOWS: usize = 10;
+
 /// What to assume the round trip is until something measures it.
 ///
 /// Conservative: a caller that never says is one whose link is unknown, and
@@ -98,6 +139,15 @@ const SHORTEST_PACE: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// The ceiling, so a bad measurement cannot leave a session black.
 const LONGEST_PACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The tighter of two limits, when either may be absent.
+fn tighter<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
 
 /// How long between frames at an announced framerate.
 ///
@@ -151,6 +201,17 @@ pub struct ControllerStream {
     /// The soonest the host could produce the next frame, from the framerate
     /// it announced. Half of the pace, and the half a LAN does not supply.
     frame_interval: std::time::Duration,
+    /// The framerate the host announced, which is where the bloat ladder
+    /// starts from.
+    ///
+    /// **Stale once this side has asked for less, on purpose.** A host that
+    /// lowered its framerate on request does not re-announce: an announcement
+    /// is a reconfiguration, and a reconfiguration restarts reassembly and
+    /// costs a keyframe — which on the link that provoked the ask is the most
+    /// expensive thing there is. So this stays at what the stream opened with,
+    /// and it is only ever a starting point: once [`Self::fps_rung`] is set
+    /// the ladder steps from that.
+    announced_fps: u16,
     last_ask: Option<std::time::Instant>,
     /// The link ladder: which rung of [`RUNGS`] has been asked for, if any,
     /// and what the window of loss looks like so far.
@@ -158,6 +219,24 @@ pub struct ControllerStream {
     window_ends: Option<std::time::Instant>,
     lost_when_window_began: u64,
     clean_windows: u32,
+    /// The bloat ladder: which rung of [`FPS_RUNGS`] has been asked for, the
+    /// smallest round trip seen in each of the last [`BASELINE_WINDOWS`]
+    /// windows, and how many windows the queue has been drained for.
+    fps_rung: Option<usize>,
+    rtt_this_window: Option<std::time::Duration>,
+    baseline: [Option<std::time::Duration>; BASELINE_WINDOWS],
+    baseline_at: usize,
+    calm_windows: u32,
+    /// What a *caller* asked for, kept apart from what the ladders ask for.
+    ///
+    /// The host replaces both halves of a hint each time it gets one, so every
+    /// hint has to carry everything this side currently wants. Keeping the
+    /// caller's wishes separately is what lets the two ladders and the viewer
+    /// each ask for something without wiping the others out — the same
+    /// two-value shape the host uses for its owner's caps, one level up.
+    wanted_fps: Option<u16>,
+    wanted_edge: Option<u32>,
+    wanted_profile: Profile,
     /// Requests for the caller to send.
     outbound: Vec<MediaMessage>,
     /// What the host has said about the pointer, for the caller to act on.
@@ -202,11 +281,20 @@ impl ControllerStream {
             awaiting_keyframe: true,
             round_trip: UNKNOWN_ROUND_TRIP,
             frame_interval: frame_interval(config.max_fps),
+            announced_fps: config.max_fps,
             last_ask: None,
             rung: None,
             window_ends: None,
             lost_when_window_began: 0,
             clean_windows: 0,
+            fps_rung: None,
+            rtt_this_window: None,
+            baseline: [None; BASELINE_WINDOWS],
+            baseline_at: 0,
+            calm_windows: 0,
+            wanted_fps: None,
+            wanted_edge: None,
+            wanted_profile: Profile::Balanced,
             outbound: Vec::new(),
             cursor: Vec::new(),
             jitter: Jitter::new(config.max_fps, config.clock_hz),
@@ -257,9 +345,15 @@ impl ControllerStream {
     /// Does nothing if it has not, so a caller may call it whenever it likes.
     pub fn tick(&mut self, now: std::time::Instant, out: &mut Vec<Decoded>) {
         if self.jitter.is_due(now) {
-            self.jitter.fired();
+            self.jitter.fired(now);
             self.flush_at(now, out);
         }
+        // **And the ladders' window is a clock, not an arrival.** It used to
+        // advance only when a datagram came in or a deadline fired, so a link
+        // that went quiet froze both ladders wherever they happened to be —
+        // and a queue can be full while nothing is arriving at all, which is
+        // the state the bloat ladder exists for.
+        self.step_ladder(now);
     }
 
     /// What the arrivals have looked like.
@@ -401,6 +495,90 @@ impl ControllerStream {
                 self.step(false);
             }
         }
+
+        self.step_bloat_ladder();
+    }
+
+    /// Move the bloat ladder, and roll the baseline on.
+    ///
+    /// **The signal loss cannot give.** A queue filling costs latency long
+    /// before it costs a packet: a home uplink with a second of buffer hands
+    /// back every byte it is given and simply hands them back a second late.
+    /// Measured on a link whose ceiling was below what the host was offering,
+    /// with a second of queue: the round trip reached 736 ms, and the session
+    /// showed **no pictures at all** in ten seconds. Nothing was lost until
+    /// the queue overflowed, by which point every frame in it was stale.
+    ///
+    /// So this watches the round trip against its own baseline, and spends
+    /// framerate — the lever that reduces bytes per second without taking the
+    /// picture apart.
+    fn step_bloat_ladder(&mut self) {
+        let seen = self.rtt_this_window.take();
+        let before = self.baseline_round_trip();
+
+        if let Some(least) = seen {
+            if let Some(slot) = self.baseline.get_mut(self.baseline_at) {
+                *slot = Some(least);
+            }
+            self.baseline_at = self.baseline_at.saturating_add(1) % BASELINE_WINDOWS;
+        }
+
+        // A baseline needs a window that closed before this one. Judging the
+        // first window against itself would compare the round trip with its
+        // own minimum and never see anything.
+        let Some(baseline) = before else {
+            return;
+        };
+        let queued = self.round_trip.saturating_sub(baseline);
+        if queued >= BLOAT {
+            self.calm_windows = 0;
+            self.step_fps(true);
+        } else if queued <= CALM {
+            self.calm_windows = self.calm_windows.saturating_add(1);
+            if self.calm_windows >= CLEAN_WINDOWS_TO_STEP_UP {
+                self.calm_windows = 0;
+                self.step_fps(false);
+            }
+        }
+    }
+
+    /// One framerate rung down, or one up.
+    ///
+    /// Starts from what the host announced rather than the top of the list,
+    /// for the same reason the size ladder does: a stream already at fifteen
+    /// frames a second should not spend three windows asking for thirty.
+    fn step_fps(&mut self, down: bool) {
+        let current = self.fps_rung.unwrap_or_else(|| {
+            let announced = self.announced_fps;
+            FPS_RUNGS
+                .iter()
+                .position(|r| *r <= announced)
+                .unwrap_or(FPS_RUNGS.len().saturating_sub(1))
+        });
+        let next = if down {
+            current
+                .saturating_add(1)
+                .min(FPS_RUNGS.len().saturating_sub(1))
+        } else if self.fps_rung.is_none() {
+            // Nothing has been asked for, so there is nothing to relax.
+            return;
+        } else {
+            current.saturating_sub(1)
+        };
+        if Some(next) == self.fps_rung {
+            return;
+        }
+        self.fps_rung = Some(next);
+        self.say_what_we_want();
+    }
+
+    /// Which framerate the bloat ladder is asking for, if any.
+    ///
+    /// For saying why a session looks less smooth than it started, which is
+    /// otherwise indistinguishable from the host being slow.
+    #[must_use]
+    pub fn link_fps(&self) -> Option<u16> {
+        self.fps_rung.and_then(|r| FPS_RUNGS.get(r).copied())
     }
 
     /// One rung down, or one up, and tell the host if anything changed.
@@ -428,13 +606,10 @@ impl ControllerStream {
             return;
         }
         self.rung = Some(next);
-        let Some(edge) = RUNGS.get(next).copied() else {
+        if RUNGS.get(next).is_none() {
             return;
-        };
-        // A hint, not a demand: the host takes the tighter of this and its
-        // own limit, so this can only ever ask for less than the machine's
-        // owner allowed.
-        self.hint(None, Some(edge), Profile::Balanced);
+        }
+        self.say_what_we_want();
     }
 
     /// Which resolution the link ladder is asking for, if any.
@@ -459,6 +634,23 @@ impl ControllerStream {
     /// session that stays black long after the link recovered.
     pub fn set_round_trip(&mut self, rtt: std::time::Duration) {
         self.round_trip = rtt;
+        // The smallest seen in this window, which is what the baseline is made
+        // of. A minimum rather than a mean, because a mean of a queueing link
+        // *is* the queue — the number wanted here is what the path costs when
+        // nothing is waiting on it.
+        self.rtt_this_window = Some(match self.rtt_this_window {
+            Some(least) => least.min(rtt),
+            None => rtt,
+        });
+    }
+
+    /// The round trip this path costs when nothing is queued on it.
+    ///
+    /// `None` until a window has closed, because one sample is not a baseline
+    /// and acting on it would spend framerate on a single slow ack.
+    #[must_use]
+    pub fn baseline_round_trip(&self) -> Option<std::time::Duration> {
+        self.baseline.iter().flatten().copied().min()
     }
 
     /// How long to wait before asking again.
@@ -493,19 +685,45 @@ impl ControllerStream {
             .clamp(SHORTEST_PACE, LONGEST_PACE)
     }
 
-    /// A hint for the caller to send, if it wants to.
+    /// What the *viewer* would like, which only the viewer knows.
     ///
-    /// A convenience rather than policy: the controller knows what its viewer
-    /// is doing and this is the shape of saying so.
+    /// A window half the size of the screen does not need the whole screen's
+    /// pixels, and somebody reading a document wants sharpness over motion.
+    /// Recorded rather than sent directly, because the host replaces both
+    /// halves of a hint every time it receives one — so a hint that carried
+    /// only this would wipe out whatever the ladders are asking for, and one
+    /// carrying only the ladders' asks would wipe out this.
     pub fn hint(&mut self, max_fps: Option<u16>, max_long_edge: Option<u32>, profile: Profile) {
+        self.wanted_fps = max_fps;
+        self.wanted_edge = max_long_edge;
+        self.wanted_profile = profile;
+        self.say_what_we_want();
+    }
+
+    /// Send the tighter of everything this side wants.
+    ///
+    /// **One hint carries every reason.** Three things ask for less — the
+    /// viewer, the loss ladder and the bloat ladder — and the host keeps only
+    /// the last hint it was sent. So each of them changes what this side
+    /// wants, and this says the whole of it.
+    ///
+    /// A hint, not a demand: the host takes the tighter of this and its own
+    /// owner's limits, so nothing here can ask for more than that machine
+    /// allowed.
+    fn say_what_we_want(&mut self) {
         let hint = QualityHint {
-            max_fps,
-            max_long_edge,
-            profile,
+            max_fps: tighter(self.wanted_fps, self.link_fps()),
+            max_long_edge: tighter(self.wanted_edge, self.link_ceiling()),
+            profile: self.wanted_profile,
         };
-        if hint.is_well_formed() {
-            self.outbound.push(MediaMessage::Hint(hint));
+        if !hint.is_well_formed() {
+            return;
         }
+        // One outstanding is enough: the host acts on the latest, and a queue
+        // of superseded hints is a queue of wrong numbers.
+        self.outbound
+            .retain(|m| !matches!(m, MediaMessage::Hint(_)));
+        self.outbound.push(MediaMessage::Hint(hint));
     }
 
     /// Ask for a different monitor.
@@ -529,6 +747,7 @@ impl ControllerStream {
         // reconfiguration is where it changes: the host's own ladder spends
         // framerate first.
         self.frame_interval = frame_interval(config.max_fps);
+        self.announced_fps = config.max_fps;
         // A different stream, so any ask outstanding was about the old one.
         self.awaiting_keyframe = false;
         self.outbound
@@ -584,7 +803,7 @@ impl ControllerStream {
         // A frame that completed on its own needs no deadline; one still being
         // assembled does.
         if produced_frame {
-            self.jitter.settled();
+            self.jitter.settled(now);
         }
         self.jitter
             .arrived(now, timestamp, self.depacketizer.is_assembling());
@@ -621,6 +840,26 @@ impl ControllerStream {
                     self.awaiting_keyframe = false;
                 } else if self.awaiting_keyframe {
                     // Provably whole, and its references are gone.
+                    //
+                    // **And ask again, because this frame is the evidence the
+                    // last ask did not work.** A frame arriving whole while a
+                    // keyframe is outstanding says the link is carrying data
+                    // and the keyframe is still not here — the request was
+                    // lost, or its answer was, or the host never made one.
+                    //
+                    // Without this the session has a hole it never comes out
+                    // of. Asking happened only when a frame was *lost* or
+                    // refused, so a link that recovered while a keyframe was
+                    // outstanding went quiet in exactly the wrong way: whole
+                    // frames arriving, every one of them discarded, and
+                    // nothing left to trigger another ask. Measured on a link
+                    // whose queue drained after six seconds: five clean
+                    // seconds, 74 frames delivered, not one shown, and no ask
+                    // made in all that time.
+                    //
+                    // The pace is what makes this safe — one per round trip
+                    // plus a frame, not one per arrival.
+                    self.ask(KeyframeReason::LostSync, now);
                     self.stats.frames_skipped = self.stats.frames_skipped.saturating_add(1);
                     out.push(Decoded::Skipped {
                         timestamp,
@@ -794,6 +1033,204 @@ mod tests {
             clock_hz: 90_000,
             ssrc: 1,
         }
+    }
+
+    /// **A queue filling is the signal loss cannot give.**
+    ///
+    /// A bufferbloated uplink hands back every byte it is given and hands it
+    /// back late: nothing is lost until the buffer overflows, by which point
+    /// every frame in it is stale. Measured on a link whose ceiling was below
+    /// what the host offered, with a second of queue, the round trip reached
+    /// 736 ms and the session showed no pictures at all in ten seconds.
+    ///
+    /// So the round trip is watched against its own baseline. Against the
+    /// baseline and not an absolute figure: a satellite link answering in
+    /// 600 ms with no queue at all is a perfectly good link, and an absolute
+    /// trigger would spend its framerate for nothing.
+    #[test]
+    fn a_filling_queue_spends_framerate() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        let start = std::time::Instant::now();
+        let mut out = Vec::new();
+
+        // A quiet second, so there is a baseline to judge against.
+        c.set_round_trip(Duration::from_millis(20));
+        c.tick(start, &mut out);
+        c.tick(start + WINDOW + Duration::from_millis(1), &mut out);
+        assert_eq!(
+            c.baseline_round_trip(),
+            Some(Duration::from_millis(20)),
+            "a window closed, so the path's cost should be known"
+        );
+        assert_eq!(c.link_fps(), None, "nothing has gone wrong yet");
+
+        // Then the queue fills: the same path, answering far more slowly.
+        let mut now = start + WINDOW;
+        for _ in 0..3 {
+            c.set_round_trip(Duration::from_millis(700));
+            now += WINDOW + Duration::from_millis(1);
+            c.tick(now, &mut out);
+        }
+
+        let asked = c.link_fps().expect("the bloat ladder should have moved");
+        assert!(
+            asked < 30,
+            "a queue seven hundred milliseconds deep left the framerate at {asked}"
+        );
+        // And it says so on the wire, as a hint the host can act on.
+        assert!(
+            c.take_outbound().iter().any(|m| matches!(
+                m,
+                MediaMessage::Hint(h) if h.max_fps == Some(asked)
+            )),
+            "the ladder moved and told nobody"
+        );
+    }
+
+    /// And gives it back when the queue drains — at a tighter threshold than
+    /// it stepped down on, or it would raise the framerate, refill the queue,
+    /// and spend the session doing that.
+    #[test]
+    fn a_drained_queue_gets_the_framerate_back() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        let start = std::time::Instant::now();
+        let mut out = Vec::new();
+        let mut now = start;
+        let mut close = |c: &mut ControllerStream, rtt: Duration, now: &mut std::time::Instant| {
+            c.set_round_trip(rtt);
+            *now += WINDOW + Duration::from_millis(1);
+            c.tick(*now, &mut out);
+        };
+
+        close(&mut c, Duration::from_millis(20), &mut now);
+        for _ in 0..3 {
+            close(&mut c, Duration::from_millis(700), &mut now);
+        }
+        let stepped_down = c.link_fps().expect("the ladder should have moved down");
+
+        // The queue drains, and stays drained for long enough to earn it.
+        for _ in 0..(CLEAN_WINDOWS_TO_STEP_UP + 1) {
+            close(&mut c, Duration::from_millis(25), &mut now);
+        }
+        let recovered = c.link_fps().expect("still on the ladder");
+        assert!(
+            recovered > stepped_down,
+            "a queue that drained left the framerate at {recovered}"
+        );
+    }
+
+    /// **And a queue that is merely uncomfortable does not get it back.**
+    ///
+    /// Stepping up at the same threshold that stepped down is how a
+    /// controller oscillates: it raises the framerate, refills the queue,
+    /// lowers it again, and spends the session doing that. So the step down
+    /// is at [`BLOAT`] and the step up at [`CALM`], and a link sitting
+    /// between them stays where it is.
+    #[test]
+    fn a_queue_between_the_thresholds_stays_where_it_is() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        let mut now = std::time::Instant::now();
+        let mut out = Vec::new();
+        let mut close = |c: &mut ControllerStream, rtt: Duration, now: &mut std::time::Instant| {
+            c.set_round_trip(rtt);
+            *now += WINDOW + Duration::from_millis(1);
+            c.tick(*now, &mut out);
+        };
+
+        close(&mut c, Duration::from_millis(20), &mut now);
+        for _ in 0..3 {
+            close(&mut c, Duration::from_millis(700), &mut now);
+        }
+        let stepped_down = c.link_fps().expect("the ladder should have moved down");
+
+        // Half a queue: past CALM, short of BLOAT. Neither better nor worse.
+        //
+        // Held for longer than the baseline's own window and it would stop
+        // being a queue at all — a standing sixty milliseconds that never
+        // drains is indistinguishable from sixty milliseconds of distance,
+        // and after ten seconds the sliding minimum rightly calls it that.
+        // What this is about is the window before then.
+        for _ in 0..(CLEAN_WINDOWS_TO_STEP_UP + 1) {
+            close(&mut c, Duration::from_millis(20 + 60), &mut now);
+        }
+        assert_eq!(
+            c.link_fps(),
+            Some(stepped_down),
+            "a queue between the thresholds moved the ladder, which is how it oscillates"
+        );
+    }
+
+    /// **A satellite link is not a full queue.** Six hundred milliseconds of
+    /// distance, steady, must cost nothing: the signal is the round trip
+    /// *growing*, which is this session's own bytes waiting.
+    #[test]
+    fn a_long_path_with_no_queue_costs_nothing() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        let mut now = std::time::Instant::now();
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            c.set_round_trip(Duration::from_millis(600));
+            now += WINDOW + Duration::from_millis(1);
+            c.tick(now, &mut out);
+        }
+        assert_eq!(
+            c.link_fps(),
+            None,
+            "a steady six-hundred-millisecond path is a distance, not a queue"
+        );
+    }
+
+    /// **Every hint carries every reason.** The host keeps only the last hint
+    /// it was sent and replaces both halves of it, so a hint carrying one
+    /// ladder's ask wipes out the other's — and a ladder's hint used to
+    /// overwrite the viewer's own profile with `Balanced`.
+    #[test]
+    fn one_hint_carries_the_viewer_and_both_ladders() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        let mut out = Vec::new();
+        let mut now = std::time::Instant::now();
+
+        // The viewer is reading text in a small window.
+        c.hint(None, Some(960), Profile::Text);
+
+        // The link starts losing frames, so the size ladder moves.
+        c.set_round_trip(Duration::from_millis(20));
+        c.tick(now, &mut out);
+        now += WINDOW + Duration::from_millis(1);
+        c.tick(now, &mut out);
+        c.step(true);
+
+        // And the queue fills, so the bloat ladder moves too.
+        for _ in 0..3 {
+            c.set_round_trip(Duration::from_millis(700));
+            now += WINDOW + Duration::from_millis(1);
+            c.tick(now, &mut out);
+        }
+
+        let last = c
+            .take_outbound()
+            .into_iter()
+            .filter_map(|m| match m {
+                MediaMessage::Hint(h) => Some(h),
+                _ => None,
+            })
+            .next_back()
+            .expect("a hint");
+        assert_eq!(
+            last.profile,
+            Profile::Text,
+            "a ladder overwrote what the viewer said it was doing"
+        );
+        assert_eq!(
+            last.max_fps,
+            c.link_fps(),
+            "the bloat ladder's ask is missing from the hint"
+        );
+        assert_eq!(
+            last.max_long_edge,
+            Some(c.link_ceiling().expect("a rung").min(960)),
+            "the size ladder's ask, or the viewer's, is missing from the hint"
+        );
     }
 
     /// A round trip long enough to matter is added to it, not replaced by it.

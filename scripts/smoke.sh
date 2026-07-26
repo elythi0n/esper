@@ -313,7 +313,7 @@ cleanup_terminal() {
              "${named_host:-}" "${service_pid:-}" "${forward_pid:-}" \
              "${denied_pid:-}" "${private_host:-}" "${invited_host:-}" \
              "${announcing:-}" "${supervised:-}" "${relay_pid:-}" \
-             "${small_host:-}"; do
+             "${small_host:-}" "${bloat_pid:-}" "${slow_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1101,6 +1101,67 @@ print(s.getsockname()[1]); s.close()')
           printf '  ✓ and %s keyframes were asked for, not a request per loss\n' "$asks"
         else
           printf '  ✗ %s keyframe requests in six seconds is a request storm\n' "${asks:-no}"
+          printf '%s\n' "$out" | sed 's/^/      /'
+          fail=1
+        fi
+      fi
+
+      # **A session on a link that is slow and buffered, which is a home
+      # uplink.** Loss is the *late* signal: a bufferbloated router hands back
+      # every byte it is given and hands it back a second late, so a receiver
+      # waiting for loss to react has already made the link a second deep.
+      #
+      # This was a hard zero. On a rate-limited link with a second of queue
+      # the session showed **no pictures at all** — three separate causes, all
+      # invisible from either end, and each hiding the next. The numbers are
+      # in the findings; what this asserts is that pictures arrive and that
+      # the controller noticed the queue.
+      if command -v python3 >/dev/null 2>&1; then
+        echo "  — a session through a slow, buffered link"
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+          timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          > "$term_a/slow.log" 2>&1 &
+        slow_host=$!
+        slow_addr=""
+        for _ in $(seq 1 100); do
+          slow_addr=$( { awk '/listening/{print $2}' "$term_a/slow.log" 2>/dev/null || true; } | head -1)
+          [ -n "$slow_addr" ] && break
+          sleep 0.1
+        done
+        bloated=$(python3 -c 'import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1]); s.close()')
+        # Two hundred kilobits and a second of buffer. The host is left at its
+        # defaults on purpose: what is being tested is whether a session that
+        # opens at 1280x720 and thirty frames a second can find its way down
+        # to something the link carries.
+        python3 scripts/flaky-link.py --listen "127.0.0.1:$bloated" --to "$slow_addr" \
+          --rate 200 --queue 1000 > "$term_b/bloat.log" 2>&1 &
+        bloat_pid=$!
+        sleep 0.5
+        out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 60 "$BIN/esper-engine" connect "127.0.0.1:$bloated" --seconds 10 2>&1 || true)
+        shown=$(printf '%s' "$out" | awk '/^  pictures /{n=$2} END{print n}')
+        kill "$bloat_pid" 2>/dev/null || true
+        bloat_pid=""
+        kill "$slow_host" 2>/dev/null || true
+        slow_host=""
+        # **A number greater than zero, and nothing more.** How many arrive
+        # depends on the machine; that any arrive is the whole finding, and it
+        # was zero for as long as the bug lasted.
+        if [ -n "$shown" ] && [ "$shown" -gt 0 ]; then
+          printf '  ✓ %s pictures arrived through a 200 kbit/s link with a second of queue\n' "$shown"
+        else
+          printf '  ✗ a slow, buffered link showed no pictures at all\n'
+          printf '%s\n' "$out" | sed 's/^/      /'
+          fail=1
+        fi
+        # And it says the queue is why it looks less smooth, which is the only
+        # way a person can tell this from the host being slow.
+        if printf '%s' "$out" | grep -q '^  queue  '; then
+          printf '  ✓ and the controller said the round trip was growing, and spent framerate\n'
+        else
+          printf '  ✗ nothing noticed the queue: the round-trip signal did not engage\n'
           printf '%s\n' "$out" | sed 's/^/      /'
           fail=1
         fi

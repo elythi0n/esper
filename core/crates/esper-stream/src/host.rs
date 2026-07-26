@@ -231,6 +231,9 @@ impl HostStream {
     }
 
     /// Tell the path's MTU to the packetizer.
+    ///
+    /// Called on every frame, from [`HostStream::step`], because a path is not
+    /// what it was when the session opened. See [`HostStream::follow_path`].
     pub fn set_mtu(&mut self, mtu: usize) -> Result<(), StreamError> {
         self.packetizer.set_mtu(mtu)?;
         Ok(())
@@ -308,6 +311,7 @@ impl HostStream {
                 keyframe,
                 ..
             } => {
+                self.follow_path(sink)?;
                 let timestamp = self.rtp_timestamp();
                 self.packetizer
                     .packetize(&bitstream, timestamp, &mut self.scratch)?;
@@ -330,6 +334,43 @@ impl HostStream {
             Step::Reconfigured { width, height } => Ok(HostStep::Reconfigured { width, height }),
             Step::Finished => Ok(HostStep::Finished),
         }
+    }
+
+    /// Size the next frame's datagrams to the path as it is *now*.
+    ///
+    /// # Why this has to happen on every frame
+    ///
+    /// **The path is not what it was when the session opened.** QUIC probes
+    /// its MTU upward and, when a probe black-holes, drops the estimate back
+    /// — which happens most readily on exactly the links that need everything
+    /// else here to work. Measured on a rate-limited link with a full queue,
+    /// one session's path went 1351, 1382, 1414 and then **1162**, and stayed
+    /// there.
+    ///
+    /// A packetizer sized once at the start then produces datagrams the
+    /// transport refuses as too large, and it does so **silently**: `send`
+    /// returns `Ok`, the refusal lands in a statistic nobody prints, and every
+    /// frame spanning more than one datagram loses a piece. Small frames still
+    /// fit, so the session goes on looking alive — throughput, arrivals,
+    /// delta frames decoding — while no keyframe ever arrives whole and
+    /// nothing at all is shown. 57 datagrams refused in ten seconds, and no
+    /// layer said a word.
+    ///
+    /// `set_mtu` and the packetizer's own `set_mtu` were both written for this
+    /// and neither had a caller. The mechanism was there; nothing turned it.
+    fn follow_path(&mut self, sink: &impl DatagramSink) -> Result<(), StreamError> {
+        let Some(mtu) = sink.max_datagram_size() else {
+            // A transport that will not say cannot be followed, and the size
+            // agreed at the start is the best information there is.
+            return Ok(());
+        };
+        if mtu == self.packetizer.mtu() {
+            return Ok(());
+        }
+        // A path below the floor is the same condition `check_path` refuses a
+        // session for, arriving later. Refusing here ends the session with a
+        // reason, which is the honest outcome: video is impossible on it.
+        self.set_mtu(mtu)
     }
 
     /// The RTP timestamp for a frame sent now.

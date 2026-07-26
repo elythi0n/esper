@@ -131,6 +131,14 @@ impl Packetizer {
         self.mtu.saturating_sub(RTP_HEADER_LEN)
     }
 
+    /// The datagram size this is packetizing for.
+    ///
+    /// So a caller following a path that changes can tell whether it has.
+    #[must_use]
+    pub const fn mtu(&self) -> usize {
+        self.mtu
+    }
+
     /// Continue an interrupted stream's numbering.
     ///
     /// For a session resumed on a new transport: the packets are the same

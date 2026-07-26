@@ -264,6 +264,209 @@ fn a_lossy_link_recovers_and_keeps_delivering() {
     );
 }
 
+/// **A link that recovers while a keyframe is outstanding has to come back.**
+///
+/// Asking happened only when a frame was *lost* or refused. So a session that
+/// lost sync and whose link then healed went quiet in exactly the wrong way:
+/// whole frames arriving, every one of them discarded for want of a keyframe,
+/// and nothing left to trigger another ask. Measured on a link whose queue
+/// drained after six seconds — five clean seconds, 74 frames delivered, not
+/// one shown, and not one ask made in all that time.
+///
+/// A frame arriving whole while a keyframe is outstanding is the evidence the
+/// last ask did not work: the link is carrying data and the keyframe is still
+/// not here.
+#[test]
+fn whole_frames_arriving_without_a_keyframe_ask_again() {
+    let mut h = host(30);
+    let mut c = controller(&h);
+    let mut clean = RecordingSink::new();
+    clean.limit = Some(MTU);
+
+    // Get the stream going, so there is a reference and frames decode.
+    let _ = c.take_outbound();
+    for _ in 0..4 {
+        let _ = h
+            .step(Duration::from_millis(30), &mut clean)
+            .expect("a step");
+    }
+    let mut out = Vec::new();
+    let start = std::time::Instant::now();
+    for datagram in std::mem::take(&mut clean.sent) {
+        c.receive_at(&datagram, start, &mut out).expect("received");
+    }
+    out.clear();
+    let _ = c.take_outbound();
+
+    // **Now the controller is waiting for a keyframe and the host does not
+    // know it.** A reconfiguration leaves this side waiting — and the ask it
+    // makes is deliberately never carried to the host below, which is the
+    // ordinary case of a request that did not arrive. Every frame after this
+    // arrives whole and is undecodable, which is the state the session got
+    // stuck in.
+    c.reconfigure(&h.config()).expect("its own config");
+    let _ = c.take_outbound();
+    let mut asks = 0u32;
+    let mut skipped = 0u32;
+    let mut now = start;
+    for turn in 0..40u32 {
+        now = start + Duration::from_millis(u64::from(turn) * 30);
+        let _ = h
+            .step(Duration::from_millis(30), &mut clean)
+            .expect("a step");
+        for datagram in std::mem::take(&mut clean.sent) {
+            c.receive_at(&datagram, now, &mut out).expect("received");
+        }
+        skipped += out
+            .drain(..)
+            .filter(|d| matches!(d, Decoded::Skipped { .. }))
+            .count() as u32;
+        asks += c
+            .take_outbound()
+            .iter()
+            .filter(|m| matches!(m, MediaMessage::Keyframe(_)))
+            .count() as u32;
+    }
+
+    assert!(
+        skipped >= 4,
+        "only {skipped} frames were discarded; this cannot test the hole"
+    );
+    assert!(
+        asks >= 1,
+        "{skipped} whole frames were discarded over {:?} and the controller \
+         never asked again: a session that lost sync can never get it back",
+        now.saturating_duration_since(start)
+    );
+    // And not one per frame — the pace is what keeps this from being a storm.
+    assert!(
+        asks <= 8,
+        "{asks} asks for {skipped} discarded frames is one per arrival"
+    );
+}
+
+/// A sink whose path narrows underneath it, and which **swallows** what it
+/// cannot carry.
+///
+/// Swallowing is the point. The real one does the same — a transport that
+/// refuses a datagram is not an error a session dies of, so `send` returns
+/// `Ok` and increments a counter — and that is exactly what made the bug it
+/// guards against invisible for as long as it lasted.
+struct NarrowingSink {
+    sent: Vec<Vec<u8>>,
+    limit: usize,
+    swallowed: usize,
+}
+
+impl NarrowingSink {
+    fn new(limit: usize) -> Self {
+        Self {
+            sent: Vec::new(),
+            limit,
+            swallowed: 0,
+        }
+    }
+}
+
+impl DatagramSink for NarrowingSink {
+    fn send(&mut self, payload: &[u8]) -> Result<(), SinkError> {
+        if payload.len() > self.limit {
+            self.swallowed += 1;
+            return Ok(());
+        }
+        self.sent.push(payload.to_vec());
+        Ok(())
+    }
+
+    fn max_datagram_size(&self) -> Option<usize> {
+        Some(self.limit)
+    }
+}
+
+/// **The packetizer has to follow the path, because the path moves.**
+///
+/// QUIC probes its MTU upward and drops the estimate back when a probe
+/// black-holes, which happens most readily on the links that need everything
+/// else here to work. Measured on a rate-limited link with a full queue, one
+/// session's path went 1351, 1382, 1414 and then 1162 and stayed there.
+///
+/// Sized once at the start, the packetizer then produces datagrams the
+/// transport refuses as too large — silently, because a refused datagram is
+/// not an error a session dies of. Small frames still fit, so the session
+/// goes on looking alive while no keyframe ever arrives whole. `set_mtu`
+/// existed for this, on both the packetizer and the stream, and neither had a
+/// caller.
+#[test]
+fn the_packetizer_follows_a_path_that_narrows() {
+    let mut h = host(30);
+    let mut sink = NarrowingSink::new(1400);
+    // A few frames at the wide path, so the packetizer is certainly using it.
+    for _ in 0..4 {
+        let _ = h
+            .step(Duration::from_millis(30), &mut sink)
+            .expect("a step");
+    }
+    assert_eq!(sink.swallowed, 0, "nothing should be refused at 1400");
+    assert!(
+        sink.sent.iter().any(|d| d.len() > 1162),
+        "this test needs the wide path to actually be used, \
+         or narrowing it proves nothing"
+    );
+
+    // The path narrows to QUIC's floor, as a black-hole detection does.
+    sink.limit = 1162;
+    sink.sent.clear();
+    // **And then a keyframe**, which is the frame this matters for: a delta
+    // frame fits in one small datagram whatever the path is doing, so a test
+    // that sent only delta frames would pass with the packetizer sizing for a
+    // path that no longer exists. A keyframe spans several datagrams, and it
+    // is the frame a receiver that lost sync is waiting for.
+    for _ in 0..12 {
+        h.handle(&MediaMessage::Keyframe(esper_proto::KeyframeRequest {
+            reason: KeyframeReason::LostSync,
+        }))
+        .expect("accepted");
+        let _ = h
+            .step(Duration::from_millis(30), &mut sink)
+            .expect("a step");
+    }
+    assert!(
+        sink.sent.len() > 12,
+        "the keyframes should have spanned several datagrams each, got {}",
+        sink.sent.len()
+    );
+
+    assert_eq!(
+        sink.swallowed, 0,
+        "the transport refused {} datagram(s) after the path narrowed: \
+         the packetizer is still sizing for a path that is gone",
+        sink.swallowed
+    );
+    assert!(
+        sink.sent.iter().all(|d| d.len() <= 1162),
+        "a datagram larger than the path was handed over"
+    );
+
+    // And it follows the path back up, or a link that recovers stays
+    // needlessly fragmented for the rest of the session.
+    sink.limit = 1400;
+    sink.sent.clear();
+    for _ in 0..12 {
+        h.handle(&MediaMessage::Keyframe(esper_proto::KeyframeRequest {
+            reason: KeyframeReason::LostSync,
+        }))
+        .expect("accepted");
+        let _ = h
+            .step(Duration::from_millis(30), &mut sink)
+            .expect("a step");
+    }
+    assert_eq!(sink.swallowed, 0);
+    assert!(
+        sink.sent.iter().any(|d| d.len() > 1162),
+        "the wider path should be in use again"
+    );
+}
+
 /// **The link ladder.** A controller that keeps losing frames asks for smaller
 /// ones, because frame size is what decides whether loss is survivable — and
 /// nothing else in the system can see the link at all. The host's own ladder

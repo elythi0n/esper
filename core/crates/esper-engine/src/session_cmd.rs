@@ -1946,11 +1946,24 @@ async fn serve(
         (Some(new), None) => Some(new),
         (None, waiting) => waiting,
     };
-    let stats = format!(
+    let mut stats = format!(
         "{frames} frames, {} datagrams, {} KiB",
         sent.datagrams,
         sent.bytes / 1024
     );
+    // **And anything the transport would not take, because silence here cost
+    // a great deal once.** A refused datagram is not an error a session dies
+    // of, so the sink counts it and carries on — which is right, and meant
+    // that a packetizer sizing for a path that had narrowed underneath it
+    // destroyed every keyframe for a whole session with no layer saying a
+    // word. Said out loud, a recurrence is one line in a log rather than an
+    // afternoon with a packet capture.
+    if sent.refused > 0 {
+        stats.push_str(&format!(
+            " — {} datagram(s) the transport would not carry",
+            sent.refused
+        ));
+    }
     Ok((stats, survivor))
 }
 
@@ -2448,11 +2461,11 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     // is as complete as it is going to get. `tick` does
                     // nothing if the deadline has not really passed.
                     link.tick(std::time::Instant::now(), &mut out);
-                    // **And the recovery pace, from the link that measured
-                    // it.** Here rather than on every datagram: the round trip
-                    // moves over seconds, and this branch runs whenever the
-                    // stream is quiet, which is exactly when it changed.
-                    link.pace_recovery();
+                    // **And the round trip.** The link samples it on every
+                    // turn of its own accord; this covers the case where
+                    // nothing is arriving at all, which is a quiet link rather
+                    // than a fast one and is also when it is worth knowing.
+                    link.observe_link();
                     // A host that closed with a reason has said why, and
                     // saying it back is the difference between "the session
                     // ended" and "something went wrong, we think".
@@ -2666,6 +2679,8 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         }
         let stats = link.stats();
         let link_capped = link.link_ceiling();
+        let link_fps = link.link_fps();
+        let link_baseline = link.baseline_round_trip();
         println!();
         // **Why it ended, in the vocabulary the protocol has for it.** Every
         // reason code used to be a failure, so a session ending normally
@@ -2767,6 +2782,21 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             println!(
                 "  link       asked for {edge} pixels on the long edge: frames were being lost"
             );
+        }
+        // **And why it was less smooth.** A queue filling is invisible from
+        // this end except as latency, and a viewer told nothing would put a
+        // stuttering session down to the host being slow. The baseline is
+        // printed with it because the number that matters is the *difference*:
+        // a 200 ms path is fine, and 200 ms of queue on top of it is not.
+        if let Some(fps) = link_fps {
+            match link_baseline {
+                Some(base) => println!(
+                    "  queue      asked for {fps} fps: the round trip grew from {:.0} ms, \
+                     which is this session's bytes waiting in a buffer",
+                    base.as_secs_f64() * 1000.0
+                ),
+                None => println!("  queue      asked for {fps} fps: the round trip was growing"),
+            }
         }
         Ok(())
     })
