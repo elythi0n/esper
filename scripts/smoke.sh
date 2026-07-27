@@ -1107,6 +1107,40 @@ print(s.getsockname()[1]); s.close()')
         fi
       fi
 
+      # **A flag nobody can find out about is a flag nobody has.** Every
+      # option `connect` takes was documented in a doc comment in the Rust
+      # source and nowhere a person would look — `--profile` among them, which
+      # decides what a host gives up first when it runs short.
+      echo "  — asking a command what it takes"
+      help_out=$("$BIN/esper" connect --help 2>&1 || true)
+      if printf '%s' "$help_out" | grep -q -- "--profile" &&
+        printf '%s' "$help_out" | grep -q "usage: esper connect"; then
+        printf '  ✓ connect --help lists its options, under the name that was typed\n'
+      else
+        printf '  ✗ connect --help did not list its options\n'
+        printf '%s\n' "$help_out" | sed 's/^/      /'
+        fail=1
+      fi
+      # **Asking is not failing.** A question answered on stdout with a zero
+      # status is what a shell pipeline and a person both expect; a usage line
+      # on stderr after an error is what they get from a program that treats
+      # every mention of help as a mistake.
+      # **Asking is never a failure, whichever command is asked.** Four of
+      # them used to answer "unexpected argument" or "unknown flag --help",
+      # which is a program telling somebody that asking was a mistake.
+      helpless=""
+      for c in connect host terminal forward discover pair devices; do
+        if ! "$BIN/esper-engine" "$c" --help > /dev/null 2>&1; then
+          helpless="$helpless $c"
+        fi
+      done
+      if [ -z "$helpless" ]; then
+        printf '  ✓ and every command answers --help rather than refusing it\n'
+      else
+        printf '  ✗ these commands treated --help as an error:%s\n' "$helpless"
+        fail=1
+      fi
+
       # **A viewer saying what it is looking at, and being charged less for
       # it.** The profile is the one input a host cannot work out for itself: a
       # slideshow and a video look the same to a damage tracker until it is too

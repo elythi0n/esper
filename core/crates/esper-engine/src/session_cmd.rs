@@ -215,7 +215,9 @@ pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
                 via_key = Some(crate::broker_cmd::parse_key(&value("--broker-key")?)?);
                 i += 2;
             }
-            other => return Err(format!("unknown flag {other}")),
+            other => {
+                return Err(format!("unknown flag {other}\n{}", host_usage()));
+            }
         }
     }
     o.via = broker_from(via_addr, via_key)?;
@@ -326,7 +328,9 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
                 }
                 i += 1;
             }
-            other => return Err(format!("unknown flag {other}")),
+            other => {
+                return Err(format!("unknown flag {other}\n{}", connect_usage()));
+            }
         }
     }
     // A broker on the command line replaces the configured one; without one,
@@ -2024,6 +2028,67 @@ async fn serve(
     Ok((stats, survivor))
 }
 
+/// What `connect` takes, for somebody who has not memorised it.
+///
+/// **A person cannot use a flag they cannot find out about.** Every flag here
+/// was documented only in a doc comment in this file — which is to say, to
+/// nobody who was not reading the source. `--profile` in particular decides
+/// what a host gives up first when it runs short, and had no way of being
+/// discovered at all.
+///
+/// The program is named as it was invoked rather than as it was built: a
+/// person who typed `esper` is told to type `esper`.
+///
+/// Kept honest by `every_flag_the_parser_takes_is_in_its_usage`, which reads
+/// the parser's own arms out of this file rather than trusting anybody to
+/// remember. Help that has drifted from the program is worse than none: it
+/// is a promise the program does not keep.
+pub fn connect_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} connect [<address>|<device>] [options]\n\
+         \n\
+         Show a paired host's screen. An address, a device name, or a\n\
+         fingerprint prefix — or nothing, when exactly one host is paired.\n\
+         \n\
+         \x20 --present            open a window and show the pictures\n\
+         \x20 --control            send this window's keys and pointer to the host\n\
+         \x20 --monitor <n>        ask for a monitor other than the one announced\n\
+         \x20 --profile <what>     text, balanced or motion: what you are doing,\n\
+         \x20                      which decides what the host gives up first\n\
+         \x20 --seconds <n>        stop after this long, for measuring\n\
+         \x20 --via <broker>       be introduced by a broker when nothing direct works\n\
+         \x20 --broker-key <key>   the broker's key, when it is not remembered\n\
+         \x20 --no-mdns            do not ask the local network where the host is\n\
+         \n\
+         for example: {me} connect elythion --present --control"
+    )
+}
+
+/// And what `host` takes.
+pub fn host_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} host [options]\n\
+         \n\
+         Serve this machine's screen to a paired device.\n\
+         \n\
+         \x20 --listen <addr>          address, or a bare port, to listen on\n\
+         \x20 --monitor <n>            serve this monitor rather than the primary\n\
+         \x20 --max-resolution <n>     never send a picture wider than this, or `none`\n\
+         \x20 --fps <n>                never send more frames a second than this\n\
+         \x20 --budget <n>             how many cores' worth of CPU to spend\n\
+         \x20 --backend <name>         which capture backend to use\n\
+         \x20 --forward-allow <rule>   allow a forwarded target, repeatable\n\
+         \x20 --once                   serve one session and exit\n\
+         \x20 --via <broker>           be reachable through a broker\n\
+         \x20 --broker-key <key>       the broker's key, when it is not remembered\n\
+         \x20 --no-mdns                do not advertise on the local network\n\
+         \n\
+         for example: {me} host --listen 7645 --max-resolution 1280"
+    )
+}
+
 /// Where to look for a device, and what may be told in the looking.
 ///
 /// Shared by every command that has to *get* to a host — a screen, a shell, a
@@ -2883,6 +2948,73 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Help that has drifted from the program is worse than none.**
+    ///
+    /// It is a promise the program does not keep, and the person who believes
+    /// it spends their time on a flag that was renamed. Writing the first
+    /// draft of `host_usage` from memory produced exactly that: `--forward`,
+    /// which has been `--forward-allow` since the day it existed.
+    ///
+    /// So this reads the parser's own match arms out of this file and checks
+    /// both directions. Reading the source is unusual and it is the only way
+    /// to be *exact*: any list kept alongside the parser is a second thing to
+    /// remember, and the whole failure being guarded against is somebody not
+    /// remembering.
+    #[test]
+    fn every_flag_the_parser_takes_is_in_its_usage() {
+        let source = include_str!("session_cmd.rs");
+        // The arms of one parser, between its own name and the next `pub fn`.
+        let flags_of = |parser: &str| -> Vec<String> {
+            let from = source
+                .find(parser)
+                .unwrap_or_else(|| panic!("{parser} is gone"));
+            let rest = &source[from + parser.len()..];
+            let to = rest.find("\npub fn ").unwrap_or(rest.len());
+            let mut found: Vec<String> = Vec::new();
+            for line in rest[..to].lines() {
+                let line = line.trim();
+                // `"--flag" => {`, which is how every arm here is written.
+                if let Some(after) = line.strip_prefix("\"--")
+                    && let Some(name) = after.split('"').next()
+                    && line.contains("=>")
+                {
+                    found.push(format!("--{name}"));
+                }
+            }
+            found.sort();
+            found.dedup();
+            assert!(
+                !found.is_empty(),
+                "{parser} has no flags, which cannot be right"
+            );
+            found
+        };
+
+        for (parser, usage, command) in [
+            ("pub fn parse_connect", connect_usage(), "connect"),
+            ("pub fn parse_host", host_usage(), "host"),
+        ] {
+            for flag in flags_of(parser) {
+                assert!(
+                    usage.contains(&flag),
+                    "{command} takes {flag} and its usage does not mention it: \
+                     a flag nobody can find out about"
+                );
+            }
+            // And the other way, which is the one that lies to a person: a
+            // usage naming a flag the parser would refuse.
+            for word in usage.split_whitespace() {
+                let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+                if word.starts_with("--") && word.len() > 2 {
+                    assert!(
+                        flags_of(parser).iter().any(|f| f == word),
+                        "{command}'s usage names {word}, which its parser does not take"
+                    );
+                }
+            }
+        }
+    }
 
     /// **What a person types, and the three answers there are.**
     ///

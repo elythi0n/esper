@@ -425,6 +425,8 @@ This machine
   version [--json]   print the release, build time and protocol version
   help               this text
 
+Commands that take options will list them: esper connect --help
+
 Esper operates no infrastructure. There is no account, no password, and no
 default server: devices pair once with a short code and know each other by
 public key thereafter.

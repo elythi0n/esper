@@ -43,6 +43,28 @@ fn main() -> ExitCode {
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // **Asking for help is never a failure.**
+    //
+    // Handled before the command runs, because `--help` is a question rather
+    // than an attempt: a person who asks gets an answer on stdout and an exit
+    // status of nought, not a usage line on stderr after an error.
+    //
+    // **And every command answers**, not only the ones with a list of their
+    // own. Four of them used to reply "unexpected argument" or "unknown flag
+    // --help" — which is a program telling somebody that asking was a
+    // mistake. Where there is nothing specific to say, the general help is
+    // the honest answer, and it is still an answer.
+    if let Some(command) = args.first().map(String::as_str)
+        && args.iter().skip(1).any(|a| a == "--help" || a == "-h")
+    {
+        match usage_for(command) {
+            Some(usage) => println!("{usage}"),
+            None => print_help(),
+        }
+        return ExitCode::SUCCESS;
+    }
+
     match args.first().map(String::as_str) {
         None | Some("version" | "--version" | "-v") => {
             print_version();
@@ -285,6 +307,19 @@ fn identity_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     Ok(std::path::PathBuf::from(home)
         .join(".esper")
         .join("identity.key"))
+}
+
+/// What a command takes, for the commands that take anything.
+///
+/// `None` for the ones that take no options at all — `devices`, `identity` —
+/// where a person asking for help should get the general help rather than an
+/// empty list, which is what falling through to the dispatcher gives them.
+fn usage_for(command: &str) -> Option<String> {
+    match command {
+        "connect" => Some(session_cmd::connect_usage()),
+        "host" => Some(session_cmd::host_usage()),
+        _ => None,
+    }
 }
 
 fn print_version() {
