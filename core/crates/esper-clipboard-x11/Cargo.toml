@@ -1,0 +1,21 @@
+[package]
+name = "esper-clipboard-x11"
+description = "The clipboard on X11: owning a selection, answering for it, and reading somebody else's — including the parts that arrive one piece at a time."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-clipboard.workspace = true
+esper-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+x11rb.workspace = true
+
+[dev-dependencies]
+esper-display-lock.workspace = true

@@ -46,7 +46,8 @@ mod held;
 pub use courier::{Courier, Grants};
 pub use held::Held;
 
-use esper_proto::ClipboardKind;
+// Re-exported so a backend crate names one vocabulary rather than two.
+pub use esper_proto::ClipboardKind;
 
 /// What can go wrong down at the platform.
 ///

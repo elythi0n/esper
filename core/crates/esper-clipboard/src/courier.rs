@@ -266,10 +266,21 @@ impl<C: Clipboard> Courier<C> {
                 _ => ClipboardRefusal::Unavailable,
             });
         }
-        // **The write changed the clipboard, and this is what stops the echo.**
-        // Without it the next poll would see a new generation, read back what
-        // just arrived, and offer the far end its own paste — which it would
-        // then ask for, forever.
+        // **This is what stops the echo.** The write changed the clipboard,
+        // which from here is indistinguishable from the person at this machine
+        // copying something — so without it the next poll would offer the far
+        // end its own paste, it would ask for it, and the two would trade the
+        // same clipboard forever.
+        //
+        // Recorded as *content* rather than as a generation, because a real
+        // backend learns of the change from the display server a moment after
+        // the write returns, and a generation captured before that notice
+        // arrives would already be stale. Content compares equal whenever it
+        // arrives.
+        if self.grants.read {
+            self.forget_held();
+            self.held = vec![Held::new(data.kind, data.content.clone())];
+        }
         self.seen = self.clipboard.generation();
         self.changed_at = None;
         Ok(())
@@ -623,6 +634,14 @@ mod tests {
                 content: b"paste me".to_vec(),
             })
             .expect("it was asked for and is well formed");
+
+        // A real display server tells this process about the change *after*
+        // the write returns, so the generation moves again here. Guarding on
+        // the generation alone would miss exactly this.
+        courier
+            .clipboard_mut()
+            .inner
+            .set(ClipboardKind::Text, b"paste me");
 
         for step in 1..6 {
             let at = now.checked_add(SETTLE * step * 2).unwrap_or(now);
