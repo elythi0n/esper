@@ -155,6 +155,29 @@ pub enum Fidelity {
     Balanced,
     /// Visibly softer. Cheaper.
     Low,
+    /// Coarse, and much cheaper. **For a link, not for a CPU.**
+    ///
+    /// The CPU ladder does not use this rung, and that is deliberate: a
+    /// coarser quantiser saves in the entropy coder and the motion search,
+    /// which is a modest and unreliable CPU win, while it saves *bytes*
+    /// proportionately. So it is the rung a controller short of bandwidth
+    /// reaches for and one a host short of cycles has better options than.
+    ///
+    /// Measured on the synthetic pattern at 1280x720, thirty frames:
+    ///
+    /// | range | keyframe | bitrate |
+    /// |---|---|---|
+    /// | `High` (14, 32) | 39 262 B | 561 kbit/s |
+    /// | `Balanced` (20, 38) | 39 262 B | 532 kbit/s |
+    /// | `Low` (26, 42) | 37 588 B | 406 kbit/s |
+    /// | `Coarse` (36, 48) | 28 100 B | 300 kbit/s |
+    ///
+    /// Which is also how this rung came to exist. The three above it span
+    /// 561 to 406 kbit/s — barely a quarter of what the quantiser can
+    /// actually give — and the top two are **indistinguishable on a
+    /// keyframe**, which is the frame that decides whether a bandwidth-limited
+    /// session works at all.
+    Coarse,
 }
 
 impl Fidelity {
@@ -170,6 +193,7 @@ impl Fidelity {
             Self::High => (14, 32),
             Self::Balanced => (20, 38),
             Self::Low => (26, 42),
+            Self::Coarse => (36, 48),
         }
     }
 
@@ -180,6 +204,7 @@ impl Fidelity {
             Self::High => "high",
             Self::Balanced => "balanced",
             Self::Low => "low",
+            Self::Coarse => "coarse",
         }
     }
 }
@@ -262,6 +287,11 @@ const fn fidelity_factor(f: Fidelity) -> f64 {
         Fidelity::High => 1.15,
         Fidelity::Balanced => 1.0,
         Fidelity::Low => 0.85,
+        // Barely below `Low`, and deliberately so. This rung's win is in
+        // *bytes*, not cycles — the measurement is on [`Fidelity::Coarse`] —
+        // and a factor that promised a CPU saving it does not deliver would
+        // send the governor to a rung that did not help.
+        Fidelity::Coarse => 0.8,
     }
 }
 

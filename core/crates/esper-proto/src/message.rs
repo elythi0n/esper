@@ -1104,6 +1104,20 @@ pub struct QualityHint {
     /// What the controller is doing, which is the only thing it knows that the
     /// host does not.
     pub profile: Profile,
+    /// How sharp a picture the controller is willing to settle for.
+    ///
+    /// **The middle rung of the degradation order, and for a long time the
+    /// only one a controller could not reach.** It could ask for fewer frames
+    /// and for smaller ones; it could not ask for cheaper ones. So a session
+    /// short of bandwidth skipped from framerate straight to resolution — and
+    /// resolution is the most damaging lever there is for the thing this
+    /// product is mostly used for, which is reading somebody's screen.
+    ///
+    /// A ceiling like the other two: `None` is no preference, and the host
+    /// takes the coarser of this and what it would have chosen. Nothing here
+    /// can ask a host to spend *more*.
+    #[serde(default)]
+    pub sharpness: Option<Sharpness>,
 }
 
 impl QualityHint {
@@ -1119,6 +1133,24 @@ impl QualityHint {
         self.max_fps.is_none_or(|f| f > 0 && f <= MAX_FPS)
             && self.max_long_edge.is_none_or(|e| Self::EDGE.contains(&e))
     }
+}
+
+/// How coarsely a controller is willing to have its pictures quantised.
+///
+/// The protocol's own vocabulary, deliberately not the encoder's. What a
+/// quantiser parameter range should be for a given answer is the encoder's
+/// business and changes with the codec; what a viewer is willing to look at
+/// does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sharpness {
+    /// Text, diagrams, code. Every glyph edge intact.
+    Sharp,
+    /// The default.
+    #[default]
+    Balanced,
+    /// Visibly softer, and much cheaper. What video can afford to be.
+    Soft,
 }
 
 /// What the person at the controller is doing.
@@ -1415,11 +1447,13 @@ mod media_tests {
                 max_fps: Some(15),
                 max_long_edge: Some(1280),
                 profile: Profile::Text,
+                sharpness: None,
             }),
             MediaMessage::Hint(QualityHint {
                 max_fps: None,
                 max_long_edge: None,
                 profile: Profile::Balanced,
+                sharpness: None,
             }),
             MediaMessage::Keyframe(KeyframeRequest {
                 reason: KeyframeReason::LostSync,
@@ -1529,6 +1563,7 @@ mod media_tests {
             max_fps: Some(30),
             max_long_edge: Some(1920),
             profile: Profile::Balanced,
+            sharpness: None,
         };
         assert!(ok.is_well_formed());
         for bad in [
@@ -1561,6 +1596,7 @@ mod media_tests {
                 max_fps: None,
                 max_long_edge: None,
                 profile: Profile::Motion,
+                sharpness: None,
             }
             .is_well_formed()
         );
@@ -1582,6 +1618,7 @@ mod media_tests {
                 max_fps: None,
                 max_long_edge: None,
                 profile: Profile::Balanced,
+                sharpness: None,
             }),
             MediaMessage::Keyframe(KeyframeRequest {
                 reason: KeyframeReason::Joined,

@@ -264,6 +264,68 @@ fn a_lossy_link_recovers_and_keeps_delivering() {
     );
 }
 
+/// **A viewer saying what it is looking at has to reach the encoder.**
+///
+/// The whole chain in one test: a controller states a sharpness, the hint goes
+/// on the wire, the host translates the protocol's word into the encoder's,
+/// the pipeline takes the coarser of that and its governor's own choice, and
+/// the bytes coming out are fewer.
+///
+/// Every link in it existed in some form before and the chain did not.
+/// `Profile` had been on the wire since Phase 4 — validated, plumbed through
+/// the host, and recorded in a `tracing::debug!` that nothing read — while the
+/// quantiser, which is the middle rung of the degradation order the design
+/// asks for, could not be reached from the far end at all.
+#[test]
+fn a_viewer_that_will_settle_for_less_is_sent_less() {
+    let measure = |sharpness: Option<esper_proto::Sharpness>| {
+        let mut h = host(30);
+        h.handle(&MediaMessage::Hint(esper_proto::QualityHint {
+            max_fps: None,
+            max_long_edge: None,
+            profile: Profile::Balanced,
+            sharpness,
+        }))
+        .expect("accepted");
+        let mut sink = RecordingSink::new();
+        sink.limit = Some(MTU);
+        for _ in 0..20 {
+            let _ = h
+                .step(Duration::from_millis(30), &mut sink)
+                .expect("a step");
+        }
+        (sink.bytes(), h.asked_fidelity())
+    };
+
+    let (sharp_bytes, sharp_asked) = measure(Some(esper_proto::Sharpness::Sharp));
+    let (soft_bytes, soft_asked) = measure(Some(esper_proto::Sharpness::Soft));
+
+    // The protocol's word became the encoder's, and `Sharp` is the sharpest
+    // rung there is — which is the same as asking for nothing, because a hint
+    // may only ever coarsen.
+    assert_eq!(sharp_asked, Some(esper_pipeline::Fidelity::High));
+    assert_eq!(soft_asked, Some(esper_pipeline::Fidelity::Coarse));
+
+    assert!(
+        soft_bytes < sharp_bytes,
+        "a viewer that said it would settle for a soft picture was sent \
+         {soft_bytes} bytes against {sharp_bytes} for a sharp one: the \
+         quantiser rung reached nothing"
+    );
+    // And by a margin worth having, not a rounding error. Measured on the
+    // synthetic pattern at 1280x720 the difference is about a third of the
+    // bitrate; a fifth is a floor loose enough for a smaller picture and any
+    // machine, and tight enough that a lever which stopped working would fail
+    // this.
+    let saved = 1.0 - (soft_bytes as f64 / sharp_bytes as f64);
+    assert!(
+        saved > 0.20,
+        "settling for a soft picture saved only {:.0}% of the bytes",
+        saved * 100.0
+    );
+    println!("a soft picture saved {:.0}% of the bytes", saved * 100.0);
+}
+
 /// **A link that recovers while a keyframe is outstanding has to come back.**
 ///
 /// Asking happened only when a frame was *lost* or refused. So a session that
@@ -601,6 +663,7 @@ fn a_hint_is_bounded_by_the_owner_and_not_by_its_own_past() {
         max_fps: Some(15),
         max_long_edge: Some(640),
         profile: Profile::Text,
+        sharpness: None,
     }))
     .expect("accepted");
     assert_eq!(h.pipeline().requested_fps(), 15);
@@ -611,6 +674,7 @@ fn a_hint_is_bounded_by_the_owner_and_not_by_its_own_past() {
         max_fps: Some(240),
         max_long_edge: Some(4096),
         profile: Profile::Motion,
+        sharpness: None,
     }))
     .expect("accepted");
     assert_eq!(
@@ -633,6 +697,7 @@ fn a_hint_is_bounded_by_the_owner_and_not_by_its_own_past() {
         max_fps: None,
         max_long_edge: None,
         profile: Profile::Balanced,
+        sharpness: None,
     }))
     .expect("accepted");
     assert_eq!(h.pipeline().requested_fps(), 60);
@@ -651,6 +716,7 @@ fn an_owners_resolution_cap_is_never_exceeded() {
             max_fps: None,
             max_long_edge: Some(asked),
             profile: Profile::Balanced,
+            sharpness: None,
         }))
         .expect("accepted");
         let effective = h.pipeline().ceiling().long_edge().expect("a cap");
@@ -1059,6 +1125,7 @@ fn the_direction_rule_and_what_the_host_accepts_agree() {
             max_fps: Some(30),
             max_long_edge: None,
             profile: Profile::Balanced,
+            sharpness: None,
         }),
         MediaMessage::Keyframe(esper_proto::KeyframeRequest {
             reason: KeyframeReason::LostSync,

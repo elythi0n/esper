@@ -269,6 +269,15 @@ impl ControllerLink {
         self.flush_outbound().await
     }
 
+    /// And how sharp a picture it will settle for.
+    pub async fn want_sharpness(
+        &mut self,
+        sharpness: Option<esper_proto::Sharpness>,
+    ) -> Result<(), LinkError> {
+        self.stream.want_sharpness(sharpness);
+        self.flush_outbound().await
+    }
+
     /// The host's latest announcement, once, if it has made one.
     ///
     /// **Separate from comparing configs**, because the answer to a refused

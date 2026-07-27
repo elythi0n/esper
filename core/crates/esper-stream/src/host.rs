@@ -78,6 +78,9 @@ pub struct HostStream {
     /// What the controller has asked for, if anything.
     asked_ceiling: Option<u32>,
     asked_fps: Option<u32>,
+    asked_fidelity: Option<esper_pipeline::Fidelity>,
+    /// What the controller said it was looking at. See [`HostStream::profile`].
+    profile: Profile,
 }
 
 impl std::fmt::Debug for HostStream {
@@ -159,7 +162,22 @@ impl HostStream {
             scratch: Vec::new(),
             asked_ceiling: None,
             asked_fps: None,
+            asked_fidelity: None,
+            profile: Profile::default(),
         })
+    }
+
+    /// What the controller said it was doing, so a host can say what it was
+    /// told rather than only what it did.
+    #[must_use]
+    pub const fn profile(&self) -> Profile {
+        self.profile
+    }
+
+    /// The coarsest quantiser the controller asked for, if any.
+    #[must_use]
+    pub const fn asked_fidelity(&self) -> Option<esper_pipeline::Fidelity> {
+        self.asked_fidelity
     }
 
     /// What the controller has asked the picture to be capped at, if
@@ -293,6 +311,8 @@ impl HostStream {
                     // something, and until then this machine's own caps apply.
                     asked_ceiling: None,
                     asked_fps: None,
+                    asked_fidelity: None,
+                    profile: Profile::default(),
                 })
             }
             Err(e) => Err((pipeline, e.into())),
@@ -419,7 +439,12 @@ impl HostStream {
                 Ok(Handled::Nothing)
             }
             MediaMessage::Hint(hint) => {
-                self.apply(hint.max_fps, hint.max_long_edge, hint.profile);
+                self.apply(
+                    hint.max_fps,
+                    hint.max_long_edge,
+                    hint.profile,
+                    hint.sharpness,
+                );
                 Ok(Handled::Nothing)
             }
             MediaMessage::Select(select) => {
@@ -475,7 +500,13 @@ impl HostStream {
     /// can afford 15 gets 15; the request lowers a limit and never raises one.
     /// A protocol where the viewer could demand more would let a viewer make
     /// somebody else's laptop unusable by opening a window.
-    fn apply(&mut self, max_fps: Option<u16>, max_long_edge: Option<u32>, profile: Profile) {
+    fn apply(
+        &mut self,
+        max_fps: Option<u16>,
+        max_long_edge: Option<u32>,
+        profile: Profile,
+        sharpness: Option<esper_proto::Sharpness>,
+    ) {
         // **What the controller asked for is remembered, not merged in.** The
         // effective cap is the tighter of the two, recomputed each time, so a
         // controller can relax its own request and cannot loosen this
@@ -499,10 +530,40 @@ impl HostStream {
         } else {
             Ceiling::of(ceiling)
         });
-        // The profile is a hint about content, and what to do with it is the
-        // encoder's business. Recorded so the governor can read it; acting on
-        // it is Phase 12's rate control.
-        tracing::debug!("controller profile hint: {profile:?}");
+        // **And the middle rung, which had nowhere to land.** A controller
+        // could ask for fewer frames and smaller ones; it could not ask for
+        // cheaper ones, so a session short of bandwidth skipped from framerate
+        // straight to resolution — the most damaging lever there is for a
+        // screen somebody is reading.
+        self.asked_fidelity = sharpness.map(fidelity_of);
+        self.pipeline.set_requested_fidelity(self.asked_fidelity);
+        // The profile is a hint about *content*, and what a controller does
+        // with it is the controller's business: it is the side that knows what
+        // its viewer is looking at, and it spends its rungs in the order that
+        // implies. Recorded here so a host can say what it was told.
+        self.profile = profile;
+    }
+}
+
+/// The encoder's word for what a viewer asked for.
+///
+/// **Two vocabularies on purpose.** What a quantiser range should be for a
+/// given answer is the encoder's business and changes with the codec; what a
+/// viewer is willing to look at does not. This is the seam, and it is the only
+/// place the two meet.
+const fn fidelity_of(sharpness: esper_proto::Sharpness) -> esper_pipeline::Fidelity {
+    use esper_pipeline::Fidelity;
+    use esper_proto::Sharpness;
+    match sharpness {
+        Sharpness::Sharp => Fidelity::High,
+        Sharpness::Balanced => Fidelity::Balanced,
+        // **`Coarse`, not `Low`.** A viewer that says it will accept a soft
+        // picture is asking for the cheapest one worth looking at, and `Low`
+        // is not that: measured, the three rungs from `High` to `Low` span
+        // 561 to 406 kbit/s where the quantiser can reach 300, and the top
+        // two of them produce an *identical* keyframe. See
+        // [`esper_pipeline::Fidelity::Coarse`].
+        Sharpness::Soft => Fidelity::Coarse,
     }
 }
 

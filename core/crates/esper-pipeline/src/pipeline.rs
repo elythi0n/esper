@@ -61,7 +61,7 @@ use esper_capture::geometry::Rect;
 use esper_color::convert;
 use esper_color::{ColorSpace, I420};
 use esper_decode::decoder::{DecodeError, VideoDecoder};
-use esper_encode::budget::{Budget, Governor, Moved};
+use esper_encode::budget::{Budget, Fidelity, Governor, Moved};
 use esper_encode::encoder::{EncodeError, EncoderConfig, VideoEncoder};
 use esper_scale::{Ceiling, ScaleError, Scaler};
 
@@ -293,6 +293,9 @@ pub struct Pipeline {
     /// moment the governor recovers. The effective ceiling is the lower of the
     /// two.
     requested_fps: u32,
+    /// The coarsest quantiser the caller will accept, if it has said. See
+    /// [`Pipeline::set_requested_fidelity`].
+    requested_fidelity: Option<Fidelity>,
 }
 
 impl std::fmt::Debug for Pipeline {
@@ -345,6 +348,7 @@ impl Pipeline {
             capturer,
             gate: EncodeGate::new(Rect::sized(width, height), policy),
             requested_fps: policy.max_fps.max(1),
+            requested_fidelity: None,
             governor,
             space: ColorSpace::default(),
             native: (width, height),
@@ -557,6 +561,30 @@ impl Pipeline {
         self.requested_fps = fps.max(1);
         let level = self.effective_level();
         self.gate.set_max_fps(level.fps);
+    }
+
+    /// Change the coarsest quantiser the caller is willing to accept.
+    ///
+    /// **The middle rung of the degradation order, and the one nothing could
+    /// reach.** The governor spends framerate, then fidelity, then resolution
+    /// when the *CPU* runs short; a caller short of *bandwidth* could ask for
+    /// fewer frames and smaller ones and had no way to ask for cheaper ones.
+    /// So it skipped the middle rung and went to resolution, which is the
+    /// most damaging lever for a screen somebody is reading.
+    ///
+    /// A floor under the picture's cost, not a demand for it: `None` is no
+    /// preference, and the coarser of this and the governor's own choice
+    /// wins — so this can only ever make a picture cheaper, never dearer.
+    /// Takes effect on the next frame, through the same path a rung change
+    /// takes.
+    pub fn set_requested_fidelity(&mut self, fidelity: Option<Fidelity>) {
+        self.requested_fidelity = fidelity;
+    }
+
+    /// The coarsest quantiser the caller has asked for, if any.
+    #[must_use]
+    pub const fn requested_fidelity(&self) -> Option<Fidelity> {
+        self.requested_fidelity
     }
 
     /// The frame rate the caller has asked for.
@@ -791,6 +819,29 @@ impl Pipeline {
         }
 
         self.gate.set_max_fps(level.fps);
+
+        // **A rung change rebuilds the encoder, and a rebuild costs a
+        // keyframe.** `reconfigure` builds a fresh one — deliberately,
+        // because openh264 accepts some changes in place and silently ignores
+        // others — and a fresh encoder holds no reference pictures, so its
+        // first frame must be an IDR. On the links where rungs are spent that
+        // is the scarcest thing there is: a keyframe is the largest frame, so
+        // it is the one a slow link is least able to carry. A session walking
+        // four framerate rungs and four resolution rungs pays eight of them.
+        //
+        // Skipping the rebuild for a framerate-only change was tried, on the
+        // reasoning that the gate above is what actually admits fewer frames
+        // and the encoder's `fps` is only a rate-control hint. **Measured
+        // worse**, in both directions: 5% loss went from 78 pictures to 67
+        // with 30% more bytes per frame. The hint is not idle — the periodic
+        // keyframe interval is derived from it *in frames*, so an encoder left
+        // believing in a lower framerate emits keyframes more often, and the
+        // saving buys more of exactly what it was trying to avoid.
+        //
+        // Which leaves the cost real and unpaid. Doing better than this needs
+        // the quantiser changed in place, and `reinit` is private in the
+        // binding while the raw `SetOption` is `unsafe`, which this workspace
+        // forbids.
         let config = EncoderConfig::for_budget(
             self.staging.width(),
             self.staging.height(),
@@ -810,6 +861,14 @@ impl Pipeline {
     fn effective_level(&self) -> esper_encode::budget::Level {
         let mut level = self.governor.level();
         level.fps = level.fps.min(self.requested_fps).max(1);
+        // **The coarser of the two wins, which is the *larger*.** `Fidelity`
+        // is declared sharpest-first, so `High < Balanced < Low` — and an
+        // inverted comparison here would let a viewer ask a host to spend
+        // more on the picture than the host had chosen, which is the one
+        // thing a request from the far end must never be able to do.
+        if let Some(asked) = self.requested_fidelity {
+            level.fidelity = level.fidelity.max(asked);
+        }
         level
     }
 
@@ -833,6 +892,100 @@ impl Pipeline {
 mod tests {
     use super::*;
     use esper_encode::budget::LADDER;
+
+    /// A pipeline over the synthetic screen, for the tests that need a real
+    /// one rather than a table of numbers.
+    fn pipeline_for_test() -> Pipeline {
+        fn encoder_for(
+            config: &EncoderConfig,
+        ) -> Result<Box<dyn esper_encode::encoder::VideoEncoder>, esper_encode::encoder::EncodeError>
+        {
+            Ok(Box::new(esper_encode::openh264::OpenH264::new(config)?))
+        }
+        let capturer =
+            esper_capture::synthetic::SyntheticCapturer::new(640, 360, 1_000_000).expect("a size");
+        Pipeline::new(
+            Box::new(capturer),
+            &encoder_for,
+            Budget::of(100.0),
+            esper_capture::gate::Policy::default(),
+        )
+        .expect("a pipeline")
+    }
+
+    /// **A request from the far end may only ever make a picture cheaper.**
+    ///
+    /// The one property this whole mechanism has to have, and the one an
+    /// inverted comparison would silently destroy. `Fidelity` is declared
+    /// sharpest-first, so the *coarser* of two answers is the larger — which
+    /// makes the clamp a `max` where every other cap here is a `min`, and
+    /// reading it the wrong way round would let a viewer ask somebody else's
+    /// laptop to spend more on the picture than its own governor chose.
+    ///
+    /// Driven through [`Pipeline::effective_level`] rather than asserted as
+    /// arithmetic. The first version of this test compared `chosen.max(asked)`
+    /// against itself and passed with the comparison inverted, which is a test
+    /// of `Ord` and not of this file.
+    #[test]
+    fn a_request_can_only_ever_coarsen() {
+        let mut p = pipeline_for_test();
+        let chosen = p.governor.level().fidelity;
+        for asked in [
+            Fidelity::High,
+            Fidelity::Balanced,
+            Fidelity::Low,
+            Fidelity::Coarse,
+        ] {
+            p.set_requested_fidelity(Some(asked));
+            let effective = p.effective_level().fidelity;
+            assert!(
+                effective >= chosen,
+                "a host at {} asked for {} ended at {}, which is sharper than it chose",
+                chosen.name(),
+                asked.name(),
+                effective.name()
+            );
+            assert_eq!(
+                effective,
+                if chosen > asked { chosen } else { asked },
+                "asking for {} should give the coarser of it and {}",
+                asked.name(),
+                chosen.name()
+            );
+        }
+        // And asking for nothing leaves the governor's own choice alone.
+        p.set_requested_fidelity(None);
+        assert_eq!(p.effective_level().fidelity, chosen);
+    }
+
+    /// And a coarser rung really is cheaper, or the lever is decoration.
+    ///
+    /// Measured on the synthetic pattern at 1280x720 — the numbers are on
+    /// [`Fidelity::Coarse`] — and pinned here as an ordering so a future
+    /// change to the ranges cannot silently invert it.
+    #[test]
+    fn the_rungs_are_ordered_by_what_they_cost() {
+        let ranges = [
+            Fidelity::High.qp_range(),
+            Fidelity::Balanced.qp_range(),
+            Fidelity::Low.qp_range(),
+            Fidelity::Coarse.qp_range(),
+        ];
+        for pair in ranges.windows(2) {
+            if let [(lo, hi), (next_lo, next_hi)] = pair {
+                assert!(
+                    next_lo > lo && next_hi > hi,
+                    "({lo},{hi}) then ({next_lo},{next_hi}): a coarser rung must \
+                     quantise more coarsely at both ends, or it saves nothing"
+                );
+            }
+        }
+        // H.264's quantiser stops at 51, and openh264's `QpRange::new`
+        // **panics** past it rather than refusing.
+        for (lo, hi) in ranges {
+            assert!(lo < hi && hi <= 51, "({lo},{hi}) is not a usable range");
+        }
+    }
 
     /// The two properties everything downstream assumes of the encode size,
     /// over every rung and a range of displays including ones smaller than any

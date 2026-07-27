@@ -184,6 +184,13 @@ impl HostPump {
         self.stream.asked_ceiling()
     }
 
+    /// What the controller said it was doing. See
+    /// [`esper_stream::HostStream::profile`].
+    #[must_use]
+    pub const fn profile(&self) -> esper_proto::Profile {
+        self.stream.profile()
+    }
+
     /// Run one turn.
     pub fn pump(&mut self, timeout: Duration) -> Result<HostStep, LinkError> {
         Ok(self.stream.step(timeout, &mut self.sink)?)

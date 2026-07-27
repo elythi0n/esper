@@ -313,7 +313,8 @@ cleanup_terminal() {
              "${named_host:-}" "${service_pid:-}" "${forward_pid:-}" \
              "${denied_pid:-}" "${private_host:-}" "${invited_host:-}" \
              "${announcing:-}" "${supervised:-}" "${relay_pid:-}" \
-             "${small_host:-}" "${bloat_pid:-}" "${slow_host:-}"; do
+             "${small_host:-}" "${bloat_pid:-}" "${slow_host:-}" \
+             "${profile_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1104,6 +1105,60 @@ print(s.getsockname()[1]); s.close()')
           printf '%s\n' "$out" | sed 's/^/      /'
           fail=1
         fi
+      fi
+
+      # **A viewer saying what it is looking at, and being charged less for
+      # it.** The profile is the one input a host cannot work out for itself: a
+      # slideshow and a video look the same to a damage tracker until it is too
+      # late to have chosen differently.
+      echo "  — telling the host what this viewer is doing"
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/profile.log" 2>&1 &
+      profile_host=$!
+      profile_addr=""
+      for _ in $(seq 1 100); do
+        profile_addr=$( { awk '/listening/{print $2}' "$term_a/profile.log" 2>/dev/null || true; } | head -1)
+        [ -n "$profile_addr" ] && break
+        sleep 0.1
+      done
+      kbit_for() {
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 60 "$BIN/esper-engine" connect "$profile_addr" --seconds 4 \
+          --profile "$1" 2>&1 | awk '/^  received /{print $6}'
+      }
+      sharp_kbit=$(kbit_for text)
+      soft_kbit=$(kbit_for motion)
+      kill "$profile_host" 2>/dev/null || true
+      profile_host=""
+      # **A ratio, and a generous one.** How many bits a screen costs depends
+      # on the machine and on what the synthetic pattern is doing; that asking
+      # for a soft picture costs *fewer* of them does not. Measured on an idle
+      # machine the saving is about a third; ten per cent is a floor that a
+      # lever which stopped working could not clear.
+      if [ -n "$sharp_kbit" ] && [ -n "$soft_kbit" ] &&
+        [ "$(awk -v a="$soft_kbit" -v b="$sharp_kbit" 'BEGIN{print (a < b * 0.9) ? 1 : 0}')" = 1 ]; then
+        printf '  ✓ --profile motion cost %s kbit/s against %s for text\n' "$soft_kbit" "$sharp_kbit"
+      else
+        printf '  ✗ --profile motion cost %s kbit/s against %s for text: the quantiser rung reached nothing\n' \
+          "${soft_kbit:-no}" "${sharp_kbit:-no}"
+        fail=1
+      fi
+      # And a profile nobody has heard of is refused rather than defaulted.
+      #
+      # Captured first and grepped after, rather than piped. `connect` exits
+      # non-zero on a refused profile — correctly — and under `pipefail` a
+      # pipeline takes that status even when the `grep` in it matched, so the
+      # check would read a working refusal as a failure. The same trap as
+      # `head` closing a pipe on a writer, one file over.
+      refusal=$(env ESPER_HOME="$term_b" "$BIN/esper-engine" connect "$profile_addr" \
+        --profile cinema 2>&1 || true)
+      if printf '%s' "$refusal" | grep -q 'is not a profile'; then
+        printf '  ✓ and a profile that is not one is refused, not quietly ignored\n'
+      else
+        printf '  ✗ an unknown profile was accepted\n'
+        printf '%s\n' "$refusal" | sed 's/^/      /'
+        fail=1
       fi
 
       # **A session on a link that is slow and buffered, which is a home

@@ -33,7 +33,7 @@ use esper_decode::decoder::VideoDecoder;
 use esper_media::{Depacketizer, Reassembled};
 use esper_proto::{
     KeyframeReason, KeyframeRequest, MediaMessage, MonitorSelect, Profile, QualityHint, Role,
-    StreamConfig,
+    Sharpness, StreamConfig,
 };
 
 use crate::StreamError;
@@ -97,6 +97,16 @@ const CLEAN_WINDOWS_TO_STEP_UP: u32 = 5;
 /// more than motion staying smooth.
 const FPS_RUNGS: &[u16] = &[60, 30, 20, 15, 10, 5];
 
+/// The sharpnesses a controller will settle for when the link is short of
+/// bandwidth.
+///
+/// **The middle rung of the degradation order**, and for a long time the one
+/// nothing could reach: a controller could ask for fewer frames and smaller
+/// ones and had no way to ask for cheaper ones, so a session short of
+/// bandwidth skipped from framerate straight to resolution. Resolution is the
+/// most damaging lever there is for the thing this product is mostly used
+/// for, which is reading somebody's screen — a glyph at half the pixels is
+/// not a softer glyph, it is a different one.
 /// Queueing delay at which the link is judged to be filling.
 ///
 /// **Above the baseline, not absolute.** A satellite link with a 600 ms round
@@ -237,6 +247,7 @@ pub struct ControllerStream {
     wanted_fps: Option<u16>,
     wanted_edge: Option<u32>,
     wanted_profile: Profile,
+    wanted_sharpness: Option<Sharpness>,
     /// Requests for the caller to send.
     outbound: Vec<MediaMessage>,
     /// What the host has said about the pointer, for the caller to act on.
@@ -295,6 +306,7 @@ impl ControllerStream {
             wanted_fps: None,
             wanted_edge: None,
             wanted_profile: Profile::Balanced,
+            wanted_sharpness: None,
             outbound: Vec::new(),
             cursor: Vec::new(),
             jitter: Jitter::new(config.max_fps, config.clock_hz),
@@ -487,6 +499,25 @@ impl ControllerStream {
 
         if lost >= LOSSES_TO_STEP_DOWN {
             self.clean_windows = 0;
+            // **And it takes frame size even when the queue is what filled,
+            // which is not what the degradation order asks for — see the note
+            // on [`order_for`].**
+            //
+            // Tail drop from an overloaded link arrives here looking exactly
+            // like the random loss of a bad wireless link, and answering it
+            // with the resolution lever spends the most damaging one on a
+            // problem that fewer or cheaper frames would have fixed.
+            //
+            // Suppressing it here was tried and **measured a clear
+            // regression**: leaving congestive loss to the ladder below
+            // serialised the two responses, so resolution only began to fall
+            // in the sixth second while the link was five times overloaded,
+            // and a session that had shown 26-36 pictures showed none. One
+            // rung per window is not a policy for an overload of that size.
+            //
+            // So this stays until the response can be *sized* to the
+            // overload rather than walked one rung at a time. See the tracker
+            // for what that needs.
             self.step(true);
         } else if lost == 0 {
             self.clean_windows = self.clean_windows.saturating_add(1);
@@ -547,7 +578,7 @@ impl ControllerStream {
     /// Starts from what the host announced rather than the top of the list,
     /// for the same reason the size ladder does: a stream already at fifteen
     /// frames a second should not spend three windows asking for thirty.
-    fn step_fps(&mut self, down: bool) {
+    fn step_fps(&mut self, down: bool) -> bool {
         let current = self.fps_rung.unwrap_or_else(|| {
             let announced = self.announced_fps;
             FPS_RUNGS
@@ -561,15 +592,16 @@ impl ControllerStream {
                 .min(FPS_RUNGS.len().saturating_sub(1))
         } else if self.fps_rung.is_none() {
             // Nothing has been asked for, so there is nothing to relax.
-            return;
+            return false;
         } else {
             current.saturating_sub(1)
         };
         if Some(next) == self.fps_rung {
-            return;
+            return false;
         }
         self.fps_rung = Some(next);
         self.say_what_we_want();
+        true
     }
 
     /// Which framerate the bloat ladder is asking for, if any.
@@ -582,7 +614,7 @@ impl ControllerStream {
     }
 
     /// One rung down, or one up, and tell the host if anything changed.
-    fn step(&mut self, down: bool) {
+    fn step(&mut self, down: bool) -> bool {
         // The first step down starts from the size the host is actually
         // sending rather than from the top of the list, so a session already
         // at 640 does not spend three windows asking for sizes larger than it
@@ -598,18 +630,19 @@ impl ControllerStream {
             current.saturating_add(1).min(RUNGS.len().saturating_sub(1))
         } else if self.rung.is_none() {
             // Nothing has been asked for, so there is nothing to relax.
-            return;
+            return false;
         } else {
             current.saturating_sub(1)
         };
         if Some(next) == self.rung {
-            return;
+            return false;
         }
         self.rung = Some(next);
         if RUNGS.get(next).is_none() {
-            return;
+            return false;
         }
         self.say_what_we_want();
+        true
     }
 
     /// Which resolution the link ladder is asking for, if any.
@@ -700,6 +733,17 @@ impl ControllerStream {
         self.say_what_we_want();
     }
 
+    /// And how sharp a picture the viewer wants, if it has a view.
+    ///
+    /// Separate from [`Self::hint`] because it is the one field a viewer
+    /// almost never sets: a person does not choose a quantiser, they choose
+    /// what they are doing, and the profile says that. This exists for the
+    /// case where somebody has decided anyway.
+    pub fn want_sharpness(&mut self, sharpness: Option<Sharpness>) {
+        self.wanted_sharpness = sharpness;
+        self.say_what_we_want();
+    }
+
     /// Send the tighter of everything this side wants.
     ///
     /// **One hint carries every reason.** Three things ask for less — the
@@ -715,6 +759,12 @@ impl ControllerStream {
             max_fps: tighter(self.wanted_fps, self.link_fps()),
             max_long_edge: tighter(self.wanted_edge, self.link_ceiling()),
             profile: self.wanted_profile,
+            // **The coarser of the two, not the tighter.** Every other field
+            // here is a number where less is a smaller ask; this one is an
+            // enum where the *later* variant is. Read the wrong way round it
+            // would turn a viewer's willingness to accept a soft picture into
+            // a demand for a sharp one.
+            sharpness: self.wanted_sharpness,
         };
         if !hint.is_well_formed() {
             return;

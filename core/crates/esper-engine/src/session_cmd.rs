@@ -30,7 +30,7 @@ use esper_encode::encoder::{EncodeError, EncoderConfig, VideoEncoder};
 use esper_encode::openh264::OpenH264;
 use esper_link::{ControllerLink, HostLink, parts};
 use esper_pipeline::pipeline::Pipeline;
-use esper_proto::{Hello, MediaMessage, Permission, Role};
+use esper_proto::{Hello, MediaMessage, Permission, Profile, Role, Sharpness};
 use esper_scale::Ceiling;
 use esper_stream::{Decoded, Expired, Handled, HostStep, PARK_TIMEOUT, Parked};
 use esper_transport::{
@@ -125,6 +125,17 @@ pub struct ConnectOptions {
     /// The alternative to an address, and the usual way in: where a machine
     /// *is* changes, and which machine it is does not.
     pub named: Option<String>,
+    /// What the person is doing, which is the only thing this side knows that
+    /// the host does not.
+    ///
+    /// **The one input a host cannot work out for itself.** A slideshow and a
+    /// video look the same to a damage tracker until it is too late to have
+    /// chosen differently, and the right thing to give up is opposite in the
+    /// two cases: reading a screen, frames are nearly free to lose and glyph
+    /// edges are the whole point; watching motion, stutter is the first thing
+    /// anybody notices and moving pictures hide quantiser noise so well that
+    /// video codecs have leaned on it for thirty years.
+    pub profile: Profile,
     /// Ask the segment where it is. On by default, like the host's own
     /// advertising, and off with `--no-mdns` for somebody who would rather
     /// not be heard asking.
@@ -234,6 +245,7 @@ pub fn broker_from(
 pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut addr: Option<SocketAddr> = None;
     let mut seconds = 0u64;
+    let mut profile = Profile::default();
     let mut present = false;
     let mut control = false;
     let mut monitor: Option<u32> = None;
@@ -261,6 +273,22 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
             "--no-mdns" => {
                 mdns = false;
                 i += 1;
+            }
+            "--profile" => {
+                let name = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--profile needs text, balanced or motion".to_owned())?;
+                profile = match name.as_str() {
+                    "text" => Profile::Text,
+                    "balanced" => Profile::Balanced,
+                    "motion" => Profile::Motion,
+                    other => {
+                        return Err(format!(
+                            "{other} is not a profile; it is text, balanced or motion"
+                        ));
+                    }
+                };
+                i += 2;
             }
             "--seconds" => {
                 seconds = args
@@ -310,6 +338,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     Ok(ConnectOptions {
         addr,
         seconds,
+        profile,
         present,
         control,
         monitor,
@@ -1692,6 +1721,14 @@ async fn serve(
         // the pump rather than passed in, so there is one source for it.
         let opening = pump.config();
         let mut announced = (opening.width, opening.height);
+        // **What the viewer said it was doing, said once when it says it.**
+        //
+        // The one thing this side cannot work out for itself, and worth
+        // telling whoever owns the machine: a session that is deliberately
+        // soft because somebody is watching video looks, in every other line
+        // of output, exactly like a session that is soft because this machine
+        // is struggling.
+        let mut said = pump.profile();
         loop {
             // Anything the controller asked for, before the next frame, so a
             // keyframe request is acted on by the very next one.
@@ -1733,6 +1770,26 @@ async fn serve(
                     eprintln!("      · the pipeline stopped: {e}");
                     break;
                 }
+            }
+
+            // **What the viewer said it was doing, once, when it says it.**
+            //
+            // The one thing this side cannot work out for itself — a slideshow
+            // and a video look the same to a damage tracker — and worth
+            // telling whoever owns the machine, because a session that is
+            // deliberately soft because somebody is watching video looks, in
+            // every other line of output here, exactly like a session that is
+            // soft because this machine is struggling.
+            if pump.profile() != said {
+                said = pump.profile();
+                println!(
+                    "      the viewer says it is {}",
+                    match said {
+                        esper_proto::Profile::Text => "reading: sharpness over motion",
+                        esper_proto::Profile::Balanced => "not minding either way",
+                        esper_proto::Profile::Motion => "watching motion: a softer picture will do",
+                    }
+                );
             }
 
             // **The governor changes the encode size, and the controller has
@@ -2306,6 +2363,27 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // only the host knows, and it says so in the config that has just
         // arrived. A monitor that is not there comes back as a refusal on the
         // control stream and the session carries on with the one it has.
+        // **Say what this viewer is doing, before anything else is asked
+        // for.** The host cannot work it out, and what it decides to give up
+        // when it runs short depends on the answer.
+        //
+        // `Text` asks for a sharp picture and `Motion` for a soft one, which
+        // is the same statement said twice — once as content and once as a
+        // consequence — because the host acts on the second and a person
+        // reads the first. `Balanced` states no preference at all and leaves
+        // the host's own judgement alone.
+        let wanted = match o.profile {
+            Profile::Text => Some(Sharpness::Sharp),
+            Profile::Balanced => None,
+            Profile::Motion => Some(Sharpness::Soft),
+        };
+        link.hint(None, None, o.profile)
+            .await
+            .map_err(|e| format!("saying what this viewer is doing: {e}"))?;
+        link.want_sharpness(wanted)
+            .await
+            .map_err(|e| format!("saying what this viewer will settle for: {e}"))?;
+
         let mut asked_for: Option<u32> = None;
         if let Some(wanted) = o.monitor {
             if wanted == config.selected {
@@ -2791,11 +2869,11 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         if let Some(fps) = link_fps {
             match link_baseline {
                 Some(base) => println!(
-                    "  queue      asked for {fps} fps: the round trip grew from {:.0} ms, \
+                    "  queue      settled for {fps} fps: the round trip grew from {:.0} ms, \
                      which is this session's bytes waiting in a buffer",
                     base.as_secs_f64() * 1000.0
                 ),
-                None => println!("  queue      asked for {fps} fps: the round trip was growing"),
+                None => println!("  queue      settled for {fps} fps: the round trip was growing"),
             }
         }
         Ok(())
@@ -2805,6 +2883,42 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **What a person types, and the three answers there are.**
+    ///
+    /// A profile is the one input a host cannot work out for itself — a
+    /// slideshow and a video look the same to a damage tracker — so getting
+    /// it from the command line wrong, or silently, would leave the host
+    /// guessing while a person believed they had said.
+    #[test]
+    fn a_profile_is_what_the_person_says_they_are_doing() {
+        let parse = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+            parse_connect(&owned)
+        };
+        assert_eq!(
+            parse(&["127.0.0.1:7645"]).expect("no profile").profile,
+            Profile::Balanced,
+            "the default is the one to pick when unsure"
+        );
+        for (typed, wanted) in [
+            ("text", Profile::Text),
+            ("balanced", Profile::Balanced),
+            ("motion", Profile::Motion),
+        ] {
+            let o = parse(&["127.0.0.1:7645", "--profile", typed]).expect("a profile");
+            assert_eq!(o.profile, wanted, "--profile {typed}");
+        }
+        // **Refused rather than defaulted.** A typo silently becoming
+        // `balanced` is how somebody watching video spends the session
+        // wondering why it stutters.
+        let err = parse(&["127.0.0.1:7645", "--profile", "cinema"]).expect_err("a typo");
+        assert!(err.contains("cinema") && err.contains("motion"), "{err}");
+        assert!(
+            parse(&["127.0.0.1:7645", "--profile"]).is_err(),
+            "a profile with no answer is not an answer"
+        );
+    }
 
     #[test]
     fn with_nothing_parked_the_host_waits_indefinitely() {
