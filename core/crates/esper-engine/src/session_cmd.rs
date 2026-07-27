@@ -2089,6 +2089,49 @@ pub fn host_usage() -> String {
     )
 }
 
+/// The share of frames going missing that stops meaning "a lossy link".
+///
+/// A quarter. Measured, the regimes separate either side of it: a link whose
+/// short buffer is overflowing on bursts loses about half its frames, while a
+/// link with five per cent packet loss — a genuinely lossy one — loses about a
+/// tenth.
+const LOSS_THAT_IS_NOT_A_SLOW_LINK: f64 = 0.25;
+
+/// Queueing delay above the path's own floor that counts as a filling queue.
+///
+/// The same hundred milliseconds the controller's own ladder steps on, and
+/// used here for the opposite purpose: to establish that the queue is *not*
+/// what went wrong, which is what makes the loss mean something else.
+const QUEUE_THAT_IS_GROWING: Duration = Duration::from_millis(100);
+
+/// Whether what went wrong was a buffer too short to hold one frame.
+///
+/// **Two conditions, and the second is what makes it mean anything.** Frames
+/// going missing is ordinary; frames going missing on a path whose round trip
+/// never moved is not. A link that is genuinely slow queues before it drops,
+/// so its round trip grows; a link whose buffer cannot hold one frame drops
+/// the tail of every large one and stays as quick as it ever was.
+///
+/// Which is the case the rest of the system reads wrongly: it looks exactly
+/// like packet loss, so the ladder spends frame size on it, and frame size is
+/// not the problem — the *shape* of a frame's departure is.
+fn looks_like_a_short_buffer(lost: f64, rtt: Duration, floor: Duration) -> bool {
+    lost >= LOSS_THAT_IS_NOT_A_SLOW_LINK && rtt.saturating_sub(floor) < QUEUE_THAT_IS_GROWING
+}
+
+/// What share of the frames a host sent never arrived whole.
+///
+/// Pictures and skipped frames both arrived; a lost one did not. Zero when
+/// nothing happened at all, because a session with no frames has no fraction
+/// rather than a fraction of nothing.
+fn lost_fraction(pictures: u64, skipped: u64, lost: u64) -> f64 {
+    let sent = pictures.saturating_add(skipped).saturating_add(lost);
+    if sent == 0 {
+        return 0.0;
+    }
+    lost as f64 / sent as f64
+}
+
 /// Where to look for a device, and what may be told in the looking.
 ///
 /// Shared by every command that has to *get* to a host — a screen, a shell, a
@@ -2941,6 +2984,35 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 None => println!("  queue      settled for {fps} fps: the round trip was growing"),
             }
         }
+        // **A short buffer, which looks exactly like a lossy link and is not.**
+        //
+        // A frame's datagrams leave the host together, and a buffer that
+        // cannot hold one frame drops the tail of every large one. What
+        // reaches this end is frames going missing on a path whose round trip
+        // never moves — the signature of a *lossy* link, which is why the
+        // ladder above spends frame size on it, and frame size is not the
+        // problem.
+        //
+        // Measured: two links both carrying 800 kbit/s, one with 40 ms of
+        // buffer and one with 200, gave 9-31 pictures and 144-148. Neither
+        // was short of capacity. Modern routers keep buffers deliberately
+        // short, so this is the *good* equipment — and nothing in a session's
+        // own numbers said so until this line.
+        if let Some(base) = link_baseline
+            && looks_like_a_short_buffer(
+                lost_fraction(pictures, skipped, stats.frames_lost),
+                path.rtt,
+                base,
+            )
+        {
+            println!(
+                "  buffer     frames arrived in pieces on a path that never slowed \
+                 (round trip {:.0} ms against a floor of {:.0} ms): the link's buffer is \
+                 most likely too short for one frame, which no resolution can fix",
+                path.rtt.as_secs_f64() * 1000.0,
+                base.as_secs_f64() * 1000.0
+            );
+        }
         Ok(())
     })
 }
@@ -2948,6 +3020,48 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The two failures that look identical from here.**
+    ///
+    /// Frames going missing on a link that never slowed is a buffer too short
+    /// to hold one frame; frames going missing on a link that did slow is a
+    /// queue. Measured, two links both carrying 800 kbit/s and differing only
+    /// in buffer gave 9-31 pictures and 144-148, and every other number a
+    /// session reports was the same shape.
+    ///
+    /// Told them apart wrongly, the advice is actively harmful: the ladder
+    /// spends resolution on a problem no resolution can fix.
+    #[test]
+    fn a_short_buffer_is_told_from_a_slow_link() {
+        let ms = Duration::from_millis;
+        // The measured short-buffer case: half the frames gone, a round trip
+        // that never left its floor.
+        assert!(looks_like_a_short_buffer(0.5, ms(15), ms(8)));
+        // The measured bloated case: the same loss, and a round trip half a
+        // second above where it started. That is a queue, and the ladder that
+        // watches the round trip already answers it.
+        assert!(!looks_like_a_short_buffer(0.5, ms(520), ms(20)));
+        // A genuinely lossy link: five per cent of packets, a tenth of the
+        // frames, and nothing about the buffer to report.
+        assert!(!looks_like_a_short_buffer(0.1, ms(3), ms(2)));
+        // And a session where nothing went wrong at all.
+        assert!(!looks_like_a_short_buffer(0.0, ms(2), ms(2)));
+    }
+
+    /// The fraction is over what the host *sent*, which is everything that
+    /// arrived plus everything that did not.
+    #[test]
+    fn the_lost_fraction_counts_frames_that_arrived_and_were_discarded() {
+        // Skipped frames arrived: they cost the link everything they cost,
+        // and counting them as losses would read a session recovering from
+        // one lost keyframe as a session losing most of its frames.
+        assert!((lost_fraction(10, 10, 0) - 0.0).abs() < f64::EPSILON);
+        assert!((lost_fraction(0, 0, 10) - 1.0).abs() < f64::EPSILON);
+        assert!((lost_fraction(40, 40, 20) - 0.2).abs() < f64::EPSILON);
+        // A session with nothing in it has no fraction rather than a division
+        // by zero.
+        assert!((lost_fraction(0, 0, 0) - 0.0).abs() < f64::EPSILON);
+    }
 
     /// **Help that has drifted from the program is worse than none.**
     ///

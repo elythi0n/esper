@@ -314,7 +314,7 @@ cleanup_terminal() {
              "${denied_pid:-}" "${private_host:-}" "${invited_host:-}" \
              "${announcing:-}" "${supervised:-}" "${relay_pid:-}" \
              "${small_host:-}" "${bloat_pid:-}" "${slow_host:-}" \
-             "${profile_host:-}"; do
+             "${profile_host:-}" "${short_host:-}" "${pinch_pid:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1193,6 +1193,48 @@ print(s.getsockname()[1]); s.close()')
         printf '  ✗ an unknown profile was accepted\n'
         printf '%s\n' "$refusal" | sed 's/^/      /'
         fail=1
+      fi
+
+      # **A short buffer is not a slow link, and a session must not say it
+      # is.** Two links carrying the same rate, differing only in how much
+      # buffer sits in front of the bottleneck, gave 9-31 pictures and
+      # 144-148 — and every other number a session reports looked the same.
+      # Told apart wrongly the advice is actively harmful: the ladder spends
+      # resolution on a problem no resolution can fix.
+      if command -v python3 >/dev/null 2>&1; then
+        echo "  — telling a short buffer from a slow link"
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+          timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          > "$term_a/short.log" 2>&1 &
+        short_host=$!
+        short_addr=""
+        for _ in $(seq 1 100); do
+          short_addr=$( { awk '/listening/{print $2}' "$term_a/short.log" 2>/dev/null || true; } | head -1)
+          [ -n "$short_addr" ] && break
+          sleep 0.1
+        done
+        pinched=$(python3 -c 'import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1]); s.close()')
+        # Plenty of rate, and less buffer than one frame needs. The link is
+        # not slow; it simply cannot take a frame all at once.
+        python3 scripts/flaky-link.py --listen "127.0.0.1:$pinched" --to "$short_addr" \
+          --rate 800 --queue 40 > "$term_b/short.log" 2>&1 &
+        pinch_pid=$!
+        sleep 0.5
+        out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 60 "$BIN/esper-engine" connect "127.0.0.1:$pinched" --seconds 8 2>&1 || true)
+        kill "$pinch_pid" 2>/dev/null || true
+        pinch_pid=""
+        kill "$short_host" 2>/dev/null || true
+        short_host=""
+        if printf '%s' "$out" | grep -q "^  buffer "; then
+          printf '  ✓ a link whose buffer is too short for one frame is named as that\n'
+        else
+          printf '  ✗ a short buffer was not recognised, so it reads as a lossy link\n'
+          printf '%s\n' "$out" | sed 's/^/      /'
+          fail=1
+        fi
       fi
 
       # **A session on a link that is slow and buffered, which is a home
