@@ -1171,6 +1171,270 @@ pub enum Profile {
     Motion,
 }
 
+/// What kind of thing is on a clipboard.
+///
+/// **A closed set, and small on purpose.** A clipboard on a real desktop can
+/// carry anything a program cares to invent — file lists, application-private
+/// formats, HTML with remote references, RTF with embedded objects. Forwarding
+/// arbitrary types would turn a paste into a transfer, and turn a parser the
+/// far end never chose into an attack surface reachable by copying.
+///
+/// So: text and images, and nothing else, and a peer naming anything else is
+/// simply not understood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardKind {
+    /// UTF-8 text. The overwhelming majority of what anybody copies.
+    Text,
+    /// A PNG image. One encoding rather than several, so a receiver decodes
+    /// what it expects rather than sniffing.
+    Image,
+}
+
+impl ClipboardKind {
+    /// Every kind, for a caller enumerating what it can offer.
+    pub const ALL: [Self; 2] = [Self::Text, Self::Image];
+
+    /// The most bytes worth carrying, for this kind.
+    ///
+    /// **Text and images are capped differently because they are used
+    /// differently.** A megabyte of text is a large file pretending to be a
+    /// paste; a megabyte of image is a screenshot, which is the second most
+    /// ordinary thing anybody copies.
+    #[must_use]
+    pub const fn cap(self) -> usize {
+        match self {
+            // Comfortably a long document, and far below the point where a
+            // paste becomes a transfer by another name.
+            Self::Text => 1024 * 1024,
+            // A full-screen PNG screenshot at 4K, with room.
+            Self::Image => 16 * 1024 * 1024,
+        }
+    }
+
+    /// A name for a person.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "an image",
+        }
+    }
+}
+
+/// Which way a clipboard is being crossed, from the point of view of the
+/// machine deciding.
+///
+/// The two directions are separate permissions because they are separate
+/// risks. Letting a controller *read* this machine's clipboard exports
+/// whatever was last copied here — very often a password. Letting it *write*
+/// puts content a person did not choose in front of the next paste they make.
+/// A support session usually wants one and not the other, and which one
+/// depends on who is helping whom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardWay {
+    /// Leaving this machine, because the far end asked for what is here.
+    Out,
+    /// Arriving at this machine, to be put on the clipboard here.
+    In,
+}
+
+impl ClipboardWay {
+    /// The permission this direction cannot proceed without.
+    #[must_use]
+    pub const fn permission(self) -> Permission {
+        match self {
+            Self::Out => Permission::ClipboardOut,
+            Self::In => Permission::ClipboardIn,
+        }
+    }
+
+    /// The same crossing seen from the other machine.
+    ///
+    /// One side's `Out` is the other side's `In`, and both sides have to agree
+    /// for anything to move: a controller reading a host's clipboard needs its
+    /// own `clipboard-in` *and* the host's `clipboard-out`.
+    #[must_use]
+    pub const fn reversed(self) -> Self {
+        match self {
+            Self::Out => Self::In,
+            Self::In => Self::Out,
+        }
+    }
+
+    /// A phrase for a log line or a refusal.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Out => "read from this machine's clipboard",
+            Self::In => "written to this machine's clipboard",
+        }
+    }
+}
+
+/// What is on a peer's clipboard — **its shape, never its content**.
+///
+/// # Why an offer rather than a push
+///
+/// A clipboard holds whatever was copied last, and what people copy last is
+/// very often a password. A session that pushed every clipboard change to the
+/// far end would export the contents of a password manager to anyone who
+/// happened to have a window open, silently, at the moment somebody pressed
+/// copy.
+///
+/// So a change announces its *shape* — what kind, how big — and nothing moves
+/// until the other side asks for it and this side's policy allows it. The
+/// asking is what makes the taking visible, and the policy is what makes it
+/// refusable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardOffer {
+    /// What is available, and how large each is.
+    ///
+    /// Ordered by the sender's preference, most useful first, so a receiver
+    /// that wants only one thing takes the first it understands.
+    pub kinds: Vec<Offered>,
+}
+
+/// One thing on offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Offered {
+    pub kind: ClipboardKind,
+    /// How many bytes it is, so the far end can decide before asking rather
+    /// than after receiving.
+    pub bytes: u32,
+}
+
+impl ClipboardOffer {
+    /// The most kinds an offer may name.
+    ///
+    /// There are two kinds, so anything longer is either a peer repeating
+    /// itself or a peer probing. Bounded because this is the first thing a
+    /// session parses from an unpaired-in-spirit peer.
+    pub const MOST_KINDS: usize = 8;
+
+    /// Whether this offer is within bounds and self-consistent.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.kinds.is_empty()
+            && self.kinds.len() <= Self::MOST_KINDS
+            && self.kinds.iter().all(Offered::is_well_formed)
+    }
+
+    /// What is offered of this kind, if anything.
+    #[must_use]
+    pub fn of(&self, kind: ClipboardKind) -> Option<Offered> {
+        self.kinds.iter().copied().find(|o| o.kind == kind)
+    }
+}
+
+impl Offered {
+    /// Whether this is worth asking for.
+    ///
+    /// **An empty offer is refused rather than carried.** Nothing is gained by
+    /// asking for zero bytes, and a peer that offers them is either confused
+    /// or counting how this side responds.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.bytes > 0 && self.bytes as usize <= self.kind.cap()
+    }
+}
+
+/// Asking for something that was offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardRequest {
+    pub kind: ClipboardKind,
+}
+
+/// The content, at last.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardData {
+    pub kind: ClipboardKind,
+    /// The bytes. UTF-8 for [`ClipboardKind::Text`], PNG for
+    /// [`ClipboardKind::Image`].
+    #[serde(with = "serde_bytes")]
+    pub content: Vec<u8>,
+}
+
+impl ClipboardData {
+    /// Whether this is within its kind's cap and actually of its kind.
+    ///
+    /// **Checked here rather than trusted**, because this is content from the
+    /// far end on its way to a local clipboard, where every program on the
+    /// machine can read it. Text that is not UTF-8 would be handed to a
+    /// clipboard as though it were; an image that is not a PNG would be handed
+    /// to whatever decodes PNGs.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        if self.content.is_empty() || self.content.len() > self.kind.cap() {
+            return false;
+        }
+        match self.kind {
+            ClipboardKind::Text => std::str::from_utf8(&self.content).is_ok(),
+            ClipboardKind::Image => self.content.starts_with(&PNG_MAGIC),
+        }
+    }
+}
+
+/// The eight bytes every PNG begins with.
+///
+/// Checked so that "an image" means a PNG rather than whatever the far end
+/// felt like sending to this machine's image decoders.
+const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Why a clipboard request came back with nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardRefusal {
+    /// The peer does not hold the permission this direction needs.
+    NotPermitted,
+    /// Nothing of that kind is on the clipboard.
+    ///
+    /// Ordinary rather than exceptional: an offer describes the clipboard at
+    /// the moment it was sent, and a person can copy something else before the
+    /// far end gets around to asking.
+    NotOffered,
+    /// The clipboard could not be read at all.
+    ///
+    /// Deliberately not distinguished from a clipboard that is simply empty.
+    /// Whether this machine has a display, whether anything owns the
+    /// selection, and whether the owning program answered are all facts about
+    /// the host, and the asker's next move is the same for all three.
+    Unavailable,
+    /// The request was outside its bounds.
+    Malformed,
+}
+
+impl ClipboardRefusal {
+    /// A sentence for a user, not a code for a machine.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotPermitted => "this device is not permitted to use that machine's clipboard",
+            Self::NotOffered => "there is nothing of that kind on the clipboard now",
+            Self::Unavailable => "that machine's clipboard could not be read",
+            Self::Malformed => "the clipboard request was malformed",
+        }
+    }
+}
+
+/// The answer to a [`ClipboardRequest`], and the only thing that ever carries
+/// clipboard content.
+///
+/// **On a stream of its own, never on the media control stream.** A sixteen
+/// megabyte image on the control stream would sit in front of every keyframe
+/// request behind it, so a paste would cost the session seconds of frozen
+/// picture. Its own stream means a large paste is slow at being a paste and
+/// nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardReply {
+    /// Here it is.
+    Sent(ClipboardData),
+    /// Refused, with a reason.
+    Refused(ClipboardRefusal),
+}
+
 /// A controller asking for a picture it can start from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyframeRequest {
@@ -1218,6 +1482,16 @@ pub enum MediaMessage {
     /// monitor list would be a keystroke a person notices; a cursor position
     /// queued behind one is a position that is about to be superseded anyway.
     Cursor(crate::CursorMessage),
+    /// What is on this side's clipboard now — its shape, not its content.
+    /// Either direction.
+    ///
+    /// The one symmetric message here, because a clipboard is the one thing in
+    /// a session that both machines have. Everything else on this stream is a
+    /// controller asking about a host's screen.
+    ///
+    /// Small enough to belong on this stream: two kinds and a length each. The
+    /// content it describes never travels here — see [`ClipboardReply`].
+    Clipboard(ClipboardOffer),
 }
 
 impl MediaMessage {
@@ -1229,6 +1503,23 @@ impl MediaMessage {
             Self::Select(_) | Self::Keyframe(_) => true,
             Self::Hint(h) => h.is_well_formed(),
             Self::Cursor(c) => c.is_well_formed(),
+            Self::Clipboard(o) => o.is_well_formed(),
+        }
+    }
+
+    /// A name for a person, for an error message or a log line.
+    ///
+    /// Here rather than at each end, so a host refusing a message and a
+    /// controller refusing the same message call it the same thing.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Config(_) => "a stream config",
+            Self::Select(_) => "a monitor selection",
+            Self::Hint(_) => "a quality hint",
+            Self::Keyframe(_) => "a keyframe request",
+            Self::Cursor(c) => c.name(),
+            Self::Clipboard(_) => "a clipboard offer",
         }
     }
 
@@ -1246,6 +1537,10 @@ impl MediaMessage {
             Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) => {
                 matches!(role, Role::Controller)
             }
+            // Both machines have a clipboard, so both may say what is on it.
+            // What may then be *taken* is the permissions' business, not the
+            // direction rule's.
+            Self::Clipboard(_) => true,
         }
     }
 }
@@ -1658,5 +1953,277 @@ mod media_tests {
         assert_eq!(Codec::H264.name(), "h264");
         assert_eq!(Codec::H264.payload_type(), 96);
         assert_eq!(Profile::default(), Profile::Balanced);
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    fn roundtrip<T>(value: &T) -> T
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let mut bytes = Vec::new();
+        crate::frame::write_frame(&mut bytes, value).expect("encodes");
+        crate::frame::read_frame(&mut bytes.as_slice()).expect("decodes")
+    }
+
+    fn png(extra: usize) -> Vec<u8> {
+        let mut v = PNG_MAGIC.to_vec();
+        v.extend(std::iter::repeat_n(0u8, extra));
+        v
+    }
+
+    #[test]
+    fn every_clipboard_message_round_trips_through_the_framing() {
+        let offer = ClipboardOffer {
+            kinds: vec![
+                Offered {
+                    kind: ClipboardKind::Text,
+                    bytes: 12,
+                },
+                Offered {
+                    kind: ClipboardKind::Image,
+                    bytes: 4096,
+                },
+            ],
+        };
+        assert_eq!(roundtrip(&offer), offer);
+        assert!(offer.is_well_formed());
+
+        let request = ClipboardRequest {
+            kind: ClipboardKind::Image,
+        };
+        assert_eq!(roundtrip(&request), request);
+
+        for reply in [
+            ClipboardReply::Sent(ClipboardData {
+                kind: ClipboardKind::Text,
+                content: b"hello".to_vec(),
+            }),
+            ClipboardReply::Sent(ClipboardData {
+                kind: ClipboardKind::Image,
+                content: png(16),
+            }),
+            ClipboardReply::Refused(ClipboardRefusal::NotPermitted),
+            ClipboardReply::Refused(ClipboardRefusal::NotOffered),
+        ] {
+            assert_eq!(roundtrip(&reply), reply);
+        }
+    }
+
+    /// **The check that keeps a paste a paste.** Content arriving from the far
+    /// end is on its way to a clipboard every program on this machine can
+    /// read, so what it claims to be has to be what it is.
+    #[test]
+    fn content_that_is_not_what_it_says_it_is_gets_refused() {
+        for bad in [
+            // Not UTF-8, offered as text.
+            ClipboardData {
+                kind: ClipboardKind::Text,
+                content: vec![0xFF, 0xFE, 0xFD],
+            },
+            // Not a PNG, offered as an image.
+            ClipboardData {
+                kind: ClipboardKind::Image,
+                content: b"GIF89a and then some".to_vec(),
+            },
+            // A PNG header is not enough on its own to be a nothing.
+            ClipboardData {
+                kind: ClipboardKind::Text,
+                content: Vec::new(),
+            },
+            ClipboardData {
+                kind: ClipboardKind::Image,
+                content: Vec::new(),
+            },
+        ] {
+            assert!(!bad.is_well_formed(), "{:?} was accepted", bad.kind);
+        }
+        assert!(
+            ClipboardData {
+                kind: ClipboardKind::Text,
+                content: "héllo — unicode".as_bytes().to_vec(),
+            }
+            .is_well_formed()
+        );
+        assert!(
+            ClipboardData {
+                kind: ClipboardKind::Image,
+                content: png(1),
+            }
+            .is_well_formed()
+        );
+    }
+
+    /// A cap that is not checked at its own edge is a cap that is off by one.
+    #[test]
+    fn the_cap_holds_exactly_at_its_edge() {
+        for kind in ClipboardKind::ALL {
+            let content = match kind {
+                ClipboardKind::Text => vec![b'a'; kind.cap()],
+                ClipboardKind::Image => png(kind.cap() - PNG_MAGIC.len()),
+            };
+            assert_eq!(content.len(), kind.cap());
+            let mut data = ClipboardData { kind, content };
+            assert!(data.is_well_formed(), "{kind:?} at its cap was refused");
+            data.content
+                .push(if kind == ClipboardKind::Text { b'a' } else { 0 });
+            assert!(
+                !data.is_well_formed(),
+                "{kind:?} one byte over was accepted"
+            );
+
+            // And the offer describing it is bounded the same way, or a peer
+            // could announce more than could ever be carried.
+            let at = u32::try_from(kind.cap()).expect("a cap fits in a u32");
+            assert!(Offered { kind, bytes: at }.is_well_formed());
+            assert!(
+                !Offered {
+                    kind,
+                    bytes: at + 1
+                }
+                .is_well_formed()
+            );
+            assert!(!Offered { kind, bytes: 0 }.is_well_formed());
+        }
+        // Text is capped far below images on purpose: a megabyte of text is a
+        // file pretending to be a paste.
+        assert!(ClipboardKind::Text.cap() < ClipboardKind::Image.cap());
+    }
+
+    #[test]
+    fn an_offer_outside_its_bounds_is_refused() {
+        let ok = Offered {
+            kind: ClipboardKind::Text,
+            bytes: 4,
+        };
+        assert!(!ClipboardOffer { kinds: Vec::new() }.is_well_formed());
+        assert!(
+            !ClipboardOffer {
+                kinds: vec![ok; ClipboardOffer::MOST_KINDS + 1],
+            }
+            .is_well_formed()
+        );
+        assert!(
+            ClipboardOffer {
+                kinds: vec![ok; ClipboardOffer::MOST_KINDS],
+            }
+            .is_well_formed()
+        );
+        // One bad entry spoils the offer rather than being skipped over.
+        assert!(
+            !ClipboardOffer {
+                kinds: vec![
+                    ok,
+                    Offered {
+                        kind: ClipboardKind::Image,
+                        bytes: 0
+                    }
+                ],
+            }
+            .is_well_formed()
+        );
+    }
+
+    #[test]
+    fn an_offer_says_what_it_has_of_a_kind() {
+        let offer = ClipboardOffer {
+            kinds: vec![Offered {
+                kind: ClipboardKind::Text,
+                bytes: 7,
+            }],
+        };
+        assert_eq!(offer.of(ClipboardKind::Text).map(|o| o.bytes), Some(7));
+        assert_eq!(offer.of(ClipboardKind::Image), None);
+    }
+
+    /// **The two directions must not collapse into one permission.** Granting
+    /// a controller the right to paste *into* this machine is not granting it
+    /// the right to read what is already here, and a mapping that returned the
+    /// same permission for both would silently make it so.
+    #[test]
+    fn each_direction_needs_its_own_permission() {
+        assert_eq!(ClipboardWay::Out.permission(), Permission::ClipboardOut);
+        assert_eq!(ClipboardWay::In.permission(), Permission::ClipboardIn);
+        assert_ne!(
+            ClipboardWay::Out.permission(),
+            ClipboardWay::In.permission()
+        );
+        for way in [ClipboardWay::Out, ClipboardWay::In] {
+            assert_eq!(way.reversed().reversed(), way);
+            assert_ne!(way.reversed(), way);
+            assert!(!way.describe().is_empty());
+        }
+    }
+
+    /// The clipboard offer is the one message on this stream that both ends
+    /// may send, because it is the one thing both ends have.
+    #[test]
+    fn a_clipboard_offer_may_travel_either_way() {
+        let message = MediaMessage::Clipboard(ClipboardOffer {
+            kinds: vec![Offered {
+                kind: ClipboardKind::Text,
+                bytes: 3,
+            }],
+        });
+        assert!(message.may_be_sent_by(Role::Host));
+        assert!(message.may_be_sent_by(Role::Controller));
+        assert!(message.is_well_formed());
+        assert_eq!(message.name(), "a clipboard offer");
+
+        // And a malformed one is refused whichever way it came.
+        let empty = MediaMessage::Clipboard(ClipboardOffer { kinds: Vec::new() });
+        assert!(!empty.is_well_formed());
+    }
+
+    /// The wire names are the contract, and a rename is a protocol break.
+    #[test]
+    fn the_clipboard_wire_names_are_pinned() {
+        for (bytes, tag) in [
+            (
+                encode(&MediaMessage::Clipboard(ClipboardOffer {
+                    kinds: vec![Offered {
+                        kind: ClipboardKind::Text,
+                        bytes: 1,
+                    }],
+                })),
+                "clipboard",
+            ),
+            (
+                encode(&ClipboardReply::Refused(ClipboardRefusal::NotPermitted)),
+                "not_permitted",
+            ),
+            (
+                encode(&ClipboardRequest {
+                    kind: ClipboardKind::Image,
+                }),
+                "image",
+            ),
+            (encode(&ClipboardWay::Out), "out"),
+        ] {
+            let as_text: String = bytes.iter().map(|&b| b as char).collect();
+            assert!(
+                as_text.contains(tag),
+                "the wire form no longer contains {tag:?}"
+            );
+        }
+        assert_eq!(ClipboardKind::Text.name(), "text");
+        assert_eq!(ClipboardKind::Image.name(), "an image");
+        for r in [
+            ClipboardRefusal::NotPermitted,
+            ClipboardRefusal::NotOffered,
+            ClipboardRefusal::Unavailable,
+            ClipboardRefusal::Malformed,
+        ] {
+            assert!(!r.message().is_empty());
+        }
+    }
+
+    fn encode<T: serde::Serialize>(value: &T) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        crate::frame::write_frame(&mut bytes, value).expect("encodes");
+        bytes
     }
 }

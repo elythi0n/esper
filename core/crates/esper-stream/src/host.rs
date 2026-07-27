@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 use esper_media::{Packetizer, VIDEO_CLOCK_HZ};
 use esper_pipeline::pipeline::{Pipeline, Step};
 use esper_proto::{
-    Codec, MAX_MONITORS, MediaMessage, MonitorDescription, Profile, Role, StreamConfig,
+    ClipboardOffer, Codec, MAX_MONITORS, MediaMessage, MonitorDescription, Profile, Role,
+    StreamConfig,
 };
 use esper_scale::Ceiling;
 
@@ -81,6 +82,12 @@ pub struct HostStream {
     asked_fidelity: Option<esper_pipeline::Fidelity>,
     /// What the controller said it was looking at. See [`HostStream::profile`].
     profile: Profile,
+    /// The last thing the controller said was on *its* clipboard.
+    ///
+    /// **One value, not a queue.** A clipboard has one current content, so a
+    /// newer offer replaces an older one rather than joining it — which is
+    /// also why no history accumulates here for a later session to find.
+    offered: Option<ClipboardOffer>,
 }
 
 impl std::fmt::Debug for HostStream {
@@ -164,6 +171,7 @@ impl HostStream {
             asked_fps: None,
             asked_fidelity: None,
             profile: Profile::default(),
+            offered: None,
         })
     }
 
@@ -172,6 +180,15 @@ impl HostStream {
     #[must_use]
     pub const fn profile(&self) -> Profile {
         self.profile
+    }
+
+    /// What the controller last said was on its clipboard, taken away.
+    ///
+    /// Taken rather than borrowed: an offer is acted on once. A caller that
+    /// read it without consuming it would ask for the same paste on every
+    /// tick.
+    pub fn take_offer(&mut self) -> Option<ClipboardOffer> {
+        self.offered.take()
     }
 
     /// The coarsest quantiser the controller asked for, if any.
@@ -313,6 +330,10 @@ impl HostStream {
                     asked_fps: None,
                     asked_fidelity: None,
                     profile: Profile::default(),
+                    // And a resumed session starts knowing nothing about the
+                    // far end's clipboard. Whatever was copied before the link
+                    // broke is not this session's to remember.
+                    offered: None,
                 })
             }
             Err(e) => Err((pipeline, e.into())),
@@ -430,12 +451,20 @@ impl HostStream {
     pub fn handle(&mut self, message: &MediaMessage) -> Result<Handled, StreamError> {
         if !message.is_well_formed() {
             return Err(StreamError::Malformed {
-                what: name_of(message),
+                what: message.name(),
             });
         }
         match message {
             MediaMessage::Keyframe(_) => {
                 self.pipeline.request_keyframe();
+                Ok(Handled::Nothing)
+            }
+            // **Kept, not acted on.** Whether to ask for what the controller
+            // has copied is a decision about permissions and about what a
+            // person wants, and neither belongs to the layer that packetises
+            // pictures.
+            MediaMessage::Clipboard(offer) => {
+                self.offered = Some(offer.clone());
                 Ok(Handled::Nothing)
             }
             MediaMessage::Hint(hint) => {
@@ -484,11 +513,11 @@ impl HostStream {
             // pointer it does not have.
             MediaMessage::Cursor(_) => Err(StreamError::WrongDirection {
                 role: Role::Controller,
-                what: name_of(message),
+                what: message.name(),
             }),
             MediaMessage::Config(_) => Err(StreamError::WrongDirection {
                 role: Role::Controller,
-                what: name_of(message),
+                what: message.name(),
             }),
         }
     }
@@ -564,17 +593,6 @@ const fn fidelity_of(sharpness: esper_proto::Sharpness) -> esper_pipeline::Fidel
         // two of them produce an *identical* keyframe. See
         // [`esper_pipeline::Fidelity::Coarse`].
         Sharpness::Soft => Fidelity::Coarse,
-    }
-}
-
-/// A name for an error message.
-const fn name_of(message: &MediaMessage) -> &'static str {
-    match message {
-        MediaMessage::Config(_) => "a stream config",
-        MediaMessage::Select(_) => "a monitor selection",
-        MediaMessage::Hint(_) => "a quality hint",
-        MediaMessage::Keyframe(_) => "a keyframe request",
-        MediaMessage::Cursor(c) => c.name(),
     }
 }
 

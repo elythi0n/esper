@@ -348,6 +348,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-clipboard"
+version = "0.0.0"
+dependencies = [
+ "esper-proto",
+ "thiserror",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "esper-color"
 version = "0.0.0"
 dependencies = [

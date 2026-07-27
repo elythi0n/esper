@@ -1,0 +1,19 @@
+[package]
+name = "esper-clipboard"
+description = "Moving what somebody copied between two machines without moving what they did not: the platform seam, the policy that decides, and the conformance suite every backend has to pass."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# The content of a clipboard is very often a password. Held bytes are wiped
+# when they are dropped rather than left for whatever allocates next.
+zeroize = "1.8"

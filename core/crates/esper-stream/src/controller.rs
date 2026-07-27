@@ -279,6 +279,9 @@ pub struct ControllerStream {
     outbound: Vec<MediaMessage>,
     /// What the host has said about the pointer, for the caller to act on.
     cursor: Vec<esper_proto::CursorMessage>,
+    /// The last thing the host said was on its clipboard. See
+    /// [`ControllerStream::take_offer`].
+    offered: Option<esper_proto::ClipboardOffer>,
     /// When to stop waiting for a frame.
     ///
     /// Owned here rather than left to the caller, because a caller that has to
@@ -339,6 +342,7 @@ impl ControllerStream {
             wanted_sharpness: None,
             outbound: Vec::new(),
             cursor: Vec::new(),
+            offered: None,
             jitter: Jitter::new(config.max_fps, config.clock_hz),
             stats: ControllerStats::default(),
         };
@@ -1136,6 +1140,16 @@ impl ControllerStream {
                 what: "that message",
             });
         }
+        // **Checked at the boundary, for every kind, before anything is kept.**
+        // Each arm below used to be trusted to check its own, which held for as
+        // long as every arm remembered to — and the pointer arm did not, so a
+        // host could fill a controller's queue with positions off every screen
+        // it had.
+        if !message.is_well_formed() {
+            return Err(StreamError::Malformed {
+                what: message.name(),
+            });
+        }
         match message {
             MediaMessage::Config(config) => self.reconfigure(config),
             // **Kept for the caller rather than acted on here.** What to do
@@ -1155,8 +1169,24 @@ impl ControllerStream {
             // Listed rather than caught by a wildcard, so a message added to
             // the protocol later cannot be silently ignored here: the compiler
             // will not accept a non-exhaustive match.
+            // Kept for the caller, and superseding rather than queueing: a
+            // clipboard has one current content, so the newest offer is the
+            // only one worth having — and nothing accumulates to be found
+            // later.
+            MediaMessage::Clipboard(offer) => {
+                self.offered = Some(offer.clone());
+                Ok(())
+            }
             MediaMessage::Select(_) | MediaMessage::Hint(_) | MediaMessage::Keyframe(_) => Ok(()),
         }
+    }
+
+    /// What the host last said was on its clipboard, taken away.
+    ///
+    /// Taken rather than borrowed, so an offer is acted on once rather than on
+    /// every tick until it changes.
+    pub fn take_offer(&mut self) -> Option<esper_proto::ClipboardOffer> {
+        self.offered.take()
     }
 
     /// Everything the host has said about the pointer since this was last
@@ -1555,5 +1585,71 @@ mod tests {
         // for ever.
         c.set_round_trip(Duration::from_secs(30));
         assert_eq!(c.pace(), LONGEST_PACE);
+    }
+
+    /// **Every message is checked before anything is kept.** The pointer arm
+    /// was trusted to check its own bounds and did not, so a host could hand a
+    /// controller a cursor whose pixels do not match the size it declares —
+    /// which is the shape of every read past the end of a buffer there has
+    /// ever been.
+    #[test]
+    fn a_malformed_message_is_refused_before_it_is_kept() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+
+        let bad_cursor = MediaMessage::Cursor(esper_proto::CursorMessage::Shape(
+            esper_proto::CursorShape {
+                serial: 1,
+                image: esper_proto::CursorImage::Bitmap {
+                    width: 32,
+                    height: 32,
+                    hotspot_x: 0,
+                    hotspot_y: 0,
+                    // Eight pixels' worth, for an image that claims 1024.
+                    rgba: vec![0u8; 32],
+                },
+            },
+        ));
+        assert!(!bad_cursor.is_well_formed(), "the test's input is not bad");
+        assert!(matches!(
+            c.handle(&bad_cursor),
+            Err(StreamError::Malformed { .. })
+        ));
+        assert!(c.take_cursor().is_empty(), "it was kept anyway");
+
+        let empty_offer =
+            MediaMessage::Clipboard(esper_proto::ClipboardOffer { kinds: Vec::new() });
+        assert!(matches!(
+            c.handle(&empty_offer),
+            Err(StreamError::Malformed {
+                what: "a clipboard offer"
+            })
+        ));
+        assert_eq!(c.take_offer(), None, "an empty offer was kept anyway");
+    }
+
+    /// A clipboard has one content, so the newest offer replaces the last —
+    /// and taking it leaves nothing behind for a later look to find.
+    #[test]
+    fn an_offer_supersedes_and_is_taken_once() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        let offer = |bytes: u32| {
+            MediaMessage::Clipboard(esper_proto::ClipboardOffer {
+                kinds: vec![esper_proto::Offered {
+                    kind: esper_proto::ClipboardKind::Text,
+                    bytes,
+                }],
+            })
+        };
+        assert_eq!(c.take_offer(), None);
+        c.handle(&offer(10)).expect("a well-formed offer");
+        c.handle(&offer(20)).expect("a well-formed offer");
+
+        let held = c.take_offer().expect("the host said something was copied");
+        assert_eq!(
+            held.of(esper_proto::ClipboardKind::Text).map(|o| o.bytes),
+            Some(20),
+            "the older offer survived the newer one"
+        );
+        assert_eq!(c.take_offer(), None, "an offer was acted on twice");
     }
 }
