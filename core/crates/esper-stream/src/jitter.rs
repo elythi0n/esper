@@ -325,13 +325,27 @@ impl Jitter {
     ///
     /// And it is the honest evidence: the time from its first datagram to its
     /// last is exactly what the deadline has to be longer than.
-    pub fn settled(&mut self, now: Instant) {
-        if let (Some(opened), Some(last)) = (self.opened_at, self.last_for_frame) {
-            let _ = now;
-            self.remember(last.saturating_duration_since(opened));
-        }
+    /// Returns how long the frame took to arrive, first datagram to last,
+    /// when there were two to measure between.
+    ///
+    /// **That spread is how fast the link carried a burst**, and a burst is
+    /// the only thing that measures a link's *capacity* rather than a
+    /// sender's demand — the sender asked for everything at once, so what
+    /// came out the other end was the link going as fast as it can. See
+    /// [`crate::ControllerStream::link_capacity`].
+    pub fn settled(&mut self, now: Instant) -> Option<Duration> {
+        let _ = now;
+        let spread = match (self.opened_at, self.last_for_frame) {
+            (Some(opened), Some(last)) => {
+                let spread = last.saturating_duration_since(opened);
+                self.remember(spread);
+                Some(spread)
+            }
+            _ => None,
+        };
         self.opened_at = None;
         self.last_for_frame = None;
+        spread
     }
 
     /// The stream's framerate changed, so the deadline should too.
@@ -513,7 +527,7 @@ mod tests {
         let spread = Duration::from_millis(120);
         j.arrived(start, 0, true);
         j.arrived(start + spread, 0, true);
-        j.settled(start + spread);
+        let _ = j.settled(start + spread);
         assert_eq!(j.widest_arrival(), spread);
         assert!(
             j.wait() >= spread,
@@ -527,7 +541,7 @@ mod tests {
         let start = Instant::now();
         j.arrived(start, 0, true);
         assert!(j.due_in(start).is_some());
-        j.settled(start);
+        let _ = j.settled(start);
         assert_eq!(j.due_in(start + Duration::from_secs(1)), None);
     }
 
@@ -617,7 +631,7 @@ mod tests {
         let t = Instant::now();
         k.arrived(t, 0, true);
         k.arrived(t + Duration::from_millis(8), 0, true);
-        k.settled(t + Duration::from_millis(8));
+        let _ = k.settled(t + Duration::from_millis(8));
         // Four seconds of nothing, then a new frame starts.
         k.arrived(t + Duration::from_secs(4), 3000, true);
         assert_eq!(

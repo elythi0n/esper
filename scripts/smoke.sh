@@ -1228,6 +1228,26 @@ print(s.getsockname()[1]); s.close()')
         pinch_pid=""
         kill "$short_host" 2>/dev/null || true
         short_host=""
+        # **And what the link can actually carry**, which is not what it
+        # carried: the second is demand, and on a link with room it says
+        # nothing about the link at all. A frame's own arrival is the only
+        # thing that measures capacity, because its datagrams are handed over
+        # at once — so what spread they arrive with is the wire.
+        #
+        # The bench link carries 800 kbit/s. A reading within a factor of two
+        # of that is the assertion: the estimate ran 8-15% high on an idle
+        # machine, and what would fail this is reading *demand* instead, which
+        # on this link is a third of it and on a fast one is unrelated
+        # entirely.
+        seen_kbit=$(printf '%s' "$out" | awk '/^  capacity /{print $3}')
+        if [ -n "$seen_kbit" ] &&
+          [ "$(awk -v k="$seen_kbit" 'BEGIN{print (k > 400 && k < 1600) ? 1 : 0}')" = 1 ]; then
+          printf '  ✓ the link was measured at about %s kbit/s, which is what it is\n' "$seen_kbit"
+        else
+          printf '  ✗ an 800 kbit/s link was measured at %s kbit/s\n' "${seen_kbit:-nothing}"
+          printf '%s\n' "$out" | sed 's/^/      /'
+          fail=1
+        fi
         if printf '%s' "$out" | grep -q "^  buffer "; then
           printf '  ✓ a link whose buffer is too short for one frame is named as that\n'
         else

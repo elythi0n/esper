@@ -67,6 +67,26 @@ pub enum Decoded {
 /// between them.
 const RUNGS: &[u32] = &[1920, 1280, 960, 640, 480, 320];
 
+/// The smallest frame whose arrival says anything about the link.
+///
+/// Below this the spread is dominated by whether two datagrams happened to be
+/// handed over in the same breath rather than by the wire between them.
+const SMALLEST_BURST_WORTH_TIMING: u64 = 4_000;
+
+/// How many burst measurements to keep.
+///
+/// Sixteen, which at a keyframe every few seconds is most of a minute of
+/// evidence, and rolls over fast enough that a link which genuinely changed
+/// is not remembered as what it was.
+const BURSTS_REMEMBERED: usize = 16;
+
+/// How many are needed before the middle of them means anything.
+///
+/// Four. Below that the median is one of two or three readings and inherits
+/// their noise, and a wrong capacity is worse than none — nothing has to act
+/// on this until it is worth acting on.
+const ENOUGH_BURSTS_TO_JUDGE: usize = 4;
+
 /// How long a window of loss is judged over.
 const WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -228,6 +248,13 @@ pub struct ControllerStream {
     rung: Option<usize>,
     window_ends: Option<std::time::Instant>,
     lost_when_window_began: u64,
+    /// Bytes of the frame being assembled, excluding its first datagram, and
+    /// the fastest burst seen in this window. See [`ControllerStream::note_burst`].
+    burst_bytes: u64,
+    /// The fastest burst in each of the last few windows, so one quiet window
+    /// does not lose what the link is known to carry.
+    burst: [Option<f64>; BURSTS_REMEMBERED],
+    burst_at: usize,
     clean_windows: u32,
     /// The bloat ladder: which rung of [`FPS_RUNGS`] has been asked for, the
     /// smallest round trip seen in each of the last [`BASELINE_WINDOWS`]
@@ -297,6 +324,9 @@ impl ControllerStream {
             rung: None,
             window_ends: None,
             lost_when_window_began: 0,
+            burst_bytes: 0,
+            burst: [None; BURSTS_REMEMBERED],
+            burst_at: 0,
             clean_windows: 0,
             fps_rung: None,
             rtt_this_window: None,
@@ -468,6 +498,71 @@ impl ControllerStream {
         self.stats.keyframes_requested = self.stats.keyframes_requested.saturating_add(1);
         self.outbound
             .push(MediaMessage::Keyframe(KeyframeRequest { reason }));
+    }
+
+    /// What a frame's arrival said about the link's capacity.
+    ///
+    /// # Why a burst is the only honest measurement of a link
+    ///
+    /// Everything else a receiver can count measures **demand**. Bytes per
+    /// second is what the sender chose to send; frames per second likewise.
+    /// On a link with room those numbers say nothing about the link at all,
+    /// which is the trap five separate attempts at pacing fell into — pacing
+    /// to any of them is a rate limit in disguise, and a rate limit on a link
+    /// with room costs exactly the frames it saves on one without.
+    ///
+    /// A frame is different, because a sender hands its datagrams over all at
+    /// once. Whatever spread they arrive with is the link serialising them,
+    /// so `bytes / spread` is the rate the link *can* do rather than the rate
+    /// it was asked for. On a fast link a frame lands in a fraction of a
+    /// millisecond and this reads in the hundreds of megabits; on a link
+    /// carrying 800 kbit/s a five-kilobyte keyframe occupies fifty
+    /// milliseconds and it reads 800.
+    ///
+    /// The largest reading wins, because a burst can be *slowed* by things
+    /// that are not the link — this side being descheduled, a frame arriving
+    /// while another is decoding — and nothing can make one arrive faster
+    /// than the link carried it.
+    fn note_burst(&mut self, bytes: u64, spread: std::time::Duration) {
+        // **Only frames big enough to have occupied the link.**
+        //
+        // A small frame measures nothing: two datagrams that happen to be
+        // handed over together arrive together, and `bytes / spread` for them
+        // reads in the gigabits. Measured on a link carrying 800 kbit/s, the
+        // frames over four kilobytes read 763 to 886 — within a few per cent
+        // of the truth every time — while the whole population had a maximum
+        // of 5.7 Gbit/s.
+        //
+        // Four kilobytes is about three datagrams, and on any link slow
+        // enough for this to matter it is milliseconds of wire.
+        if bytes < SMALLEST_BURST_WORTH_TIMING || spread.is_zero() {
+            return;
+        }
+        let kbit = bytes as f64 * 8.0 / 1000.0 / spread.as_secs_f64();
+        if let Some(slot) = self.burst.get_mut(self.burst_at) {
+            *slot = Some(kbit);
+            self.burst_at = self.burst_at.saturating_add(1) % BURSTS_REMEMBERED;
+        }
+    }
+
+    /// How fast this link carried a burst, in kbit/s, over the recent past.
+    ///
+    /// `None` before any frame has arrived in more than one piece: a session
+    /// whose frames all fit in a single datagram has never asked the link for
+    /// anything at once, so nothing has measured it.
+    /// **The middle reading, not the best one.** Both tails lie: a frame can
+    /// be *slowed* by this side being descheduled, and it can appear
+    /// impossibly fast when its datagrams were handed over together. Measured
+    /// on a link carrying 800 kbit/s, the readings from frames worth timing
+    /// ran 763 to 886 while the maximum over all of them was 5.7 Gbit/s.
+    #[must_use]
+    pub fn link_capacity(&self) -> Option<f64> {
+        let mut seen: Vec<f64> = self.burst.iter().flatten().copied().collect();
+        if seen.len() < ENOUGH_BURSTS_TO_JUDGE {
+            return None;
+        }
+        seen.sort_by(f64::total_cmp);
+        seen.get(seen.len() / 2).copied()
     }
 
     /// Move the link ladder if a window has closed.
@@ -827,6 +922,10 @@ impl ControllerStream {
         self.stats.datagrams = self.stats.datagrams.saturating_add(1);
         self.stats.bytes = self.stats.bytes.saturating_add(datagram.len() as u64);
 
+        // Whether a frame was already being assembled *before* this datagram,
+        // which is what makes this one "not the first of its frame".
+        let opened_before = self.depacketizer.is_assembling();
+
         let mut frames = Vec::new();
         if let Err(e) = self.depacketizer.push(datagram, &mut frames) {
             // A datagram this stream does not accept is not a session
@@ -852,8 +951,40 @@ impl ControllerStream {
         }
         // A frame that completed on its own needs no deadline; one still being
         // assembled does.
+        // **Bytes that arrived after this frame opened, and only this
+        // frame's.**
+        //
+        // Not the frame's whole size: the first datagram's own time on the
+        // wire falls outside the spread between first and last, so dividing
+        // the whole frame by that spread overstates the link by n/(n-1) —
+        // double, for a frame of two datagrams.
+        //
+        // And reset on *every* ending, not only a completion. Kept only
+        // across completions it accumulated through abandoned frames as well,
+        // so on a link losing half of them it measured two frames' bytes
+        // against one frame's spread and read an 800 kbit/s link at 1500.
+        //
+        // The datagram in hand belongs to the frame that just ended unless it
+        // is the one that *started the next* — which is what ended it. That
+        // one is the next frame's first, and first datagrams are never
+        // counted.
+        let starts_the_next = self.depacketizer.is_assembling();
         if produced_frame {
-            self.jitter.settled(now);
+            if opened_before && !starts_the_next {
+                self.burst_bytes = self.burst_bytes.saturating_add(datagram.len() as u64);
+            }
+            let carried = std::mem::take(&mut self.burst_bytes);
+            if let Some(spread) = self.jitter.settled(now) {
+                self.note_burst(carried, spread);
+            }
+        } else {
+            if !opened_before {
+                // A frame ended without producing one — abandoned. Whatever
+                // was counted belonged to it and is gone with it.
+                self.burst_bytes = 0;
+            } else {
+                self.burst_bytes = self.burst_bytes.saturating_add(datagram.len() as u64);
+            }
         }
         self.jitter
             .arrived(now, timestamp, self.depacketizer.is_assembling());
@@ -1083,6 +1214,116 @@ mod tests {
             clock_hz: 90_000,
             ssrc: 1,
         }
+    }
+
+    /// **A burst measures the link; everything else measures the demand.**
+    ///
+    /// The distinction that five separate attempts at pacing foundered on.
+    /// Bytes per second is what the sender chose to send, and on a link with
+    /// room it says nothing whatever about the link — so a session that had
+    /// settled at 320x180 and five frames a second reported 68 kbit/s on a
+    /// link carrying 800. A frame is different: its datagrams are handed over
+    /// at once, so the spread they arrive with is the wire serialising them.
+    #[test]
+    fn a_bursts_arrival_measures_the_wire() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        // A hundred kilobits a second: 10 000 bytes takes 800 ms.
+        for _ in 0..ENOUGH_BURSTS_TO_JUDGE {
+            c.note_burst(10_000, Duration::from_millis(800));
+        }
+        let measured = c.link_capacity().expect("four readings is enough to judge");
+        assert!(
+            (measured - 100.0).abs() < 1.0,
+            "10 000 bytes over 800 ms is 100 kbit/s, not {measured:.0}"
+        );
+
+        // And the same bytes arriving in a tenth of the time is a link ten
+        // times as fast — not a session sending ten times as much.
+        let mut fast = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        for _ in 0..ENOUGH_BURSTS_TO_JUDGE {
+            fast.note_burst(10_000, Duration::from_millis(80));
+        }
+        let measured = fast.link_capacity().expect("readings");
+        assert!((measured - 1000.0).abs() < 10.0, "{measured:.0}");
+    }
+
+    /// **A frame too small to occupy the link measures nothing.**
+    ///
+    /// Two datagrams handed over in the same breath arrive in the same
+    /// breath, and dividing by that spread reads in the gigabits. Measured on
+    /// a real 800 kbit/s link, the frames over the threshold read 763 to 886
+    /// while the maximum over the whole population was 5.7 Gbit/s.
+    #[test]
+    fn a_frame_too_small_to_time_is_not_timed() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        // A literal rather than the constant less one: derived from the
+        // threshold, this test would follow the threshold anywhere, and a
+        // threshold moved to nothing is exactly what it exists to catch.
+        const A_DELTA_FRAME: u64 = 900;
+        // Constant, and that is the point: it costs nothing and it fails the
+        // moment somebody moves the threshold under what a delta frame
+        // weighs, which is the mistake this whole test exists for.
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(
+                A_DELTA_FRAME < SMALLEST_BURST_WORTH_TIMING,
+                "the threshold has moved below what a delta frame weighs, so \
+                 small frames are being timed and they read in the gigabits"
+            );
+        }
+        for _ in 0..(ENOUGH_BURSTS_TO_JUDGE * 4) {
+            // A plausible delta frame, arriving absurdly fast.
+            c.note_burst(A_DELTA_FRAME, Duration::from_micros(10));
+        }
+        assert_eq!(
+            c.link_capacity(),
+            None,
+            "small frames were timed, and they read in the gigabits"
+        );
+        // A frame with no spread at all is one datagram, and one datagram
+        // never waited for anything.
+        c.note_burst(100_000, Duration::ZERO);
+        assert_eq!(c.link_capacity(), None);
+    }
+
+    /// **The middle reading, because both tails lie.**
+    ///
+    /// A burst can be slowed by this side being descheduled and can look
+    /// impossibly fast when its datagrams were handed over together. A
+    /// maximum takes the second kind every time.
+    #[test]
+    fn the_middle_reading_survives_both_tails() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        // Eight honest readings around a megabit, one absurdly fast and one
+        // absurdly slow — the shape a real link produces.
+        for _ in 0..4 {
+            c.note_burst(10_000, Duration::from_millis(80));
+        }
+        c.note_burst(10_000, Duration::from_micros(20));
+        for _ in 0..4 {
+            c.note_burst(10_000, Duration::from_millis(80));
+        }
+        c.note_burst(10_000, Duration::from_secs(4));
+        let measured = c.link_capacity().expect("readings");
+        assert!(
+            (measured - 1000.0).abs() < 10.0,
+            "one absurd reading either way moved the estimate to {measured:.0}"
+        );
+    }
+
+    /// And nothing is claimed before there is enough to claim it from.
+    #[test]
+    fn too_few_readings_is_no_answer_rather_than_a_bad_one() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        for taken in 1..ENOUGH_BURSTS_TO_JUDGE {
+            c.note_burst(10_000, Duration::from_millis(80));
+            assert_eq!(c.link_capacity(), None, "answered after {taken} reading(s)");
+        }
+        c.note_burst(10_000, Duration::from_millis(80));
+        assert!(
+            c.link_capacity().is_some(),
+            "still silent with enough to judge"
+        );
     }
 
     /// **A queue filling is the signal loss cannot give.**

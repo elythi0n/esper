@@ -2867,6 +2867,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let link_capped = link.link_ceiling();
         let link_fps = link.link_fps();
         let link_baseline = link.baseline_round_trip();
+        let capacity = link.link_capacity();
         println!();
         // **Why it ended, in the vocabulary the protocol has for it.** Every
         // reason code used to be a failure, so a session ending normally
@@ -2983,6 +2984,17 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 ),
                 None => println!("  queue      settled for {fps} fps: the round trip was growing"),
             }
+        }
+        // **What the link can actually carry**, which is not what it carried:
+        // the second is demand and the first is capacity, and only a frame's
+        // own arrival measures the difference. A number worth showing on its
+        // own — somebody asking why a session is soft is better served by
+        // "this link carries about 800 kbit/s" than by any amount of advice.
+        if let Some(kbit) = capacity {
+            println!(
+                "  capacity   about {kbit:.0} kbit/s, from how fast a frame's \
+                 datagrams arrived together"
+            );
         }
         // **A short buffer, which looks exactly like a lossy link and is not.**
         //

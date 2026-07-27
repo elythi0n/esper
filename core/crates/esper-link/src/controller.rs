@@ -148,6 +148,15 @@ impl ControllerLink {
         self.stream.link_fps()
     }
 
+    /// How fast this link carried a burst, in kbit/s.
+    ///
+    /// The only measurement of a link's *capacity* a receiver can make: see
+    /// [`esper_stream::ControllerStream::link_capacity`].
+    #[must_use]
+    pub fn link_capacity(&self) -> Option<f64> {
+        self.stream.link_capacity()
+    }
+
     /// The round trip this path costs with nothing queued on it.
     #[must_use]
     pub fn baseline_round_trip(&self) -> Option<std::time::Duration> {
