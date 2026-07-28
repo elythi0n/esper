@@ -112,6 +112,18 @@ pub struct Endpoint {
     /// Our own public key, so a caller can report which device this is without
     /// holding the identity as well.
     public_key: [u8; KEY_LEN],
+    /// The server configuration, kept so each incoming connection can be given
+    /// its own copy with its own capacity estimate. See [`Endpoint::accept`].
+    server: quinn::ServerConfig,
+    /// The capacity estimate for each live connection, by the connection's own
+    /// stable identifier.
+    ///
+    /// **One per connection, not one per endpoint.** The estimate is what a
+    /// *receiver* measured about the path between it and here, and two
+    /// controllers on different networks have different answers — a shared
+    /// cell would clamp a session on gigabit to whatever a session on a hotel
+    /// uplink last reported.
+    capacities: Arc<std::sync::Mutex<Vec<(usize, crate::pacing::Capacity)>>>,
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -143,13 +155,15 @@ impl Endpoint {
         let server = server_config(identity, accept_from, Arc::clone(&provider))?;
         let client = client_config(identity, dial_to, provider)?;
 
-        let mut inner = quinn::Endpoint::server(server, addr)
+        let mut inner = quinn::Endpoint::server(server.clone(), addr)
             .map_err(|source| TransportError::Bind { addr, source })?;
         inner.set_default_client_config(client);
 
         Ok(Self {
             inner,
             public_key: identity.public_key(),
+            server,
+            capacities: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -174,7 +188,51 @@ impl Endpoint {
     /// exchanged. See the note in [`crate::auth`].
     pub async fn accept(&self) -> Option<Result<quinn::Connection, quinn::ConnectionError>> {
         let incoming = self.inner.accept().await?;
-        Some(incoming.await)
+
+        // **A configuration of its own, so the pacing estimate is its own.**
+        // Everything expensive in a server configuration — the certificate,
+        // the verifier, the crypto provider — is behind an `Arc`, so this
+        // clone is a handful of pointers and a fresh transport config.
+        let capacity = crate::pacing::Capacity::unknown();
+        let mut mine = self.server.clone();
+        mine.transport_config(Arc::new(transport_config(capacity.clone())));
+
+        let connecting = match incoming.accept_with(Arc::new(mine)) {
+            Ok(connecting) => connecting,
+            Err(e) => return Some(Err(e)),
+        };
+        let connection = match connecting.await {
+            Ok(connection) => connection,
+            Err(e) => return Some(Err(e)),
+        };
+        self.remember(connection.stable_id(), capacity);
+        Some(Ok(connection))
+    }
+
+    /// Record a connection's capacity cell, and forget the finished ones.
+    fn remember(&self, id: usize, capacity: crate::pacing::Capacity) {
+        let Ok(mut held) = self.capacities.lock() else {
+            return;
+        };
+        // **Pruned by whether anybody else still holds one.** A cell whose only
+        // remaining owner is this list belongs to a connection whose session
+        // has gone; keeping them all would be a list that grows for the life
+        // of a host.
+        held.retain(|(_, cell)| cell.is_shared());
+        held.push((id, capacity));
+    }
+
+    /// The capacity estimate to write what a connection's far end reports into.
+    ///
+    /// `None` for a connection this endpoint did not accept — a dialled one,
+    /// which does not send media and so has nothing to pace.
+    #[must_use]
+    pub fn capacity_of(&self, connection: &quinn::Connection) -> Option<crate::pacing::Capacity> {
+        let held = self.capacities.lock().ok()?;
+        let id = connection.stable_id();
+        held.iter()
+            .find(|(seen, _)| *seen == id)
+            .map(|(_, cell)| cell.clone())
     }
 
     /// Dial a peer.
@@ -282,7 +340,9 @@ fn server_config(
 
     let quic = QuicServerConfig::try_from(tls).map_err(|e| TransportError::Tls(e.to_string()))?;
     let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(quic));
-    cfg.transport_config(Arc::new(transport_config()));
+    cfg.transport_config(Arc::new(transport_config(
+        crate::pacing::Capacity::unknown(),
+    )));
 
     // Enabled by default in quinn, and pinned here anyway.
     //
@@ -315,7 +375,9 @@ fn client_config(
 
     let quic = QuicClientConfig::try_from(tls).map_err(|e| TransportError::Tls(e.to_string()))?;
     let mut cfg = quinn::ClientConfig::new(Arc::new(quic));
-    cfg.transport_config(Arc::new(transport_config()));
+    cfg.transport_config(Arc::new(transport_config(
+        crate::pacing::Capacity::unknown(),
+    )));
     Ok(cfg)
 }
 
@@ -324,8 +386,15 @@ fn client_config(
 /// Every value here is a resource bound as much as a tuning knob: an
 /// unauthenticated peer can open streams and send datagrams, so the limits are
 /// what stop a connection from costing us more than it costs them.
-fn transport_config() -> quinn::TransportConfig {
+fn transport_config(capacity: crate::pacing::Capacity) -> quinn::TransportConfig {
     let mut t = quinn::TransportConfig::default();
+
+    // **Cubic, with its window additionally bounded by what the far end says
+    // the link carries.** The loss response is Cubic's, unchanged; the only
+    // difference is that a session cannot ask the wire for more than the wire
+    // has been measured to give. See [`crate::pacing`] for the six attempts
+    // that led here.
+    t.congestion_controller_factory(Arc::new(crate::pacing::PacedCubic::reading(capacity)));
 
     t.max_idle_timeout(Some(IDLE_TIMEOUT.try_into().unwrap_or_else(|_| {
         quinn::IdleTimeout::from(quinn::VarInt::from_u32(30_000))

@@ -94,6 +94,10 @@ pub struct HostStream {
     asked_fidelity: Option<esper_pipeline::Fidelity>,
     /// What the controller said it was looking at. See [`HostStream::profile`].
     profile: Profile,
+    /// What the controller last measured the link at, in kbit/s.
+    reported: Option<u32>,
+    /// When it said so, so a caller can tell a measurement from a memory.
+    reported_at: Option<Instant>,
 }
 
 impl std::fmt::Debug for HostStream {
@@ -177,6 +181,8 @@ impl HostStream {
             asked_fps: None,
             asked_fidelity: None,
             profile: Profile::default(),
+            reported: None,
+            reported_at: None,
         })
     }
 
@@ -185,6 +191,21 @@ impl HostStream {
     #[must_use]
     pub const fn profile(&self) -> Profile {
         self.profile
+    }
+
+    /// What the controller last measured the link at, and how long ago.
+    ///
+    /// `None` when nothing has been reported, or when the report is older than
+    /// `fresh_for`. **A stale estimate is worse than none**: a link that got
+    /// faster would be held at the old rate for the rest of the session, and
+    /// nothing would say why.
+    #[must_use]
+    pub fn reported_capacity(&self, fresh_for: Duration) -> Option<u32> {
+        let at = self.reported_at?;
+        if at.elapsed() > fresh_for {
+            return None;
+        }
+        self.reported
     }
 
     /// The coarsest quantiser the controller asked for, if any.
@@ -326,6 +347,11 @@ impl HostStream {
                     asked_fps: None,
                     asked_fidelity: None,
                     profile: Profile::default(),
+                    // A resumed session measures the link it has now. What the
+                    // old one carried says nothing about the new one — that is
+                    // often the whole reason it was resumed.
+                    reported: None,
+                    reported_at: None,
                 })
             }
             Err(e) => Err((pipeline, e.into())),
@@ -474,6 +500,16 @@ impl HostStream {
         match message {
             MediaMessage::Keyframe(_) => {
                 self.pipeline.request_keyframe();
+                Ok(Handled::Nothing)
+            }
+            // **Kept for the caller rather than acted on here.** What to do
+            // with a capacity is the transport's — its congestion controller
+            // is the only place that can pace without putting a second
+            // serialiser in front of the wire — and this layer has no
+            // transport.
+            MediaMessage::Report(report) => {
+                self.reported = report.capacity_kbit;
+                self.reported_at = Some(Instant::now());
                 Ok(Handled::Nothing)
             }
             MediaMessage::Hint(hint) => {

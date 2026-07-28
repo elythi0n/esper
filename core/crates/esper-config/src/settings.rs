@@ -223,6 +223,21 @@ pub static SETTINGS: &[Setting] = &[
         about: "The longest edge to send, in pixels. None sends the screen's own size.",
     },
     Setting {
+        key: "host.pace_to_measured",
+        kind: Kind::Flag,
+        // **On, and switchable.** Six attempts at pacing a media session were
+        // built and measured worse than not pacing at all, and this is the
+        // seventh — the first inside the transport, where quinn's own pacer
+        // does the work from the congestion window. It is measured better on
+        // the link that motivated it and costs nothing on a clean one, and it
+        // is still new enough that an operator seeing something strange should
+        // be able to take it out of the picture in one line rather than by
+        // rebuilding.
+        default: Value::Flag(true),
+        about: "Pace this machine's video at the rate the viewer measures the link at, rather \
+                than at whatever the congestion window allows. Off falls back to plain Cubic.",
+    },
+    Setting {
         key: "session.idle_timeout",
         kind: Kind::Time,
         default: Value::Nothing,

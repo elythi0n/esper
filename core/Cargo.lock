@@ -694,6 +694,7 @@ dependencies = [
  "esper-pty",
  "getrandom 0.2.17",
  "quinn",
+ "quinn-proto",
  "rand_core 0.6.4",
  "rustls",
  "rustls-pki-types",

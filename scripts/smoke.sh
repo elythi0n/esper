@@ -317,7 +317,8 @@ cleanup_terminal() {
              "${profile_host:-}" "${short_host:-}" "${pinch_pid:-}" \
              "${clip_host:-}" "${clip_host2:-}" "${clip_viewer:-}" \
              "${clip_x1:-}" "${clip_x2:-}" "${cp_host:-}" "${cp_wire:-}" "${cp_along:-}" \
-             "${multi_host:-}" "${idle_host:-}"; do
+             "${multi_host:-}" "${idle_host:-}" \
+             "${pace_host:-}" "${pace_wire:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1661,6 +1662,93 @@ print(s.getsockname()[1]); s.close()')
       fi
       sed -i '/host.synthetic_monitors/d' "$term_a/config.toml"
 
+      # **The receiver measures the link, and the sender's transport paces to
+      # it.** Three pieces have to line up for that: a controller that can
+      # measure a link from how a frame's datagrams arrive, a report crossing
+      # to the host, and a congestion window on the host that follows it. Any
+      # one of them silently not happening looks exactly like a session that
+      # is merely slow.
+      #
+      # What is checked here is the chain rather than the improvement: the
+      # gain is 27% on a median and would be a flaky assertion, while the
+      # arithmetic that produces it is pinned by unit tests. What cannot be
+      # pinned there is whether the number ever arrives.
+      echo "  — pacing to the rate the far end measures"
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 120 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/pace.log" 2>&1 &
+      pace_host=$!
+      pace_addr=""
+      for _ in $(seq 1 100); do
+        pace_addr=$( { awk '/listening/{print $2}' "$term_a/pace.log" 2>/dev/null || true; } | head -1)
+        [ -n "$pace_addr" ] && break
+        sleep 0.1
+      done
+      pace_port=$((24000 + (RANDOM % 2000)))
+      python3 scripts/flaky-link.py --listen "127.0.0.1:$pace_port" --to "$pace_addr" \
+        --rate 800 --queue 40 > "$term_b/pace-wire.log" 2>&1 &
+      pace_wire=$!
+      sleep 1
+      # Long enough for the estimate to form on a busy machine: it is the
+      # median of four frames over four kilobytes, and eight seconds was
+      # sometimes not enough of them.
+      ESPER_HOME="$term_b" timeout 120 "$BIN/esper-engine" connect "127.0.0.1:$pace_port" \
+        --seconds 20 > "$term_b/pace-view.log" 2>&1 || true
+      kill "$pace_wire" 2>/dev/null || true
+      pace_wire=""
+      kill "$pace_host" 2>/dev/null || true
+      pace_host=""
+
+      measured=$( { grep -oE 'measures this link at [0-9]+' "$term_a/pace.log" 2>/dev/null || true; } |
+        tail -1 | awk '{print $5}')
+      # A wide band on purpose. What is being ruled out is a number that never
+      # arrives or is nonsense — the estimate's own accuracy is 8–15% and is
+      # measured by its own tests, not by this one.
+      if [ -n "$measured" ] &&
+        [ "$(awk -v m="$measured" 'BEGIN{print (m > 400 && m < 2000) ? 1 : 0}')" = 1 ]; then
+        printf '  ✓ the host was told the link carries %s kbit/s, and paced to it\n' "$measured"
+      else
+        printf '  ✗ the host was never told what the link carries (got %s)\n' "${measured:-nothing}"
+        grep -iE 'measur|pacing' "$term_a/pace.log" 2>/dev/null | sed 's/^/      /' || true
+        fail=1
+      fi
+
+      # And switching it off means it is off, which is what an operator seeing
+      # something strange reaches for.
+      #
+      # **Through the same rate-limited wire**, so the setting is the only
+      # difference. A first version ran this one on a clean link, where no
+      # estimate is produced at all — so it passed whatever the setting did.
+      printf 'host.pace_to_measured = false\n' >> "$term_a/config.toml"
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/nopace.log" 2>&1 &
+      pace_host=$!
+      nopace_addr=""
+      for _ in $(seq 1 100); do
+        nopace_addr=$( { awk '/listening/{print $2}' "$term_a/nopace.log" 2>/dev/null || true; } | head -1)
+        [ -n "$nopace_addr" ] && break
+        sleep 0.1
+      done
+      pace_port=$((pace_port + 1))
+      python3 scripts/flaky-link.py --listen "127.0.0.1:$pace_port" --to "$nopace_addr" \
+        --rate 800 --queue 40 > "$term_b/nopace-wire.log" 2>&1 &
+      pace_wire=$!
+      sleep 1
+      ESPER_HOME="$term_b" timeout 120 "$BIN/esper-engine" connect "127.0.0.1:$pace_port" \
+        --seconds 20 >/dev/null 2>&1 || true
+      kill "$pace_wire" 2>/dev/null || true
+      pace_wire=""
+      kill "$pace_host" 2>/dev/null || true
+      pace_host=""
+      sed -i '/host.pace_to_measured/d' "$term_a/config.toml"
+      if ! grep -q 'measures this link at' "$term_a/nopace.log" 2>/dev/null; then
+        printf '  ✓ and switching it off means nothing is paced to\n'
+      else
+        printf '  ✗ it paced anyway with the setting off\n'
+        fail=1
+      fi
+
       # **A short buffer is not a slow link, and a session must not say it
       # is.** Two links carrying the same rate, differing only in how much
       # buffer sits in front of the bottleneck, gave 9-31 pictures and
@@ -1669,6 +1757,15 @@ print(s.getsockname()[1]); s.close()')
       # resolution on a problem no resolution can fix.
       if command -v python3 >/dev/null 2>&1; then
         echo "  — telling a short buffer from a slow link"
+        # **With pacing off, deliberately.** The diagnosis fires on a quarter
+        # of the frames being lost with the round trip not growing, and pacing
+        # to the measured rate stops that happening — the short buffer stops
+        # *being* a short buffer, so there is nothing to name. Which is the
+        # right outcome, and it moves this check to the regime the diagnosis is
+        # still for: pacing has a floor of about 24 kbit·s of capacity × round
+        # trip, and below it an operator does need telling.
+        sed -i '/host.pace_to_measured/d' "$term_a/config.toml" 2>/dev/null || true
+        printf 'host.pace_to_measured = false\n' >> "$term_a/config.toml"
         env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
           timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
           > "$term_a/short.log" 2>&1 &
@@ -1692,6 +1789,7 @@ print(s.getsockname()[1]); s.close()')
           timeout 60 "$BIN/esper-engine" connect "127.0.0.1:$pinched" --seconds 8 2>&1 || true)
         kill "$pinch_pid" 2>/dev/null || true
         pinch_pid=""
+        sed -i '/host.pace_to_measured/d' "$term_a/config.toml" 2>/dev/null || true
         kill "$short_host" 2>/dev/null || true
         short_host=""
         # **And what the link can actually carry**, which is not what it

@@ -682,6 +682,11 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                 }
                 None => break Ok(()),
             };
+            // **The cell this connection's pacing reads from**, taken while
+            // the connection is still nameable here. What goes into it is what
+            // the controller measures and reports; the transport's congestion
+            // controller is what acts on it. See `esper_transport::pacing`.
+            let capacity = endpoint.capacity_of(&conn);
             // `Session::open` is done here rather than inside `serve_one` so
             // that nothing in this crate has to name a `quinn::Connection`.
             // The transport's choice of QUIC is the transport's business.
@@ -710,6 +715,7 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                     terminals: &terminals,
                     log: &log,
                     permits: permits.clone(),
+                    capacity,
                 },
             )
             .await
@@ -1280,6 +1286,7 @@ async fn serve_session(
         terminals,
         log,
         permits,
+        capacity,
     } = machine;
     println!(
         "      peer {}  {}",
@@ -1707,6 +1714,7 @@ async fn serve_session(
             watch: watch.as_ref(),
             live: live.clone(),
             log,
+            capacity,
         },
     )
     .await;
@@ -2031,6 +2039,12 @@ struct Machine<'a> {
     log: &'a Log,
     /// What every paired device may do, as it changes.
     permits: crate::permits::Watching,
+    /// Where to put what the controller measures the link at, for this
+    /// connection's own congestion controller to pace from.
+    ///
+    /// `None` for a connection this endpoint did not accept — which does not
+    /// happen for a host, and is not something to fail a session over.
+    capacity: Option<esper_transport::Capacity>,
 }
 
 struct Attending<'a> {
@@ -2046,6 +2060,9 @@ struct Attending<'a> {
     live: crate::permits::Live,
     /// What happened, for somebody reading it afterwards.
     log: &'a Log,
+    /// Where what the controller measures the link at goes, for this
+    /// connection's own congestion controller to pace from.
+    capacity: Option<esper_transport::Capacity>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -2261,6 +2278,9 @@ async fn serve(
     // chosen to leave — and the reason is worth naming in the log rather than
     // printing one fixed sentence for two different endings.
     let mut ours: Option<esper_proto::Reason> = None;
+    // What the transport has been told, so the same number is not announced
+    // every half second.
+    let mut told_capacity: Option<u32> = None;
     loop {
         let turn = tokio::select! {
             _ = stopping.changed() => Turn::Stop,
@@ -2322,6 +2342,40 @@ async fn serve(
                 }
             },
             Turn::FromController(Ok(message)) => {
+                // **The one message this loop acts on itself.** What the
+                // controller measured about the link is for the *transport* —
+                // its congestion controller is the only place that can pace
+                // without putting a second serialiser in front of the wire —
+                // and the transport is here rather than on the pipeline's
+                // thread. It is forwarded as well, so the session can say what
+                // it was told.
+                if let MediaMessage::Report(report) = &message
+                    && let Some(cell) = attending.capacity.as_ref()
+                    && crate::settings::flag("host.pace_to_measured", true)
+                {
+                    match report.capacity_kbit {
+                        Some(kbit) => {
+                            cell.told(kbit);
+                            if told_capacity != Some(kbit) {
+                                told_capacity = Some(kbit);
+                                println!(
+                                    "      the viewer measures this link at {kbit} kbit/s;                                      pacing to it"
+                                );
+                            }
+                        }
+                        // **Withdrawn, not remembered.** A host pacing on a
+                        // number nothing stands behind any more would hold a
+                        // link that got faster at the old rate for the rest of
+                        // the session, with nothing saying why.
+                        None => {
+                            cell.forget();
+                            if told_capacity.is_some() {
+                                told_capacity = None;
+                                println!("      the viewer can no longer measure this link");
+                            }
+                        }
+                    }
+                }
                 if to_pipeline.send(message).is_err() {
                     break;
                 }

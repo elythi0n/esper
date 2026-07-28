@@ -1786,6 +1786,54 @@ impl StreamPurpose {
     }
 }
 
+/// What the receiving end has measured about the link.
+///
+/// # Why a sender cannot work this out for itself
+///
+/// Measured, three ways, all wrong. The congestion window over the round trip
+/// reads two to three times high. A sender's own send rate measures the
+/// *overload* rather than the capacity — it is what this end chose to offer,
+/// not what the wire took. And the delivered rate is `min(offered, capacity)`,
+/// so a settled session reported 68 kbit/s on a link carrying 800.
+///
+/// What can measure it is the end the bytes arrive at. **Every frame is a
+/// capacity probe**: a sender hands a frame's datagrams over at once, so the
+/// spread they arrive with is the wire serialising them, and `bytes ÷ spread`
+/// is what the link can do. Measured within 8–15% across a fourfold range,
+/// while demand over the same sessions varied four-fold with no relationship
+/// to it.
+///
+/// So the receiver measures and says so, and the sender's transport paces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkReport {
+    /// What the link carries, in kbit/s.
+    ///
+    /// Absent until enough frames have arrived to judge — and absent is the
+    /// honest answer rather than a guess, because a sender told a number it
+    /// cannot rely on paces at a rate the link does not have.
+    pub capacity_kbit: Option<u32>,
+}
+
+/// The most a report may claim, in kbit/s.
+///
+/// A hundred gigabits. Past anything real and short of where the arithmetic
+/// on the other side stops being comfortable.
+pub const MOST_REPORTED_KBIT: u32 = 100_000_000;
+
+impl LinkReport {
+    /// Whether this is within bounds.
+    ///
+    /// A report only ever makes the sender **more** cautious, so a hostile one
+    /// is a peer throttling the session it is itself watching. Bounded anyway:
+    /// a number outside the plausible range is a peer that is confused, and
+    /// acting on confusion is how a session ends up paced at nothing.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.capacity_kbit
+            .is_none_or(|kbit| kbit > 0 && kbit <= MOST_REPORTED_KBIT)
+    }
+}
+
 /// A controller asking for a picture it can start from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyframeRequest {
@@ -1833,6 +1881,12 @@ pub enum MediaMessage {
     /// monitor list would be a keystroke a person notices; a cursor position
     /// queued behind one is a position that is about to be superseded anyway.
     Cursor(crate::CursorMessage),
+    /// What the controller has measured about the link. Controller to host.
+    ///
+    /// On this stream because it is a handful of bytes a few times a second
+    /// and the only other traffic here is rare. See [`LinkReport`] for why the
+    /// measuring end is the receiving one.
+    Report(LinkReport),
 }
 
 impl MediaMessage {
@@ -1844,6 +1898,7 @@ impl MediaMessage {
             Self::Select(_) | Self::Keyframe(_) => true,
             Self::Hint(h) => h.is_well_formed(),
             Self::Cursor(c) => c.is_well_formed(),
+            Self::Report(r) => r.is_well_formed(),
         }
     }
 
@@ -1859,6 +1914,7 @@ impl MediaMessage {
             Self::Hint(_) => "a quality hint",
             Self::Keyframe(_) => "a keyframe request",
             Self::Cursor(c) => c.name(),
+            Self::Report(_) => "a link report",
         }
     }
 
@@ -1873,7 +1929,7 @@ impl MediaMessage {
     pub const fn may_be_sent_by(&self, role: Role) -> bool {
         match self {
             Self::Config(_) | Self::Cursor(_) => matches!(role, Role::Host),
-            Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) => {
+            Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) | Self::Report(_) => {
                 matches!(role, Role::Controller)
             }
         }

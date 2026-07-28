@@ -45,6 +45,11 @@ quinn = { version = "0.11", default-features = false, features = [
     "rustls-log",
     "log",
 ] }
+# The congestion controller's own round-trip estimate, which `quinn` uses in
+# its API and does not re-export. Already in the tree as `quinn`'s own
+# dependency — this is a direct name for something already vendored, not a new
+# crate, and the version is the one `quinn` picks so there is one copy.
+quinn-proto = { version = "0.11", default-features = false }
 rustls-pki-types = "1"
 # Named directly rather than reached through rand_core: this crate needs 16
 # random bytes for a session identifier and nothing else, and a random number

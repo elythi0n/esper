@@ -32,8 +32,8 @@
 use esper_decode::decoder::VideoDecoder;
 use esper_media::{Depacketizer, Reassembled};
 use esper_proto::{
-    KeyframeReason, KeyframeRequest, MediaMessage, MonitorSelect, Profile, QualityHint, Role,
-    Sharpness, StreamConfig,
+    KeyframeReason, KeyframeRequest, LinkReport, MediaMessage, MonitorSelect, Profile, QualityHint,
+    Role, Sharpness, StreamConfig,
 };
 
 use crate::StreamError;
@@ -215,6 +215,19 @@ pub struct ControllerStats {
 /// one worth dropping.
 const MAX_PENDING_CURSOR: usize = 256;
 
+/// How often the link's measured capacity is reported to the host.
+///
+/// The estimate is a median over a window of frames, so it drifts a little
+/// every frame; half a second is often enough for a host to follow a link that
+/// changed and rare enough that the reporting is not itself traffic.
+const REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How far the measurement has to move, in per cent, before it is worth saying.
+///
+/// Ten. The estimate is accurate to 8–15%, so anything tighter would be
+/// reporting the noise.
+const REPORT_WHEN_OFF_BY: u64 = 10;
+
 pub struct ControllerStream {
     depacketizer: Depacketizer,
     decoder: Option<Box<dyn VideoDecoder>>,
@@ -279,6 +292,10 @@ pub struct ControllerStream {
     outbound: Vec<MediaMessage>,
     /// What the host has said about the pointer, for the caller to act on.
     cursor: Vec<esper_proto::CursorMessage>,
+    /// What the host was last told the link carries, in kbit/s.
+    reported: Option<u32>,
+    /// When it was told, so the cadence is a cadence rather than a burst.
+    reported_when: Option<std::time::Instant>,
     /// When to stop waiting for a frame.
     ///
     /// Owned here rather than left to the caller, because a caller that has to
@@ -339,6 +356,8 @@ impl ControllerStream {
             wanted_sharpness: None,
             outbound: Vec::new(),
             cursor: Vec::new(),
+            reported: None,
+            reported_when: None,
             jitter: Jitter::new(config.max_fps, config.clock_hz),
             stats: ControllerStats::default(),
         };
@@ -396,6 +415,59 @@ impl ControllerStream {
         // and a queue can be full while nothing is arriving at all, which is
         // the state the bloat ladder exists for.
         self.step_ladder(now);
+        self.say_what_the_link_carries(now);
+    }
+
+    /// Tell the host what this end has measured the link at.
+    ///
+    /// **The sending end cannot measure this**, so it has to be told. See
+    /// [`esper_proto::LinkReport`], and [`ControllerStream::link_capacity`] for
+    /// how a frame's arrival spread becomes a rate.
+    ///
+    /// Sent on a cadence rather than on every change: the estimate is a median
+    /// over a window of frames, so it moves a little every frame and a message
+    /// per movement would be a message per frame for a number that barely
+    /// changed. A report that is *withdrawn* — the estimate going away — is
+    /// sent immediately, because a host pacing on a number nothing stands
+    /// behind is the one state worth leaving quickly.
+    fn say_what_the_link_carries(&mut self, now: std::time::Instant) {
+        let measured = self.link_capacity().and_then(|kbit| {
+            let rounded = kbit.round();
+            (rounded > 0.0).then_some(rounded as u32)
+        });
+        let withdrawn = measured.is_none() && self.reported.is_some();
+        let due = self
+            .reported_when
+            .is_none_or(|then| now.saturating_duration_since(then) >= REPORT_EVERY);
+        if !withdrawn && !due {
+            return;
+        }
+        // **Only when it has actually moved**, past the noise a median over a
+        // sliding window always has. A host given the same number again pays
+        // for a message and changes nothing.
+        let moved = match (measured, self.reported) {
+            (Some(now_kbit), Some(was)) => {
+                let bigger = now_kbit.max(was);
+                u64::from(now_kbit.abs_diff(was)) * 100 > u64::from(bigger) * REPORT_WHEN_OFF_BY
+            }
+            (a, b) => a != b,
+        };
+        if !moved {
+            return;
+        }
+        let report = LinkReport {
+            capacity_kbit: measured,
+        };
+        if !report.is_well_formed() {
+            return;
+        }
+        self.reported = measured;
+        self.reported_when = Some(now);
+        // One outstanding is enough: the host keeps the latest, and a queue of
+        // superseded measurements is a queue of stale numbers.
+        self.outbound
+            .retain(|m| !matches!(m, MediaMessage::Report(_)));
+        self.outbound.push(MediaMessage::Report(report));
     }
 
     /// What the arrivals have looked like.
@@ -1165,7 +1237,14 @@ impl ControllerStream {
             // Listed rather than caught by a wildcard, so a message added to
             // the protocol later cannot be silently ignored here: the compiler
             // will not accept a non-exhaustive match.
-            MediaMessage::Select(_) | MediaMessage::Hint(_) | MediaMessage::Keyframe(_) => Ok(()),
+            // Listed rather than caught by a wildcard, so a message added to
+            // the protocol later cannot be silently ignored here. A report is
+            // something this end *sends*; the direction check above has
+            // already refused one arriving.
+            MediaMessage::Select(_)
+            | MediaMessage::Hint(_)
+            | MediaMessage::Keyframe(_)
+            | MediaMessage::Report(_) => Ok(()),
         }
     }
 
