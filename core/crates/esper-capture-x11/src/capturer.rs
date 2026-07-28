@@ -77,6 +77,11 @@ pub struct X11Capturer {
     format: PixelFormat,
     monitors: Vec<MonitorInfo>,
     source: monitors::Source,
+    /// Numbers that stay with a monitor for as long as this capturer runs.
+    ///
+    /// Owned here because this is the thing with the lifetime they are stable
+    /// across. See [`esper_capture::Numbering`] for what goes wrong without it.
+    numbering: esper_capture::Numbering,
     selected: MonitorId,
     /// `None` when the server has no DAMAGE, in which case every frame is
     /// reported as wholly changed and the idle ladder is the only thing
@@ -140,7 +145,9 @@ impl X11Capturer {
             backend: BACKEND,
             detail: e.to_string(),
         })?;
-        let Monitors { list, source } = found;
+        let Monitors { mut list, source } = found;
+        let mut numbering = esper_capture::Numbering::new();
+        numbering.number(&mut list);
 
         let selected = match monitor {
             None => list.first().map(|m| m.id).unwrap_or(MonitorId(0)),
@@ -188,6 +195,7 @@ impl X11Capturer {
             format,
             monitors: list,
             source,
+            numbering,
             selected,
             tracker,
             segment,
@@ -271,11 +279,15 @@ impl X11Capturer {
 
     /// Re-read the monitor list; `true` when the desktop is now different.
     fn refresh_monitors(&mut self) -> Result<bool, CaptureError> {
-        let found =
+        let mut found =
             monitors::enumerate(&self.conn, self.root).map_err(|e| CaptureError::Backend {
                 backend: BACKEND,
                 detail: e.to_string(),
             })?;
+        // **Numbered before it is compared.** Fresh out of `enumerate` every
+        // monitor carries a placeholder, so a comparison against the numbered
+        // list this holds would say the layout changed every single time.
+        self.numbering.number(&mut found.list);
         if monitors::same_layout(&self.monitors, &found.list) {
             return Ok(false);
         }

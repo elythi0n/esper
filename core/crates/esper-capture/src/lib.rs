@@ -11,7 +11,7 @@ pub mod pattern;
 pub mod pool;
 pub mod synthetic;
 
-pub use capturer::{Capture, CaptureError, Capturer, MonitorId, MonitorInfo};
+pub use capturer::{Capture, CaptureError, Capturer, MonitorId, MonitorInfo, Numbering};
 pub use damage::{Damage, Regions};
 pub use frame::{Frame, FrameError, PixelFormat};
 pub use gate::{EncodeGate, Policy, Reason, Rung, Verdict};

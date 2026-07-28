@@ -47,20 +47,45 @@ pub struct SyntheticCapturer {
     limit: Option<u64>,
     /// A pending geometry change, delivered once.
     reconfigure_at: Option<u64>,
+    /// Monitors appearing and disappearing, each delivered once.
+    ///
+    /// **The one event that is nearly untestable on real hardware.** Unplugging
+    /// a monitor mid-session breaks the announced layout, the selected monitor,
+    /// the pointer's frame of reference and every buffer size downstream — and
+    /// arranging it means somebody standing next to a machine with a cable in
+    /// their hand. X11's own RandR 1.5 can add a *logical* monitor without one,
+    /// but an `Xvfb` will not, so CI cannot do it either.
+    replugs: Vec<(u64, Replug)>,
+    /// The same sticky numbering a real backend uses, so a fixture cannot be
+    /// kinder about monitor identity than the thing it stands in for.
+    numbering: crate::capturer::Numbering,
     selected: MonitorId,
+}
+
+/// A change to which monitors exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Replug {
+    /// This one is unplugged.
+    Gone(MonitorId),
+    /// One appears, to the right of everything before it.
+    New { width: u32, height: u32 },
+    /// The desktop is rearranged and this one moves.
+    Moved { id: MonitorId, x: i32, y: i32 },
 }
 
 impl SyntheticCapturer {
     /// A synthetic capturer of this size, at this frame rate.
     pub fn new(width: u32, height: u32, fps: u32) -> Result<Self, PatternError> {
         let pattern = Pattern::new(width, height)?;
-        let monitors = vec![MonitorInfo {
+        let mut numbering = crate::capturer::Numbering::new();
+        let mut monitors = vec![MonitorInfo {
             id: MonitorId(0),
             name: "synthetic-0".to_owned(),
             geometry: Rect::sized(width, height),
             scale: 1.0,
             primary: true,
         }];
+        numbering.number(&mut monitors);
         Ok(Self {
             pattern,
             monitors,
@@ -73,6 +98,8 @@ impl SyntheticCapturer {
             started: false,
             limit: None,
             reconfigure_at: None,
+            replugs: Vec::new(),
+            numbering,
             selected: MonitorId(0),
         })
     }
@@ -109,6 +136,20 @@ impl SyntheticCapturer {
     /// still capturing the old monitor would be invisible between two monitors
     /// of the same size, and the frame's size is what a test can see.
     pub fn with_extra_monitor(mut self, width: u32, height: u32) -> Result<Self, PatternError> {
+        self.add_monitor(width, height)?;
+        Ok(self)
+    }
+
+    /// The same, without consuming this.
+    ///
+    /// The builder form loses what it was given when it refuses, which makes a
+    /// loop that adds monitors until one is too small impossible to write. This
+    /// is what the loop uses and what the builder is written on top of.
+    ///
+    /// # Errors
+    ///
+    /// If no pattern can be rendered at that size.
+    pub fn add_monitor(&mut self, width: u32, height: u32) -> Result<(), PatternError> {
         // Rejected here rather than at select time: an unusable monitor in the
         // list is a fixture that lies about the host it is standing in for.
         let _ = Pattern::new(width, height)?;
@@ -122,9 +163,10 @@ impl SyntheticCapturer {
             })
             .max()
             .unwrap_or(0);
-        let id = MonitorId(u32::try_from(self.monitors.len()).unwrap_or(0));
+        let name = format!("synthetic-{}", self.numbering.handed_out());
+        let id = self.numbering.number_of(&name);
         self.monitors.push(MonitorInfo {
-            name: format!("synthetic-{}", id.0),
+            name,
             id,
             geometry: Rect {
                 x,
@@ -135,7 +177,7 @@ impl SyntheticCapturer {
             scale: 1.0,
             primary: false,
         });
-        Ok(self)
+        Ok(())
     }
 
     /// Report a geometry change before the given frame.
@@ -147,6 +189,110 @@ impl SyntheticCapturer {
     pub const fn with_reconfigure_at(mut self, frame: u64) -> Self {
         self.reconfigure_at = Some(frame);
         self
+    }
+
+    /// Unplug a monitor before the given frame.
+    ///
+    /// The list shrinks and, if the one that went was the one being captured,
+    /// the selection moves — which is what a real backend does, and what
+    /// everything above it has to cope with.
+    #[must_use]
+    pub fn with_unplug_at(mut self, frame: u64, monitor: MonitorId) -> Self {
+        self.replugs.push((frame, Replug::Gone(monitor)));
+        self
+    }
+
+    /// Plug a monitor in before the given frame.
+    #[must_use]
+    pub fn with_plug_at(mut self, frame: u64, width: u32, height: u32) -> Self {
+        self.replugs.push((frame, Replug::New { width, height }));
+        self
+    }
+
+    /// Move a monitor before the given frame, as rearranging a desktop does.
+    ///
+    /// Nothing about the picture changes, which is the point: a layout change
+    /// that does not change the frame's size is the one a host announcing only
+    /// on a size change will miss.
+    #[must_use]
+    pub fn with_move_at(mut self, frame: u64, monitor: MonitorId, x: i32, y: i32) -> Self {
+        self.replugs
+            .push((frame, Replug::Moved { id: monitor, x, y }));
+        self
+    }
+
+    /// Apply whatever is due at this frame. Says whether anything was.
+    fn replug(&mut self) -> bool {
+        let Some(at) = self
+            .replugs
+            .iter()
+            .position(|(frame, _)| *frame == self.frame)
+        else {
+            return false;
+        };
+        let Some((_, what)) = self.replugs.get(at).copied() else {
+            return false;
+        };
+        self.replugs.remove(at);
+        match what {
+            Replug::Gone(id) => self.monitors.retain(|m| m.id != id),
+            Replug::New { width, height } => {
+                let x = self
+                    .monitors
+                    .iter()
+                    .map(|m| {
+                        m.geometry
+                            .x
+                            .saturating_add(i32::try_from(m.geometry.width).unwrap_or(i32::MAX))
+                    })
+                    .max()
+                    .unwrap_or(0);
+                // **Never a number already in use**, and the same numbering
+                // a real backend has: a monitor plugged in after one was
+                // unplugged must not inherit its number, or a controller
+                // holding the old list would think it already knew this screen.
+                let name = format!("synthetic-{}", self.numbering.handed_out());
+                let id = self.numbering.number_of(&name);
+                self.monitors.push(MonitorInfo {
+                    name,
+                    id,
+                    geometry: Rect {
+                        x,
+                        y: 0,
+                        width,
+                        height,
+                    },
+                    scale: 1.0,
+                    primary: false,
+                });
+            }
+            Replug::Moved { id, x, y } => {
+                if let Some(m) = self.monitors.iter_mut().find(|m| m.id == id) {
+                    m.geometry.x = x;
+                    m.geometry.y = y;
+                }
+            }
+        }
+        // The selected monitor may be the one that went. Falling back to the
+        // first is what a real backend does: a session watching a screen that
+        // was unplugged should show something.
+        if !self.monitors.iter().any(|m| m.id == self.selected) {
+            self.selected = self.monitors.first().map_or(MonitorId(0), |m| m.id);
+        }
+        // And the pattern has to be the size of whatever is now selected,
+        // because the frame's size is what everything downstream sizes itself
+        // from. Rendering the old monitor's size into a stream announced at the
+        // new one's would be a fixture that lies about the host.
+        if let Some(now) = self.monitors.iter().find(|m| m.id == self.selected) {
+            let (w, h) = now.size();
+            if (self.pattern.width(), self.pattern.height()) != (w, h)
+                && let Ok(fresh) = Pattern::new(w, h)
+            {
+                self.pattern = fresh;
+                self.started = false;
+            }
+        }
+        true
     }
 
     /// The frame number the next capture will render.
@@ -267,6 +413,9 @@ impl Capturer for SyntheticCapturer {
 
         if self.reconfigure_at == Some(self.frame) {
             self.reconfigure_at = None;
+            return Ok(Capture::Reconfigured(self.monitors.clone()));
+        }
+        if self.replug() {
             return Ok(Capture::Reconfigured(self.monitors.clone()));
         }
 

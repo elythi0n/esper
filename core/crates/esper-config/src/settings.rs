@@ -180,6 +180,19 @@ pub static SETTINGS: &[Setting] = &[
                 naming one is a refusal to fall back.",
     },
     Setting {
+        key: "host.synthetic_monitors",
+        kind: Kind::Whole { least: 1, most: 8 },
+        // Not a security decision, and not a test hook either: the synthetic
+        // backend is already something a person can ask for by name, and how
+        // many screens it pretends to have is the same kind of question as
+        // what size they are. It exists because developing or testing a
+        // multi-monitor viewer otherwise needs multi-monitor hardware.
+        default: Value::Whole(1),
+        about: "How many screens the synthetic backend pretends to have. Each is half the \
+                size of the one before, so a switch between them is visible. Only applies \
+                when the synthetic backend is in use.",
+    },
+    Setting {
         key: "host.monitor",
         kind: Kind::WholeOrNone { least: 0, most: 64 },
         default: Value::Nothing,

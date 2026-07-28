@@ -99,12 +99,34 @@ impl CursorTracker {
         let mut out = Vec::new();
         let (id, mx, my, width, height) = monitor;
 
-        // The shape, when the serial says it changed — or when it is the
-        // hidden state and the far end has not been told.
-        let hidden = state.image.is_none();
+        // Whether the pointer is on the screen being sent.
+        let on_this_monitor = state.x >= mx
+            && state.y >= my
+            && state.x < mx.saturating_add(i32::try_from(width).unwrap_or(i32::MAX))
+            && state.y < my.saturating_add(i32::try_from(height).unwrap_or(i32::MAX));
+
+        // **A pointer on another screen is a pointer that is not there**, and
+        // the far end has to be told so rather than left with the last
+        // position it was given.
+        //
+        // Before this, moving the mouse to a second monitor left the viewer
+        // drawing a pointer frozen at the edge of the picture — a pointer
+        // somewhere the person's hand is not, which is worse than no pointer
+        // at all because it looks live.
+        //
+        // Said with `Hidden`, which already means "there is no pointer to
+        // draw". That does conflate "an application hid it" with "it is on
+        // another screen" — and deliberately: the two are the same
+        // *instruction* to a viewer, and a second message for a distinction
+        // nothing could act on differently would be a protocol carrying a
+        // difference to nowhere.
+        let hidden = state.image.is_none() || !on_this_monitor;
         let shape_is_new = self.sent_serial != Some(state.serial) || self.sent_hidden != hidden;
         if shape_is_new {
             let image = match &state.image {
+                // Nothing to draw: either the application hid the pointer, or
+                // it is on a screen this session is not sending.
+                _ if !on_this_monitor => Some(CursorImage::Hidden),
                 None => Some(CursorImage::Hidden),
                 Some(i) if i.is_consistent() => Some(CursorImage::Bitmap {
                     width: i.width,
@@ -131,12 +153,13 @@ impl CursorTracker {
             }
         }
 
-        // The position, when the pointer is on the monitor being captured.
-        let on_this_monitor = state.x >= mx
-            && state.y >= my
-            && state.x < mx.saturating_add(i32::try_from(width).unwrap_or(i32::MAX))
-            && state.y < my.saturating_add(i32::try_from(height).unwrap_or(i32::MAX));
+        // And the position only means anything while it is on this screen.
         if !on_this_monitor {
+            // Forgotten, so that coming back sends a position rather than
+            // being suppressed as "the same place it already was" — which,
+            // after a trip to the other screen, is a pointer that reappears
+            // only once it moves.
+            self.sent_at = None;
             return out;
         }
         let here = CursorPos::from_pixels(
@@ -332,9 +355,27 @@ mod tests {
         // Left of this monitor, on the one at the origin.
         let out = t.update(&state(1, 100, 400), MONITOR, now);
         assert!(positions(&out).is_empty(), "not on this monitor");
-        // The shape still travels: what the pointer looks like is true
-        // wherever it is, and the controller will want it when it comes back.
+
+        // **And the far end is told there is no pointer to draw.**
+        //
+        // An earlier version sent the real shape here, reasoning that what the
+        // pointer looks like is true wherever it is. It is — and it is also
+        // useless: the viewer has no other way to know the pointer left, so it
+        // went on drawing one at the last position it was given. Moving the
+        // mouse to a second screen left a pointer frozen at the edge of the
+        // picture, somewhere the person's hand was not, which is worse than no
+        // pointer because it looks live.
         assert_eq!(shapes(&out), 1);
+        assert!(
+            matches!(
+                out.first(),
+                Some(CursorMessage::Shape(CursorShape {
+                    image: CursorImage::Hidden,
+                    ..
+                }))
+            ),
+            "a pointer on another screen was announced as visible: {out:?}"
+        );
 
         // Below it, too.
         let out = t.update(
@@ -343,6 +384,53 @@ mod tests {
             now + POSITION_INTERVAL,
         );
         assert!(positions(&out).is_empty());
+        assert_eq!(
+            shapes(&out),
+            0,
+            "it was already told; saying it again is noise"
+        );
+    }
+
+    /// **And it comes back.** A pointer that returned and was never announced
+    /// again would be a session where the pointer disappears the first time
+    /// somebody glances at their other screen and never returns.
+    #[test]
+    fn a_pointer_that_comes_back_is_drawn_again_without_having_to_move() {
+        let mut t = CursorTracker::new();
+        let now = Instant::now();
+
+        // On this screen: a shape and a position.
+        let out = t.update(&state(1, 2000, 400), MONITOR, now);
+        assert_eq!(shapes(&out), 1);
+        assert_eq!(positions(&out).len(), 1);
+
+        // Away, and told so.
+        let out = t.update(&state(1, 100, 400), MONITOR, now + POSITION_INTERVAL);
+        assert!(matches!(
+            out.first(),
+            Some(CursorMessage::Shape(CursorShape {
+                image: CursorImage::Hidden,
+                ..
+            }))
+        ));
+
+        // Back to **exactly where it was**, with the same serial. The shape has
+        // to be sent again, because the far end was told there was none — and
+        // so does the position, because the far end stopped drawing it.
+        let out = t.update(&state(1, 2000, 400), MONITOR, now + POSITION_INTERVAL * 2);
+        assert_eq!(shapes(&out), 1, "the pointer never came back: {out:?}");
+        assert!(matches!(
+            out.first(),
+            Some(CursorMessage::Shape(CursorShape {
+                image: CursorImage::Bitmap { .. },
+                ..
+            }))
+        ));
+        assert_eq!(
+            positions(&out).len(),
+            1,
+            "it reappeared with no position, so nothing would be drawn until it moved"
+        );
     }
 
     /// The corners of the captured monitor are inside it, and the pixel past

@@ -90,17 +90,21 @@ pub fn enumerate<C: Connection>(conn: &C, root: Window) -> Result<Monitors, Moni
     })
 }
 
-/// Sort, then number.
+/// Sort for presentation. **Numbering is somebody else's job.**
 ///
 /// The primary first, then left to right and top to bottom. Ordering is a
 /// product decision rather than a technical one: `--monitor 0` has to mean the
 /// screen the person is most likely to want, and the X server's own order is
 /// whatever RandR happens to return.
+///
+/// This used to hand out ids by position here, which is stable until the
+/// desktop changes and then silently is not — unplugging the middle of three
+/// monitors renumbers the third onto the second's number, and a session
+/// watching it is watching a different screen without having asked. Numbers
+/// come from [`esper_capture::Numbering`], which the capturer owns because that
+/// is the thing with a lifetime for them to be stable across.
 fn order(mut list: Vec<MonitorInfo>) -> Vec<MonitorInfo> {
     list.sort_by_key(|m| (!m.primary, m.geometry.x, m.geometry.y, m.name.clone()));
-    for (i, m) in list.iter_mut().enumerate() {
-        m.id = MonitorId(u32::try_from(i).unwrap_or(u32::MAX));
-    }
     list
 }
 

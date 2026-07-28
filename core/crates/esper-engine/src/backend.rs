@@ -108,11 +108,32 @@ pub fn open(
     } else {
         attempts.push("synthetic: in use, as asked".to_owned());
     }
-    let synthetic = esper_capture::synthetic::SyntheticCapturer::new(size.0, size.1, 1_000_000)
+    let mut synthetic = esper_capture::synthetic::SyntheticCapturer::new(size.0, size.1, 1_000_000)
         .map_err(|e| CaptureError::Backend {
             backend: "synthetic",
             detail: e.to_string(),
         })?;
+    // **Each half the size of the one before**, so a switch between them shows
+    // up in the picture rather than being taken on trust — the same reason the
+    // test fixtures do it. A screen too small to render stops the list rather
+    // than failing the host: a machine that would not start because somebody
+    // asked for eight synthetic monitors is worse than one that offers five.
+    let wanted = crate::settings::whole("host.synthetic_monitors").unwrap_or(1);
+    let (mut w, mut h) = size;
+    for _ in 1..wanted {
+        (w, h) = (w / 2, h / 2);
+        // A screen too small to render ends the list here with what was
+        // built so far.
+        if synthetic.add_monitor(w, h).is_err() {
+            break;
+        }
+    }
+    if synthetic.monitors().len() > 1 {
+        attempts.push(format!(
+            "synthetic: {} screens, as asked",
+            synthetic.monitors().len()
+        ));
+    }
     Ok(Selected {
         capturer: Box::new(synthetic),
         attempts,

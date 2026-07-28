@@ -59,6 +59,91 @@ impl MonitorInfo {
     }
 }
 
+/// Numbers that stay with a monitor for as long as a capturer runs.
+///
+/// # The bug this exists to stop
+///
+/// The obvious way to number a monitor list is by position in it: sort for
+/// presentation, then hand out 0, 1, 2. That is stable until the desktop
+/// changes, and then it silently is not.
+///
+/// Three monitors, A B C, numbered 0 1 2. Unplug **B**. Re-enumerate, sort,
+/// renumber: A is 0 and **C is now 1**. A session watching 1 was watching B
+/// and is now watching C — a different screen, with no switch asked for and
+/// possibly the same size, so nothing downstream has any reason to notice. The
+/// controller's monitor picker is wrong, the pointer is expressed as a fraction
+/// of the wrong rectangle, and the person sees somebody else's desktop.
+///
+/// So a number is handed out once and kept. A monitor that comes back gets the
+/// one it had; a new one gets a number never used before. The *order* of the
+/// list stays a presentation decision — primary first, then left to right —
+/// and has nothing to do with the numbers in it.
+///
+/// # What it is keyed on
+///
+/// The platform's own name, which is the only thing available and is good
+/// enough for one capturer's lifetime: `DP-1` is a port, two monitors never
+/// share one, and a screen unplugged and plugged back into the same port is
+/// the same screen by any definition a person would use. It is deliberately
+/// **not** a claim that the name means anything across restarts — see
+/// [`MonitorId`].
+#[derive(Debug, Default)]
+pub struct Numbering {
+    /// Every name ever seen, with the number it was given.
+    given: Vec<(String, MonitorId)>,
+    /// The next number never used.
+    next: u32,
+}
+
+impl Numbering {
+    /// A fresh set of numbers.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Give each of these the number it already has, or a new one.
+    ///
+    /// The list's order is left exactly as it came: what order the monitors
+    /// are presented in and what they are called are two different questions.
+    pub fn number(&mut self, list: &mut [MonitorInfo]) {
+        for m in list {
+            m.id = self.number_of(&m.name);
+        }
+    }
+
+    /// The number for this name, assigning one if it has never been seen.
+    #[must_use]
+    pub fn number_of(&mut self, name: &str) -> MonitorId {
+        if let Some((_, id)) = self.given.iter().find(|(seen, _)| seen == name) {
+            return *id;
+        }
+        let id = MonitorId(self.next);
+        self.next = self.next.saturating_add(1);
+        // Bounded: a machine that plugs monitors in and out for a month should
+        // not grow this without limit. The oldest name goes, which at worst
+        // means a very long-departed monitor gets a fresh number on its
+        // return — and nothing is watching it.
+        if self.given.len() >= MOST_REMEMBERED {
+            self.given.remove(0);
+        }
+        self.given.push((name.to_owned(), id));
+        id
+    }
+
+    /// How many numbers have been handed out.
+    #[must_use]
+    pub const fn handed_out(&self) -> u32 {
+        self.next
+    }
+}
+
+/// How many monitor names a capturer remembers numbers for.
+///
+/// Far more than any desktop has, and a bound so that plugging screens in and
+/// out all day cannot grow it for ever.
+const MOST_REMEMBERED: usize = 64;
+
 /// What a capture attempt produced.
 #[derive(Debug)]
 pub enum Capture {

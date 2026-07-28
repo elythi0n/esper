@@ -316,7 +316,8 @@ cleanup_terminal() {
              "${small_host:-}" "${bloat_pid:-}" "${slow_host:-}" \
              "${profile_host:-}" "${short_host:-}" "${pinch_pid:-}" \
              "${clip_host:-}" "${clip_host2:-}" "${clip_viewer:-}" \
-             "${clip_x1:-}" "${clip_x2:-}" "${cp_host:-}" "${cp_wire:-}" "${cp_along:-}"; do
+             "${clip_x1:-}" "${clip_x2:-}" "${cp_host:-}" "${cp_wire:-}" "${cp_along:-}" \
+             "${multi_host:-}" "${idle_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1550,6 +1551,87 @@ print(s.getsockname()[1]); s.close()')
       ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" files-out files-in >/dev/null
       kill "$cp_host" 2>/dev/null || true
       cp_host=""
+
+      # **More than one screen.** Switching between monitors, the layout
+      # reaching the controller, and the claim that a screen nobody is watching
+      # costs the session nothing — which is a claim about damage tracking and
+      # is worth measuring rather than asserting.
+      echo "  — a host with more than one screen"
+      printf 'host.synthetic_monitors = 3\n' >> "$term_a/config.toml"
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 120 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/multi.log" 2>&1 &
+      multi_host=$!
+      multi_addr=""
+      for _ in $(seq 1 100); do
+        multi_addr=$( { awk '/listening/{print $2}' "$term_a/multi.log" 2>/dev/null || true; } | head -1)
+        [ -n "$multi_addr" ] && break
+        sleep 0.1
+      done
+
+      # Each screen is half the size of the one before, so a switch is visible
+      # in the picture rather than taken on trust.
+      switched=$(ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$multi_addr" \
+        --seconds 3 --monitor 1 2>&1 || true)
+      if printf '%s' "$switched" | grep -q 'now showing monitor 1: 640x360'; then
+        printf '  ✓ a controller asked for the second screen and got it, at its own size\n'
+      else
+        printf '  ✗ the switch to a second screen did not happen\n'
+        printf '%s\n' "$switched" | grep -iE 'monitor|showing' | sed 's/^/      /'
+        fail=1
+      fi
+
+      # **A screen that is not there is refused, not silently substituted.**
+      missing=$(ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$multi_addr" \
+        --seconds 3 --monitor 7 2>&1 || true)
+      if printf '%s' "$missing" | grep -q 'would not switch to monitor 7'; then
+        printf '  ✓ and asking for a screen that is not there is refused by name\n'
+      else
+        printf '  ✗ a screen that does not exist was not refused\n'
+        printf '%s\n' "$missing" | grep -iE 'monitor|showing' | sed 's/^/      /'
+        fail=1
+      fi
+      kill "$multi_host" 2>/dev/null || true
+      multi_host=""
+
+      # **The measurement.** The same screen, watched for the same time, on a
+      # host with one screen and on a host with three. Damage on X11 is
+      # desktop-wide, so a host that sent a frame every time anything moved
+      # anywhere would charge a session for screens nobody asked for.
+      kbit_with() {
+        sed -i '/host.synthetic_monitors/d' "$term_a/config.toml"
+        printf 'host.synthetic_monitors = %s\n' "$1" >> "$term_a/config.toml"
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+          timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          > "$term_a/idle-$1.log" 2>&1 &
+        idle_host=$!
+        local addr=""
+        for _ in $(seq 1 100); do
+          addr=$( { awk '/listening/{print $2}' "$term_a/idle-$1.log" 2>/dev/null || true; } | head -1)
+          [ -n "$addr" ] && break
+          sleep 0.1
+        done
+        ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$addr" --seconds 4 \
+          2>&1 | awk '/^  received /{print $6}'
+        kill "$idle_host" 2>/dev/null || true
+        idle_host=""
+      }
+      one_screen=$(kbit_with 1)
+      three_screens=$(kbit_with 3)
+      # A generous band: what is being ruled out is a host that charges for
+      # every screen, which would be three times the number rather than a few
+      # per cent either way.
+      if [ -n "$one_screen" ] && [ -n "$three_screens" ] &&
+        [ "$(awk -v a="$three_screens" -v b="$one_screen" \
+          'BEGIN{print (a < b * 1.5) ? 1 : 0}')" = 1 ]; then
+        printf '  ✓ two idle screens cost the session nothing: %s kbit/s against %s\n' \
+          "$three_screens" "$one_screen"
+      else
+        printf '  ✗ idle screens are being charged for: %s kbit/s against %s\n' \
+          "${three_screens:-no}" "${one_screen:-no}"
+        fail=1
+      fi
+      sed -i '/host.synthetic_monitors/d' "$term_a/config.toml"
 
       # **A short buffer is not a slow link, and a session must not say it
       # is.** Two links carrying the same rate, differing only in how much

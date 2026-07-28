@@ -47,7 +47,20 @@ pub enum HostStep {
     /// The gate skipped the frame to stay inside the rate ceiling.
     Skipped,
     /// The monitor's geometry changed. The caller must re-announce the config.
-    Reconfigured { width: u32, height: u32 },
+    Reconfigured {
+        width: u32,
+        height: u32,
+        /// Which monitor is being sent now.
+        monitor: u32,
+        /// Whether that is a **different** monitor from the one before.
+        ///
+        /// True when the screen being watched went away and this end fell back
+        /// to another. A switch nobody asked for is the one thing a controller
+        /// cannot work out for itself: the picture simply becomes somewhere
+        /// else, possibly at the same size, and a viewer told nothing shows a
+        /// stranger's desktop under the old screen's name.
+        switched: bool,
+    },
     /// The capture source ended.
     Finished,
 }
@@ -351,7 +364,32 @@ impl HostStream {
             }
             Step::Unchanged => Ok(HostStep::Quiet),
             Step::Skipped => Ok(HostStep::Skipped),
-            Step::Reconfigured { width, height } => Ok(HostStep::Reconfigured { width, height }),
+            Step::Reconfigured { width, height } => {
+                // **The capturer may have moved underneath this.** A monitor
+                // being unplugged makes a backend fall back to another one on
+                // its own — it has to, because a session watching a screen
+                // that was pulled out should show something — and this end
+                // held the old number. Announcing that number against a list
+                // that no longer contains it produces a config the controller
+                // refuses as malformed, so the stream is never reconfigured
+                // and the picture stops for the rest of the session.
+                let now = self.pipeline.selected_monitor().0;
+                let switched = now != self.monitor;
+                if switched {
+                    self.monitor = now;
+                    // A different screen is a different synchronisation
+                    // source, exactly as it is when somebody asks for one:
+                    // every reference picture the decoder holds is of
+                    // somewhere else.
+                    self.packetizer.set_ssrc(ssrc_for(now));
+                }
+                Ok(HostStep::Reconfigured {
+                    width,
+                    height,
+                    monitor: now,
+                    switched,
+                })
+            }
             Step::Finished => Ok(HostStep::Finished),
         }
     }

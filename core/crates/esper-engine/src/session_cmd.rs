@@ -2067,10 +2067,15 @@ async fn serve(
     let sending = std::thread::spawn(move || {
         let interval = Duration::from_millis(200);
         let mut frames = 0u64;
-        // What the controller was last told the picture's size is. Read from
-        // the pump rather than passed in, so there is one source for it.
-        let opening = pump.config();
-        let mut announced = (opening.width, opening.height);
+        // **What the controller was last told**, whole rather than just its
+        // size. Two overlapping conditions used to decide whether to send a
+        // config — the picture's size moved, or the desktop changed — and a
+        // monitor switch satisfied both, so it went out twice. One rule: send
+        // it when it is different from what was sent.
+        //
+        // Read from the pump rather than passed in, so there is one source
+        // for it.
+        let mut announced: Option<esper_proto::StreamConfig> = Some(pump.config());
         // **What the viewer said it was doing, said once when it says it.**
         //
         // The one thing this side cannot work out for itself, and worth
@@ -2106,15 +2111,61 @@ async fn serve(
                         None
                     }
                 };
-                if let Some(config) = answer
-                    && to_controller.send(MediaMessage::Config(config)).is_err()
-                {
-                    break;
+                if let Some(config) = answer {
+                    // Recorded as well as sent, so the reconfiguration this
+                    // switch is about to cause does not announce the same
+                    // thing again a moment later.
+                    announced = Some(config.clone());
+                    if to_controller.send(MediaMessage::Config(config)).is_err() {
+                        break;
+                    }
                 }
             }
             match pump.pump(interval) {
                 Ok(HostStep::Sent { .. }) => frames = frames.saturating_add(1),
                 Ok(HostStep::Finished) => break,
+                // **The desktop changed, and the controller has to be told —
+                // even when the picture did not.** A monitor plugged in, or a
+                // desktop rearranged, leaves the screen being watched exactly
+                // as it was: the size check below sees nothing and says
+                // nothing, and the controller's monitor list is wrong for the
+                // rest of the session. A viewer offering a picker would list
+                // screens that are gone and not the one that arrived.
+                Ok(HostStep::Reconfigured {
+                    monitor, switched, ..
+                }) => {
+                    let now = pump.config();
+                    // **Only when it is news.** A monitor switch already
+                    // announced itself from the `Select` handler, and the
+                    // reconfiguration it causes arrives here a moment later —
+                    // the same config twice, the second reported as "the
+                    // desktop changed" when nothing had.
+                    if announced.as_ref() == Some(&now) {
+                        continue;
+                    }
+                    if switched {
+                        // **A switch nobody asked for.** The screen being
+                        // watched went away and this machine fell back to
+                        // another one. It is the single thing a controller
+                        // cannot work out for itself — the picture simply
+                        // becomes somewhere else, possibly at the same size —
+                        // so it is said here and carried in the config.
+                        println!(
+                            "      the monitor being watched went away; now sending monitor                              {monitor}: {}x{}",
+                            now.width, now.height
+                        );
+                    } else {
+                        println!(
+                            "      the desktop changed: {} monitor(s), still sending monitor {}",
+                            now.monitors.len(),
+                            now.selected
+                        );
+                    }
+                    announced = Some(now.clone());
+                    if to_controller.send(MediaMessage::Config(now)).is_err() {
+                        break;
+                    }
+                }
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("      · the pipeline stopped: {e}");
@@ -2155,8 +2206,11 @@ async fn serve(
             // 960x540" and stopped showing anything, on a session where
             // nothing had gone wrong except that the host got busy.
             let now_sending = pump.config();
-            if (now_sending.width, now_sending.height) != announced {
-                announced = (now_sending.width, now_sending.height);
+            let size_moved = announced.as_ref().is_none_or(|was| {
+                (was.width, was.height) != (now_sending.width, now_sending.height)
+            });
+            if size_moved {
+                announced = Some(now_sending.clone());
                 // **Why, not just what.** Two different things lower a
                 // picture — this machine running out of CPU, and the
                 // controller asking for smaller frames because the link is
@@ -2866,6 +2920,9 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             .map_err(|e| format!("saying what this viewer will settle for: {e}"))?;
 
         let mut asked_for: Option<u32> = None;
+        // Which monitor the picture is of, so a layout change can be told
+        // apart from a switch — the host sends one message for both.
+        let mut showing: Option<u32> = Some(config.selected);
         if let Some(wanted) = o.monitor {
             if wanted == config.selected {
                 println!("  monitor    {wanted} is the one the host is already sending");
@@ -3007,13 +3064,53 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     // that silently changes size, or silently does not, looks
                     // like a fault either way.
                     if let Some(announced) = link.take_announcement() {
+                        // **Four different things arrive as one message**, and
+                        // a viewer that said the same sentence for all of them
+                        // would tell somebody their picture had changed when
+                        // only the host's monitor list had.
+                        let was = showing.replace(announced.selected);
+                        let layout_only = was == Some(announced.selected);
                         match asked_for.take_if(|m| *m != announced.selected) {
                             Some(refused) => println!(
                                 "  · the host would not switch to monitor {refused}; \
                                  it is still sending monitor {}",
                                 announced.selected
                             ),
+                            // Nothing was asked for and the picture is still
+                            // the same screen: the host's desktop changed
+                            // around it. Worth saying, because a picker built
+                            // from the old list is now wrong.
+                            None if layout_only && asked_for.is_none() => {
+                                println!(
+                                    "  · the host's desktop changed: {} monitor(s)",
+                                    announced.monitors.len()
+                                );
+                                for m in &announced.monitors {
+                                    println!(
+                                        "      monitor {} {}  {}x{} at {},{}{}",
+                                        m.id,
+                                        m.name,
+                                        m.width,
+                                        m.height,
+                                        m.x,
+                                        m.y,
+                                        if m.id == announced.selected {
+                                            " — showing"
+                                        } else {
+                                            ""
+                                        }
+                                    );
+                                }
+                            }
                             None => {
+                                // A switch this end did not ask for is the
+                                // screen it was watching having gone away.
+                                if asked_for.is_none() && was.is_some() {
+                                    println!(
+                                        "  · the host's monitor {} went away",
+                                        was.unwrap_or_default()
+                                    );
+                                }
                                 asked_for = None;
                                 println!(
                                     "  · now showing monitor {}: {}x{}",
