@@ -33,6 +33,7 @@ esper-stream = { path = "crates/esper-stream" }
 esper-link = { path = "crates/esper-link" }
 esper-discovery = { path = "crates/esper-discovery" }
 esper-interfaces = { path = "crates/esper-interfaces" }
+esper-files = { path = "crates/esper-files" }
 esper-clipboard = { path = "crates/esper-clipboard" }
 esper-clipboard-x11 = { path = "crates/esper-clipboard-x11" }
 esper-input = { path = "crates/esper-input" }

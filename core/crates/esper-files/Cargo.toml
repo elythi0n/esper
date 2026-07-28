@@ -1,0 +1,27 @@
+[package]
+name = "esper-files"
+description = "Moving a file onto somebody else's disk without being able to choose where: the name rules, the confined root, and the transfer that lands whole or not at all."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# SHA-256 for whole-file verification. Already in the tree through
+# `esper-crypto`, which is the point: a second hash to be marginally faster is
+# how a dependency list becomes a liability.
+sha2 = "0.10"
+
+# `openat2` — the kernel resolving a path *and* refusing to leave a directory,
+# in one syscall with no window between the check and the open. Already in the
+# tree through the pseudo-terminal and X11 capture, so this is a direct
+# dependency on something already vendored rather than a new crate.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }

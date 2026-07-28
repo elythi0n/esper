@@ -486,6 +486,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-files"
+version = "0.0.0"
+dependencies = [
+ "esper-proto",
+ "rustix",
+ "sha2",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "esper-input"
 version = "0.0.0"
 dependencies = [
