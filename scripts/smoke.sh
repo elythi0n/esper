@@ -315,7 +315,8 @@ cleanup_terminal() {
              "${announcing:-}" "${supervised:-}" "${relay_pid:-}" \
              "${small_host:-}" "${bloat_pid:-}" "${slow_host:-}" \
              "${profile_host:-}" "${short_host:-}" "${pinch_pid:-}" \
-             "${clip_host:-}"; do
+             "${clip_host:-}" "${clip_host2:-}" "${clip_viewer:-}" \
+             "${clip_x1:-}" "${clip_x2:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1263,6 +1264,102 @@ print(s.getsockname()[1]); s.close()')
         printf '%s\n' "$refused_out" | grep -iE 'granted|clipboard' | sed 's/^/      /'
         fail=1
       fi
+
+      # **And the thing a person actually does**, on two displays, through a
+      # real session: copy over here, paste over there. Nothing else in the
+      # suite reaches this — the protocol half is two couriers talking to each
+      # other and the X11 half is two clients on one display — so this is the
+      # only check that the whole path holds.
+      #
+      # Needs two throwaway displays and something to copy with. Skipped, out
+      # loud, when the machine has neither.
+      if command -v Xvfb >/dev/null 2>&1 && command -v xclip >/dev/null 2>&1; then
+        clip_d1=""; clip_d2=""
+        for d in $(seq 71 99); do
+          [ -e "/tmp/.X${d}-lock" ] && continue
+          if [ -z "$clip_d1" ]; then clip_d1=$d; elif [ -z "$clip_d2" ]; then clip_d2=$d; break; fi
+        done
+      fi
+      if [ -n "${clip_d2:-}" ]; then
+        Xvfb ":$clip_d1" -screen 0 800x600x24 >/dev/null 2>&1 &
+        clip_x1=$!
+        Xvfb ":$clip_d2" -screen 0 800x600x24 >/dev/null 2>&1 &
+        clip_x2=$!
+        sleep 1
+        DISPLAY=":$clip_d1" ESPER_HOME="$term_a" \
+          timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          > "$term_a/clipx.log" 2>&1 &
+        clip_host2=$!
+        clipx_addr=""
+        for _ in $(seq 1 100); do
+          clipx_addr=$( { awk '/listening/{print $2}' "$term_a/clipx.log" 2>/dev/null || true; } | head -1)
+          [ -n "$clipx_addr" ] && break
+          sleep 0.1
+        done
+        ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" clipboard-out clipboard-in >/dev/null
+        # Unique, so what is read back cannot be something that was already
+        # there — including from an earlier run of this suite.
+        from_host="esper-from-host-$$-$(date +%s)"
+        printf '%s' "$from_host" | DISPLAY=":$clip_d1" xclip -selection clipboard 2>/dev/null
+        DISPLAY=":$clip_d2" ESPER_HOME="$term_b" \
+          timeout 60 "$BIN/esper-engine" connect "$clipx_addr" --seconds 20 \
+          > "$term_b/clipx.log" 2>&1 &
+        clip_viewer=$!
+        # Polled rather than slept: the copy has to be noticed, offered, asked
+        # for and answered, and how long that takes is the machine's business.
+        landed=""
+        for _ in $(seq 1 80); do
+          landed=$(DISPLAY=":$clip_d2" timeout 5 xclip -selection clipboard -o 2>/dev/null || true)
+          [ "$landed" = "$from_host" ] && break
+          sleep 0.25
+        done
+        if [ "$landed" = "$from_host" ]; then
+          printf '  ✓ a copy on the host reached the viewer, asked for rather than pushed\n'
+        else
+          printf '  ✗ a copy on the host never reached the viewer (got %s)\n' "${landed:-nothing}"
+          grep -i clipboard "$term_a/clipx.log" "$term_b/clipx.log" 2>/dev/null | sed 's/^/      /' || true
+          fail=1
+        fi
+        # And back the other way, on the same session.
+        from_viewer="esper-from-viewer-$$-$(date +%s)"
+        printf '%s' "$from_viewer" | DISPLAY=":$clip_d2" xclip -selection clipboard 2>/dev/null
+        returned=""
+        for _ in $(seq 1 80); do
+          returned=$(DISPLAY=":$clip_d1" timeout 5 xclip -selection clipboard -o 2>/dev/null || true)
+          [ "$returned" = "$from_viewer" ] && break
+          sleep 0.25
+        done
+        if [ "$returned" = "$from_viewer" ]; then
+          printf '  ✓ and a copy on the viewer reached the host, on the same session\n'
+        else
+          printf '  ✗ a copy on the viewer never reached the host (got %s)\n' "${returned:-nothing}"
+          grep -i clipboard "$term_a/clipx.log" "$term_b/clipx.log" 2>/dev/null | sed 's/^/      /' || true
+          fail=1
+        fi
+        # **And they did not trade it forever.** Each side offers what it has
+        # once; a paste that came back as an offer would show up here as a
+        # count that keeps climbing.
+        offers=$( { grep -c 'is here to be asked for' "$term_a/clipx.log" 2>/dev/null || true; } | head -1)
+        seen_offers=$( { grep -c 'is here to be asked for' "$term_b/clipx.log" 2>/dev/null || true; } | head -1)
+        if [ "${offers:-0}" = 1 ] && [ "${seen_offers:-0}" = 1 ]; then
+          printf '  ✓ and neither end offered the other its own paste back\n'
+        else
+          printf '  ✗ two copies were made and %s and %s offers went out\n' \
+            "${offers:-?}" "${seen_offers:-?}"
+          grep -i clipboard "$term_a/clipx.log" "$term_b/clipx.log" 2>/dev/null | sed 's/^/      /' || true
+          fail=1
+        fi
+        # The engines first, then the displays: an X client whose server
+        # vanishes underneath it prints to the terminal, and a suite that
+        # prints noise trains people to skim it.
+        kill "$clip_viewer" "$clip_host2" 2>/dev/null || true
+        wait "$clip_viewer" "$clip_host2" 2>/dev/null || true
+        kill "$clip_x1" "$clip_x2" 2>/dev/null || true
+        clip_viewer=""; clip_host2=""; clip_x1=""; clip_x2=""
+      else
+        printf '  — skipped the two-display check: needs Xvfb and xclip\n'
+      fi
+
       ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" clipboard-out clipboard-in >/dev/null
       kill "$clip_host" 2>/dev/null || true
       clip_host=""

@@ -81,6 +81,13 @@ enum Job {
 /// Holds a thread with a connection of its own. Dropping it gives up whatever
 /// this process was answering for, so a session that ends stops being the
 /// owner of anything.
+///
+/// **Which means a paste does not outlive the session that made it.** Nothing
+/// on X11 stores a clipboard; a client answers for one, and when this one
+/// stops the content it was answering with is gone. Worth knowing rather than
+/// discovering: content that crossed a session lasting only as long as the
+/// session is the safe direction, and it is the direction the platform gives
+/// for free.
 pub struct X11Clipboard {
     jobs: mpsc::Sender<Job>,
     generation: Arc<AtomicU64>,

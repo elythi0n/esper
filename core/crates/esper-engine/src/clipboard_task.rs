@@ -58,6 +58,12 @@ pub struct Attached {
     thread: Option<std::thread::JoinHandle<()>>,
     /// The backend in use, for the session's own log.
     pub backend: &'static str,
+    /// What to put in front of a line this end says.
+    ///
+    /// A host indents its session lines six spaces and a controller two, and
+    /// one loop serves both — so the caller says which, rather than the
+    /// clipboard's lines being the ones that do not line up.
+    indent: &'static str,
 }
 
 impl std::fmt::Debug for Attached {
@@ -74,7 +80,7 @@ impl std::fmt::Debug for Attached {
 /// Returns the reason when it cannot, so the session can say it out loud
 /// rather than being silently without a clipboard — which from the far end
 /// looks exactly like a clipboard that is empty.
-pub fn open(grants: Grants) -> Result<Attached, String> {
+pub fn open(grants: Grants, indent: &'static str) -> Result<Attached, String> {
     if !grants.read && !grants.write {
         return Err("not granted for this session".to_owned());
     }
@@ -91,6 +97,7 @@ pub fn open(grants: Grants) -> Result<Attached, String> {
         words,
         thread: Some(thread),
         backend,
+        indent,
     })
 }
 
@@ -115,7 +122,11 @@ impl Attached {
         // this machine's clipboard. The courier checks again on the way in;
         // this is what keeps a malformed message from being work at all.
         if !message.is_well_formed() {
-            eprintln!("      · refused {} from the far end", message.name());
+            eprintln!(
+                "{}· refused {} from the far end",
+                self.indent,
+                message.name()
+            );
             return true;
         }
         self.errands.send(Errand(message)).is_ok()
@@ -127,6 +138,13 @@ impl Drop for Attached {
         // Dropping the sender ends the thread's loop, and the thread wipes
         // what it holds on its way out. Joined rather than detached, so a
         // session that has ended has really let go of what it was holding.
+        //
+        // The join is the one blocking thing this module does on the runtime's
+        // thread, and it is deliberate. It is over as soon as the loop notices
+        // the channel is gone — unless the courier is mid-read, where a
+        // display server has a couple of seconds to answer. Paid once, at the
+        // end of a session, to be certain nothing is still holding a
+        // password.
         let (errands, _) = std::sync::mpsc::channel();
         drop(std::mem::replace(&mut self.errands, errands));
         if let Some(thread) = self.thread.take()
@@ -153,7 +171,7 @@ pub async fn serve(
                         break;
                     }
                 }
-                Some(Word::Say(line)) => println!("      {line}"),
+                Some(Word::Say(line)) => println!("{}{line}", attached.indent),
                 None => break,
             },
             incoming = control.recv::<ClipboardMessage>() => match incoming {

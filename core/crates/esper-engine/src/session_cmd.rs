@@ -1489,7 +1489,7 @@ async fn serve_session(
     // from the far end, exactly like a clipboard that is empty.
     let clipboard_grants = esper_clipboard::Grants::from_permissions(&granted);
     let clipboard = if clipboard_grants.read || clipboard_grants.write {
-        match crate::clipboard_task::open(clipboard_grants) {
+        match crate::clipboard_task::open(clipboard_grants, "      ") {
             Ok(attached) => {
                 println!(
                     "      clipboard  {} — offered, never pushed",
@@ -1652,6 +1652,17 @@ struct ExtraStreams {
     granted: Vec<Permission>,
 }
 
+/// Tasks that must not outlive whatever spawned them.
+struct Children(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for Children {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// How long a stream has to say what it is.
 ///
 /// A peer that opens one and then says nothing must not park this loop: the
@@ -1667,6 +1678,16 @@ const SAY_WHAT_YOU_ARE: Duration = Duration::from_secs(10);
 /// stream mistaken for an input stream would be a session where neither works
 /// and nothing says why.
 async fn serve_extra_streams(mut extras: ExtraStreams) {
+    // **What is spawned here dies with this.** The session ends by aborting
+    // this task, and a spawned child is not aborted by its parent being. The
+    // input dispatcher's `Drop` is what releases a key still held down on
+    // somebody else's machine, and the clipboard's is what wipes what it was
+    // carrying — neither is a thing to leave until a stream happens to error.
+    let mut children = Children(Vec::new());
+    // Whether each kind has been served, so a stream arriving with nothing to
+    // serve it is told which of the two things happened.
+    let mut served_input = false;
+    let mut served_clipboard = false;
     loop {
         let Ok(mut control) = extras.accepting.accept().await else {
             return;
@@ -1699,20 +1720,37 @@ async fn serve_extra_streams(mut extras: ExtraStreams) {
         match purpose {
             esper_proto::StreamPurpose::Input => match extras.input.take() {
                 Some(dispatcher) => {
+                    served_input = true;
                     let stopping = extras.stopping.clone();
                     let live = extras.live.clone();
-                    tokio::spawn(serve_input(control, dispatcher, stopping, live));
+                    children.0.push(tokio::spawn(serve_input(
+                        control, dispatcher, stopping, live,
+                    )));
                 }
-                // One keyboard, one stream. A second is a peer confused about
-                // what it already has.
-                None => eprintln!("      · refused a second input stream"),
+                // **Two different refusals, said differently.** One keyboard
+                // means a second stream is a peer confused about what it
+                // already has; nothing to inject with means the far end is
+                // waiting on something this machine already said it does not
+                // have.
+                None if served_input => eprintln!("      · refused a second input stream"),
+                None => {
+                    eprintln!("      · an input stream, with nothing on this machine to inject");
+                }
             },
             esper_proto::StreamPurpose::Clipboard => match extras.clipboard.take() {
                 Some(attached) => {
+                    served_clipboard = true;
                     let stopping = extras.stopping.clone();
-                    tokio::spawn(crate::clipboard_task::serve(control, attached, stopping));
+                    children.0.push(tokio::spawn(crate::clipboard_task::serve(
+                        control, attached, stopping,
+                    )));
                 }
-                None => eprintln!("      · refused a second clipboard stream"),
+                None if served_clipboard => {
+                    eprintln!("      · refused a second clipboard stream");
+                }
+                None => {
+                    eprintln!("      · a clipboard stream, with no clipboard on this machine");
+                }
             },
         }
     }
@@ -2749,30 +2787,32 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // onto its own. One negotiated grant, both ends, no second set of
         // switches to disagree with the first.
         let (clipboard_stop, clipboard_stopping) = tokio::sync::watch::channel(false);
-        let clipboard =
-            match crate::clipboard_task::open(esper_clipboard::Grants::mirrored(&grant.granted)) {
-                Ok(attached) => {
-                    let backend = attached.backend;
-                    match announce(&session, esper_proto::StreamPurpose::Clipboard).await {
-                        Ok(control) => {
-                            println!("  clipboard  {backend} — offered, never pushed");
-                            Some(tokio::spawn(crate::clipboard_task::serve(
-                                control,
-                                attached,
-                                clipboard_stopping,
-                            )))
-                        }
-                        Err(e) => {
-                            println!("  clipboard  unavailable ({e})");
-                            None
-                        }
+        let clipboard = match crate::clipboard_task::open(
+            esper_clipboard::Grants::mirrored(&grant.granted),
+            "  ",
+        ) {
+            Ok(attached) => {
+                let backend = attached.backend;
+                match announce(&session, esper_proto::StreamPurpose::Clipboard).await {
+                    Ok(control) => {
+                        println!("  clipboard  {backend} — offered, never pushed");
+                        Some(tokio::spawn(crate::clipboard_task::serve(
+                            control,
+                            attached,
+                            clipboard_stopping,
+                        )))
+                    }
+                    Err(e) => {
+                        println!("  clipboard  unavailable ({e})");
+                        None
                     }
                 }
-                Err(why) => {
-                    println!("  clipboard  {why}");
-                    None
-                }
-            };
+            }
+            Err(why) => {
+                println!("  clipboard  {why}");
+                None
+            }
+        };
 
         let deadline =
             (o.seconds > 0).then(|| tokio::time::Instant::now() + Duration::from_secs(o.seconds));

@@ -368,6 +368,15 @@ impl<C: Clipboard> Courier<C> {
     /// something the person here chose to accept or something they copied
     /// themselves since, and taking either away is a worse surprise than
     /// leaving it.
+    ///
+    /// # What the platform does anyway
+    ///
+    /// On a display server where nothing *stores* a clipboard and a process
+    /// answers for one — X11 — a paste this session made does not outlive it,
+    /// because the thing answering for it goes when the session does. That is
+    /// not this method's doing and it is not undone here: content that arrived
+    /// over a session lasting only as long as the session is the safe
+    /// direction, and a person who wants to keep it can copy it again.
     pub fn forget(&mut self) {
         self.forget_held();
         self.asked = None;
