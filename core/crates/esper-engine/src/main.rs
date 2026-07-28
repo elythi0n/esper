@@ -10,6 +10,7 @@
 
 mod backend;
 mod broker_cmd;
+mod clipboard_task;
 mod cursor_task;
 mod devices_cmd;
 mod discover_cmd;

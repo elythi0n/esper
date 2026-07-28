@@ -43,7 +43,7 @@ pub mod conformance;
 mod courier;
 mod held;
 
-pub use courier::{Courier, Grants};
+pub use courier::{Courier, Grants, Heard};
 pub use held::Held;
 
 // Re-exported so a backend crate names one vocabulary rather than two.
@@ -126,6 +126,23 @@ pub trait Clipboard {
     /// log the failure and carry on — there is nothing else to do, and the
     /// session is over either way.
     fn clear(&mut self) -> Result<(), ClipboardError>;
+}
+
+/// So that a caller can hold whichever backend this platform has without
+/// naming it.
+impl Clipboard for Box<dyn Clipboard + Send> {
+    fn read(&mut self, kind: ClipboardKind) -> Result<Option<Vec<u8>>, ClipboardError> {
+        (**self).read(kind)
+    }
+    fn write(&mut self, kind: ClipboardKind, content: &[u8]) -> Result<(), ClipboardError> {
+        (**self).write(kind, content)
+    }
+    fn generation(&mut self) -> u64 {
+        (**self).generation()
+    }
+    fn clear(&mut self) -> Result<(), ClipboardError> {
+        (**self).clear()
+    }
 }
 
 /// A clipboard that remembers what it was told, for tests and for a build with

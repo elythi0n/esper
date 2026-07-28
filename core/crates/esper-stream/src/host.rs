@@ -24,8 +24,7 @@ use std::time::{Duration, Instant};
 use esper_media::{Packetizer, VIDEO_CLOCK_HZ};
 use esper_pipeline::pipeline::{Pipeline, Step};
 use esper_proto::{
-    ClipboardOffer, Codec, MAX_MONITORS, MediaMessage, MonitorDescription, Profile, Role,
-    StreamConfig,
+    Codec, MAX_MONITORS, MediaMessage, MonitorDescription, Profile, Role, StreamConfig,
 };
 use esper_scale::Ceiling;
 
@@ -82,12 +81,6 @@ pub struct HostStream {
     asked_fidelity: Option<esper_pipeline::Fidelity>,
     /// What the controller said it was looking at. See [`HostStream::profile`].
     profile: Profile,
-    /// The last thing the controller said was on *its* clipboard.
-    ///
-    /// **One value, not a queue.** A clipboard has one current content, so a
-    /// newer offer replaces an older one rather than joining it — which is
-    /// also why no history accumulates here for a later session to find.
-    offered: Option<ClipboardOffer>,
 }
 
 impl std::fmt::Debug for HostStream {
@@ -171,7 +164,6 @@ impl HostStream {
             asked_fps: None,
             asked_fidelity: None,
             profile: Profile::default(),
-            offered: None,
         })
     }
 
@@ -180,15 +172,6 @@ impl HostStream {
     #[must_use]
     pub const fn profile(&self) -> Profile {
         self.profile
-    }
-
-    /// What the controller last said was on its clipboard, taken away.
-    ///
-    /// Taken rather than borrowed: an offer is acted on once. A caller that
-    /// read it without consuming it would ask for the same paste on every
-    /// tick.
-    pub fn take_offer(&mut self) -> Option<ClipboardOffer> {
-        self.offered.take()
     }
 
     /// The coarsest quantiser the controller asked for, if any.
@@ -330,10 +313,6 @@ impl HostStream {
                     asked_fps: None,
                     asked_fidelity: None,
                     profile: Profile::default(),
-                    // And a resumed session starts knowing nothing about the
-                    // far end's clipboard. Whatever was copied before the link
-                    // broke is not this session's to remember.
-                    offered: None,
                 })
             }
             Err(e) => Err((pipeline, e.into())),
@@ -457,14 +436,6 @@ impl HostStream {
         match message {
             MediaMessage::Keyframe(_) => {
                 self.pipeline.request_keyframe();
-                Ok(Handled::Nothing)
-            }
-            // **Kept, not acted on.** Whether to ask for what the controller
-            // has copied is a decision about permissions and about what a
-            // person wants, and neither belongs to the layer that packetises
-            // pictures.
-            MediaMessage::Clipboard(offer) => {
-                self.offered = Some(offer.clone());
                 Ok(Handled::Nothing)
             }
             MediaMessage::Hint(hint) => {

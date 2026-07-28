@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use esper_proto::{
-    ClipboardData, ClipboardKind, ClipboardOffer, ClipboardRefusal, ClipboardReply,
-    ClipboardRequest, ClipboardWay, Offered, Permission,
+    ClipboardData, ClipboardKind, ClipboardMessage, ClipboardOffer, ClipboardRefusal,
+    ClipboardReply, ClipboardRequest, ClipboardWay, Offered, Permission,
 };
 
 use crate::{Clipboard, ClipboardError, Held};
@@ -45,6 +45,29 @@ impl Grants {
         Self {
             read: held.contains(&Permission::ClipboardOut),
             write: held.contains(&Permission::ClipboardIn),
+        }
+    }
+
+    /// The same grant seen from the other machine.
+    ///
+    /// # Why the far end's permissions decide this end's
+    ///
+    /// The permissions are written from the host's point of view: `clipboard
+    /// out` means *the controller may read the host's clipboard*. For that to
+    /// be worth anything, the controller has to be willing to put what comes
+    /// back onto its own clipboard — which, from the controller, is the far
+    /// end writing to it.
+    ///
+    /// So one negotiated grant settles both ends, and the controller needs no
+    /// second set of switches that could disagree with the first. A session
+    /// where the host permits a paste and the controller quietly refuses to
+    /// receive it is a session where copy does nothing and nothing says why.
+    #[must_use]
+    pub fn mirrored(held: &[Permission]) -> Self {
+        let straight = Self::from_permissions(held);
+        Self {
+            read: straight.write,
+            write: straight.read,
         }
     }
 
@@ -286,6 +309,58 @@ impl<C: Clipboard> Courier<C> {
         Ok(())
     }
 
+    /// Act on one thing the far end said.
+    ///
+    /// **The whole conversation is here** rather than in whatever is holding
+    /// the stream. A session's clipboard code is then only I/O — read a
+    /// message, hand it over, send what comes back — and the part with the
+    /// decisions in it can be tested by running two of these against each
+    /// other, with no transport and no display anywhere near it.
+    pub fn hear(&mut self, message: &ClipboardMessage) -> Heard {
+        // Checked here as well as at the boundary, because "the caller
+        // checked" is a property of today's caller.
+        if !message.is_well_formed() {
+            return Heard::just(format!("refused {} from the far end", message.name()));
+        }
+        match message {
+            ClipboardMessage::Offer(offer) => match self.wants(offer) {
+                Some(ask) => Heard {
+                    say: Some(ClipboardMessage::Ask(ask)),
+                    note: None,
+                },
+                None => Heard::nothing(),
+            },
+            ClipboardMessage::Ask(request) => {
+                let reply = self.answer(request);
+                let note = match &reply {
+                    ClipboardReply::Sent(data) => {
+                        format!("sent {} bytes of {}", data.content.len(), data.kind.name())
+                    }
+                    ClipboardReply::Refused(why) => why.message().to_owned(),
+                };
+                Heard {
+                    say: Some(ClipboardMessage::Reply(reply)),
+                    note: Some(note),
+                }
+            }
+            ClipboardMessage::Reply(ClipboardReply::Sent(data)) => {
+                // **Nothing goes back.** The far end asked nothing; a refusal
+                // sent here would be this side answering a question that was
+                // not put, and a peer that could make this side speak by
+                // sending content is a peer with a way to make it speak.
+                Heard::just(match self.accept(data) {
+                    Ok(()) => format!("took {} bytes of {}", data.content.len(), data.kind.name()),
+                    Err(why) => format!("did not take it: {}", why.message()),
+                })
+            }
+            // The far end's policy answering, which is the arrangement
+            // working. Said once, quietly.
+            ClipboardMessage::Reply(ClipboardReply::Refused(why)) => {
+                Heard::just(why.message().to_owned())
+            }
+        }
+    }
+
     /// Forget everything, at the end of a session.
     ///
     /// Wipes what this process is holding. **The machine's own clipboard is
@@ -304,6 +379,31 @@ impl<C: Clipboard> Courier<C> {
             held.wipe();
         }
         self.held.clear();
+    }
+}
+
+/// What came of hearing one message.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Heard {
+    /// What to send back, if anything.
+    pub say: Option<ClipboardMessage>,
+    /// What happened, in a sentence, for whoever is watching the session.
+    pub note: Option<String>,
+}
+
+impl Heard {
+    const fn nothing() -> Self {
+        Self {
+            say: None,
+            note: None,
+        }
+    }
+
+    fn just(note: String) -> Self {
+        Self {
+            say: None,
+            note: Some(note),
+        }
     }
 }
 
@@ -784,5 +884,42 @@ mod tests {
         assert!(!Grants::none().allows(ClipboardWay::Out));
         assert!(!Grants::none().allows(ClipboardWay::In));
         assert_eq!(Courier::new(Spy::default(), BOTH).grants(), BOTH);
+    }
+
+    /// One negotiated grant, two ends, and the same content moving.
+    #[test]
+    fn a_grant_read_from_the_other_end_is_the_same_grant() {
+        // The host lets the controller read its clipboard, so the controller
+        // has to be willing to take what comes back.
+        let out = [Permission::ClipboardOut];
+        assert_eq!(
+            Grants::from_permissions(&out),
+            Grants {
+                read: true,
+                write: false
+            }
+        );
+        assert_eq!(
+            Grants::mirrored(&out),
+            Grants {
+                read: false,
+                write: true
+            },
+            "the controller would have refused the paste it asked for"
+        );
+        // And the other direction, the other way round.
+        assert_eq!(
+            Grants::mirrored(&[Permission::ClipboardIn]),
+            Grants {
+                read: true,
+                write: false
+            }
+        );
+        // Neither becomes neither, and both stay both.
+        assert_eq!(Grants::mirrored(&[]), Grants::none());
+        assert_eq!(
+            Grants::mirrored(&[Permission::ClipboardIn, Permission::ClipboardOut]),
+            BOTH
+        );
     }
 }

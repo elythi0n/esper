@@ -454,6 +454,8 @@ dependencies = [
  "esper-buildinfo",
  "esper-capture",
  "esper-capture-x11",
+ "esper-clipboard",
+ "esper-clipboard-x11",
  "esper-color",
  "esper-config",
  "esper-crypto",

@@ -140,6 +140,9 @@ pub struct ConnectOptions {
     /// advertising, and off with `--no-mdns` for somebody who would rather
     /// not be heard asking.
     pub mdns: bool,
+    /// What to ask the host for the clipboard. The host's grant decides what
+    /// is actually allowed; this is only what is asked for.
+    pub clipboard: ClipboardWish,
 }
 
 /// Parse `host` flags.
@@ -244,10 +247,54 @@ pub fn broker_from(
 }
 
 /// Parse `connect` flags.
+/// What a controller asks for the clipboard, said the way a person thinks
+/// about it.
+///
+/// The permissions are written from the host's point of view — `clipboard out`
+/// means the controller may read the host's — which is the right way round for
+/// a host's records and the wrong way round for a person at a keyboard. So the
+/// option is named after what it does: copy on the host and paste here, or the
+/// other way, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClipboardWish {
+    /// Both ways, as far as the host allows.
+    #[default]
+    Both,
+    /// Copy on the host, paste here.
+    FromHost,
+    /// Copy here, paste on the host.
+    ToHost,
+    /// Neither. A session with no clipboard at all.
+    None,
+}
+
+impl ClipboardWish {
+    /// The permissions this wish asks the host for.
+    fn wanted(self) -> Vec<Permission> {
+        match self {
+            Self::Both => vec![Permission::ClipboardOut, Permission::ClipboardIn],
+            Self::FromHost => vec![Permission::ClipboardOut],
+            Self::ToHost => vec![Permission::ClipboardIn],
+            Self::None => Vec::new(),
+        }
+    }
+
+    fn parse(word: &str) -> Option<Self> {
+        match word {
+            "both" => Some(Self::Both),
+            "from-host" => Some(Self::FromHost),
+            "to-host" => Some(Self::ToHost),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
 pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut addr: Option<SocketAddr> = None;
     let mut seconds = 0u64;
     let mut profile = Profile::default();
+    let mut clipboard = ClipboardWish::default();
     let mut present = false;
     let mut control = false;
     let mut monitor: Option<u32> = None;
@@ -275,6 +322,17 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
             "--no-mdns" => {
                 mdns = false;
                 i += 1;
+            }
+            "--clipboard" => {
+                let name = args.get(i + 1).ok_or_else(|| {
+                    "--clipboard needs both, from-host, to-host or none".to_owned()
+                })?;
+                clipboard = ClipboardWish::parse(name).ok_or_else(|| {
+                    format!(
+                        "{name} is not a clipboard setting; it is both, from-host, to-host or none"
+                    )
+                })?;
+                i += 2;
             }
             "--profile" => {
                 let name = args
@@ -349,6 +407,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
         via,
         named,
         mdns,
+        clipboard,
     })
 }
 
@@ -1424,23 +1483,55 @@ async fn serve_session(
         None
     };
 
-    let waiting_for_input = match input {
-        Some(dispatcher) => {
-            // Accepted in a task because the controller opens this stream
-            // lazily — a session that sends no input never opens it, and
-            // waiting here would hold up the video.
-            let accepting = session.control_acceptor();
-            let stopping = stopping.clone();
-            let live = live.clone();
-            Some(tokio::spawn(async move {
-                match accepting.accept().await {
-                    Ok(control) => serve_input(control, dispatcher, stopping, live).await,
-                    Err(e) => tracing::debug!("no input stream on this session: {e}"),
-                }
-            }))
+    // **The clipboard, if this device was granted one.** Opened before the
+    // stream that carries it, so a machine with no clipboard says so here
+    // rather than at the first copy — a session silently without one looks,
+    // from the far end, exactly like a clipboard that is empty.
+    let clipboard_grants = esper_clipboard::Grants::from_permissions(&granted);
+    let clipboard = if clipboard_grants.read || clipboard_grants.write {
+        match crate::clipboard_task::open(clipboard_grants) {
+            Ok(attached) => {
+                println!(
+                    "      clipboard  {} — offered, never pushed",
+                    attached.backend
+                );
+                Some(attached)
+            }
+            Err(why) => {
+                println!("      clipboard  {why}");
+                None
+            }
         }
-        None => None,
+    } else {
+        // **Said with the way out of it.** A permission that exists, is
+        // checked, and is never mentioned is the same as a feature that does
+        // not work — the person at the host has no reason to guess that a
+        // clipboard is a thing they could grant.
+        println!(
+            "      clipboard  not granted — {} grant {} clipboard-out clipboard-in",
+            crate::net::me(),
+            session.peer_fingerprint().hex()
+        );
+        None
     };
+
+    let waiting_for_streams = (input.is_some() || clipboard.is_some()).then(|| {
+        // Accepted in a task because the controller opens these lazily — a
+        // session that sends no input never opens one — and waiting here would
+        // hold up the video.
+        let accepting = session.control_acceptor();
+        let stopping = stopping.clone();
+        let live = live.clone();
+        let granted = granted.clone();
+        tokio::spawn(serve_extra_streams(ExtraStreams {
+            accepting,
+            input,
+            clipboard,
+            stopping,
+            live,
+            granted,
+        }))
+    });
 
     // **The indicator goes up before a single frame goes out.** A person
     // whose screen starts being watched has to be told at the moment it
@@ -1496,10 +1587,10 @@ async fn serve_session(
     if let Some(indicator) = indicator {
         indicator.hide();
     }
-    if let Some(task) = waiting_for_input {
+    if let Some(task) = waiting_for_streams {
         // Aborted rather than awaited: it is waiting on a stream that will
-        // never arrive now, and the dispatcher's `Drop` is what releases
-        // anything held.
+        // never arrive now. The `Drop` of what it holds is what releases a key
+        // still down and wipes what the clipboard was carrying.
         task.abort();
     }
     served
@@ -1549,6 +1640,84 @@ fn fresh(
 /// However it ends. The dispatcher releases on drop, and this says so in the
 /// log when something was still held, because a session that ended with keys
 /// down is worth knowing about even when the release worked.
+/// What a host is prepared to serve on the streams a controller opens.
+struct ExtraStreams {
+    accepting: esper_transport::ControlAcceptor,
+    /// Taken by the first input stream. There is only one keyboard.
+    input: Option<esper_input::Dispatcher>,
+    /// Taken by the first clipboard stream. There is only one clipboard.
+    clipboard: Option<crate::clipboard_task::Attached>,
+    stopping: tokio::sync::watch::Receiver<bool>,
+    live: crate::permits::Live,
+    granted: Vec<Permission>,
+}
+
+/// How long a stream has to say what it is.
+///
+/// A peer that opens one and then says nothing must not park this loop: the
+/// next stream would wait behind it, and a session would lose its clipboard
+/// because something opened a stream and stopped.
+const SAY_WHAT_YOU_ARE: Duration = Duration::from_secs(10);
+
+/// Accept the streams a controller opens, and give each to what serves it.
+///
+/// **Every stream says what it is before it says anything else.** There used
+/// to be one kind, so the one that arrived was the one it had to be — which is
+/// an assumption rather than a fact the moment there are two, and a clipboard
+/// stream mistaken for an input stream would be a session where neither works
+/// and nothing says why.
+async fn serve_extra_streams(mut extras: ExtraStreams) {
+    loop {
+        let Ok(mut control) = extras.accepting.accept().await else {
+            return;
+        };
+        let said = tokio::time::timeout(
+            SAY_WHAT_YOU_ARE,
+            control.recv::<esper_proto::StreamPurpose>(),
+        )
+        .await;
+        let purpose = match said {
+            Ok(Ok(purpose)) => purpose,
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "a stream did not say what it was");
+                continue;
+            }
+            Err(_) => {
+                eprintln!("      · a stream was opened and never said what it was for");
+                continue;
+            }
+        };
+        // **Checked against the grant, not against what was opened.** A stream
+        // is not permission to do the thing it names.
+        if !purpose.permitted_by(&extras.granted) {
+            eprintln!(
+                "      · refused a {} stream: not granted for this session",
+                purpose.name()
+            );
+            continue;
+        }
+        match purpose {
+            esper_proto::StreamPurpose::Input => match extras.input.take() {
+                Some(dispatcher) => {
+                    let stopping = extras.stopping.clone();
+                    let live = extras.live.clone();
+                    tokio::spawn(serve_input(control, dispatcher, stopping, live));
+                }
+                // One keyboard, one stream. A second is a peer confused about
+                // what it already has.
+                None => eprintln!("      · refused a second input stream"),
+            },
+            esper_proto::StreamPurpose::Clipboard => match extras.clipboard.take() {
+                Some(attached) => {
+                    let stopping = extras.stopping.clone();
+                    tokio::spawn(crate::clipboard_task::serve(control, attached, stopping));
+                }
+                None => eprintln!("      · refused a second clipboard stream"),
+            },
+        }
+    }
+}
+
 async fn serve_input(
     session_input: esper_transport::Control,
     mut dispatcher: esper_input::Dispatcher,
@@ -2043,6 +2212,26 @@ async fn serve(
 /// the parser's own arms out of this file rather than trusting anybody to
 /// remember. Help that has drifted from the program is worse than none: it
 /// is a promise the program does not keep.
+/// Open a stream to the host and say what it is for.
+///
+/// **The purpose goes first, before anything else on the stream.** The host
+/// serves whatever a stream says it is, so a stream that said nothing would be
+/// one the host holds open waiting to be told.
+async fn announce(
+    session: &Session,
+    purpose: esper_proto::StreamPurpose,
+) -> Result<esper_transport::Control, String> {
+    let mut control = session
+        .open_control()
+        .await
+        .map_err(|e| format!("could not open a {} stream: {e}", purpose.name()))?;
+    control
+        .send(&purpose)
+        .await
+        .map_err(|e| format!("could not say what the stream was for: {e}"))?;
+    Ok(control)
+}
+
 pub fn connect_usage() -> String {
     let me = crate::net::me();
     format!(
@@ -2056,6 +2245,8 @@ pub fn connect_usage() -> String {
          \x20 --monitor <n>        ask for a monitor other than the one announced\n\
          \x20 --profile <what>     text, balanced or motion: what you are doing,\n\
          \x20                      which decides what the host gives up first\n\
+         \x20 --clipboard <what>   both, from-host, to-host or none. Nothing is ever\n\
+         \x20                      pushed: a copy offers, the other end asks (default both)\n\
          \x20 --seconds <n>        stop after this long, for measuring\n\
          \x20 --via <broker>       be introduced by a broker when nothing direct works\n\
          \x20 --broker-key <key>   the broker's key, when it is not remembered\n\
@@ -2395,10 +2586,15 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             &mut control,
             &esper_proto::SessionRequest {
                 kind: esper_proto::SessionKind::Screen,
-                want: if o.control {
-                    vec![Permission::View, Permission::Control]
-                } else {
-                    vec![Permission::View]
+                want: {
+                    // Asked for, not assumed: the host grants a subset, and
+                    // this side renders what it holds.
+                    let mut want = vec![Permission::View];
+                    if o.control {
+                        want.push(Permission::Control);
+                    }
+                    want.extend(o.clipboard.wanted());
+                    want
                 },
                 codecs: vec![config_codec_name().to_owned()],
                 reason: "a screen".to_owned(),
@@ -2528,7 +2724,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let mut driving = None;
         if o.control && may_drive {
             match presenter.as_mut() {
-                Some(p) => match session.open_control().await {
+                Some(p) => match announce(&session, esper_proto::StreamPurpose::Input).await {
                     Ok(control) => {
                         p.forward_input(true);
                         println!("  control    keys and pointer go to the host");
@@ -2545,6 +2741,38 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 None => println!("  control    needs a window; add --present"),
             }
         }
+
+        // **The clipboard, from the same grant the host is working from.**
+        // The permissions are written from the host's side, so this end reads
+        // them the other way round: a host that will let this controller read
+        // its clipboard needs this controller willing to put what comes back
+        // onto its own. One negotiated grant, both ends, no second set of
+        // switches to disagree with the first.
+        let (clipboard_stop, clipboard_stopping) = tokio::sync::watch::channel(false);
+        let clipboard =
+            match crate::clipboard_task::open(esper_clipboard::Grants::mirrored(&grant.granted)) {
+                Ok(attached) => {
+                    let backend = attached.backend;
+                    match announce(&session, esper_proto::StreamPurpose::Clipboard).await {
+                        Ok(control) => {
+                            println!("  clipboard  {backend} — offered, never pushed");
+                            Some(tokio::spawn(crate::clipboard_task::serve(
+                                control,
+                                attached,
+                                clipboard_stopping,
+                            )))
+                        }
+                        Err(e) => {
+                            println!("  clipboard  unavailable ({e})");
+                            None
+                        }
+                    }
+                }
+                Err(why) => {
+                    println!("  clipboard  {why}");
+                    None
+                }
+            };
 
         let deadline =
             (o.seconds > 0).then(|| tokio::time::Instant::now() + Duration::from_secs(o.seconds));
@@ -2912,6 +3140,13 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     .ok();
             }
         }
+        // **Stopped before the summary, so what it was holding is gone by the
+        // time this process says anything else.** Dropping the sender ends the
+        // task, which drops what it holds, which wipes it.
+        drop(clipboard_stop);
+        if let Some(task) = clipboard {
+            task.abort();
+        }
         println!();
 
         let path = link.transport();
@@ -3167,6 +3402,45 @@ mod tests {
             let o = parse(&["127.0.0.1:7645", "--profile", typed]).expect("a profile");
             assert_eq!(o.profile, wanted, "--profile {typed}");
         }
+        // The clipboard is asked for in the terms a person thinks in, not in
+        // the terms the permissions are stored in.
+        for (typed, wanted, permissions) in [
+            ("both", ClipboardWish::Both, 2),
+            ("from-host", ClipboardWish::FromHost, 1),
+            ("to-host", ClipboardWish::ToHost, 1),
+            ("none", ClipboardWish::None, 0),
+        ] {
+            let o = parse(&["127.0.0.1:7645", "--clipboard", typed]).expect("a clipboard");
+            assert_eq!(o.clipboard, wanted, "--clipboard {typed}");
+            assert_eq!(
+                o.clipboard.wanted().len(),
+                permissions,
+                "--clipboard {typed}"
+            );
+        }
+        // The two named directions ask for opposite permissions, or the option
+        // is one setting with two spellings.
+        assert_ne!(
+            ClipboardWish::FromHost.wanted(),
+            ClipboardWish::ToHost.wanted()
+        );
+        assert_eq!(
+            ClipboardWish::FromHost.wanted(),
+            vec![Permission::ClipboardOut]
+        );
+        assert_eq!(
+            ClipboardWish::ToHost.wanted(),
+            vec![Permission::ClipboardIn]
+        );
+        // Asked for by default: a remote desktop where copy and paste do
+        // nothing until a flag is found is a remote desktop people work around.
+        assert_eq!(
+            parse(&["127.0.0.1:7645"]).expect("no options").clipboard,
+            ClipboardWish::Both
+        );
+        assert!(parse(&["127.0.0.1:7645", "--clipboard", "sideways"]).is_err());
+        assert!(parse(&["127.0.0.1:7645", "--clipboard"]).is_err());
+
         // **Refused rather than defaulted.** A typo silently becoming
         // `balanced` is how somebody watching video spends the session
         // wondering why it stutters.

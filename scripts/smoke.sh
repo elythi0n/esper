@@ -314,7 +314,8 @@ cleanup_terminal() {
              "${denied_pid:-}" "${private_host:-}" "${invited_host:-}" \
              "${announcing:-}" "${supervised:-}" "${relay_pid:-}" \
              "${small_host:-}" "${bloat_pid:-}" "${slow_host:-}" \
-             "${profile_host:-}" "${short_host:-}" "${pinch_pid:-}"; do
+             "${profile_host:-}" "${short_host:-}" "${pinch_pid:-}" \
+             "${clip_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1194,6 +1195,77 @@ print(s.getsockname()[1]); s.close()')
         printf '%s\n' "$refusal" | sed 's/^/      /'
         fail=1
       fi
+
+      # **The clipboard, through a real session.** The protocol half is
+      # tested by two couriers talking to each other and the X11 half by two
+      # clients pasting between them; what neither reaches is the wiring —
+      # whether the permission is negotiated, whether the stream is opened,
+      # and whether the stream says what it is before it says anything else.
+      #
+      # This runs with no display, so both ends report a clipboard they cannot
+      # open. That is the point: the *reason* they give is what says the grant
+      # crossed, because a session that was never granted one says something
+      # different and says how to fix it.
+      echo "  — a clipboard that is asked for rather than pushed"
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/clip.log" 2>&1 &
+      clip_host=$!
+      clip_addr=""
+      for _ in $(seq 1 100); do
+        clip_addr=$( { awk '/listening/{print $2}' "$term_a/clip.log" 2>/dev/null || true; } | head -1)
+        [ -n "$clip_addr" ] && break
+        sleep 0.1
+      done
+      # Ungranted first: a permission nobody can find out about is a
+      # permission nobody has, so the host has to say how to grant it.
+      ungranted=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        timeout 60 "$BIN/esper-engine" connect "$clip_addr" --seconds 2 2>&1 || true)
+      sleep 0.5
+      if grep -q 'clipboard  not granted' "$term_a/clip.log" &&
+        grep -q 'grant .* clipboard-out' "$term_a/clip.log"; then
+        printf '  ✓ a session with no clipboard grant says so, and says how to grant one\n'
+      else
+        printf '  ✗ the host said nothing usable about an ungranted clipboard\n'
+        tail -25 "$term_a/clip.log" 2>/dev/null | sed 's/^/      /' || true
+        fail=1
+      fi
+      if printf '%s' "$ungranted" | grep -q 'clipboard  not granted'; then
+        printf '  ✓ and the viewer says it too, rather than quietly having none\n'
+      else
+        printf '  ✗ the viewer said nothing about the clipboard it does not have\n'
+        printf '%s\n' "$ungranted" | grep -i clipboard | sed 's/^/      /'
+        fail=1
+      fi
+
+      # Now grant it, and the same session negotiates one.
+      ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" clipboard-out clipboard-in >/dev/null
+      granted_out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        timeout 60 "$BIN/esper-engine" connect "$clip_addr" --seconds 2 2>&1 || true)
+      sleep 0.5
+      if printf '%s' "$granted_out" | grep -q 'granted .*clipboard_out' &&
+        ! printf '%s' "$granted_out" | grep -q 'clipboard  not granted'; then
+        printf '  ✓ a granted session negotiates a clipboard in both directions\n'
+      else
+        printf '  ✗ the clipboard grant did not reach the session\n'
+        printf '%s\n' "$granted_out" | grep -iE 'granted|clipboard' | sed 's/^/      /'
+        fail=1
+      fi
+      # And asking for none means none, whatever the host would allow.
+      refused_out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        timeout 60 "$BIN/esper-engine" connect "$clip_addr" --seconds 2 \
+        --clipboard none 2>&1 || true)
+      if printf '%s' "$refused_out" | grep -q 'clipboard  not granted' &&
+        ! printf '%s' "$refused_out" | grep -q 'granted .*clipboard'; then
+        printf '  ✓ and --clipboard none gets one that the host would have allowed\n'
+      else
+        printf '  ✗ --clipboard none still negotiated a clipboard\n'
+        printf '%s\n' "$refused_out" | grep -iE 'granted|clipboard' | sed 's/^/      /'
+        fail=1
+      fi
+      ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" clipboard-out clipboard-in >/dev/null
+      kill "$clip_host" 2>/dev/null || true
+      clip_host=""
 
       # **A short buffer is not a slow link, and a session must not say it
       # is.** Two links carrying the same rate, differing only in how much

@@ -1435,6 +1435,99 @@ pub enum ClipboardReply {
     Refused(ClipboardRefusal),
 }
 
+/// Anything that travels on a session's clipboard stream, in either direction.
+///
+/// # Why a stream of its own
+///
+/// The obvious place for a clipboard offer is the media control stream, which
+/// already exists and already carries small things. Two reasons it does not go
+/// there. A sixteen megabyte image would sit in front of every keyframe
+/// request behind it, so a paste would cost the session seconds of frozen
+/// picture — and a clipboard is the one part of a session that is **the same
+/// in both directions**, where everything on the media stream is a controller
+/// asking a host about its screen. One stream, one vocabulary, and both ends
+/// run the same code over it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipboardMessage {
+    /// Something was copied here. Its shape, never its content.
+    Offer(ClipboardOffer),
+    /// Asking for something that was offered.
+    Ask(ClipboardRequest),
+    /// The answer to an ask, which is the only thing that carries content.
+    Reply(ClipboardReply),
+}
+
+impl ClipboardMessage {
+    /// Whether this message is within bounds.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Self::Offer(o) => o.is_well_formed(),
+            Self::Ask(_) => true,
+            // A refusal carries nothing to be wrong; content is checked by
+            // whatever is about to put it on a clipboard, which checks it
+            // again on the way in.
+            Self::Reply(ClipboardReply::Sent(d)) => d.is_well_formed(),
+            Self::Reply(ClipboardReply::Refused(_)) => true,
+        }
+    }
+
+    /// A name for a person.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Offer(_) => "a clipboard offer",
+            Self::Ask(_) => "a clipboard request",
+            Self::Reply(ClipboardReply::Sent(_)) => "clipboard content",
+            Self::Reply(ClipboardReply::Refused(_)) => "a clipboard refusal",
+        }
+    }
+}
+
+/// What a control stream a peer just opened is for.
+///
+/// **The first frame on every stream a screen session opens, and the only
+/// thing that says what the rest of it is.** Before this existed there was one
+/// kind of extra stream — input — so the one that arrived was the one it had
+/// to be. A second kind makes that an assumption rather than a fact, and a
+/// clipboard stream mistaken for an input stream would be a session where
+/// neither works and nothing says why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamPurpose {
+    /// Keys and pointer, controller to host. See [`crate::InputMessage`].
+    Input,
+    /// The clipboard, both ways. See [`ClipboardMessage`].
+    Clipboard,
+}
+
+impl StreamPurpose {
+    /// The permission a stream of this kind cannot run without.
+    ///
+    /// The clipboard needs *either* direction: a session where the controller
+    /// may paste into the host but not read from it is a session with a
+    /// clipboard stream that carries traffic one way.
+    #[must_use]
+    pub fn permitted_by(self, held: &[Permission]) -> bool {
+        match self {
+            Self::Input => held.contains(&Permission::Control),
+            Self::Clipboard => {
+                held.contains(&Permission::ClipboardOut) || held.contains(&Permission::ClipboardIn)
+            }
+        }
+    }
+
+    /// A name for a person.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Clipboard => "clipboard",
+        }
+    }
+}
+
 /// A controller asking for a picture it can start from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyframeRequest {
@@ -1482,16 +1575,6 @@ pub enum MediaMessage {
     /// monitor list would be a keystroke a person notices; a cursor position
     /// queued behind one is a position that is about to be superseded anyway.
     Cursor(crate::CursorMessage),
-    /// What is on this side's clipboard now — its shape, not its content.
-    /// Either direction.
-    ///
-    /// The one symmetric message here, because a clipboard is the one thing in
-    /// a session that both machines have. Everything else on this stream is a
-    /// controller asking about a host's screen.
-    ///
-    /// Small enough to belong on this stream: two kinds and a length each. The
-    /// content it describes never travels here — see [`ClipboardReply`].
-    Clipboard(ClipboardOffer),
 }
 
 impl MediaMessage {
@@ -1503,7 +1586,6 @@ impl MediaMessage {
             Self::Select(_) | Self::Keyframe(_) => true,
             Self::Hint(h) => h.is_well_formed(),
             Self::Cursor(c) => c.is_well_formed(),
-            Self::Clipboard(o) => o.is_well_formed(),
         }
     }
 
@@ -1519,7 +1601,6 @@ impl MediaMessage {
             Self::Hint(_) => "a quality hint",
             Self::Keyframe(_) => "a keyframe request",
             Self::Cursor(c) => c.name(),
-            Self::Clipboard(_) => "a clipboard offer",
         }
     }
 
@@ -1537,10 +1618,6 @@ impl MediaMessage {
             Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) => {
                 matches!(role, Role::Controller)
             }
-            // Both machines have a clipboard, so both may say what is on it.
-            // What may then be *taken* is the permissions' business, not the
-            // direction rule's.
-            Self::Clipboard(_) => true,
         }
     }
 }
@@ -2158,24 +2235,60 @@ mod clipboard_tests {
         }
     }
 
-    /// The clipboard offer is the one message on this stream that both ends
-    /// may send, because it is the one thing both ends have.
+    /// The clipboard is the one part of a session that is the same in both
+    /// directions, so its messages have no direction rule at all — what may be
+    /// taken is the permissions' business.
     #[test]
-    fn a_clipboard_offer_may_travel_either_way() {
-        let message = MediaMessage::Clipboard(ClipboardOffer {
+    fn every_clipboard_message_is_checked_before_it_is_acted_on() {
+        let good = ClipboardMessage::Offer(ClipboardOffer {
             kinds: vec![Offered {
                 kind: ClipboardKind::Text,
                 bytes: 3,
             }],
         });
-        assert!(message.may_be_sent_by(Role::Host));
-        assert!(message.may_be_sent_by(Role::Controller));
-        assert!(message.is_well_formed());
-        assert_eq!(message.name(), "a clipboard offer");
+        assert!(good.is_well_formed());
+        assert_eq!(roundtrip(&good), good);
+        assert_eq!(good.name(), "a clipboard offer");
 
-        // And a malformed one is refused whichever way it came.
-        let empty = MediaMessage::Clipboard(ClipboardOffer { kinds: Vec::new() });
-        assert!(!empty.is_well_formed());
+        for bad in [
+            ClipboardMessage::Offer(ClipboardOffer { kinds: Vec::new() }),
+            ClipboardMessage::Reply(ClipboardReply::Sent(ClipboardData {
+                kind: ClipboardKind::Text,
+                content: vec![0xFF],
+            })),
+        ] {
+            assert!(!bad.is_well_formed(), "{} was accepted", bad.name());
+        }
+        // A refusal has nothing in it to be wrong.
+        let refused =
+            ClipboardMessage::Reply(ClipboardReply::Refused(ClipboardRefusal::NotOffered));
+        assert!(refused.is_well_formed());
+        assert_eq!(refused.name(), "a clipboard refusal");
+        assert_eq!(
+            ClipboardMessage::Ask(ClipboardRequest {
+                kind: ClipboardKind::Image
+            })
+            .name(),
+            "a clipboard request"
+        );
+    }
+
+    /// **A stream says what it is before it says anything else.** There was
+    /// one kind, so the one that arrived was the one it had to be; a second
+    /// kind turns that from a fact into an assumption.
+    #[test]
+    fn a_stream_says_what_it_is_and_what_it_needs() {
+        for purpose in [StreamPurpose::Input, StreamPurpose::Clipboard] {
+            assert_eq!(roundtrip(&purpose), purpose);
+            assert!(!purpose.permitted_by(&[]), "{purpose:?} needed nothing");
+            assert!(!purpose.name().is_empty());
+        }
+        assert!(StreamPurpose::Input.permitted_by(&[Permission::Control]));
+        assert!(!StreamPurpose::Input.permitted_by(&[Permission::ClipboardIn]));
+        // Either direction is enough for a clipboard stream to be worth having.
+        assert!(StreamPurpose::Clipboard.permitted_by(&[Permission::ClipboardIn]));
+        assert!(StreamPurpose::Clipboard.permitted_by(&[Permission::ClipboardOut]));
+        assert!(!StreamPurpose::Clipboard.permitted_by(&[Permission::Control]));
     }
 
     /// The wire names are the contract, and a rename is a protocol break.
@@ -2183,14 +2296,15 @@ mod clipboard_tests {
     fn the_clipboard_wire_names_are_pinned() {
         for (bytes, tag) in [
             (
-                encode(&MediaMessage::Clipboard(ClipboardOffer {
+                encode(&ClipboardMessage::Offer(ClipboardOffer {
                     kinds: vec![Offered {
                         kind: ClipboardKind::Text,
                         bytes: 1,
                     }],
                 })),
-                "clipboard",
+                "offer",
             ),
+            (encode(&StreamPurpose::Clipboard), "clipboard"),
             (
                 encode(&ClipboardReply::Refused(ClipboardRefusal::NotPermitted)),
                 "not_permitted",
