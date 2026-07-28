@@ -89,10 +89,22 @@ impl MonitorInfo {
 /// [`MonitorId`].
 #[derive(Debug, Default)]
 pub struct Numbering {
-    /// Every name ever seen, with the number it was given.
-    given: Vec<(String, MonitorId)>,
+    /// Every name ever seen, with the number it was given and when it was last
+    /// asked about.
+    given: Vec<Remembered>,
     /// The next number never used.
     next: u32,
+    /// Ticks up on every lookup, so the least recently seen can be found.
+    now: u64,
+}
+
+/// One name and the number it was given.
+#[derive(Debug)]
+struct Remembered {
+    name: String,
+    id: MonitorId,
+    /// The tick it was last asked about.
+    at: u64,
 }
 
 impl Numbering {
@@ -115,19 +127,37 @@ impl Numbering {
     /// The number for this name, assigning one if it has never been seen.
     #[must_use]
     pub fn number_of(&mut self, name: &str) -> MonitorId {
-        if let Some((_, id)) = self.given.iter().find(|(seen, _)| seen == name) {
-            return *id;
+        self.now = self.now.saturating_add(1);
+        let at = self.now;
+        if let Some(seen) = self.given.iter_mut().find(|seen| seen.name == name) {
+            seen.at = at;
+            return seen.id;
         }
         let id = MonitorId(self.next);
         self.next = self.next.saturating_add(1);
-        // Bounded: a machine that plugs monitors in and out for a month should
-        // not grow this without limit. The oldest name goes, which at worst
-        // means a very long-departed monitor gets a fresh number on its
-        // return — and nothing is watching it.
-        if self.given.len() >= MOST_REMEMBERED {
-            self.given.remove(0);
+        // Bounded: a machine docked and undocked for a month should not grow
+        // this without limit.
+        //
+        // **The least recently asked about goes, not the oldest.** A docking
+        // station's screens come and go; the built-in panel is present at every
+        // enumeration for the life of the process, and is also the very first
+        // name ever seen — so evicting the oldest would evict the primary
+        // display, which is the one thing here that must never be renumbered.
+        if self.given.len() >= MOST_REMEMBERED
+            && let Some(stalest) = self
+                .given
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, seen)| seen.at)
+                .map(|(i, _)| i)
+        {
+            self.given.remove(stalest);
         }
-        self.given.push((name.to_owned(), id));
+        self.given.push(Remembered {
+            name: name.to_owned(),
+            id,
+            at,
+        });
         id
     }
 
@@ -244,4 +274,133 @@ pub trait Capturer: std::fmt::Debug + Send {
     /// controller clicking the current monitor should not cost a keyframe.
     /// Anything else discards the previous picture, so the next frame is whole.
     fn select(&mut self, monitor: MonitorId) -> Result<(), CaptureError>;
+}
+
+#[cfg(test)]
+mod numbering_tests {
+    use super::*;
+
+    fn named(names: &[&str]) -> Vec<MonitorInfo> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| MonitorInfo {
+                id: MonitorId(u32::MAX),
+                name: (*name).to_owned(),
+                geometry: crate::geometry::Rect {
+                    x: i32::try_from(i).unwrap_or(0) * 1920,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                scale: 1.0,
+                primary: i == 0,
+            })
+            .collect()
+    }
+
+    fn numbers(list: &[MonitorInfo]) -> Vec<u32> {
+        list.iter().map(|m| m.id.0).collect()
+    }
+
+    /// **The bug this exists for.** Three monitors, unplug the middle one, and
+    /// numbering by position moves the third onto the second's number — so a
+    /// session watching it is watching a different screen without having asked.
+    #[test]
+    fn unplugging_the_middle_of_three_does_not_renumber_the_third() {
+        let mut n = Numbering::new();
+        let mut all = named(&["DP-1", "DP-2", "HDMI-1"]);
+        n.number(&mut all);
+        assert_eq!(numbers(&all), vec![0, 1, 2]);
+
+        let mut without_the_middle = named(&["DP-1", "HDMI-1"]);
+        n.number(&mut without_the_middle);
+        assert_eq!(
+            numbers(&without_the_middle),
+            vec![0, 2],
+            "HDMI-1 was renumbered onto the screen that was unplugged"
+        );
+
+        // And plugged back in, it is itself again.
+        let mut back = named(&["DP-1", "DP-2", "HDMI-1"]);
+        n.number(&mut back);
+        assert_eq!(numbers(&back), vec![0, 1, 2]);
+    }
+
+    /// A screen that arrives after another left gets a number never used.
+    #[test]
+    fn a_new_screen_never_inherits_a_departed_ones_number() {
+        let mut n = Numbering::new();
+        let mut two = named(&["DP-1", "DP-2"]);
+        n.number(&mut two);
+        assert_eq!(numbers(&two), vec![0, 1]);
+
+        let mut swapped = named(&["DP-1", "HDMI-1"]);
+        n.number(&mut swapped);
+        assert_eq!(
+            numbers(&swapped),
+            vec![0, 2],
+            "a different screen was given the departed one's number"
+        );
+        assert_eq!(n.handed_out(), 3);
+    }
+
+    /// The list's order is left exactly as it came: what order screens are
+    /// presented in and what they are called are two different questions.
+    #[test]
+    fn the_order_of_the_list_is_not_touched() {
+        let mut n = Numbering::new();
+        let mut list = named(&["c", "a", "b"]);
+        n.number(&mut list);
+        assert_eq!(
+            list.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["c", "a", "b"]
+        );
+        assert_eq!(numbers(&list), vec![0, 1, 2]);
+    }
+
+    /// **The primary is the one thing that must never be renumbered**, and it
+    /// is also the first name ever seen — so an eviction policy of "the oldest
+    /// goes" would evict exactly it. The stalest goes instead, and the primary
+    /// is never stale because it is present at every enumeration.
+    #[test]
+    fn the_screen_that_is_always_there_is_never_the_one_forgotten() {
+        let mut n = Numbering::new();
+        let mut built_in = named(&["eDP-1"]);
+        n.number(&mut built_in);
+        let panel = built_in.first().map(|m| m.id).expect("one screen");
+
+        // A docking station's worth of screens, coming and going, past the
+        // bound — with the built-in panel present every time, as it is.
+        for round in 0..MOST_REMEMBERED * 2 {
+            let dock = format!("dock-{round}");
+            let mut list = named(&["eDP-1", &dock]);
+            n.number(&mut list);
+        }
+
+        let mut alone = named(&["eDP-1"]);
+        n.number(&mut alone);
+        assert_eq!(
+            alone.first().map(|m| m.id),
+            Some(panel),
+            "the built-in panel was forgotten and renumbered"
+        );
+    }
+
+    /// And it is bounded, or a month of docking grows it for ever.
+    #[test]
+    fn it_does_not_remember_for_ever() {
+        let mut n = Numbering::new();
+        for i in 0..MOST_REMEMBERED * 3 {
+            let mut list = named(&[&format!("screen-{i}")]);
+            n.number(&mut list);
+        }
+        assert!(
+            n.given.len() <= MOST_REMEMBERED,
+            "it remembers {} names",
+            n.given.len()
+        );
+        // Every number is still distinct, however many were forgotten.
+        assert_eq!(n.handed_out() as usize, MOST_REMEMBERED * 3);
+    }
 }

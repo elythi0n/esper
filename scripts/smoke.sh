@@ -1594,6 +1594,34 @@ print(s.getsockname()[1]); s.close()')
       kill "$multi_host" 2>/dev/null || true
       multi_host=""
 
+      # **And the host's own choice of screen.** `host.monitor` reaches the
+      # X11 backend at construction and this one afterwards, and without the
+      # afterwards a host asked for its third screen quietly sent its first.
+      sed -i '/host.monitor/d' "$term_a/config.toml"
+      printf 'host.monitor = 2\n' >> "$term_a/config.toml"
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/third.log" 2>&1 &
+      multi_host=$!
+      third_addr=""
+      for _ in $(seq 1 100); do
+        third_addr=$( { awk '/listening/{print $2}' "$term_a/third.log" 2>/dev/null || true; } | head -1)
+        [ -n "$third_addr" ] && break
+        sleep 0.1
+      done
+      third=$(ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$third_addr" \
+        --seconds 2 2>&1 || true)
+      if printf '%s' "$third" | grep -q 'stream     320x180'; then
+        printf '  ✓ a host told which of its screens to send sends that one\n'
+      else
+        printf '  ✗ the host sent a different screen than it was told to\n'
+        printf '%s\n' "$third" | grep -iE 'stream|monitor' | sed 's/^/      /'
+        fail=1
+      fi
+      sed -i '/host.monitor/d' "$term_a/config.toml"
+      kill "$multi_host" 2>/dev/null || true
+      multi_host=""
+
       # **The measurement.** The same screen, watched for the same time, on a
       # host with one screen and on a host with three. Damage on X11 is
       # desktop-wide, so a host that sent a frame every time anything moved

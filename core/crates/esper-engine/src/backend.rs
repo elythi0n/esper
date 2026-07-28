@@ -134,6 +134,15 @@ pub fn open(
             synthetic.monitors().len()
         ));
     }
+    // **`--monitor` means the same thing here as it does on a real backend.**
+    // The X11 one takes it at construction; this one is built and then pointed,
+    // and without this a host asked for its second synthetic screen quietly
+    // sent its first.
+    if let Some(id) = monitor
+        && let Err(e) = esper_capture::Capturer::select(&mut synthetic, id)
+    {
+        return Err(e);
+    }
     Ok(Selected {
         capturer: Box::new(synthetic),
         attempts,
