@@ -1458,3 +1458,87 @@ fn a_resume_onto_an_unusable_path_keeps_the_session() {
         "a refused resume destroyed the session"
     );
 }
+
+/// **What the far end measures has to reach the end that can act on it.**
+///
+/// The controller measures the link from how a frame's datagrams arrive; the
+/// host's transport is the only place that can pace without putting a second
+/// serialiser in front of the wire. The message between them is the whole
+/// mechanism, and a host that accepted it and forgot it would look exactly
+/// like a link nobody could measure.
+#[test]
+fn a_host_remembers_what_the_controller_measured_and_forgets_it_when_it_is_old() {
+    let mut host = host(30);
+    let fresh = Duration::from_secs(5);
+    assert_eq!(
+        host.reported_capacity(fresh),
+        None,
+        "a host that was told nothing claims to know something"
+    );
+
+    host.handle(&MediaMessage::Report(esper_proto::LinkReport {
+        capacity_kbit: Some(1234),
+    }))
+    .expect("a report is a message a controller may send");
+    assert_eq!(host.reported_capacity(fresh), Some(1234));
+
+    // **A stale estimate is worse than none.** A link that got faster would be
+    // held at the old rate for the rest of the session with nothing saying why,
+    // so anything older than the caller's own patience is not an answer.
+    assert_eq!(
+        host.reported_capacity(Duration::ZERO),
+        None,
+        "a reading from the past was given as a reading from now"
+    );
+
+    // Withdrawn, because the far end can stop being able to measure.
+    host.handle(&MediaMessage::Report(esper_proto::LinkReport {
+        capacity_kbit: None,
+    }))
+    .expect("a withdrawal is a report");
+    assert_eq!(host.reported_capacity(fresh), None);
+}
+
+/// A report is something a controller sends, and a host sending one would be
+/// telling the controller what the controller measured.
+#[test]
+fn a_report_only_travels_one_way() {
+    let report = MediaMessage::Report(esper_proto::LinkReport {
+        capacity_kbit: Some(800),
+    });
+    assert!(report.may_be_sent_by(Role::Controller));
+    assert!(!report.may_be_sent_by(Role::Host));
+
+    let mut viewer = controller(&host(30));
+    assert!(
+        matches!(
+            viewer.handle(&report),
+            Err(esper_stream::StreamError::WrongDirection { .. })
+        ),
+        "a controller accepted a report from a host"
+    );
+}
+
+/// A number outside anything plausible is refused before it can throttle a
+/// session to nothing.
+#[test]
+fn a_report_outside_its_bounds_is_refused() {
+    let mut host = host(30);
+    for bad in [0u32, esper_proto::MOST_REPORTED_KBIT + 1, u32::MAX] {
+        let message = MediaMessage::Report(esper_proto::LinkReport {
+            capacity_kbit: Some(bad),
+        });
+        assert!(
+            !message.is_well_formed(),
+            "{bad} was accepted as a capacity"
+        );
+        assert!(
+            matches!(
+                host.handle(&message),
+                Err(esper_stream::StreamError::Malformed { .. })
+            ),
+            "{bad} reached the host"
+        );
+    }
+    assert_eq!(host.reported_capacity(Duration::from_secs(5)), None);
+}

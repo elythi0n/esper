@@ -138,6 +138,13 @@ impl std::fmt::Debug for Endpoint {
     }
 }
 
+/// How many just-accepted capacity cells are kept whether or not anybody has
+/// collected them yet.
+///
+/// A caller takes its cell immediately after accepting, so this only has to
+/// cover accepts that overlap that gap.
+const JUST_ACCEPTED: usize = 4;
+
 impl Endpoint {
     /// Bind an endpoint that both accepts and dials.
     ///
@@ -218,7 +225,18 @@ impl Endpoint {
         // remaining owner is this list belongs to a connection whose session
         // has gone; keeping them all would be a list that grows for the life
         // of a host.
-        held.retain(|(_, cell)| cell.is_shared());
+        //
+        // The newest few are kept regardless. A caller takes its cell just
+        // after accepting, so between the push and the take the only owner is
+        // this list — and a second accept arriving in that window would
+        // otherwise prune a cell nobody had collected yet.
+        let keep_at_least = held.len().saturating_sub(JUST_ACCEPTED);
+        let mut at = 0;
+        held.retain(|(_, cell)| {
+            let recent = at >= keep_at_least;
+            at += 1;
+            recent || cell.is_shared()
+        });
         held.push((id, capacity));
     }
 
