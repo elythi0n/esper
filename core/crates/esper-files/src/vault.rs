@@ -84,19 +84,25 @@ impl Vault {
     /// link to somewhere else, is refused: the whole arrangement rests on this
     /// handle being the place the machine's owner named.
     pub fn open(root: &Path) -> Result<Self, FileError> {
+        // **Only what this makes, is made private.** A directory that was
+        // already there belongs to whoever made it — a person's own working
+        // directory is very often the destination of a copy, and narrowing it
+        // underneath them would be this quietly changing something it was not
+        // asked to touch.
+        let ours = !root.exists();
         if let Err(e) = std::fs::create_dir_all(root)
             && e.kind() != std::io::ErrorKind::AlreadyExists
         {
             return Err(FileError::NoRoot(format!("{}: {e}", root.display())));
         }
-        // **Owner-only, and set after making it rather than left to a umask.**
-        // Files inside are unreadable by anybody else, but a directory anybody
-        // can list is a directory that tells them what somebody is moving —
-        // and a filename is often the whole of what is worth knowing.
-        //
-        // Only tightened, never loosened: a machine's owner who has widened
-        // their own directory on purpose keeps it.
-        platform::keep_to_ourselves(root);
+        if ours {
+            // Owner-only, set after making it rather than left to a umask.
+            // Files inside are unreadable by anybody else, but a directory
+            // anybody can list is a directory that tells them what somebody is
+            // moving — and a filename is often the whole of what is worth
+            // knowing.
+            platform::keep_to_ourselves(root);
+        }
         // Not through a link, even at the top. A root that is a symlink is a
         // root somebody else can move.
         let here = std::fs::symlink_metadata(root)
@@ -1045,6 +1051,24 @@ mod tests {
         let vault = Vault::open(&root).expect("a root");
         let mode = std::fs::metadata(&root).expect("stat").permissions().mode();
         assert_eq!(mode & 0o077, 0, "the file directory is {:o}", mode & 0o777);
+
+        // **And a directory that was already there is left exactly as it
+        // was.** A person's own working directory is very often the
+        // destination of a copy, and narrowing it underneath them would be
+        // this changing something it was not asked to touch.
+        let theirs = home.0.join("theirs");
+        std::fs::create_dir_all(&theirs).expect("mkdir");
+        std::fs::set_permissions(&theirs, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let _ = Vault::open(&theirs).expect("a root");
+        assert_eq!(
+            std::fs::metadata(&theirs)
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755,
+            "somebody's own directory was narrowed underneath them"
+        );
 
         // And what lands in it, likewise.
         let at = p("secret.txt");

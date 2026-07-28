@@ -386,8 +386,12 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
         Err(e) => return Err(format!("the host said nothing: {e}")),
     };
 
-    // The host named the file; where it lands here is this end's business.
-    let (vault, name) = local(at, tail(&wire.path).or_else(|| tail(remote)))?;
+    // **The name comes from what was asked for, never from the answer.** A
+    // host replies with a path of its own, and a receiver that took its word
+    // would let the far end choose the name of a file on this machine — `.`
+    // something, in whichever directory the person happened to be standing in.
+    // What lands here is named after what they typed.
+    let (vault, name) = local(at, tail(remote))?;
     let mut offer = Offer::check(&wire).map_err(|why| why.message().to_owned())?;
     offer.path = name.clone();
     offer.replace = o.force;
@@ -562,6 +566,25 @@ mod tests {
         assert_eq!(tail("q3.pdf"), Some("q3.pdf"));
         assert_eq!(tail("reports/"), Some("reports"));
         assert_eq!(tail(""), None);
+    }
+
+    /// **A name a person typed is a name a person typed.** The only thing
+    /// `tail` is ever given is the path from the command line, so a host
+    /// answering a request for `logs/x.log` with a path of its own choosing
+    /// cannot decide what appears in somebody's working directory.
+    #[test]
+    fn the_far_end_does_not_get_to_name_a_file_on_this_machine() {
+        // Assembled, or this test's own text is the thing it finds.
+        let derived_from_the_reply = format!("tail(&wire{}path)", ".");
+        let source = include_str!("cp_cmd.rs");
+        assert!(
+            !source.contains(&derived_from_the_reply),
+            "the local name is being derived from what the far end replied"
+        );
+        // And even if it were, the tail of a path is a single component that
+        // then has to pass the name rules.
+        assert_eq!(tail("../../.bashrc"), Some(".bashrc"));
+        assert!(SafePath::parse("..").is_err());
     }
 
     /// Every option the parser takes is in the usage, and everything the usage
