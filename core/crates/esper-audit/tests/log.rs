@@ -272,6 +272,7 @@ fn exhaustive_witness(e: &Event) {
         | Event::ForwardOpened { .. }
         | Event::ForwardClosed { .. }
         | Event::ForwardRefused { .. }
+        | Event::FileTransferred { .. }
         | Event::Refused { .. } => {}
     }
 }
@@ -326,6 +327,12 @@ fn variants() -> Vec<Event> {
         Event::ForwardRefused {
             target: "10.0.0.5:22".to_owned(),
             reason: "that target is not on the host's forwarding allowlist".to_owned(),
+        },
+        Event::FileTransferred {
+            direction: "in".to_owned(),
+            path: "reports/q3.pdf".to_owned(),
+            size: 4096,
+            outcome: "stored".to_owned(),
         },
         Event::Refused {
             reason: "unknown key".to_owned(),

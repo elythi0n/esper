@@ -79,6 +79,41 @@ pub fn audit_log() -> Result<PathBuf, String> {
     Ok(dir.join("sessions.log"))
 }
 
+/// The directory file transfers happen inside.
+///
+/// **Not the home directory and not `~/.esper`.** Everything a peer can name
+/// is relative to this and cannot leave it, so what this points at is the
+/// whole of what a file permission reaches — and pointing it at a directory
+/// that also holds the identity key would make a file permission a way to read
+/// one.
+///
+/// `~/Esper` by default: a place a person can find, outside the dot-directory
+/// the machine's own state lives in, and one they can move somewhere else in
+/// the settings.
+pub fn files_root() -> Result<PathBuf, String> {
+    let named = crate::settings::text("files.root");
+    if !named.trim().is_empty() {
+        return Ok(expand(named.trim()));
+    }
+    let base = std::env::var_os("ESPER_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .ok_or_else(|| "no home directory to put a file directory in".to_owned())?;
+    Ok(base.join("Esper"))
+}
+
+/// `~` at the start of a configured path, which a config file is written with
+/// and a shell does not expand for us.
+fn expand(text: &str) -> PathBuf {
+    match text.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(rest),
+        None => PathBuf::from(text),
+    }
+}
+
 /// Seconds since the epoch, for a `paired_at` stamp.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()

@@ -88,6 +88,7 @@ var engineCommands = map[string]bool{
 	"connect":  true,
 	"terminal": true,
 	"forward":  true,
+	"cp":       true,
 }
 
 func isEngineCommand(name string) bool { return engineCommands[name] }
@@ -408,6 +409,7 @@ Using a machine
   connect            show a paired host's screen
   terminal           open a shell on a paired host
   forward            reach a port on a paired host, ssh -L style
+  cp                 copy one file to or from a paired host
   host               serve this machine's screen to a paired device
 
 Deciding who may

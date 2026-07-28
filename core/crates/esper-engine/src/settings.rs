@@ -112,6 +112,18 @@ pub fn mdns_interfaces() -> Vec<std::net::Ipv4Addr> {
     }
 }
 
+/// Whether this machine serves file transfer at all.
+pub fn files_enabled() -> bool {
+    flag("files.enabled", false)
+}
+
+/// The largest single file this machine will move.
+pub fn file_limits() -> esper_files::Limits {
+    esper_files::Limits {
+        most_bytes: whole("files.max_bytes"),
+    }
+}
+
 /// The broker named in the settings, if one is.
 ///
 /// **Both halves or neither.** An address with no key would mean trusting

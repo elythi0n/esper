@@ -179,6 +179,28 @@ pub enum Event {
         /// Why, as the sentence the peer was given.
         reason: String,
     },
+    /// A file crossed, or tried to.
+    ///
+    /// The path relative to this machine's file directory, the size and the
+    /// outcome. **Never the contents** — the same rule terminal output and
+    /// forwarded traffic follow, and the same reason: what a person moves is
+    /// theirs, and a product that recorded it would be a wiretap that happened
+    /// to be local.
+    ///
+    /// Recorded whether it worked or not. A device repeatedly asking for paths
+    /// it may not have is the signal that matters, and it is invisible in a
+    /// record that only keeps what succeeded.
+    FileTransferred {
+        /// Which way, from this machine's point of view: `in` or `out`.
+        direction: String,
+        /// Where, relative to this machine's file directory. Already checked
+        /// to be free of control characters, so it cannot forge a line here.
+        path: String,
+        /// How large it was said to be.
+        size: u64,
+        /// How it went, as the sentence a person would be told.
+        outcome: String,
+    },
     /// A session was refused, and why.
     ///
     /// Refusals matter as much as acceptances: a run of them is what an attack
@@ -244,6 +266,7 @@ impl Event {
             Self::ForwardOpened { .. } => "forward_opened",
             Self::ForwardClosed { .. } => "forward_closed",
             Self::ForwardRefused { .. } => "forward_refused",
+            Self::FileTransferred { .. } => "file_transferred",
             Self::Refused { .. } => "refused",
         }
     }
@@ -317,6 +340,15 @@ impl Event {
             ),
             Self::ForwardRefused { target, reason } => {
                 format!("refused a forward to {target}: {reason}")
+            }
+            Self::FileTransferred {
+                direction,
+                path,
+                size,
+                outcome,
+            } => {
+                let way = if direction == "in" { "took" } else { "sent" };
+                format!("{way} {path} ({size} bytes): {outcome}")
             }
             Self::Refused { reason } => format!("refused: {reason}"),
         }

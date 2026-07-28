@@ -249,6 +249,43 @@ pub static SETTINGS: &[Setting] = &[
         about: "How many forwarded connections one session may have open at once.",
     },
     Setting {
+        key: "files.enabled",
+        kind: Kind::Flag,
+        // **Off, like every other capability that reaches a disk.** A machine
+        // that has not been asked to serve files does not serve them, whatever
+        // a device holds: the permission says who may, and this says whether
+        // this machine does at all.
+        default: Value::Flag(false),
+        about: "Serve file transfer at all. Off by default: the per-device permissions say \
+                who may move files, and this says whether this machine does it.",
+    },
+    Setting {
+        key: "files.root",
+        kind: Kind::Text,
+        // **A directory of its own, never a home directory and never `/`.**
+        // Everything a peer can name is relative to this and cannot leave it,
+        // so what this points at is the whole of what a file permission
+        // reaches. Empty means the default below, worked out where paths are.
+        default: Value::Text(Cow::Borrowed("")),
+        about: "The directory file transfers happen inside. Everything a peer can name is \
+                relative to it and nothing can leave it. Empty means ~/Esper.",
+    },
+    Setting {
+        key: "files.max_bytes",
+        kind: Kind::WholeOrNone {
+            least: 1,
+            // A terabyte. Past the point where a bound is protecting anything
+            // and short of the point where the arithmetic gets interesting.
+            most: 1024 * 1024 * 1024 * 1024,
+        },
+        // No limit of its own by default: the disk is the limit, and a
+        // transfer is refused before the first byte if it will not fit. A
+        // figure here is for a machine whose owner wants a smaller one.
+        default: Value::Nothing,
+        about: "The largest single file this machine will send or accept, in bytes. \
+                `none` means whatever fits on the disk.",
+    },
+    Setting {
         key: "discovery.mdns",
         kind: Kind::Flag,
         // **The one deliberate exception to strict defaults.** It reveals that

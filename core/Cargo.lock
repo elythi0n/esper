@@ -462,6 +462,7 @@ dependencies = [
  "esper-decode",
  "esper-discovery",
  "esper-encode",
+ "esper-files",
  "esper-input",
  "esper-input-x11",
  "esper-interfaces",

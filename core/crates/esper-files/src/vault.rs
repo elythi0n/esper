@@ -89,6 +89,14 @@ impl Vault {
         {
             return Err(FileError::NoRoot(format!("{}: {e}", root.display())));
         }
+        // **Owner-only, and set after making it rather than left to a umask.**
+        // Files inside are unreadable by anybody else, but a directory anybody
+        // can list is a directory that tells them what somebody is moving —
+        // and a filename is often the whole of what is worth knowing.
+        //
+        // Only tightened, never loosened: a machine's owner who has widened
+        // their own directory on purpose keeps it.
+        platform::keep_to_ourselves(root);
         // Not through a link, even at the top. A root that is a symlink is a
         // root somebody else can move.
         let here = std::fs::symlink_metadata(root)
@@ -211,6 +219,15 @@ impl Vault {
         platform::remove(self, path)
     }
 
+    /// How long ago this file was last written, if it is there.
+    ///
+    /// Used to decide whether a partial transfer is worth resuming or is the
+    /// remains of something nobody wants any more.
+    #[must_use]
+    pub fn age_of(&self, path: &SafePath) -> Option<std::time::Duration> {
+        platform::age_of(self, path)
+    }
+
     /// Bytes free on the filesystem the root is on.
     ///
     /// `None` when the platform will not say — in which case a caller checks
@@ -265,6 +282,23 @@ mod platform {
     #[cfg(target_os = "linux")]
     fn beneath() -> rustix::fs::ResolveFlags {
         rustix::fs::ResolveFlags::BENEATH | rustix::fs::ResolveFlags::NO_SYMLINKS
+    }
+
+    /// Take the group and world bits off a directory this process made.
+    pub(super) fn keep_to_ourselves(root: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let Ok(seen) = std::fs::metadata(root) else {
+            return;
+        };
+        let mode = seen.permissions().mode();
+        if mode & 0o077 == 0 {
+            return;
+        }
+        let mut narrower = seen.permissions();
+        narrower.set_mode(mode & 0o7700);
+        if let Err(e) = std::fs::set_permissions(root, narrower) {
+            tracing::debug!(error = %e, "could not narrow the file directory");
+        }
     }
 
     /// What the kernel here will do.
@@ -479,6 +513,16 @@ mod platform {
         }
     }
 
+    pub(super) fn age_of(vault: &Vault, path: &SafePath) -> Option<std::time::Duration> {
+        let file = open_read(vault, path).ok()?;
+        let stat = fs::fstat(&file).ok()?;
+        let written = u64::try_from(stat.st_mtime).ok()?;
+        std::time::SystemTime::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(written))?
+            .elapsed()
+            .ok()
+    }
+
     pub(super) fn free_space(vault: &Vault) -> Option<u64> {
         let stat = fs::fstatvfs(&vault.root).ok()?;
         // What an unprivileged process may actually use, not what is unused:
@@ -526,6 +570,10 @@ mod platform {
     pub(super) fn best_confinement(_root: &std::fs::File) -> HowConfined {
         HowConfined::Checked
     }
+
+    /// Not expressible without the platform's own access control, which
+    /// arrives with the platform's own backend.
+    pub(super) fn keep_to_ourselves(_root: &std::path::Path) {}
 
     /// One component, checked to be one.
     ///
@@ -642,6 +690,16 @@ mod platform {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(FileError::Failed(e.to_string())),
         }
+    }
+
+    pub(super) fn age_of(vault: &Vault, path: &SafePath) -> Option<std::time::Duration> {
+        let at = within(vault, path).ok()?;
+        std::fs::symlink_metadata(at)
+            .ok()?
+            .modified()
+            .ok()?
+            .elapsed()
+            .ok()
     }
 
     /// Not available without a syscall this build does not have.
@@ -973,6 +1031,31 @@ mod tests {
         let vault = Vault::open(&root).expect("a root");
         assert!(root.is_dir());
         assert!(!vault.exists(&p("x")));
+    }
+
+    /// **A directory anybody can list is a directory that tells them what
+    /// somebody is moving.** The files in it are unreadable by others; the
+    /// names would not be.
+    #[test]
+    #[cfg(unix)]
+    fn the_file_directory_is_not_readable_by_anybody_else() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = Temp::new("mode");
+        let root = home.0.join("root");
+        let vault = Vault::open(&root).expect("a root");
+        let mode = std::fs::metadata(&root).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o077, 0, "the file directory is {:o}", mode & 0o777);
+
+        // And what lands in it, likewise.
+        let at = p("secret.txt");
+        vault.create_new(&at).expect("a file");
+        let file = std::fs::metadata(root.join("secret.txt")).expect("stat");
+        assert_eq!(
+            file.permissions().mode() & 0o077,
+            0,
+            "a transferred file is {:o}",
+            file.permissions().mode() & 0o777
+        );
     }
 
     #[test]

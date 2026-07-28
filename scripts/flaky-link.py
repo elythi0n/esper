@@ -9,8 +9,11 @@ between them and makes the link worse on purpose.
 
     flaky-link.py --listen 127.0.0.1:7700 --to 127.0.0.1:7645 --loss 5 --delay 100
 
-One client at a time, which is all a measurement needs: the first address to
-send anything is the client, and everything from the far end goes back to it.
+Several clients at once, **sharing one wire**. Each gets its own socket to the
+far end so replies can be told apart, and the rate ceiling and queue are shared
+between all of them — which is the point when the question is what one flow
+does to another. A file transfer and a screen session on one home uplink is a
+question this tool could not ask when it carried one client.
 
 Loss is applied per packet and per direction, so a five per cent setting is a
 five per cent chance each way — which is what a link with five per cent loss
@@ -68,8 +71,6 @@ def main():
     rng = random.Random(args.seed)
     inbound = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     inbound.bind(args.listen)
-    outbound = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    outbound.bind(("0.0.0.0", 0))
     ceiling = f"{args.rate:.0f} kbit/s with {args.queue:.0f}ms of queue" if args.rate > 0 else "no rate limit"
     print(
         f"relaying {args.listen} -> {args.to}, {args.loss}% loss,"
@@ -77,7 +78,11 @@ def main():
         flush=True,
     )
 
-    client = None
+    # One socket to the far end per client, so a reply can be told apart from
+    # every other client's. Bounded, because a stray packet from anywhere
+    # would otherwise be a thread and a socket.
+    clients = {}
+    MOST_CLIENTS = 8
 
     # **Counted per direction.** A shared counter reads as nonsense the first
     # time it matters: "358 through" against a receiver that saw 188 looks
@@ -207,13 +212,13 @@ def main():
             heapq.heappush(queue, (due, next(order), sock, payload, where))
             queue_lock.notify()
 
-    def from_far_end():
+    def from_far_end(sock, client):
         while True:
-            payload, _ = outbound.recvfrom(65535)
-            if client is not None:
-                forward(inbound, payload, client, "down")
-
-    threading.Thread(target=from_far_end, daemon=True).start()
+            try:
+                payload, _ = sock.recvfrom(65535)
+            except OSError:
+                return
+            forward(inbound, payload, client, "down")
 
     if args.report:
         def report():
@@ -234,14 +239,22 @@ def main():
 
     while True:
         payload, sender = inbound.recvfrom(65535)
-        # The first address to send anything is the client. One at a time is
-        # all a measurement needs, and guessing between several would make the
-        # numbers meaningless anyway.
-        if client is None:
-            client = sender
-            print(f"client is {client[0]}:{client[1]}", flush=True)
-        if sender == client:
-            forward(outbound, payload, args.to, "up")
+        sock = clients.get(sender)
+        if sock is None:
+            if len(clients) >= MOST_CLIENTS:
+                continue
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("0.0.0.0", 0))
+            clients[sender] = sock
+            threading.Thread(
+                target=from_far_end, args=(sock, sender), daemon=True
+            ).start()
+            print(f"client {len(clients)} is {sender[0]}:{sender[1]}", flush=True)
+        # **The wire is shared and the sockets are not.** Every client's
+        # packets go through the same rate ceiling and the same queue, which is
+        # what makes "what does a transfer do to a session" a question this can
+        # answer.
+        forward(sock, payload, args.to, "up")
 
 
 if __name__ == "__main__":

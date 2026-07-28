@@ -279,6 +279,75 @@ impl Control {
         }
     }
 
+    /// Say how much this stream's data matters against the others.
+    ///
+    /// # Why a file transfer sets this
+    ///
+    /// The screen is the product; a file copy is a background errand, and on
+    /// one connection they compete. Most of that is already answered for free:
+    /// media travels as datagrams, and quinn writes datagram frames into a
+    /// packet **before** stream frames. What is left is the session's own
+    /// control streams — a keyframe request, a monitor switch — which are
+    /// stream data like the transfer is, and must not queue behind a gigabyte.
+    ///
+    /// Higher goes first. Nothing else in this product sets one, so everything
+    /// else is at zero and a transfer asks for less than that.
+    ///
+    /// # Errors
+    ///
+    /// If the stream is already closed.
+    pub fn set_priority(&self, priority: i32) -> Result<(), ControlError> {
+        self.send
+            .set_priority(priority)
+            .map_err(|e| ControlError::Stream(e.to_string()))
+    }
+
+    /// Read bytes with no framing around them, on the receiving half only.
+    ///
+    /// # When one half stops being framed
+    ///
+    /// A file transfer is framed control at the front and a raw body after it,
+    /// like a forward — but unlike a forward, only *one* half of the stream
+    /// switches. The receiving end still has an acceptance and an outcome to
+    /// send back, and it sends them on a half that is still framed.
+    ///
+    /// [`Control::into_raw`] cannot express that: it gives up the framing on
+    /// both halves at once. This gives it up on this one.
+    ///
+    /// **Whatever was read past the last frame comes out first.** A reader
+    /// that went straight to the stream would lose it — the bytes are already
+    /// in this process, and they are the first bytes of the body.
+    pub async fn recv_raw(&mut self, into: &mut [u8]) -> Result<usize, ControlError> {
+        if self.frames.held() > 0 {
+            let held = std::mem::take(&mut self.frames).into_remaining();
+            let took = held.len().min(into.len());
+            let (taking, keeping) = held.split_at(took);
+            if let Some(room) = into.get_mut(..took) {
+                room.copy_from_slice(taking);
+            }
+            // Anything that would not fit goes back, to come out next time.
+            self.frames.push(keeping);
+            return Ok(took);
+        }
+        match self.recv.read(into).await {
+            Ok(Some(n)) => Ok(n),
+            // The far end finished: there is no more body.
+            Ok(None) => Ok(0),
+            Err(e) => Err(ControlError::Stream(e.to_string())),
+        }
+    }
+
+    /// Write bytes with no framing around them, on the sending half only.
+    ///
+    /// The other half of this stream is still framed. See
+    /// [`Control::recv_raw`].
+    pub async fn send_raw(&mut self, bytes: &[u8]) -> Result<(), ControlError> {
+        self.send
+            .write_all(bytes)
+            .await
+            .map_err(|e| ControlError::Stream(e.to_string()))
+    }
+
     /// Give up the framing and hand back the raw stream.
     ///
     /// Returns the two halves and **whatever was read past the last frame**,
@@ -295,6 +364,54 @@ impl Control {
         self.send
             .finish()
             .map_err(|e| ControlError::Stream(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod raw_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// **The bytes read past the last frame are the first bytes of the body.**
+    /// One read off a socket takes whatever is there, so a frame and the
+    /// beginning of what follows it arrive together — and a reader that went
+    /// straight to the stream afterwards would have thrown them away.
+    #[test]
+    fn nothing_read_past_the_last_frame_is_lost_when_a_half_stops_being_framed() {
+        let mut frames = FrameReader::new();
+        // One frame, and some body immediately behind it.
+        let mut wire = Vec::new();
+        esper_proto::frame::write_frame(&mut wire, &"the frame").expect("encode");
+        let body = b"the first bytes of the body";
+        wire.extend_from_slice(body);
+        frames.push(&wire);
+
+        let payload = frames.take().expect("a frame").expect("a whole frame");
+        let got: String = esper_proto::decode(&payload).expect("decode");
+        assert_eq!(got, "the frame");
+
+        // What is left is exactly the body, and nothing of the frame.
+        assert_eq!(frames.held(), body.len());
+        assert_eq!(frames.into_remaining(), body);
+    }
+
+    /// And it comes out in pieces if the caller's buffer is small, rather than
+    /// the tail being dropped.
+    #[test]
+    fn a_small_buffer_gets_the_leftover_in_pieces() {
+        let mut frames = FrameReader::new();
+        frames.push(b"0123456789");
+        let mut out = Vec::new();
+        // The same arithmetic `recv_raw` does, without a socket to attach.
+        while frames.held() > 0 {
+            let held = std::mem::take(&mut frames).into_remaining();
+            let took = held.len().min(4);
+            let (taking, keeping) = held.split_at(took);
+            out.extend_from_slice(taking);
+            frames.push(keeping);
+        }
+        assert_eq!(out, b"0123456789");
     }
 }
 

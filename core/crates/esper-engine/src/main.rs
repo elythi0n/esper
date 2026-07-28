@@ -11,9 +11,11 @@
 mod backend;
 mod broker_cmd;
 mod clipboard_task;
+mod cp_cmd;
 mod cursor_task;
 mod devices_cmd;
 mod discover_cmd;
+mod files_task;
 mod forward_cmd;
 mod injector;
 mod input_source;
@@ -142,6 +144,16 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("connect: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("cp") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match cp_cmd::parse(&rest).and_then(|o| cp_cmd::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("cp: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -318,6 +330,7 @@ fn identity_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
 fn usage_for(command: &str) -> Option<String> {
     match command {
         "connect" => Some(session_cmd::connect_usage()),
+        "cp" => Some(cp_cmd::usage()),
         "host" => Some(session_cmd::host_usage()),
         _ => None,
     }
@@ -352,6 +365,7 @@ fn print_help() {
            connect    show a paired host's screen\n  \
            terminal   open a shell on a paired host\n  \
            forward    reach a port on a paired host, ssh -L style\n  \
+           cp         copy one file to or from a paired host\n  \
            serve      speak the control protocol on stdin/stdout\n  \
            version    print version, build time and protocol version\n  \
            help       this text\n\

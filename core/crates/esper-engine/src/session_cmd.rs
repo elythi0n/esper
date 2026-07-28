@@ -1364,6 +1364,90 @@ async fn serve_session(
         return Ok(("forwarding, in the background".to_owned(), parked));
     }
 
+    // **A file session is not a screen session either.** A copy over one would
+    // start capture, an encoder and a presenter on a host that was asked to
+    // hand over one file — and would have needed the `view` permission to do
+    // it, which is a much larger grant than moving a file into a directory.
+    if kind == esper_proto::SessionKind::Files {
+        if !crate::settings::files_enabled() {
+            println!("      files      off — set files.enabled to serve them");
+            media.close(esper_proto::Reason::PERMISSION_DENIED);
+            return Ok(("file transfer is not switched on here".to_owned(), parked));
+        }
+        let files = match crate::paths::files_root().and_then(|root| {
+            crate::files_task::Files::open(
+                &root,
+                crate::settings::file_limits(),
+                &granted,
+                Some(log.clone()),
+                device,
+                "      ",
+            )
+        }) {
+            Ok(files) => std::sync::Arc::new(files),
+            Err(why) => {
+                println!("      files      unavailable ({why})");
+                media.close(esper_proto::Reason::PERMISSION_DENIED);
+                return Ok((format!("no file directory: {why}"), parked));
+            }
+        };
+        println!("      files      {}", files.described());
+
+        // **In the background, like a forward.** A ten gigabyte copy would
+        // otherwise hold this loop — and with it the screen, the shell and
+        // every other device — for as long as it takes. Nothing in it touches
+        // the capture backend or a parked session, so it is one of the two
+        // kinds that can simply be let go of.
+        let closer = media.clone();
+        let from = session.remote_address();
+        let live = live.clone();
+        let log = log.clone();
+        tokio::spawn(async move {
+            // Held for the life of the session: dropping it would reset a
+            // stream the peer has no reason to think is finished.
+            let _agreed = control;
+            let watchdog = tokio::spawn(close_when_revoked(
+                closer.clone(),
+                live,
+                // Either file permission going means the session goes; which
+                // one it was is in the log line the watchdog writes.
+                Permission::FilesOut,
+                log,
+                device,
+            ));
+            let accepting = session.control_acceptor();
+            let mut children = Children(Vec::new());
+            loop {
+                let Ok(mut stream) = accepting.accept().await else {
+                    break;
+                };
+                match tokio::time::timeout(
+                    SAY_WHAT_YOU_ARE,
+                    stream.recv::<esper_proto::StreamPurpose>(),
+                )
+                .await
+                {
+                    Ok(Ok(esper_proto::StreamPurpose::Files)) => {
+                        children.0.push(tokio::spawn(crate::files_task::serve(
+                            stream,
+                            std::sync::Arc::clone(&files),
+                        )));
+                    }
+                    Ok(Ok(other)) => eprintln!(
+                        "      · a {} stream on a file session, which carries files only",
+                        other.name()
+                    ),
+                    Ok(Err(_)) | Err(_) => continue,
+                }
+            }
+            watchdog.abort();
+            println!("  · {from} finished moving files");
+            closer.linger(GOODBYE).await;
+            drop((recorded, spent));
+        });
+        return Ok(("moving files, in the background".to_owned(), parked));
+    }
+
     // **A terminal session is not a screen session.** No capture, no encoder,
     // no presenter — which is the whole claim of terminal mode, and it would
     // not be true if the host set a screen up first and answered the shell
@@ -1515,23 +1599,66 @@ async fn serve_session(
         None
     };
 
-    let waiting_for_streams = (input.is_some() || clipboard.is_some()).then(|| {
-        // Accepted in a task because the controller opens these lazily — a
-        // session that sends no input never opens one — and waiting here would
-        // hold up the video.
-        let accepting = session.control_acceptor();
-        let stopping = stopping.clone();
-        let live = live.clone();
-        let granted = granted.clone();
-        tokio::spawn(serve_extra_streams(ExtraStreams {
-            accepting,
-            input,
-            clipboard,
-            stopping,
-            live,
-            granted,
-        }))
-    });
+    // **Files, if this device was granted them and this machine serves them.**
+    // Said out loud either way, and with the way out of it: a permission that
+    // exists, is checked, and is never mentioned is the same as a feature that
+    // does not work.
+    let files = if !crate::settings::files_enabled() {
+        // **Off, and said.** A device holding the permission and finding
+        // nothing there would look like a broken host rather than a
+        // deliberately closed door.
+        println!("      files      off — set files.enabled to serve them");
+        None
+    } else if !granted.contains(&Permission::FilesOut) && !granted.contains(&Permission::FilesIn) {
+        println!(
+            "      files      not granted — {} grant {} files-out files-in",
+            crate::net::me(),
+            session.peer_fingerprint().hex()
+        );
+        None
+    } else {
+        match crate::paths::files_root().and_then(|root| {
+            crate::files_task::Files::open(
+                &root,
+                crate::settings::file_limits(),
+                &granted,
+                Some(log.clone()),
+                device,
+                "      ",
+            )
+        }) {
+            Ok(files) => {
+                println!("      files      {}", files.described());
+                Some(std::sync::Arc::new(files))
+            }
+            // A file directory that will not open is not a reason to refuse a
+            // screen. Said, and the session carries on without it.
+            Err(why) => {
+                println!("      files      unavailable ({why})");
+                None
+            }
+        }
+    };
+
+    let waiting_for_streams =
+        (input.is_some() || clipboard.is_some() || files.is_some()).then(|| {
+            // Accepted in a task because the controller opens these lazily — a
+            // session that sends no input never opens one — and waiting here would
+            // hold up the video.
+            let accepting = session.control_acceptor();
+            let stopping = stopping.clone();
+            let live = live.clone();
+            let granted = granted.clone();
+            tokio::spawn(serve_extra_streams(ExtraStreams {
+                accepting,
+                input,
+                clipboard,
+                files,
+                stopping,
+                live,
+                granted,
+            }))
+        });
 
     // **The indicator goes up before a single frame goes out.** A person
     // whose screen starts being watched has to be told at the moment it
@@ -1647,6 +1774,10 @@ struct ExtraStreams {
     input: Option<esper_input::Dispatcher>,
     /// Taken by the first clipboard stream. There is only one clipboard.
     clipboard: Option<crate::clipboard_task::Attached>,
+    /// **Shared, not taken.** A file stream is one file, so a session has as
+    /// many of them as it has files in flight — and how many that may be is
+    /// the service's own decision rather than this loop's.
+    files: Option<std::sync::Arc<crate::files_task::Files>>,
     stopping: tokio::sync::watch::Receiver<bool>,
     live: crate::permits::Live,
     granted: Vec<Permission>,
@@ -1751,6 +1882,14 @@ async fn serve_extra_streams(mut extras: ExtraStreams) {
                 None => {
                     eprintln!("      · a clipboard stream, with no clipboard on this machine");
                 }
+            },
+            esper_proto::StreamPurpose::Files => match extras.files.clone() {
+                Some(files) => {
+                    children
+                        .0
+                        .push(tokio::spawn(crate::files_task::serve(control, files)));
+                }
+                None => eprintln!("      · a file stream, with no file directory on this machine"),
             },
         }
     }

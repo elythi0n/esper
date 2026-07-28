@@ -114,15 +114,16 @@ pub fn decide_and_clamp(
     // device asking for a shell it may not have is told which permission it
     // needs; without this it is told "none of what you asked for is granted",
     // which is true and useless.
-    let needed = request.kind.requires();
-    if !device.may(needed) {
+    // Any one of them is enough: moving files is two permissions granted
+    // separately, and either is a reason to open a session.
+    if !request.kind.requires().iter().any(|p| device.may(*p)) {
         return (
             Verdict::Deny(
                 Reason::PERMISSION_DENIED,
                 format!(
                     "a {} session needs the {} permission, which this device does not hold",
                     request.kind.name(),
-                    needed.name()
+                    request.kind.needs_said()
                 ),
             ),
             Vec::new(),
@@ -162,14 +163,14 @@ pub fn decide_and_clamp(
     // which can be less — a policy that hands back a subset without the
     // permission the kind needs would otherwise open a session that cannot do
     // the one thing it was opened for.
-    if !clamped.contains(&needed) {
+    if !request.kind.requires().iter().any(|p| clamped.contains(p)) {
         return (
             Verdict::Deny(
                 Reason::PERMISSION_DENIED,
                 format!(
                     "a {} session needs the {} permission, which this device does not hold",
                     request.kind.name(),
-                    needed.name()
+                    request.kind.needs_said()
                 ),
             ),
             over_reach,

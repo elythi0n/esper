@@ -551,20 +551,39 @@ pub enum SessionKind {
     Terminal,
     /// TCP connections forwarded to a target on the host.
     Forward,
+    /// Moving files, and nothing else.
+    ///
+    /// **Not a screen session that happens to carry a file.** A copy over a
+    /// screen session would start capture, an encoder and a presenter on a
+    /// host that was asked to hand over one file — and would need the `view`
+    /// permission to do it, which is a much larger grant than moving a file
+    /// into a directory.
+    Files,
 }
 
 impl SessionKind {
-    /// The permission a session of this kind cannot run without.
+    /// The permissions a session of this kind cannot run without — **any one
+    /// of them is enough**.
     ///
     /// One place, so the check the host makes and the request the controller
-    /// sends cannot disagree about what a kind requires.
+    /// sends cannot disagree about what a kind requires. A list rather than
+    /// one, because moving files is two permissions that are granted
+    /// separately and either of them is a reason to open a session.
     #[must_use]
-    pub const fn requires(self) -> Permission {
+    pub const fn requires(self) -> &'static [Permission] {
         match self {
-            Self::Screen => Permission::View,
-            Self::Terminal => Permission::Terminal,
-            Self::Forward => Permission::Forward,
+            Self::Screen => &[Permission::View],
+            Self::Terminal => &[Permission::Terminal],
+            Self::Forward => &[Permission::Forward],
+            Self::Files => &[Permission::FilesOut, Permission::FilesIn],
         }
+    }
+
+    /// What to tell a device that holds none of them.
+    #[must_use]
+    pub fn needs_said(self) -> String {
+        let names: Vec<&str> = self.requires().iter().map(|p| p.name()).collect();
+        names.join(" or ")
     }
 
     /// The word for it, for a log line or a prompt.
@@ -574,6 +593,7 @@ impl SessionKind {
             Self::Screen => "screen",
             Self::Terminal => "terminal",
             Self::Forward => "forward",
+            Self::Files => "file",
         }
     }
 }
@@ -1485,6 +1505,231 @@ impl ClipboardMessage {
     }
 }
 
+/// The most bytes a path on a file stream may be.
+///
+/// The receiving side has its own, stricter rules about what a name may
+/// contain; this is only the bound the framing enforces before any of them
+/// run.
+pub const MAX_FILE_PATH_LEN: usize = 1024;
+
+/// The size and shape of a file, offered or asked for.
+///
+/// **The hash is here, in the offer, rather than at the end of the bytes.** It
+/// costs the sender one extra read of the file and buys three things worth
+/// much more: a receiver can refuse a file it already has, a resumed transfer
+/// can prove the partial data belongs to the same content, and there is no
+/// trailing frame to send after a raw body — which there is no clean way to
+/// do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileOffer {
+    /// Where, relative to the far end's file directory. Never absolute.
+    pub path: String,
+    /// How many bytes it is.
+    pub bytes: u64,
+    /// SHA-256 of the whole thing.
+    #[serde(with = "serde_bytes_array")]
+    pub hash: [u8; 32],
+    /// Whether to replace something already there.
+    ///
+    /// **Off unless somebody said so**, and the receiver may still refuse. A
+    /// transfer that silently replaces is a transfer that eats work.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+impl FileOffer {
+    /// Whether this is within the bounds the framing sets.
+    ///
+    /// What the *name* may be is [`crate::Permission`]-independent and lives
+    /// with the code that opens files: this is the wire's own bound, checked
+    /// before a string of any length reaches a path parser.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.path.is_empty() && self.path.len() <= MAX_FILE_PATH_LEN
+    }
+}
+
+/// Asking the far end to send something.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileWant {
+    /// Where, relative to the far end's file directory.
+    pub path: String,
+}
+
+impl FileWant {
+    /// Whether this is within the bounds the framing sets.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.path.is_empty() && self.path.len() <= MAX_FILE_PATH_LEN
+    }
+}
+
+/// Yes, and start here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileAccept {
+    /// The first byte still wanted.
+    ///
+    /// Zero for a fresh transfer, and the length of what is already held for
+    /// one being resumed. **The receiver decides this**, because the receiver
+    /// is the one that knows what it has.
+    pub from: u64,
+}
+
+/// Why a transfer will not happen.
+///
+/// Note what these do *not* separate. There is no code for "the path leaves
+/// the file directory" against "there is no such file": which of the two it
+/// was is information about a filesystem the asking end cannot see, and its
+/// next move is the same either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileRefusal {
+    /// The device does not hold the permission this direction needs.
+    NotPermitted,
+    /// This machine does not do file transfer at all.
+    NotEnabled,
+    /// The name is not one this protocol will carry.
+    BadName,
+    /// There is no such file, or it is not one this end may reach.
+    Missing,
+    /// Something is already there, and the offer did not say to replace it.
+    Exists,
+    /// Not enough room.
+    NoRoom,
+    /// Larger than this machine accepts.
+    TooLarge,
+    /// This session is already moving a file in that direction.
+    Busy,
+    /// It went wrong in a way worth one line rather than a code.
+    Failed,
+}
+
+impl FileRefusal {
+    /// A sentence for a user, not a code for a machine.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotPermitted => "this device is not permitted to move files that way",
+            Self::NotEnabled => "that machine does not have file transfer switched on",
+            Self::BadName => "that name is not one this can carry",
+            Self::Missing => "there is no such file in that machine's file directory",
+            Self::Exists => "there is already a file there",
+            Self::NoRoom => "there is not enough room for it",
+            Self::TooLarge => "it is larger than that machine accepts",
+            Self::Busy => "that session is already moving a file in that direction",
+            Self::Failed => "the transfer could not be started",
+        }
+    }
+}
+
+/// How a transfer ended, said by whichever end received it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileEnd {
+    /// Every byte arrived, the hash matched, and it is under its real name.
+    Stored,
+    /// Every byte arrived and the hash did not match. Nothing was stored.
+    Mismatch,
+    /// The bytes stopped before the end. What arrived is kept, to resume.
+    Incomplete,
+    /// Something else went wrong at the receiving end.
+    Failed,
+}
+
+impl FileEnd {
+    /// Whether the file is now where it was meant to go.
+    #[must_use]
+    pub const fn is_stored(self) -> bool {
+        matches!(self, Self::Stored)
+    }
+
+    /// A sentence for a user.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Stored => "stored",
+            Self::Mismatch => "what arrived was not what was sent; nothing was stored",
+            Self::Incomplete => "it stopped part way; what arrived is kept to carry on from",
+            Self::Failed => "it could not be written",
+        }
+    }
+}
+
+/// Anything that travels on a file stream, in either direction.
+///
+/// # The shape of a transfer
+///
+/// One stream per file, opened by the controller whichever way the file is
+/// going. Framed control at the front, **raw bytes for the body** — the same
+/// division the port forwarder makes, and for the same reason: re-framing a
+/// bulk payload would be inventing a second flow-control scheme on top of the
+/// one the stream already has.
+///
+/// Pushing, controller to host:
+///
+/// ```text
+/// controller  Offer  ──────────────►  host
+///             ◄────────────── Accept | Refuse
+///             the bytes ──────────►
+///             ◄────────────── Done
+/// ```
+///
+/// Pulling, host to controller:
+///
+/// ```text
+/// controller  Want  ───────────────►  host
+///             ◄────────────── Have | Refuse
+///             Accept | Refuse ────►
+///             ◄────────────── the bytes
+///             Done ───────────────►
+/// ```
+///
+/// **A half of the stream carries frames until it starts carrying a body, and
+/// only the sending half ever does.** That is what makes one vocabulary work
+/// in both directions without either end having to know which of them opened
+/// the stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileMessage {
+    /// I have this and would like to send it to you.
+    Offer(FileOffer),
+    /// I would like you to send me this.
+    Want(FileWant),
+    /// Here is what you asked for; say where to start.
+    Have(FileOffer),
+    /// Send it, from here. Said by whichever end is receiving.
+    Accept(FileAccept),
+    /// No, and why.
+    Refuse(FileRefusal),
+    /// That was all of it, and this is how it went. Said by the receiver.
+    Done(FileEnd),
+}
+
+impl FileMessage {
+    /// Whether this message is within bounds.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Self::Offer(o) | Self::Have(o) => o.is_well_formed(),
+            Self::Want(w) => w.is_well_formed(),
+            Self::Accept(_) | Self::Refuse(_) | Self::Done(_) => true,
+        }
+    }
+
+    /// A name for a person.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Offer(_) => "a file offer",
+            Self::Want(_) => "a request for a file",
+            Self::Have(_) => "the shape of a file",
+            Self::Accept(_) => "an acceptance",
+            Self::Refuse(_) => "a refusal",
+            Self::Done(_) => "the end of a transfer",
+        }
+    }
+}
+
 /// What a control stream a peer just opened is for.
 ///
 /// **The first frame on every stream a screen session opens, and the only
@@ -1500,6 +1745,13 @@ pub enum StreamPurpose {
     Input,
     /// The clipboard, both ways. See [`ClipboardMessage`].
     Clipboard,
+    /// One file, either way. See [`FileMessage`].
+    ///
+    /// **One stream per file, not one per session.** A transfer holds its
+    /// stream for as long as the file takes, and a second file waiting behind
+    /// the first on a shared stream would be a second file that cannot be
+    /// cancelled without cancelling the first.
+    Files,
 }
 
 impl StreamPurpose {
@@ -1515,6 +1767,11 @@ impl StreamPurpose {
             Self::Clipboard => {
                 held.contains(&Permission::ClipboardOut) || held.contains(&Permission::ClipboardIn)
             }
+            // Either direction is enough to open one; which way this
+            // particular file is going is checked when the offer arrives.
+            Self::Files => {
+                held.contains(&Permission::FilesOut) || held.contains(&Permission::FilesIn)
+            }
         }
     }
 
@@ -1524,6 +1781,7 @@ impl StreamPurpose {
         match self {
             Self::Input => "input",
             Self::Clipboard => "clipboard",
+            Self::Files => "files",
         }
     }
 }
@@ -2336,6 +2594,179 @@ mod clipboard_tests {
     }
 
     fn encode<T: serde::Serialize>(value: &T) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        crate::frame::write_frame(&mut bytes, value).expect("encodes");
+        bytes
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    fn roundtrip<T>(value: &T) -> T
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let mut bytes = Vec::new();
+        crate::frame::write_frame(&mut bytes, value).expect("encodes");
+        crate::frame::read_frame(&mut bytes.as_slice()).expect("decodes")
+    }
+
+    fn offer(path: &str) -> FileOffer {
+        FileOffer {
+            path: path.to_owned(),
+            bytes: 4096,
+            hash: [7u8; 32],
+            replace: false,
+        }
+    }
+
+    #[test]
+    fn every_file_message_round_trips_through_the_framing() {
+        for message in [
+            FileMessage::Offer(offer("reports/q3.pdf")),
+            FileMessage::Have(offer("logs/build.log")),
+            FileMessage::Want(FileWant {
+                path: "logs/build.log".to_owned(),
+            }),
+            FileMessage::Accept(FileAccept { from: 1_048_576 }),
+            FileMessage::Refuse(FileRefusal::NoRoom),
+            FileMessage::Done(FileEnd::Stored),
+        ] {
+            assert_eq!(roundtrip(&message), message, "{}", message.name());
+            assert!(message.is_well_formed(), "{}", message.name());
+            assert!(!message.name().is_empty());
+        }
+    }
+
+    /// The hash is thirty-two bytes and has to arrive as thirty-two bytes.
+    /// Serialised as a list of numbers rather than a byte string it would be
+    /// four times the size and would still decode, which is the kind of thing
+    /// that is only noticed by measuring.
+    #[test]
+    fn the_hash_crosses_as_bytes_and_comes_back_the_same() {
+        let mut o = offer("x");
+        o.hash = std::array::from_fn(|i| u8::try_from(i).unwrap_or(0));
+        let back = roundtrip(&o);
+        assert_eq!(back.hash, o.hash);
+
+        let mut encoded = Vec::new();
+        crate::frame::write_frame(&mut encoded, &o).expect("encodes");
+        // A 32-byte CBOR byte string is 2 bytes of header plus 32 of payload.
+        // As an array of small integers it would be at least 33 plus the
+        // header, and the ones above 23 would take two bytes each.
+        assert!(
+            encoded.len() < 120,
+            "the hash is not travelling as bytes: {} bytes for the whole frame",
+            encoded.len()
+        );
+    }
+
+    /// **The wire's own bound, before a string of any length reaches a path
+    /// parser.** What a name may *contain* is a stricter question answered
+    /// where files are opened; this is the one the framing can answer.
+    #[test]
+    fn a_path_outside_the_wire_bound_is_refused() {
+        assert!(FileMessage::Offer(offer("a")).is_well_formed());
+        assert!(!FileMessage::Offer(offer("")).is_well_formed());
+        assert!(!FileMessage::Have(offer("")).is_well_formed());
+        assert!(!FileMessage::Offer(offer(&"a".repeat(MAX_FILE_PATH_LEN + 1))).is_well_formed());
+        assert!(FileMessage::Offer(offer(&"a".repeat(MAX_FILE_PATH_LEN))).is_well_formed());
+        assert!(
+            !FileMessage::Want(FileWant {
+                path: String::new()
+            })
+            .is_well_formed()
+        );
+    }
+
+    /// **Replacing is off unless somebody said so**, including for a peer old
+    /// enough not to have the field at all.
+    #[test]
+    fn a_transfer_does_not_replace_unless_it_says_it_does() {
+        assert!(!offer("x").replace);
+        let older = serde_json::json!({
+            "path": "x",
+            "bytes": 1,
+            "hash": vec![0u8; 32],
+        });
+        let mut buf = Vec::new();
+        ciborium::into_writer(&older, &mut buf).expect("encode");
+        let back: FileOffer = ciborium::from_reader(buf.as_slice()).expect("an offer without it");
+        assert!(
+            !back.replace,
+            "a peer that said nothing was taken to mean yes"
+        );
+    }
+
+    /// Every refusal and every ending has something to say.
+    #[test]
+    fn every_outcome_says_something() {
+        for r in [
+            FileRefusal::NotPermitted,
+            FileRefusal::NotEnabled,
+            FileRefusal::BadName,
+            FileRefusal::Missing,
+            FileRefusal::Exists,
+            FileRefusal::NoRoom,
+            FileRefusal::TooLarge,
+            FileRefusal::Busy,
+            FileRefusal::Failed,
+        ] {
+            assert!(!r.message().is_empty(), "{r:?}");
+        }
+        for e in [
+            FileEnd::Stored,
+            FileEnd::Mismatch,
+            FileEnd::Incomplete,
+            FileEnd::Failed,
+        ] {
+            assert!(!e.message().is_empty(), "{e:?}");
+            assert_eq!(e.is_stored(), e == FileEnd::Stored);
+        }
+    }
+
+    /// A file stream needs a file permission, either direction, and nothing
+    /// else opens one.
+    #[test]
+    fn a_file_stream_needs_a_file_permission() {
+        assert!(StreamPurpose::Files.permitted_by(&[Permission::FilesOut]));
+        assert!(StreamPurpose::Files.permitted_by(&[Permission::FilesIn]));
+        assert!(!StreamPurpose::Files.permitted_by(&[Permission::Control]));
+        assert!(!StreamPurpose::Files.permitted_by(&[Permission::ClipboardIn]));
+        assert!(!StreamPurpose::Files.permitted_by(&[]));
+        assert_eq!(StreamPurpose::Files.name(), "files");
+        assert_eq!(roundtrip(&StreamPurpose::Files), StreamPurpose::Files);
+    }
+
+    /// The wire names are the contract.
+    #[test]
+    fn the_file_wire_names_are_pinned() {
+        for (bytes, tag) in [
+            (encoded(&FileMessage::Offer(offer("x"))), "offer"),
+            (
+                encoded(&FileMessage::Want(FileWant {
+                    path: "x".to_owned(),
+                })),
+                "want",
+            ),
+            (encoded(&FileMessage::Done(FileEnd::Mismatch)), "mismatch"),
+            (
+                encoded(&FileMessage::Refuse(FileRefusal::NotPermitted)),
+                "not_permitted",
+            ),
+            (encoded(&StreamPurpose::Files), "files"),
+        ] {
+            let text: String = bytes.iter().map(|&b| b as char).collect();
+            assert!(
+                text.contains(tag),
+                "the wire form no longer contains {tag:?}"
+            );
+        }
+    }
+
+    fn encoded<T: serde::Serialize>(value: &T) -> Vec<u8> {
         let mut bytes = Vec::new();
         crate::frame::write_frame(&mut bytes, value).expect("encodes");
         bytes
