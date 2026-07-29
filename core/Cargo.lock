@@ -314,6 +314,7 @@ version = "0.0.0"
 dependencies = [
  "esper-capture",
  "esper-color",
+ "esper-decode",
  "esper-encode",
  "esper-pipeline",
  "esper-scale",

@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 esper-capture.workspace = true
 esper-color.workspace = true
+esper-decode.workspace = true
 esper-encode.workspace = true
 esper-pipeline.workspace = true
 esper-scale.workspace = true

@@ -59,6 +59,33 @@ fn main() -> ExitCode {
     let json_to = after("--json", &args);
     let check = after("--check", &args);
 
+    // A characterisation rather than a gate: it prints a table and asserts
+    // nothing, because what a quantiser rung *buys* is a question rather than
+    // a promise. Behind a flag so the gate stays fast and stable.
+    // Where the knee in the rate-distortion curve actually is, rather than
+    // assuming the rungs that exist are the right ones.
+    if args.iter().any(|a| a == "--sweep") {
+        println!("{}\n", machine::describe());
+        return match sweep() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("esper-bench: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if args.iter().any(|a| a == "--curve") {
+        println!("{}\n", machine::describe());
+        return match curve() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("esper-bench: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let machine = machine::describe();
     println!("{machine}\n");
 
@@ -109,6 +136,117 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Print what each rung of the quantiser ladder buys, on both kinds of content.
+///
+/// **The ladder is the lever congestion control pulls**, and what it is worth
+/// depends entirely on the content: on a still screen there is almost nothing
+/// to quantise, so every rung looks alike; on video the quantiser is where all
+/// the bits go. The rungs' documented figures were taken on a screen. This is
+/// the other half, and both are printed so the difference is the point rather
+/// than a footnote.
+fn curve() -> Result<(), scenario::BenchError> {
+    for (what, motion, width, height) in [
+        (
+            "a screen — 1280x720, what the rungs were characterised on",
+            esper_capture::pattern::Motion::Screen,
+            1280,
+            720,
+        ),
+        (
+            "video — 1920x1080, full motion",
+            esper_capture::pattern::Motion::Everything,
+            1920,
+            1080,
+        ),
+    ] {
+        println!("  {what}\n");
+        println!(
+            "    {:<10} {:>9} {:>11} {:>9} {:>12} {:>11}",
+            "rung", "qp", "bitrate", "psnr", "keyframe", "encode"
+        );
+        println!("    {}", "-".repeat(67));
+        let rungs = scenario::rate_quality(motion, width, height)?;
+        let widest = rungs.iter().map(|r| r.kbit).fold(0.0f64, f64::max).max(1.0);
+        let narrowest = rungs
+            .iter()
+            .map(|r| r.kbit)
+            .fold(f64::INFINITY, f64::min)
+            .max(1.0);
+        for r in &rungs {
+            println!(
+                "    {:<10} {:>9} {:>8.0} kbit {:>6.1} dB {:>9} B {:>7.2} ms",
+                r.name,
+                format!("{}..{}", r.qp.0, r.qp.1),
+                r.kbit,
+                r.psnr,
+                r.keyframe_bytes,
+                r.ms
+            );
+        }
+        println!(
+            "\n    the whole ladder spans {:.1}x in bitrate\n",
+            widest / narrowest
+        );
+    }
+    Ok(())
+}
+
+/// Which end of a quantiser range binds, on each kind of content.
+///
+/// A rung is a range, and only one of its two ends is doing anything at a
+/// time: the encoder's own choice of quantiser sits *outside* the range on
+/// both kinds of content, at opposite ends. So the experiment holds one end
+/// still and moves the other, which is the only way to see it.
+fn sweep() -> Result<(), scenario::BenchError> {
+    const FIXED_MAX: u8 = 36;
+    const FIXED_MIN: u8 = 22;
+    let moving_min: &[(&str, (u8, u8))] = &[
+        ("14..36", (14, FIXED_MAX)),
+        ("18..36", (18, FIXED_MAX)),
+        ("22..36", (22, FIXED_MAX)),
+        ("26..36", (26, FIXED_MAX)),
+        ("30..36", (30, FIXED_MAX)),
+    ];
+    let moving_max: &[(&str, (u8, u8))] = &[
+        ("22..32", (FIXED_MIN, 32)),
+        ("22..36", (FIXED_MIN, 36)),
+        ("22..40", (FIXED_MIN, 40)),
+        ("22..44", (FIXED_MIN, 44)),
+        ("22..48", (FIXED_MIN, 48)),
+    ];
+    for (what, motion, width, height) in [
+        (
+            "a screen — 1280x720",
+            esper_capture::pattern::Motion::Screen,
+            1280,
+            720,
+        ),
+        (
+            "video — 1920x1080, full motion",
+            esper_capture::pattern::Motion::Everything,
+            1920,
+            1080,
+        ),
+    ] {
+        println!("  {what}\n");
+        for (heading, candidates) in [
+            ("moving the minimum, maximum held at 36", moving_min),
+            ("moving the maximum, minimum held at 22", moving_max),
+        ] {
+            println!("    {heading}");
+            for rung in scenario::ranges(candidates, motion, width, height)? {
+                println!(
+                    "      qp {:<8} {:>8.0} kbit {:>6.1} dB {:>9} B {:>7.2} ms",
+                    rung.name, rung.kbit, rung.psnr, rung.keyframe_bytes, rung.ms
+                );
+            }
+            println!();
+        }
+    }
+    println!("  The end that changes nothing is the end this content never reaches.");
+    Ok(())
 }
 
 /// What a run came to.
@@ -270,6 +408,8 @@ fn usage() -> String {
          \n\
          \x20 --json <file>    write what was measured, as a baseline\n\
          \x20 --check <file>   fail if anything is worse than that baseline\n\
+         \x20 --curve          print what each quantiser rung buys, and assert nothing\n\
+         \x20 --sweep          print the whole rate-distortion curve, to place the rungs\n\
          \n\
          A target that is not met is reported and does not fail. A measurement\n\
          worse than the baseline does fail, because that is a change somebody\n\

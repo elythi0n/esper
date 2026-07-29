@@ -27,6 +27,7 @@ use esper_capture::gate::Policy;
 use esper_capture::pattern::Motion;
 use esper_capture::synthetic::SyntheticCapturer;
 use esper_color::{ColorSpace, I420};
+use esper_decode::decoder::VideoDecoder as _;
 use esper_encode::budget::Budget;
 use esper_encode::encoder::{EncodeError, EncoderConfig, VideoEncoder};
 use esper_encode::openh264::OpenH264;
@@ -402,4 +403,186 @@ pub fn run_all() -> Result<Measured, BenchError> {
     out.insert("path.idle.fps", idle.frames_per_second);
 
     Ok(out)
+}
+
+/// One rung of the quantiser ladder, measured.
+pub struct Rung {
+    pub name: &'static str,
+    pub qp: (u8, u8),
+    /// Bits per second the encoder produced at 30 frames a second.
+    pub kbit: f64,
+    /// Luma PSNR against the picture that went in, in decibels.
+    pub psnr: f64,
+    /// Milliseconds per frame.
+    pub ms: f64,
+    /// The keyframe's size, which is the frame that decides whether a
+    /// bandwidth-limited session works at all.
+    pub keyframe_bytes: u64,
+}
+
+/// Measure every rung of the quantiser ladder on one kind of content.
+///
+/// # Why this is a table rather than a target
+///
+/// The ladder is the lever congestion control pulls when a link is short of
+/// bandwidth. What each rung actually *buys* is a rate-distortion question,
+/// and the answer depends entirely on the content: on a still screen there is
+/// almost nothing to quantise, so every rung looks the same; on video the
+/// quantiser is where all the bits go.
+///
+/// The rungs' documented figures were taken on a screen. This is the other
+/// half.
+///
+/// # Errors
+///
+/// If the encoder or decoder will not start.
+pub fn rate_quality(motion: Motion, width: u32, height: u32) -> Result<Vec<Rung>, BenchError> {
+    let rungs: Vec<(&'static str, (u8, u8))> = [
+        ("High", esper_encode::budget::Fidelity::High),
+        ("Balanced", esper_encode::budget::Fidelity::Balanced),
+        ("Low", esper_encode::budget::Fidelity::Low),
+        ("Coarse", esper_encode::budget::Fidelity::Coarse),
+    ]
+    .into_iter()
+    .map(|(name, f)| (name, f.qp_range()))
+    .collect();
+    ranges(&rungs, motion, width, height)
+}
+
+/// Measure an arbitrary set of quantiser ranges.
+///
+/// For finding where the knee in a rate-distortion curve actually is, rather
+/// than assuming the rungs that exist are the right ones.
+///
+/// # Errors
+///
+/// If the encoder or decoder will not start.
+pub fn ranges(
+    rungs: &[(&'static str, (u8, u8))],
+    motion: Motion,
+    width: u32,
+    height: u32,
+) -> Result<Vec<Rung>, BenchError> {
+    let mut out = Vec::new();
+    for (name, qp) in rungs {
+        out.push(one_rung(name, *qp, motion, width, height)?);
+    }
+    Ok(out)
+}
+
+/// Encode and decode a run at one quantiser range.
+fn one_rung(
+    name: &'static str,
+    qp: (u8, u8),
+    motion: Motion,
+    width: u32,
+    height: u32,
+) -> Result<Rung, BenchError> {
+    let mut capturer = SyntheticCapturer::new(width, height, 1_000_000)
+        .map_err(BenchError::Pattern)?
+        .with_motion(motion);
+    let config = EncoderConfig {
+        qp: Some(qp),
+        ..encoder_config(width, height)
+    };
+    let mut encoder = OpenH264::new(&config)?;
+    let mut decoder = esper_decode::openh264::OpenH264Decoder::new(
+        &esper_decode::decoder::DecoderConfig::default(),
+    )
+    .map_err(|e| BenchError::Failed(e.to_string()))?;
+    let mut picture = I420::new(width, height).map_err(|e| BenchError::Failed(e.to_string()))?;
+
+    let mut keyframe_bytes = 0u64;
+    let mut bytes = 0u64;
+    // The encoder's own counters are cumulative, so the cost of the warm-up --
+    // which contains the keyframe, the most expensive frame there is -- has to
+    // be subtracted rather than merely not added.
+    let mut warm = esper_encode::encoder::EncodeStats::default();
+    let mut squared = 0f64;
+    let mut samples = 0u64;
+    let mut frames = 0u64;
+
+    for n in 0..WARM_UP + FRAMES {
+        let frame = next(&mut capturer)?;
+        esper_color::convert::whole_frame(&frame, space(), &mut picture)
+            .map_err(|e| BenchError::Failed(e.to_string()))?;
+        let encoded = encoder.encode(&picture, n == 0)?;
+        if n == 0 {
+            keyframe_bytes = encoded.len() as u64;
+        }
+        if n < WARM_UP {
+            // Fed to the decoder, so its reference pictures are right, and not
+            // counted: the keyframe and the encoder's first allocations would
+            // otherwise decide the answer.
+            let _ = decoder.decode(&encoded.bitstream);
+            warm = encoder.stats();
+            continue;
+        }
+        bytes = bytes.saturating_add(encoded.len() as u64);
+        frames = frames.saturating_add(1);
+        // **Against the picture that went in**, which is exact: there is no
+        // frame counter to read back and no ordering to guess at, because this
+        // loop knows which frame it just handed over.
+        if let Ok(Some(back)) = decoder.decode(&encoded.bitstream) {
+            let (sum, n) = luma_error(&picture, &back);
+            squared += sum;
+            samples = samples.saturating_add(n);
+        }
+    }
+
+    let seconds = frames as f64 / f64::from(FPS);
+    let kbit = if seconds > 0.0 {
+        bytes as f64 * 8.0 / 1000.0 / seconds
+    } else {
+        0.0
+    };
+    // A decoder that returned nothing must not read as a perfect score. An
+    // infinite PSNR from a broken decode is the most flattering possible way
+    // to be wrong.
+    if samples == 0 {
+        return Err(BenchError::Failed(format!(
+            "{name}: nothing decoded, so there is no picture to compare against"
+        )));
+    }
+    let mse = squared / samples as f64;
+    let psnr = if mse <= 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (255.0f64 * 255.0 / mse).log10()
+    };
+    let stats = encoder.stats();
+    let counted = stats.frames.saturating_sub(warm.frames);
+    let ms = if counted == 0 {
+        0.0
+    } else {
+        stats.spent.saturating_sub(warm.spent).as_secs_f64() * 1000.0 / counted as f64
+    };
+    Ok(Rung {
+        name,
+        qp,
+        kbit,
+        psnr,
+        ms,
+        keyframe_bytes,
+    })
+}
+
+/// Sum of squared luma differences, and how many samples were compared.
+fn luma_error(want: &I420, got: &I420) -> (f64, u64) {
+    let (w, h) = (
+        want.width().min(got.width()),
+        want.height().min(got.height()),
+    );
+    let mut sum = 0f64;
+    let mut n = 0u64;
+    for y in 0..h {
+        for x in 0..w {
+            let a = i32::from(want.luma_at(x, y).unwrap_or(0));
+            let b = i32::from(got.luma_at(x, y).unwrap_or(0));
+            let d = f64::from(a - b);
+            sum += d * d;
+            n = n.saturating_add(1);
+        }
+    }
+    (sum, n)
 }

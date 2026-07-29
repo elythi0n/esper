@@ -147,6 +147,59 @@ impl Default for Budget {
 }
 
 /// How coarsely the encoder may quantise.
+///
+/// # The two ends are two different levers
+///
+/// A rung is a *range*, and it is tempting to read it as one setting with some
+/// slack. It is not. In the encoder's quality rate-control mode the quantiser
+/// is chosen from how complex the picture is, and the range only **clamps**
+/// that choice — so which end binds depends entirely on the content, and the
+/// encoder's own wish is almost never inside the range at all:
+///
+/// - **On a screen the minimum binds.** Flat colour and sharp edges leave
+///   little residual, so the encoder wants a very low quantiser and is clamped
+///   *up* by `qp_min`. The maximum is far above anything it asks for.
+/// - **On video the maximum binds.** Every block has detail to code, so it
+///   wants a high quantiser and is clamped *down* by `qp_max`. The minimum is
+///   never reached.
+///
+/// Measured, at 1920x1080 in full motion, holding one end still (see the
+/// findings for the run):
+///
+/// | fixed | varied | result |
+/// |---|---|---|
+/// | max 36 | min 14 → 30 | **no change at all**: 19 549 kbit/s, 25.6 dB |
+/// | min 22 | max 32 → 48 | 56 256 → 6 930 kbit/s, 28.7 → 22.7 dB |
+///
+/// and on the 1280x720 screen, exactly reversed:
+///
+/// | fixed | varied | result |
+/// |---|---|---|
+/// | min 22 | max 32 → 48 | **no change at all**: 147 kbit/s, 45.6 dB |
+/// | max 36 | min 14 → 30 | 169 → 103 kbit/s, 48.4 → 42.1 dB |
+///
+/// So `qp_min` is the ladder's picture-quality policy and `qp_max` is its
+/// bandwidth policy, and each is nearly invisible in the other's measurement.
+/// A rung's two numbers have to be justified separately, because a
+/// measurement taken on one kind of content says nothing about the end that
+/// content does not touch.
+///
+/// # Why the top rung's maximum is 36 and not 32
+///
+/// It was 32, chosen when the ladder was characterised on a screen — where,
+/// per the table above, the maximum does nothing whatsoever. On video that
+/// choice cost **56 Mbit/s** and 14.8 ms a frame. Raising it to 36 brings that
+/// to 19.5 Mbit/s and 9.7 ms, and costs nothing measurable on a screen: the
+/// same 48.4 dB off a byte-identical keyframe.
+///
+/// A rung labelled for text that spent 56 Mbit/s the moment a video appeared
+/// was not offering sharpness, it was offering a surprise — on a host that,
+/// per this module, is usually not your machine.
+///
+/// The minimum stays at 14 even though this screen never asks for less than
+/// about 18. Unlike the maximum it costs nothing to leave low, and a harder
+/// screen than the fixture — a photograph, antialiased text at high DPI — is
+/// exactly the case a sharp rung exists for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Fidelity {
     /// Sharp. What text needs.
@@ -163,20 +216,23 @@ pub enum Fidelity {
     /// proportionately. So it is the rung a controller short of bandwidth
     /// reaches for and one a host short of cycles has better options than.
     ///
-    /// Measured on the synthetic pattern at 1280x720, thirty frames:
+    /// Measured on the synthetic screen at 1280x720, thirty frames:
     ///
     /// | range | keyframe | bitrate |
     /// |---|---|---|
-    /// | `High` (14, 32) | 39 262 B | 561 kbit/s |
-    /// | `Balanced` (20, 38) | 39 262 B | 532 kbit/s |
-    /// | `Low` (26, 42) | 37 588 B | 406 kbit/s |
-    /// | `Coarse` (36, 48) | 28 100 B | 300 kbit/s |
+    /// | `High` (14, 36) | 39 262 B | 169 kbit/s |
+    /// | `Balanced` (20, 38) | 39 262 B | 163 kbit/s |
+    /// | `Low` (26, 42) | 37 588 B | 111 kbit/s |
+    /// | `Coarse` (36, 48) | 28 100 B | 79 kbit/s |
     ///
-    /// Which is also how this rung came to exist. The three above it span
-    /// 561 to 406 kbit/s — barely a quarter of what the quantiser can
-    /// actually give — and the top two are **indistinguishable on a
-    /// keyframe**, which is the frame that decides whether a bandwidth-limited
-    /// session works at all.
+    /// Which is also how this rung came to exist: on a screen the three above
+    /// it span 169 to 111 kbit/s, and the top two are **indistinguishable on a
+    /// keyframe** — the frame that decides whether a bandwidth-limited session
+    /// works at all.
+    ///
+    /// That reasoning was sound and its generalisation was not. See
+    /// [`Fidelity`] for what the same ladder does on content the quantiser can
+    /// actually get hold of.
     Coarse,
 }
 
@@ -190,7 +246,7 @@ impl Fidelity {
     #[must_use]
     pub const fn qp_range(self) -> (u8, u8) {
         match self {
-            Self::High => (14, 32),
+            Self::High => (14, 36),
             Self::Balanced => (20, 38),
             Self::Low => (26, 42),
             Self::Coarse => (36, 48),
@@ -275,6 +331,15 @@ impl Level {
         format!("{} fps, {}, {}", self.fps, scale, self.fidelity.name())
     }
 }
+
+/// The coarsest the quantiser must always be allowed to get.
+///
+/// `qp_max` is the only end of a rung that binds on content with detail in
+/// every block, so it alone decides what a session costs when a video appears
+/// on the host's screen. Below 36 that cost stops being bounded by anything
+/// useful: the measurement in [`Fidelity`] puts 32 at 56 Mbit/s for 1080p30,
+/// against 19.5 at 36.
+pub const LEAST_COARSE_ALLOWED: u8 = 36;
 
 /// How much a fidelity level costs, on an arbitrary scale.
 ///
@@ -1008,6 +1073,24 @@ mod tests {
         let (lo_min, lo_max) = Fidelity::Low.qp_range();
         assert!(hi_min < mid_min && mid_min < lo_min);
         assert!(hi_max < mid_max && mid_max < lo_max);
+        // No rung may let the quantiser run below 36 on hard content. The
+        // maximum is the only end that binds there, and at 32 the top rung
+        // spent 56 Mbit/s on 1080p video for quality no screen could see --
+        // see [`Fidelity`]. This is a bandwidth ceiling, not an ordering.
+        for f in [
+            Fidelity::High,
+            Fidelity::Balanced,
+            Fidelity::Low,
+            Fidelity::Coarse,
+        ] {
+            let (_, max) = f.qp_range();
+            assert!(
+                max >= LEAST_COARSE_ALLOWED,
+                "{}: qp_max {max} is below {LEAST_COARSE_ALLOWED}, which measured \
+                 56 Mbit/s on full-motion 1080p",
+                f.name()
+            );
+        }
         // And nothing exceeds H.264's range.
         for f in [Fidelity::High, Fidelity::Balanced, Fidelity::Low] {
             let (min, max) = f.qp_range();

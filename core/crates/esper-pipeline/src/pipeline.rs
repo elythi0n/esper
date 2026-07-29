@@ -960,9 +960,10 @@ mod tests {
 
     /// And a coarser rung really is cheaper, or the lever is decoration.
     ///
-    /// Measured on the synthetic pattern at 1280x720 — the numbers are on
-    /// [`Fidelity::Coarse`] — and pinned here as an ordering so a future
-    /// change to the ranges cannot silently invert it.
+    /// Measured on the synthetic pattern — the numbers are on
+    /// [`Fidelity::Coarse`] for a screen and on [`Fidelity`] itself for
+    /// video — and pinned here as an ordering so a future change to the
+    /// ranges cannot silently invert it.
     #[test]
     fn the_rungs_are_ordered_by_what_they_cost() {
         let ranges = [
