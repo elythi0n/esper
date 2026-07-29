@@ -3502,8 +3502,21 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 source.dropped()
             );
         }
+        // **And how many of those had nothing to prompt them.** A keyframe
+        // asked for because nothing was arriving is the diagnostic for a state
+        // that used to be unrecoverable, so it is worth naming when it
+        // happens: one or two is a lost keyframe recovered, and a number that
+        // climbs is a host that is not answering.
+        let silent = if stats.keyframes_asked_into_silence > 0 {
+            format!(
+                ", {} of them because nothing was arriving",
+                stats.keyframes_asked_into_silence
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "  frames     {} lost, {} keyframes asked for",
+            "  frames     {} lost, {} keyframes asked for{silent}",
             stats.frames_lost, stats.keyframes_requested
         );
         println!(

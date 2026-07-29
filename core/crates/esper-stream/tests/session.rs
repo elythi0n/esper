@@ -1223,9 +1223,16 @@ fn the_stream_says_how_long_to_wait_and_releases_the_frame_when_it_expires() {
         h.handle(&m).expect("accepted");
     }
 
-    // Nothing waiting, so a caller may block as long as it likes.
+    // No frame waiting — but a keyframe was asked for on joining and has not
+    // arrived, and nothing incoming will ever wake this side to ask again. So
+    // the deadline is that retry, and a caller that blocked for as long as it
+    // liked would sleep through it.
     let t0 = Instant::now();
-    assert_eq!(c.due_in(t0), None, "a deadline with no frame to release");
+    let waiting = c.due_in(t0).expect("the keyframe retry is a deadline too");
+    assert!(
+        waiting > Duration::ZERO && waiting <= Duration::from_millis(500),
+        "with no frame to release the only deadline is the retry, got {waiting:?}"
+    );
 
     // One frame, then silence.
     while !matches!(

@@ -201,6 +201,13 @@ pub struct ControllerStats {
     pub frames_lost: u64,
     pub frames_skipped: u64,
     pub keyframes_requested: u64,
+    /// Of those, the ones asked for because nothing was arriving.
+    ///
+    /// Counted separately because it is the diagnostic for the state that used
+    /// to be unrecoverable: a keyframe outstanding on a link that has gone
+    /// quiet. One or two is a lost keyframe recovered. A number that climbs
+    /// without a picture ever appearing is a host that is not answering.
+    pub keyframes_asked_into_silence: u64,
     /// Datagrams refused before reassembly: wrong stream, wrong type,
     /// malformed.
     pub rejected: u64,
@@ -222,6 +229,23 @@ const MAX_PENDING_CURSOR: usize = 256;
 /// changed and rare enough that the reporting is not itself traffic.
 const REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long to wait, with a keyframe outstanding and nothing arriving, before
+/// asking again.
+///
+/// **Silence is evidence too**, and where a still screen is concerned it is
+/// the only evidence there is. Every other ask in this file is triggered by
+/// something *arriving* — a frame lost, or a whole frame turning up while a
+/// keyframe is still outstanding — which is sound while frames are flowing and
+/// useless the moment they stop. A host whose screen is not changing sends
+/// nothing at all, so there is no arrival left to notice the gap with, and a
+/// controller that had already asked would wait for ever.
+///
+/// Half a second is two numbers at once: about the longest a person will hold
+/// a stale picture without deciding the session is broken, and slow enough
+/// that a genuinely dead link costs two tiny messages a second rather than
+/// thirty.
+const ASK_AGAIN_INTO_SILENCE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// How far the measurement has to move, in per cent, before it is worth saying.
 ///
 /// Ten. The estimate is accurate to 8–15%, so anything tighter would be
@@ -238,6 +262,14 @@ pub struct ControllerStream {
     ///
     /// Coalesces the asking: a burst of loss produces one request.
     awaiting_keyframe: bool,
+    /// What the outstanding ask gave as its reason.
+    ///
+    /// Kept so that asking again into silence repeats the original reason
+    /// rather than inventing one. The host logs it, and a session that joined
+    /// and never got its first picture is a different fault from one that lost
+    /// sync — reporting the second would send whoever reads the log looking
+    /// for a loss that never happened.
+    asked_for: KeyframeReason,
     /// What the link's round trip was measured at.
     /// See [`ControllerStream::set_round_trip`].
     round_trip: std::time::Duration,
@@ -334,6 +366,7 @@ impl ControllerStream {
             decoder: None,
             expected: (config.width, config.height),
             awaiting_keyframe: true,
+            asked_for: KeyframeReason::Joined,
             round_trip: UNKNOWN_ROUND_TRIP,
             frame_interval: frame_interval(config.max_fps),
             announced_fps: config.max_fps,
@@ -398,7 +431,44 @@ impl ControllerStream {
     /// deadline is one reasoned number rather than one per caller.
     #[must_use]
     pub fn due_in(&self, now: std::time::Instant) -> Option<std::time::Duration> {
-        self.jitter.due_in(now)
+        // **Both deadlines, not just the buffer's.** A keyframe outstanding
+        // with nothing arriving is the one state where this side has work to
+        // do and no incoming packet will ever wake it, so a caller told only
+        // about the jitter buffer would sleep through the retry.
+        match (self.jitter.due_in(now), self.silence_ask_due_in(now)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (only, None) | (None, only) => only,
+        }
+    }
+
+    /// How long until an unanswered keyframe request is worth repeating.
+    ///
+    /// `None` when none is outstanding. Never `Some(ZERO)` for longer than one
+    /// tick, because the interval is at least the ask pace — a deadline this
+    /// side reports as due but [`Self::ask`] then declines to act on would
+    /// spin a caller that honours it.
+    fn silence_ask_due_in(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        if !self.awaiting_keyframe {
+            return None;
+        }
+        let interval = ASK_AGAIN_INTO_SILENCE.max(self.pace());
+        let Some(last) = self.last_ask else {
+            return Some(std::time::Duration::ZERO);
+        };
+        Some(interval.saturating_sub(now.saturating_duration_since(last)))
+    }
+
+    /// Ask again for a keyframe that nothing is going to prompt.
+    fn ask_into_silence(&mut self, now: std::time::Instant) {
+        if self
+            .silence_ask_due_in(now)
+            .is_none_or(|left| !left.is_zero())
+        {
+            return;
+        }
+        self.stats.keyframes_asked_into_silence =
+            self.stats.keyframes_asked_into_silence.saturating_add(1);
+        self.ask(self.asked_for, now);
     }
 
     /// Act on the deadline if it has passed.
@@ -415,6 +485,7 @@ impl ControllerStream {
         // and a queue can be full while nothing is arriving at all, which is
         // the state the bloat ladder exists for.
         self.step_ladder(now);
+        self.ask_into_silence(now);
         self.say_what_the_link_carries(now);
     }
 
@@ -567,6 +638,7 @@ impl ControllerStream {
         }
         self.last_ask = Some(now);
         self.awaiting_keyframe = true;
+        self.asked_for = reason;
         self.stats.keyframes_requested = self.stats.keyframes_requested.saturating_add(1);
         self.outbound
             .push(MediaMessage::Keyframe(KeyframeRequest { reason }));
@@ -1303,6 +1375,111 @@ mod tests {
             clock_hz: 90_000,
             ssrc: 1,
         }
+    }
+
+    /// How many keyframe requests are sitting in the outbound queue.
+    fn asks(c: &ControllerStream) -> usize {
+        c.outbound
+            .iter()
+            .filter(|m| matches!(m, MediaMessage::Keyframe(_)))
+            .count()
+    }
+
+    /// **A keyframe that never arrives, on a link where nothing else does
+    /// either, has to be asked for again.**
+    ///
+    /// Every other ask is triggered by an arrival, which is exactly the thing
+    /// missing here: the host's screen is still, so it sends nothing, so
+    /// nothing wakes this side to notice the keyframe never came. Before the
+    /// retry the session stayed stale for as long as the screen stayed still,
+    /// and the only thing that recovered it was the host's periodic keyframe
+    /// arriving by luck — which is not a recovery path, it is a coincidence
+    /// that happened to be scheduled.
+    #[test]
+    fn a_keyframe_that_never_comes_is_asked_for_again_out_of_silence() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        let start = std::time::Instant::now();
+        // The join ask, taken by a caller and lost on the way.
+        assert_eq!(asks(&c), 1, "joining asks once");
+        let _ = c.take_outbound();
+        let mut out = Vec::new();
+
+        // Ticking straight away must not ask again: the first one may still
+        // be in flight, and a retry per tick is a flood, not a recovery.
+        c.tick(start, &mut out);
+        assert_eq!(asks(&c), 0, "not before the interval is up");
+
+        c.tick(start + ASK_AGAIN_INTO_SILENCE, &mut out);
+        assert_eq!(
+            asks(&c),
+            1,
+            "and then it asks again, with nothing to prompt it"
+        );
+        assert_eq!(
+            c.stats().keyframes_asked_into_silence,
+            1,
+            "counted separately, because it diagnoses a state that used to be \
+             unrecoverable"
+        );
+        let _ = c.take_outbound();
+
+        // Repeating the *reason that is outstanding*, not the one this side
+        // joined with. A session that lost sync is a different fault from one
+        // that never got its first picture, and the host logs which.
+        let lost = start + ASK_AGAIN_INTO_SILENCE * 2;
+        c.ask(KeyframeReason::LostSync, lost);
+        let _ = c.take_outbound();
+        c.tick(lost + ASK_AGAIN_INTO_SILENCE, &mut out);
+        let asked = c
+            .take_outbound()
+            .into_iter()
+            .find_map(|m| match m {
+                MediaMessage::Keyframe(k) => Some(k.reason),
+                _ => None,
+            })
+            .expect("a keyframe request");
+        assert_eq!(asked, KeyframeReason::LostSync);
+    }
+
+    /// And it stops the moment a keyframe arrives, rather than asking for ever.
+    #[test]
+    fn the_retry_stops_when_the_picture_does_arrive() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        let start = std::time::Instant::now();
+        let _ = c.take_outbound();
+
+        c.awaiting_keyframe = false;
+        let mut out = Vec::new();
+        c.tick(start + ASK_AGAIN_INTO_SILENCE * 4, &mut out);
+        assert_eq!(asks(&c), 0, "nothing is outstanding, so nothing is asked");
+        assert_eq!(c.due_in(start), None, "and there is no deadline to honour");
+    }
+
+    /// **The deadline this side reports must be one it will act on.**
+    ///
+    /// A caller that honours `due_in` sleeps for what it is told and calls
+    /// `tick`. If the reported deadline were shorter than the pace `ask`
+    /// enforces, every wake-up would decline to ask and immediately report
+    /// zero again — a spin at whatever rate the caller can loop.
+    #[test]
+    fn the_retry_deadline_is_never_shorter_than_the_ask_pace() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        // A slow link, so the pace is far longer than the silence interval.
+        c.set_round_trip(Duration::from_secs(5));
+        assert!(c.pace() > ASK_AGAIN_INTO_SILENCE, "arrange the case");
+        let start = std::time::Instant::now();
+        let _ = c.take_outbound();
+        let mut out = Vec::new();
+
+        c.tick(start + ASK_AGAIN_INTO_SILENCE, &mut out);
+        assert_eq!(asks(&c), 0, "the pace has not expired");
+        let left = c
+            .due_in(start + ASK_AGAIN_INTO_SILENCE)
+            .expect("still outstanding");
+        assert!(
+            left > Duration::ZERO,
+            "reported as due while `ask` would decline: that is a spin"
+        );
     }
 
     /// **A burst measures the link; everything else measures the demand.**

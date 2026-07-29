@@ -72,6 +72,20 @@ impl fmt::Debug for Selected {
 
 /// Open a capturer, honouring `choice`.
 ///
+/// What the synthetic screen is doing, from `host.synthetic_motion`.
+///
+/// An unknown word cannot reach here — the setting is a choice, so the config
+/// refuses a typo rather than defaulting it — so falling back to the ordinary
+/// screen is the answer for "not set" rather than for "set to nonsense".
+fn motion() -> esper_capture::pattern::Motion {
+    use esper_capture::pattern::Motion;
+    match crate::settings::text("host.synthetic_motion").as_str() {
+        "still" => Motion::Still,
+        "video" => Motion::Everything,
+        _ => Motion::Screen,
+    }
+}
+
 /// `size` is the synthetic screen's size, and is ignored by a real backend:
 /// a real screen is whatever size it is.
 pub fn open(
@@ -112,7 +126,8 @@ pub fn open(
         .map_err(|e| CaptureError::Backend {
             backend: "synthetic",
             detail: e.to_string(),
-        })?;
+        })?
+        .with_motion(motion());
     // **Each half the size of the one before**, so a switch between them shows
     // up in the picture rather than being taken on trust — the same reason the
     // test fixtures do it. A screen too small to render stops the list rather

@@ -633,10 +633,12 @@ const fn fidelity_of(sharpness: esper_proto::Sharpness) -> esper_pipeline::Fidel
         Sharpness::Balanced => Fidelity::Balanced,
         // **`Coarse`, not `Low`.** A viewer that says it will accept a soft
         // picture is asking for the cheapest one worth looking at, and `Low`
-        // is not that: measured, the three rungs from `High` to `Low` span
-        // 561 to 406 kbit/s where the quantiser can reach 300, and the top
-        // two of them produce an *identical* keyframe. See
-        // [`esper_pipeline::Fidelity::Coarse`].
+        // is not that: on a screen the three rungs from `High` to `Low` span
+        // 169 to 111 kbit/s where the quantiser reaches 79, and the top two of
+        // them produce an *identical* keyframe. See
+        // [`esper_pipeline::Fidelity`] for why those are a screen's figures
+        // and what the same rungs do on content the quantiser can get hold
+        // of.
         Sharpness::Soft => Fidelity::Coarse,
     }
 }

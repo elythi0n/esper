@@ -155,6 +155,9 @@ pub struct Setting {
 /// Backends a host may be told to use.
 const BACKENDS: &[&str] = &["auto", "x11", "synthetic"];
 
+/// What the synthetic screen may be doing.
+const MOTIONS: &[&str] = &["screen", "still", "video"];
+
 /// Every setting there is.
 ///
 /// In the order somebody would read them: what this machine *is*, then what it
@@ -191,6 +194,20 @@ pub static SETTINGS: &[Setting] = &[
         about: "How many screens the synthetic backend pretends to have. Each is half the \
                 size of the one before, so a switch between them is visible. Only applies \
                 when the synthetic backend is in use.",
+    },
+    Setting {
+        key: "host.synthetic_motion",
+        kind: Kind::Choice(MOTIONS),
+        // The same kind of question as how many screens it pretends to have,
+        // and useful for the same reason: `still` is the only way to see what
+        // a session watching a screen that nobody is touching actually costs,
+        // and that is the state a screen spends most of its life in. `video`
+        // is the other end -- every pixel different every frame -- for looking
+        // at what the encoder does when a link cannot keep up.
+        default: Value::Text(Cow::Borrowed("screen")),
+        about: "What the synthetic backend's screen is doing: `screen` has a counter and a \
+                moving box, `still` is a screen nobody is touching, `video` is every pixel \
+                changing every frame. Only applies when the synthetic backend is in use.",
     },
     Setting {
         key: "host.monitor",

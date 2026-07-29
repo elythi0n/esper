@@ -268,6 +268,29 @@ impl Target {
 mod tests {
     use super::*;
 
+    /// **A baseline of zero means any cost at all is a regression.**
+    ///
+    /// `path.idle.kbit` is zero, and that is not a rounding of something
+    /// small: a screen nobody is touching sends no frames, so it sends no
+    /// bytes. Pinning it means one byte fails, which is the only useful
+    /// reading of a baseline at zero — the drift band around it is zero wide,
+    /// and a proportional band would have made the strictest measurement in
+    /// the harness the loosest.
+    #[test]
+    fn a_baseline_of_zero_admits_no_drift() {
+        let idle = named("path.idle.kbit").expect("a target");
+        assert_eq!(idle.better, Better::Lower);
+        assert!(!idle.regressed(0.0, 0.0), "zero is not worse than zero");
+        assert!(
+            idle.regressed(0.001, 0.0),
+            "a screen that is not changing must cost nothing, not nearly nothing"
+        );
+        assert!(
+            idle.regressed(352.0, 0.0),
+            "and certainly not what it used to"
+        );
+    }
+
     /// **A portable figure means the same thing on another machine.** An
     /// encode time does not; a ratio of two timings on one machine does, and
     /// so does a figure the policy decides. Getting this wrong in either

@@ -1662,6 +1662,65 @@ print(s.getsockname()[1]); s.close()')
       fi
       sed -i '/host.synthetic_monitors/d' "$term_a/config.toml"
 
+      # **And a screen nobody is touching costs nothing at all.**
+      #
+      # Deep idle used to send a keyframe every five seconds, which on a large
+      # screen is the biggest single cost in the product for the state a screen
+      # spends most of its life in. Now it sends nothing, which makes the
+      # transport's own keepalive load-bearing for the first time: before, media
+      # every five seconds kept the connection up whatever the keepalive did.
+      #
+      # So this measures both at once. The extra time is longer than the QUIC
+      # idle timeout, so a session that had nothing keeping it alive would be
+      # gone before the second run finished -- and if the deep rung were still
+      # sending, the extra time would cost proportionally more bytes.
+      still_kib() {
+        sed -i '/host.synthetic_motion/d' "$term_a/config.toml"
+        printf 'host.synthetic_motion = "still"\n' >> "$term_a/config.toml"
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+          timeout 120 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          > "$term_a/still-$1.log" 2>&1 &
+        idle_host=$!
+        local addr=""
+        for _ in $(seq 1 100); do
+          addr=$( { awk '/listening/{print $2}' "$term_a/still-$1.log" 2>/dev/null || true; } | head -1)
+          [ -n "$addr" ] && break
+          sleep 0.1
+        done
+        ESPER_HOME="$term_b" timeout 100 "$BIN/esper-engine" connect "$addr" --seconds "$1" \
+          > "$term_b/still-$1.out" 2>&1 || true
+        kill "$idle_host" 2>/dev/null || true
+        idle_host=""
+        awk '/^  received /{print $4}' "$term_b/still-$1.out"
+      }
+      short_kib=$(still_kib 14)
+      long_kib=$(still_kib 44)
+      # The first ten seconds are not idle yet -- the gate takes that long to
+      # reach the deepest rung -- so both runs pay for those and only the long
+      # one pays for anything after. A generous band, because what is being
+      # ruled out is a rung that still sends: thirty more seconds of keyframes
+      # would be several times the number, not a few per cent.
+      if [ -n "$short_kib" ] && [ -n "$long_kib" ] &&
+        [ "$(awk -v a="$long_kib" -v b="$short_kib" \
+          'BEGIN{print (b > 0 && a < b * 1.25) ? 1 : 0}')" = 1 ]; then
+        printf '  ✓ thirty more seconds of a still screen cost nothing: %s KiB against %s\n' \
+          "$long_kib" "$short_kib"
+      else
+        printf '  ✗ a still screen is still being charged for: %s KiB against %s\n' \
+          "${long_kib:-no}" "${short_kib:-no}"
+        fail=1
+      fi
+      # And it was alive at the end, rather than having been dropped for
+      # idleness and reported as a tidy summary of a session that ended early.
+      if grep -q 'the session ended' "$term_b/still-44.out"; then
+        printf '  ✗ the session did not survive being idle past the transport timeout\n'
+        grep 'the session ended' "$term_b/still-44.out" | sed 's/^/      /'
+        fail=1
+      else
+        printf '  ✓ and the session was still up, with only keepalives holding it\n'
+      fi
+      sed -i '/host.synthetic_motion/d' "$term_a/config.toml"
+
       # **The receiver measures the link, and the sender's transport paces to
       # it.** Three pieces have to line up for that: a controller that can
       # measure a link from how a frame's datagrams arrive, a report crossing

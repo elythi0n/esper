@@ -12,7 +12,36 @@
 //! |---|---|
 //! | Changing | Encode, up to the frame rate ceiling |
 //! | Still for over a second | One frame a second, for resilience |
-//! | Still for over ten seconds | A keyframe every five seconds, nothing between |
+//! | Still for over ten seconds | **Nothing at all** |
+//!
+//! # Why the deepest rung sends nothing
+//!
+//! It used to send a keyframe every five seconds, and on a 1080p screen that
+//! is a 223 KiB picture — 353 kbit/s to show a screen that is not doing
+//! anything, or about 127 MB an hour of a session where nothing happens. Idle
+//! is the state a screen spends most of its life in, so that was the largest
+//! single cost in the product and it bought nothing.
+//!
+//! Both of the things it insured against are covered better elsewhere:
+//!
+//! - **A viewer that joined late** does not exist here. A host serves one
+//!   session at a time and each gets a fresh pipeline, so a joining viewer
+//!   always gets [`Reason::First`].
+//! - **A decoder that lost sync** asks, on the reliable control stream, and
+//!   keeps asking until a picture arrives — including when nothing is arriving
+//!   to prompt it. A request is honoured on the next frame whatever rung the
+//!   screen is on, so recovery is a request and an answer rather than a wait
+//!   for a scheduled refresh that may be five seconds away.
+//!
+//! The interval does not *accumulate* while nothing is being sent either, and
+//! that matters more than it sounds. A screen still for a minute would
+//! otherwise have a keyframe permanently overdue, so the first frame after the
+//! pause — the frame the user is waiting for, at the moment they judge the
+//! whole session — would be the largest frame there is. The decoder's
+//! reference picture is still perfectly good: H.264 does not care how much
+//! wall-clock time went by. So the interval measures how long a *flowing*
+//! stream has been building on one reference, which is the only thing it was
+//! ever really about.
 //!
 //! # Skipping must not lose an update
 //!
@@ -50,10 +79,11 @@ pub struct Policy {
     pub idle_fps: u32,
     /// Still for this long, and even the idle rate stops.
     pub deep_idle_after: Duration,
-    /// A keyframe at least this often, whatever else is happening.
+    /// A keyframe at least this often, while the stream is flowing.
     ///
-    /// This is the recovery path for a decoder that has lost sync and for a
-    /// viewer that joined late, so it applies in every state.
+    /// **Not while it is not.** See the module documentation: a stream sending
+    /// nothing accumulates no risk to insure, and the recovery path for a
+    /// decoder that has lost sync is that it asks.
     pub keyframe_interval: Duration,
 }
 
@@ -165,7 +195,13 @@ pub struct EncodeGate {
     keyframe_requested: bool,
     last_change: Option<Instant>,
     last_encode: Option<Instant>,
-    last_keyframe: Option<Instant>,
+    /// What the periodic interval is measured from.
+    ///
+    /// The later of the last keyframe and the last moment the stream stopped
+    /// flowing, because the interval is about how long a decoder has been
+    /// building on one reference *while frames arrive*. See the module
+    /// documentation for why a still screen must not leave one overdue.
+    keyframe_clock: Option<Instant>,
     encodes: u64,
     skips: u64,
 }
@@ -182,7 +218,7 @@ impl EncodeGate {
             keyframe_requested: false,
             last_change: None,
             last_encode: None,
-            last_keyframe: None,
+            keyframe_clock: None,
             encodes: 0,
             skips: 0,
         }
@@ -286,7 +322,7 @@ impl EncodeGate {
         }
 
         let keyframe_due = self
-            .last_keyframe
+            .keyframe_clock
             .is_none_or(|t| now.saturating_duration_since(t) >= self.policy.keyframe_interval);
 
         match self.rung(now) {
@@ -333,9 +369,13 @@ impl EncodeGate {
                 if self.has_pending() {
                     return self.emit(keyframe_due, Reason::Changed, now);
                 }
-                if keyframe_due {
-                    return self.emit(true, Reason::PeriodicKeyframe, now);
-                }
+                // **Nothing, and the interval does not run.** A stream that is
+                // sending nothing is not building on its reference picture, so
+                // it accumulates no risk for the periodic keyframe to insure
+                // -- and leaving one overdue would spend the largest frame
+                // there is on the first change after the pause, which is the
+                // frame the user is actually waiting for.
+                self.keyframe_clock = Some(now);
                 self.skip()
             }
         }
@@ -377,7 +417,7 @@ impl EncodeGate {
 
         self.last_encode = Some(now);
         if keyframe {
-            self.last_keyframe = Some(now);
+            self.keyframe_clock = Some(now);
         }
         self.encodes = self.encodes.saturating_add(1);
         Verdict::Encode {
@@ -683,14 +723,19 @@ mod tests {
         assert!(keyframes >= 1, "and the periodic keyframe still applies");
     }
 
-    /// Deep idle is the state a screen spends most of its life in, and it must
-    /// cost a keyframe every five seconds and nothing else.
+    /// **Deep idle is the state a screen spends most of its life in, and it
+    /// must cost nothing.**
+    ///
+    /// It used to cost a keyframe every five seconds, which on a 1080p screen
+    /// is a 223 KiB picture: 353 kbit/s, or 127 MB an hour, to show a screen
+    /// that is not doing anything. See the module documentation for why both
+    /// of the things that bought are covered better elsewhere.
     #[test]
     #[cfg_attr(
         miri,
         ignore = "an exhaustive sweep: MIRI interprets rather than executes, so this takes minutes. This crate forbids unsafe code and has no FFI, so what MIRI is here for is the buffer pool's Drop, which the cheaper tests exercise"
     )]
-    fn deep_idle_sends_only_periodic_keyframes() {
+    fn deep_idle_sends_nothing_at_all() {
         let mut g = gate();
         let start = t0();
         let _ = g.decide(&small_change(), start);
@@ -701,27 +746,80 @@ mod tests {
         }
         let (before, _) = g.counts();
 
-        // Then twenty more seconds of nothing.
+        // Then two minutes of nothing -- far more than any interval in the
+        // policy, so a periodic anything would have fired many times over.
         let base = at(start, 22_000);
-        for i in 1..=20_000u64 {
-            let v = g.decide(&Damage::Nothing, at(base, i));
-            if let Verdict::Encode {
-                reason, keyframe, ..
-            } = v
-            {
-                assert_eq!(
-                    reason,
-                    Reason::PeriodicKeyframe,
-                    "nothing but keyframes should go out in deep idle"
-                );
-                assert!(keyframe);
-            }
+        for i in 1..=120_000u64 {
+            assert_eq!(
+                g.decide(&Damage::Nothing, at(base, i)),
+                Verdict::Skip,
+                "a still screen must cost nothing at all"
+            );
         }
         let (after, _) = g.counts();
-        let sent = after - before;
+        assert_eq!(after, before, "and nothing was encoded");
+    }
+
+    /// **A request is honoured on the next frame whatever the screen is doing.**
+    ///
+    /// This is the recovery path that replaced the periodic keyframe, so it is
+    /// the one that has to work on the deepest rung. A viewer that lost sync
+    /// while the screen was still would otherwise have nothing to wait for.
+    #[test]
+    fn a_request_is_answered_even_in_deep_idle() {
+        let mut g = gate();
+        let start = t0();
+        let _ = g.decide(&small_change(), start);
+        for i in 1..=11_000u64 {
+            let _ = g.decide(&Damage::Nothing, at(start, i * 2));
+        }
+        assert_eq!(g.rung(at(start, 22_000)), Rung::DeepIdle);
+
+        g.request_keyframe();
+        let v = g.decide(&Damage::Nothing, at(start, 22_001));
         assert!(
-            (3..=5).contains(&sent),
-            "twenty seconds of deep idle should be about four keyframes, got {sent}"
+            matches!(
+                v,
+                Verdict::Encode {
+                    keyframe: true,
+                    reason: Reason::Requested,
+                    ..
+                }
+            ),
+            "a viewer that lost sync on a still screen must be answered: {v:?}"
+        );
+    }
+
+    /// **The first change after a long pause is a delta, not a keyframe.**
+    ///
+    /// The moment a user acts after reading for a minute is the moment they
+    /// judge the whole session, and it is the worst possible time to spend the
+    /// largest frame there is. The decoder's reference picture is still
+    /// perfectly good -- H.264 does not care how much wall-clock time went by
+    /// -- so an overdue periodic keyframe here would be pure latency.
+    ///
+    /// Fails if the interval is left running while the screen is still.
+    #[test]
+    fn the_first_change_after_a_long_pause_is_not_a_keyframe() {
+        let mut g = gate();
+        let start = t0();
+        let _ = g.decide(&small_change(), start);
+        // A minute of stillness: twelve keyframe intervals.
+        for i in 1..=60_000u64 {
+            let _ = g.decide(&Damage::Nothing, at(start, i));
+        }
+
+        let v = g.decide(&small_change(), at(start, 60_001));
+        assert!(
+            matches!(
+                v,
+                Verdict::Encode {
+                    keyframe: false,
+                    reason: Reason::Changed,
+                    ..
+                }
+            ),
+            "the frame the user is waiting for must not be the biggest one: {v:?}"
         );
     }
 
