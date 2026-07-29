@@ -346,9 +346,18 @@ impl Pattern {
     /// can be checked against the source rather than against a previous run.
     #[must_use]
     pub fn pixel(&self, x: u32, y: u32, frame: u64) -> [u8; 3] {
-        // Nothing moves, so every frame is frame zero.
-        if self.motion == Motion::Still {
-            return self.still_pixel(x, y, 0);
+        // **The ordinary case first, and untouched.** Every other mode here is
+        // for a benchmark; a screen is what everything else in this crate
+        // renders, and it is rendered a great many times. Putting the scroll
+        // and the churn checks in front of it made the synthetic capturer
+        // measurably slower and tipped a timing-sensitive session test — the
+        // fixture slowing down is a real cost even when nothing it produces
+        // has changed.
+        match self.motion {
+            Motion::Screen => return self.still_pixel(x, y, frame),
+            // Nothing moves, so every frame is frame zero.
+            Motion::Still => return self.still_pixel(x, y, 0),
+            Motion::Everything => {}
         }
         // **The bands that a test reads do not scroll.** Scrolling them was
         // tried and it moves the frame counter out from under itself, which
@@ -386,6 +395,8 @@ impl Pattern {
     /// flat region and make the measurement kinder than the thing it stands
     /// in for.
     fn scrolled(&self, x: u32, y: u32, frame: u64) -> (u32, u32) {
+        // Redundant from `pixel`, which no longer reaches here for a screen —
+        // and kept, so a caller arriving another way gets the same answer.
         if self.motion != Motion::Everything {
             return (x, y);
         }

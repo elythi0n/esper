@@ -339,9 +339,16 @@ pub fn run_all() -> Result<Measured, BenchError> {
     out.insert("encode.screen.ms", ms);
     out.insert("encode.screen.core", cores);
 
+    let screen_ms = ms;
     let (ms, cores) = encode_run(Motion::Everything)?;
     out.insert("encode.motion.ms", ms);
     out.insert("encode.motion.core", cores);
+    // **The fixture checking itself.** If the full-motion content ever stopped
+    // being full motion, every encode figure above would quietly improve and
+    // this harness would report good news.
+    if screen_ms > 0.0 {
+        out.insert("encode.motion.factor", ms / screen_ms);
+    }
 
     let whole = convert_run(true)?;
     let line = convert_run(false)?;

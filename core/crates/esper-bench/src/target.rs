@@ -190,6 +190,19 @@ pub const TARGETS: &[Target] = &[
         portable: true,
     },
     Target {
+        name: "encode.motion.factor",
+        about: "How many times more a frame of video costs to encode than a \
+                frame of screen. **The fixture's own self-check**: if the \
+                full-motion content ever stopped being full motion, every \
+                encode figure here would quietly improve and the harness would \
+                report good news. Portable, because it is a ratio of two \
+                timings on the same machine.",
+        unit: "x",
+        better: Better::Higher,
+        want: Some(1.5),
+        portable: true,
+    },
+    Target {
         name: "convert.ratio",
         about: "How many times cheaper it is to convert one line of text than \
                 a whole frame. **The entire case for damage-driven \
@@ -267,7 +280,10 @@ mod tests {
             .filter(|t| t.portable)
             .map(|t| t.name)
             .collect();
-        assert_eq!(portable, vec!["path.idle.fps", "convert.ratio"]);
+        assert_eq!(
+            portable,
+            vec!["path.idle.fps", "encode.motion.factor", "convert.ratio"]
+        );
 
         // Nothing measured in milliseconds or cores can be portable: both are
         // properties of the processor.

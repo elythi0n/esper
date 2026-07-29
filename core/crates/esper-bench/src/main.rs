@@ -93,6 +93,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if verdict.unmeasured > 0 {
+        eprintln!(
+            "\n{} target(s) have no scenario behind them, which is not a pass.",
+            verdict.unmeasured
+        );
+        return ExitCode::FAILURE;
+    }
     if verdict.regressed > 0 {
         eprintln!(
             "\n{} measurement(s) worse than the baseline by more than {:.0}%.",
@@ -107,6 +114,7 @@ fn main() -> ExitCode {
 /// What a run came to.
 struct Verdict {
     regressed: usize,
+    unmeasured: usize,
 }
 
 /// A baseline file: what a named machine last measured.
@@ -170,8 +178,12 @@ fn report(measured: &scenario::Measured, baseline: Option<&Baseline>) -> Verdict
 
     let mut regressed = 0usize;
     let mut missed = 0usize;
+    let mut unmeasured = Vec::new();
     for t in TARGETS {
+        // **A target with no scenario is not a pass.** Skipping it silently is
+        // how a figure gets added to the list, never run, and read as fine.
         let Some(&value) = measured.get(t.name) else {
+            unmeasured.push(t.name);
             continue;
         };
         let want = t.want.map_or_else(|| "—".to_owned(), |w| show(w, t.unit));
@@ -211,6 +223,13 @@ fn report(measured: &scenario::Measured, baseline: Option<&Baseline>) -> Verdict
     }
 
     println!();
+    if !unmeasured.is_empty() {
+        println!(
+            "  {} target(s) were never measured: {}",
+            unmeasured.len(),
+            unmeasured.join(", ")
+        );
+    }
     if missed > 0 {
         println!(
             "  {missed} target(s) not met. That is not a failure here — a target is what the \
@@ -219,7 +238,10 @@ fn report(measured: &scenario::Measured, baseline: Option<&Baseline>) -> Verdict
         );
     }
 
-    Verdict { regressed }
+    Verdict {
+        regressed,
+        unmeasured: unmeasured.len(),
+    }
 }
 
 /// A number with its unit, at a sensible number of digits.
