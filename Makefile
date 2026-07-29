@@ -272,6 +272,25 @@ fuzz-targets:
 smoke: build
 	@./scripts/smoke.sh
 
+## Every performance target this project states, measured on this machine
+##
+## Reports what was measured against what was promised, and — when a baseline
+## for this machine exists — fails if anything is worse than it. A target that
+## is not met is reported and does not fail: some are not met yet, and a suite
+## that goes red for a known gap is a suite people stop reading.
+##
+## `make bench-baseline` records what this machine did, deliberately. Never
+## automatic: a baseline that ratchets on a noisy measurement records the
+## luckiest run anybody ever had and then fails for everybody else.
+.PHONY: bench
+bench:
+	@cd $(CORE) && cargo run --release --quiet -p esper-bench -- --check $(CURDIR)/bench/baseline.json
+
+## Record what this machine measures, as a baseline to gate against
+.PHONY: bench-baseline
+bench-baseline:
+	@cd $(CORE) && cargo run --release --quiet -p esper-bench -- --json $(CURDIR)/bench/baseline.json
+
 ## Supply-chain audit: every dependency audited or explicitly exempted
 .PHONY: vet-deps
 vet-deps:

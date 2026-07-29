@@ -16,6 +16,6 @@ pub use damage::{Damage, Regions};
 pub use frame::{Frame, FrameError, PixelFormat};
 pub use gate::{EncodeGate, Policy, Reason, Rung, Verdict};
 pub use geometry::Rect;
-pub use pattern::{Pattern, PatternError};
+pub use pattern::{Motion, Pattern, PatternError};
 pub use pool::{BufferPool, Pixels};
 pub use synthetic::SyntheticCapturer;

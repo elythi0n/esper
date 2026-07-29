@@ -110,6 +110,18 @@ jobs:
         working-directory: core
         run: cargo test --workspace
 
+      # Every performance target the design states, measured here.
+      #
+      # **Most of the figures are not comparable to the recorded baseline**,
+      # because a runner is a different machine and an encode time is a
+      # property of a processor. Those are reported so drift is visible in the
+      # log. The two that *are* portable — a ratio of two timings on one
+      # machine, and a figure the gate's policy decides rather than the
+      # hardware — are gated here as everywhere, and a regression in one fails
+      # this job.
+      - name: Rust — benchmark against the targets
+        run: make bench
+
       - name: Go — format
         shell: bash
         run: test -z "$(gofmt -s -l . | tee /dev/stderr)"

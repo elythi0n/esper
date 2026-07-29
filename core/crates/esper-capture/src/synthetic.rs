@@ -104,6 +104,17 @@ impl SyntheticCapturer {
         })
     }
 
+    /// How much of the picture changes from frame to frame.
+    ///
+    /// A screen and a video are two different things to ask an encoder for,
+    /// and the project's targets are stated for both. See
+    /// [`crate::pattern::Motion`].
+    #[must_use]
+    pub fn with_motion(mut self, motion: crate::pattern::Motion) -> Self {
+        self.pattern = self.pattern.with_motion(motion);
+        self
+    }
+
     /// Produce frames in this pixel layout.
     #[must_use]
     pub const fn with_format(mut self, format: PixelFormat) -> Self {

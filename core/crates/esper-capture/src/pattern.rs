@@ -24,6 +24,23 @@
 
 use crate::geometry::Rect;
 
+/// How far the picture scrolls each frame, in pixels.
+///
+/// Coprime with nothing in particular and different in the two directions, so
+/// the motion is not a multiple of a macroblock and the search has to actually
+/// search. Small enough to stay inside a real encoder's search window, because
+/// motion it gives up on immediately is cheap and is not what video costs.
+const SCROLL_X: u64 = 7;
+const SCROLL_Y: u64 = 3;
+
+/// How far a full-motion pixel moves from the picture underneath it.
+///
+/// Large enough that H.264's motion search finds nothing to predict from, and
+/// small enough that the bands underneath still read: the frame counter's
+/// bright cells stay bright and its dark ones stay dark, so a round trip can
+/// still be checked frame by frame.
+const CHURN: u8 = 48;
+
 /// Smallest synthetic screen that still contains every band.
 ///
 /// The frame counter needs a block per bit and the bands need a row each.
@@ -88,6 +105,7 @@ const MARKER: u32 = 2;
 pub struct Pattern {
     width: u32,
     height: u32,
+    motion: Motion,
 }
 
 /// Why a pattern could not be made.
@@ -98,13 +116,111 @@ pub enum PatternError {
     TooSmall { width: u32, height: u32 },
 }
 
+/// How much of the picture changes from frame to frame.
+///
+/// **The two ends of what an encoder is asked to do**, and they are two
+/// different products. A screen is nearly still: a pointer, a cursor, a line
+/// of text. Video is nearly all new: every pixel differs from the last frame,
+/// there is nothing to predict from, and the encoder spends its whole budget.
+///
+/// The project's own targets are stated for both, and the full-motion ones are
+/// the ones that are missed. A benchmark that only ever measured a screen
+/// would report that everything is fine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Motion {
+    /// A screen: bands that never change, a counter, and a box that moves.
+    #[default]
+    Screen,
+    /// Nothing at all: not even the counter or the box.
+    ///
+    /// What "an idle screen" means, and the only way to measure the claim that
+    /// one costs almost nothing. A screen with a counter ticking every frame is
+    /// not idle — it is a screen with something on it changing thirty times a
+    /// second, which is what this mode exists to stop a benchmark quietly
+    /// measuring instead.
+    Still,
+    /// Video: every pixel different every frame, and the whole picture moving.
+    ///
+    /// **Two things at once, and both are needed.** A per-pixel varying term
+    /// leaves nothing to predict from, which is a *bitrate* stress. On its own
+    /// it is not a *motion search* stress: an encoder that finds no match
+    /// anywhere gives up quickly and spends its time on residuals. Real video
+    /// costs what it costs because there **is** a match and finding it is
+    /// work — so the whole picture also scrolls, and the search has something
+    /// to find.
+    Everything,
+}
+
 impl Pattern {
     /// A pattern for a screen of this size.
     pub fn new(width: u32, height: u32) -> Result<Self, PatternError> {
         if width < MIN_WIDTH || height < MIN_HEIGHT {
             return Err(PatternError::TooSmall { width, height });
         }
-        Ok(Self { width, height })
+        Ok(Self {
+            width,
+            height,
+            motion: Motion::default(),
+        })
+    }
+
+    /// The same pattern, with everything changing every frame.
+    #[must_use]
+    pub const fn with_motion(mut self, motion: Motion) -> Self {
+        self.motion = motion;
+        self
+    }
+
+    /// How much of this changes from frame to frame.
+    #[must_use]
+    pub const fn motion(&self) -> Motion {
+        self.motion
+    }
+
+    /// The full-motion term, which is nothing at all for a screen.
+    ///
+    /// A cheap hash of position and frame, so it is a pure function like the
+    /// rest of the pattern and has no structure an encoder can predict —
+    /// which is the point. Applied over the bands rather than replacing them,
+    /// so everything a test reads is still readable underneath it.
+    ///
+    /// **Never zero.** A pixel whose term happened to be zero would be a pixel
+    /// that did not change, and "full motion" that leaves some of the picture
+    /// alone is not the thing being measured.
+    fn churn(&self, x: u32, y: u32, frame: u64) -> i32 {
+        if self.motion != Motion::Everything {
+            return 0;
+        }
+        // Three odd multipliers and a shift: enough decorrelation that H.264's
+        // motion search finds nothing, and cheap enough not to be measuring
+        // this function instead of the encoder.
+        let mixed = u64::from(x)
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(u64::from(y).wrapping_mul(1_597_334_677))
+            .wrapping_add(frame.wrapping_mul(2_246_822_519));
+        let magnitude = 1 + i32::try_from((mixed >> 27) % u64::from(CHURN)).unwrap_or(0);
+        if (mixed >> 13) & 1 == 0 {
+            magnitude
+        } else {
+            -magnitude
+        }
+    }
+
+    /// Move a channel by the full-motion term, **reflecting rather than
+    /// clamping** at the ends.
+    ///
+    /// Clamping was tried and is wrong twice over: a saturated pixel — a
+    /// colour bar, a white counter cell — does not move at all, so "every
+    /// pixel changes" quietly became "seven in eight do", and the whole point
+    /// of the mode is the eighth.
+    fn moved(channel: u8, by: i32) -> u8 {
+        let raised = i32::from(channel) + by;
+        if (0..=255).contains(&raised) {
+            return raised as u8;
+        }
+        // Off one end, so go the other way by the same amount. Still within
+        // range, because the swing is far smaller than the range.
+        (i32::from(channel) - by).clamp(0, 255) as u8
     }
 
     /// Width in pixels.
@@ -230,6 +346,58 @@ impl Pattern {
     /// can be checked against the source rather than against a previous run.
     #[must_use]
     pub fn pixel(&self, x: u32, y: u32, frame: u64) -> [u8; 3] {
+        // Nothing moves, so every frame is frame zero.
+        if self.motion == Motion::Still {
+            return self.still_pixel(x, y, 0);
+        }
+        // **The bands that a test reads do not scroll.** Scrolling them was
+        // tried and it moves the frame counter out from under itself, which
+        // takes away the one thing that makes a round trip checkable frame by
+        // frame. What scrolls is the background — the gradient and the
+        // stripes — which is most of the picture and all of the detail an
+        // encoder's motion search has to work on.
+        let (sx, sy) = if self.is_fixed(x, y) {
+            (x, y)
+        } else {
+            self.scrolled(x, y, frame)
+        };
+        let base = self.still_pixel(sx, sy, frame);
+        let churn = self.churn(x, y, frame);
+        if churn == 0 {
+            return base;
+        }
+        base.map(|c| Self::moved(c, churn))
+    }
+
+    /// Whether this pixel is one of the bands a test reads.
+    ///
+    /// The corner markers, the colour bars and the frame counter. Everything
+    /// else is background and may move.
+    fn is_fixed(&self, x: u32, y: u32) -> bool {
+        self.corner(x, y).is_some()
+            || y < self.bars_bottom()
+            || (y < self.counter_bottom() && x < self.counter_width())
+    }
+
+    /// Where to read the picture from, once it has scrolled.
+    ///
+    /// Wrapped rather than clamped, so the whole frame is always full of
+    /// detail — an edge that ran out of picture would give the encoder a large
+    /// flat region and make the measurement kinder than the thing it stands
+    /// in for.
+    fn scrolled(&self, x: u32, y: u32, frame: u64) -> (u32, u32) {
+        if self.motion != Motion::Everything {
+            return (x, y);
+        }
+        let dx =
+            u32::try_from(frame.wrapping_mul(SCROLL_X) % u64::from(self.width.max(1))).unwrap_or(0);
+        let dy = u32::try_from(frame.wrapping_mul(SCROLL_Y) % u64::from(self.height.max(1)))
+            .unwrap_or(0);
+        ((x + dx) % self.width.max(1), (y + dy) % self.height.max(1))
+    }
+
+    /// The picture without the full-motion term.
+    fn still_pixel(&self, x: u32, y: u32, frame: u64) -> [u8; 3] {
         // Corner markers win over everything, so orientation is always
         // readable however the rest of the picture is arranged.
         if let Some(c) = self.corner(x, y) {
@@ -313,6 +481,16 @@ impl Pattern {
     #[must_use]
     pub fn damage_between(&self, from: u64, to: u64) -> Vec<Rect> {
         if from == to {
+            return Vec::new();
+        }
+        // Everything changed, so everything is damaged. Said as one rectangle
+        // rather than a list of them, because that is what a real backend
+        // reports for a video window and it is what the gate has to cope with.
+        if self.motion == Motion::Everything {
+            return vec![self.bounds()];
+        }
+        // And nothing changed, ever.
+        if self.motion == Motion::Still {
             return Vec::new();
         }
         let mut rects = vec![self.box_at(from), self.box_at(to)];
@@ -664,5 +842,197 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+
+    /// **A screen is nearly still and video is nearly all new**, and an
+    /// encoder asked to do the two is doing two different jobs. A benchmark
+    /// that only ever measured a screen would report that everything is fine.
+    #[test]
+    fn full_motion_changes_every_pixel_and_a_screen_changes_almost_none() {
+        let screen = Pattern::new(320, 240).expect("a valid size");
+        let video = screen.with_motion(Motion::Everything);
+
+        let mut screen_changed = 0u32;
+        let mut video_changed = 0u32;
+        for y in (0..240).step_by(7) {
+            for x in (0..320).step_by(7) {
+                if screen.pixel(x, y, 10) != screen.pixel(x, y, 11) {
+                    screen_changed += 1;
+                }
+                if video.pixel(x, y, 10) != video.pixel(x, y, 11) {
+                    video_changed += 1;
+                }
+            }
+        }
+        let looked_at = (240u32 / 7 + 1) * (320 / 7 + 1);
+        assert!(
+            video_changed * 100 > looked_at * 90,
+            "only {video_changed} of {looked_at} samples changed under full motion"
+        );
+        assert!(
+            screen_changed * 20 < looked_at,
+            "{screen_changed} of {looked_at} samples changed on a still screen"
+        );
+    }
+
+    /// **Never zero, anywhere.** A pixel whose term happened to be zero is a
+    /// pixel showing the still picture, and "full motion" that leaves part of
+    /// the frame alone is not the thing being measured. Checked directly
+    /// rather than through the proportion that changes, because one in ninety
+    /// six is invisible in a proportion and is exactly what a lost `1 +`
+    /// would cost.
+    #[test]
+    fn no_pixel_is_left_showing_the_still_picture() {
+        let video = Pattern::new(320, 240)
+            .expect("a valid size")
+            .with_motion(Motion::Everything);
+        let mut seen = std::collections::BTreeSet::new();
+        for frame in 0..8u64 {
+            for y in 0..240 {
+                for x in 0..320 {
+                    let term = video.churn(x, y, frame);
+                    assert_ne!(term, 0, "no movement at {x},{y} on frame {frame}");
+                    seen.insert(term);
+                }
+            }
+        }
+        // And it uses the whole swing, or it is a smaller mode than it says.
+        assert!(
+            seen.len() >= usize::from(CHURN),
+            "only {} distinct amounts of movement",
+            seen.len()
+        );
+        assert!(seen.iter().copied().max().unwrap_or(0) <= i32::from(CHURN));
+        assert!(seen.iter().copied().min().unwrap_or(0) >= -i32::from(CHURN));
+    }
+
+    /// It is still a pure function of position and frame, which is the whole
+    /// reason this pattern exists rather than a recording.
+    #[test]
+    fn it_is_still_the_same_picture_twice() {
+        let video = Pattern::new(64, 64)
+            .expect("a valid size")
+            .with_motion(Motion::Everything);
+        for frame in [0u64, 1, 97, 1_000_000] {
+            for (x, y) in [(0u32, 0u32), (31, 31), (63, 63), (7, 40)] {
+                assert_eq!(video.pixel(x, y, frame), video.pixel(x, y, frame));
+            }
+        }
+    }
+
+    /// **The bands are still readable underneath it**, or the pattern would
+    /// have stopped being the thing that catches a flipped image or a swapped
+    /// colour channel the moment it was asked to move.
+    #[test]
+    fn the_markers_still_read_under_full_motion() {
+        let still = Pattern::new(320, 240).expect("a valid size");
+        let video = still.with_motion(Motion::Everything);
+        for frame in [0u64, 5, 33] {
+            assert_eq!(
+                video.read_counter(|x, y| video.pixel(x, y, frame)),
+                frame,
+                "the frame counter stopped reading at frame {frame}"
+            );
+            // A corner is still nearer its own colour than any other corner's.
+            for (x, y) in [(0u32, 0u32), (319, 0), (0, 239), (319, 239)] {
+                let seen = video.pixel(x, y, frame);
+                let want = still.pixel(x, y, frame);
+                let off = seen
+                    .iter()
+                    .zip(want)
+                    .map(|(a, b)| i32::from(*a).abs_diff(i32::from(b)))
+                    .max()
+                    .unwrap_or(0);
+                assert!(off <= 128, "a corner marker moved by {off} at {x},{y}");
+            }
+        }
+    }
+
+    /// **An idle screen is one where nothing changes**, and a screen with a
+    /// counter ticking thirty times a second is not one. The claim that an
+    /// idle 4K screen costs almost nothing cannot be measured against a
+    /// picture that is quietly moving.
+    #[test]
+    fn a_still_screen_does_not_change_at_all() {
+        let still = Pattern::new(320, 240)
+            .expect("a valid size")
+            .with_motion(Motion::Still);
+        for y in (0..240).step_by(3) {
+            for x in (0..320).step_by(3) {
+                assert_eq!(
+                    still.pixel(x, y, 0),
+                    still.pixel(x, y, 999),
+                    "something moved at {x},{y}"
+                );
+            }
+        }
+        assert!(
+            still.damage_between(0, 999).is_empty(),
+            "a still screen reported damage"
+        );
+        // And it is still the picture, not a blank one: the bands are there
+        // to be read even when nothing is moving.
+        assert_eq!(still.read_counter(|x, y| still.pixel(x, y, 7)), 0);
+    }
+
+    /// **Full motion has to move as well as change.** A per-pixel varying term
+    /// leaves nothing to predict from, which stresses the *bitrate*; it does
+    /// not stress the *motion search*, because an encoder that finds no match
+    /// anywhere gives up quickly. Real video costs what it costs because there
+    /// is a match and finding it is work.
+    #[test]
+    fn the_background_scrolls_so_a_motion_search_has_something_to_find() {
+        let video = Pattern::new(320, 240)
+            .expect("a valid size")
+            .with_motion(Motion::Everything);
+        let still = Pattern::new(320, 240).expect("a valid size");
+
+        // A background pixel reads from somewhere else once the picture has
+        // scrolled, so its underlying colour differs from the unscrolled one.
+        // Sampled over a band of the gradient, where the still picture varies.
+        let mut moved = 0;
+        for x in (16..300).step_by(3) {
+            let y = 200;
+            if video.pixel(x, y, 0) != video.pixel(x, y, 1) {
+                moved += 1;
+            }
+        }
+        assert!(moved > 80, "only {moved} background samples moved");
+
+        // And the fixed bands did not move: the counter still reads.
+        for frame in [0u64, 1, 9, 63] {
+            assert_eq!(video.read_counter(|x, y| video.pixel(x, y, frame)), frame);
+            assert_eq!(
+                still.pixel(1, 1, frame).len(),
+                video.pixel(1, 1, frame).len()
+            );
+        }
+    }
+
+    /// Everything changed means everything is damaged, said the way a real
+    /// backend says it for a video window.
+    #[test]
+    fn full_motion_reports_the_whole_frame_as_damaged() {
+        let video = Pattern::new(320, 240)
+            .expect("a valid size")
+            .with_motion(Motion::Everything);
+        assert_eq!(video.damage_between(4, 5), vec![video.bounds()]);
+        // And nothing changed is still nothing.
+        assert!(video.damage_between(4, 4).is_empty());
+
+        // A screen still reports only what moved, which is the entire case for
+        // damage-driven conversion.
+        let screen = Pattern::new(320, 240).expect("a valid size");
+        let rects = screen.damage_between(4, 5);
+        assert!(!rects.is_empty());
+        assert!(
+            rects.iter().all(|r| r != &screen.bounds()),
+            "a still screen reported the whole frame as damaged"
+        );
     }
 }

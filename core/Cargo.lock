@@ -309,6 +309,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-bench"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-color",
+ "esper-encode",
+ "esper-pipeline",
+ "esper-scale",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "esper-broker"
 version = "0.0.0"
 dependencies = [
