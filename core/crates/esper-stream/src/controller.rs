@@ -201,6 +201,8 @@ pub struct ControllerStats {
     pub frames_lost: u64,
     pub frames_skipped: u64,
     pub keyframes_requested: u64,
+    /// How many times the host has narrowed what this session may do.
+    pub narrowings: u64,
     /// Of those, the ones asked for because nothing was arriving.
     ///
     /// Counted separately because it is the diagnostic for the state that used
@@ -262,6 +264,11 @@ pub struct ControllerStream {
     ///
     /// Coalesces the asking: a burst of loss produces one request.
     awaiting_keyframe: bool,
+    /// The permission set the host last said this session holds.
+    ///
+    /// `None` once a caller has taken it. See
+    /// [`ControllerStream::take_permissions`].
+    granted_now: Option<Vec<esper_proto::Permission>>,
     /// What the outstanding ask gave as its reason.
     ///
     /// Kept so that asking again into silence repeats the original reason
@@ -367,6 +374,7 @@ impl ControllerStream {
             expected: (config.width, config.height),
             awaiting_keyframe: true,
             asked_for: KeyframeReason::Joined,
+            granted_now: None,
             round_trip: UNKNOWN_ROUND_TRIP,
             frame_interval: frame_interval(config.max_fps),
             announced_fps: config.max_fps,
@@ -1306,18 +1314,44 @@ impl ControllerStream {
                 }
                 Ok(())
             }
+            // **Kept for the caller, like the pointer, and for the same
+            // reason.** Applying a narrowing means closing an input source and
+            // telling a person, and this layer has neither. What it can do is
+            // make sure the message cannot be missed: it is held until taken.
+            //
+            // Nothing on *this* stream needs suppressing. A hint, a keyframe
+            // request, a monitor selection and a link report all need only
+            // `View`, and a session that has lost `View` is ending rather than
+            // narrowing.
+            MediaMessage::Permissions(change) => {
+                // The last word wins. Two narrowings in a row are not a delta
+                // to accumulate -- each carries the complete set, which is
+                // what stops the two ends drifting -- so an older one that a
+                // caller has not read yet is stale rather than lost.
+                self.granted_now = Some(change.granted.clone());
+                self.stats.narrowings = self.stats.narrowings.saturating_add(1);
+                Ok(())
+            }
             // Listed rather than caught by a wildcard, so a message added to
-            // the protocol later cannot be silently ignored here: the compiler
-            // will not accept a non-exhaustive match.
-            // Listed rather than caught by a wildcard, so a message added to
-            // the protocol later cannot be silently ignored here. A report is
-            // something this end *sends*; the direction check above has
-            // already refused one arriving.
+            // the protocol later cannot be silently ignored here. Each of
+            // these is something this end *sends*; the direction check above
+            // has already refused one arriving.
             MediaMessage::Select(_)
             | MediaMessage::Hint(_)
             | MediaMessage::Keyframe(_)
             | MediaMessage::Report(_) => Ok(()),
         }
+    }
+
+    /// What the host has said this session may now do, if it has said so.
+    ///
+    /// Taken rather than read, so a caller that acts on it cannot act twice —
+    /// and held until taken, because a narrowing that a busy caller missed
+    /// would be a permission the host has withdrawn and the controller is
+    /// still offering.
+    #[must_use]
+    pub fn take_permissions(&mut self) -> Option<Vec<esper_proto::Permission>> {
+        self.granted_now.take()
     }
 
     /// Everything the host has said about the pointer since this was last
@@ -1479,6 +1513,59 @@ mod tests {
         assert!(
             left > Duration::ZERO,
             "reported as due while `ask` would decline: that is a spin"
+        );
+    }
+
+    /// **A narrowing is handed over once, and cannot be missed.**
+    ///
+    /// Held until taken rather than reported on arrival, because the caller
+    /// that has to act on it — closing an input source, telling a person — is
+    /// not the one reading the stream, and a permission the host has withdrawn
+    /// while the controller goes on offering it is the one outcome worth
+    /// designing against.
+    #[test]
+    fn a_narrowing_is_kept_for_the_caller_until_taken() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        assert_eq!(c.take_permissions(), None, "nothing has been said yet");
+
+        let only_view = esper_proto::PermissionChange {
+            granted: vec![esper_proto::Permission::View],
+        };
+        c.handle(&MediaMessage::Permissions(only_view))
+            .expect("a host may say this");
+        assert_eq!(
+            c.take_permissions(),
+            Some(vec![esper_proto::Permission::View])
+        );
+        assert_eq!(c.take_permissions(), None, "and not a second time");
+        assert_eq!(c.stats().narrowings, 1);
+    }
+
+    /// **The last word wins, because each message is the complete set.**
+    ///
+    /// Two narrowings before a caller looks are not a delta to accumulate. The
+    /// protocol sends the whole set precisely so the two ends cannot drift, so
+    /// an older one still waiting is stale rather than lost — and the newer is
+    /// always the narrower.
+    #[test]
+    fn two_narrowings_before_a_caller_looks_leave_the_later_one() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        for granted in [
+            vec![
+                esper_proto::Permission::View,
+                esper_proto::Permission::Control,
+            ],
+            vec![esper_proto::Permission::View],
+        ] {
+            c.handle(&MediaMessage::Permissions(esper_proto::PermissionChange {
+                granted,
+            }))
+            .expect("a host may say this");
+        }
+        assert_eq!(
+            c.take_permissions(),
+            Some(vec![esper_proto::Permission::View]),
+            "the narrower of the two, not the first one seen"
         );
     }
 

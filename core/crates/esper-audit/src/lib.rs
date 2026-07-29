@@ -84,6 +84,19 @@ pub enum Event {
     },
     /// A device was revoked, and how many live sessions that closed.
     Revoked { sessions_closed: usize },
+    /// A live session was narrowed rather than ended.
+    ///
+    /// Distinct from [`Event::Revoked`], which counts the sessions a
+    /// revocation *closed*. A narrowing closes nothing — the picture keeps
+    /// flowing and the cursor stops driving — so without this it would be the
+    /// one enforcement action that left no trace. The operator's
+    /// [`Event::PermissionsChanged`] records what they decided; this records
+    /// that it reached a session which was already open, which is the half a
+    /// reader cannot infer.
+    SessionNarrowed {
+        /// Everything the session may do now.
+        granted: Vec<Permission>,
+    },
     /// What a device may do was changed by somebody at this machine.
     ///
     /// The whole new set, not the difference: a log line saying "control was
@@ -256,6 +269,7 @@ impl Event {
             Self::Paired { .. } => "paired",
             Self::Unpaired { .. } => "unpaired",
             Self::Revoked { .. } => "revoked",
+            Self::SessionNarrowed { .. } => "session_narrowed",
             Self::PermissionsChanged { .. } => "permissions_changed",
             Self::SessionOpened { .. } => "session_opened",
             Self::SessionClosed { .. } => "session_closed",
@@ -287,6 +301,9 @@ impl Event {
                 n => format!("revoked, ending {n} sessions"),
             },
             Self::PermissionsChanged { granted } => format!("may now {}", names(granted)),
+            Self::SessionNarrowed { granted } => {
+                format!("a live session was narrowed to {}", names(granted))
+            }
             Self::SessionOpened { granted, tier } => {
                 format!("session opened over {tier}, granted {}", names(granted))
             }

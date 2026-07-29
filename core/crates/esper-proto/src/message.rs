@@ -1887,6 +1887,18 @@ pub enum MediaMessage {
     /// and the only other traffic here is rare. See [`LinkReport`] for why the
     /// measuring end is the receiving one.
     Report(LinkReport),
+    /// What this session may now do. Host to controller.
+    ///
+    /// **On this stream because it is the only one the host can push on.**
+    /// Every other stream in a session is opened by the controller for a
+    /// purpose it names, so there is none the host could start to say this —
+    /// and a session-level message is not a reason to invent one, being a
+    /// handful of bytes that happen at most a few times in a session.
+    ///
+    /// It is not a media message, and this enum is not a claim that it is:
+    /// what this type means is "anything that can travel on a media session's
+    /// control stream", which is what its own documentation says.
+    Permissions(PermissionChange),
 }
 
 impl MediaMessage {
@@ -1899,6 +1911,16 @@ impl MediaMessage {
             Self::Hint(h) => h.is_well_formed(),
             Self::Cursor(c) => c.is_well_formed(),
             Self::Report(r) => r.is_well_formed(),
+            // **Always, and that is a security decision rather than laziness.**
+            // A `PermissionChange` only ever *removes* what a session may do,
+            // and a caller refuses a message this returns false for — so a
+            // validation rule here would be a way for a malformed narrowing to
+            // be discarded, leaving the wider permissions in place. The
+            // dangerous outcome for this one message is ignoring it, so there
+            // is nothing to fail. The set is bounded by the enum: it cannot
+            // name a permission that does not exist, and a repeat of one it
+            // already named grants nothing, so applying it is idempotent.
+            Self::Permissions(_) => true,
         }
     }
 
@@ -1915,6 +1937,7 @@ impl MediaMessage {
             Self::Keyframe(_) => "a keyframe request",
             Self::Cursor(c) => c.name(),
             Self::Report(_) => "a link report",
+            Self::Permissions(_) => "a permission change",
         }
     }
 
@@ -1928,7 +1951,10 @@ impl MediaMessage {
     #[must_use]
     pub const fn may_be_sent_by(&self, role: Role) -> bool {
         match self {
-            Self::Config(_) | Self::Cursor(_) => matches!(role, Role::Host),
+            // A controller announcing its own permissions would be a
+            // controller granting itself permissions, which is the whole
+            // reason this is checked at the boundary rather than trusted.
+            Self::Config(_) | Self::Cursor(_) | Self::Permissions(_) => matches!(role, Role::Host),
             Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) | Self::Report(_) => {
                 matches!(role, Role::Controller)
             }
@@ -1938,6 +1964,49 @@ impl MediaMessage {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A narrowing must never be discardable, and that is why it has no
+    /// validation rule.**
+    ///
+    /// Every other message on this stream is checked and refused if it is out
+    /// of bounds, which is right: the dangerous outcome for a config, a hint
+    /// or a pointer position is *acting* on a bad one. A `PermissionChange` is
+    /// the one message where the dangerous outcome is the opposite. It only
+    /// ever removes what a session may do, and both ends refuse a message that
+    /// is not well formed — so any rule here would be a way for a host's
+    /// withdrawal to be thrown away, leaving the *wider* permissions standing.
+    ///
+    /// So the sets that a rule might have caught are checked to be accepted:
+    /// an empty one, a repeated one, and every permission at once.
+    #[test]
+    fn a_permission_change_is_always_well_formed_so_it_cannot_be_discarded() {
+        use super::{MediaMessage, PermissionChange};
+        for granted in [
+            vec![],
+            vec![Permission::View],
+            vec![Permission::View, Permission::View],
+            Permission::ALL.to_vec(),
+        ] {
+            let m = MediaMessage::Permissions(PermissionChange { granted });
+            assert!(
+                m.is_well_formed(),
+                "a withdrawal a receiver refuses is a withdrawal that did not \
+                 happen: {m:?}"
+            );
+        }
+    }
+
+    /// And it is host to controller only. A controller that could state its
+    /// own permissions could grant itself any of them.
+    #[test]
+    fn only_a_host_may_say_what_a_session_holds() {
+        use super::{MediaMessage, PermissionChange};
+        let m = MediaMessage::Permissions(PermissionChange {
+            granted: vec![Permission::View, Permission::Control],
+        });
+        assert!(m.may_be_sent_by(super::Role::Host));
+        assert!(!m.may_be_sent_by(super::Role::Controller));
+    }
 
     #[test]
     fn every_permission_is_in_all_and_parses_back_from_its_name() {

@@ -262,6 +262,7 @@ fn exhaustive_witness(e: &Event) {
         Event::Paired { .. }
         | Event::Unpaired { .. }
         | Event::Revoked { .. }
+        | Event::SessionNarrowed { .. }
         | Event::PermissionsChanged { .. }
         | Event::SessionOpened { .. }
         | Event::SessionClosed { .. }
@@ -287,6 +288,9 @@ fn variants() -> Vec<Event> {
             name: "laptop".to_owned(),
         },
         Event::Revoked { sessions_closed: 2 },
+        Event::SessionNarrowed {
+            granted: vec![Permission::View],
+        },
         Event::PermissionsChanged {
             granted: vec![Permission::View, Permission::Terminal],
         },

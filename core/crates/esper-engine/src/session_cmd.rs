@@ -1069,6 +1069,22 @@ fn record_revocation(log: &Log, peer: &[u8; 32]) {
     }
 }
 
+/// Record that a live session was narrowed without being ended.
+///
+/// Its own event rather than a [`Event::Revoked`] with a count: nothing
+/// closed, and a log saying a session was closed when it is still running is
+/// worse than no line at all.
+fn record_narrowing(log: &Log, peer: &[u8; 32], granted: &[Permission]) {
+    if let Err(e) = log.append(&Entry::now(
+        peer,
+        Event::SessionNarrowed {
+            granted: granted.to_vec(),
+        },
+    )) {
+        tracing::warn!(error = %e, "could not record a narrowing");
+    }
+}
+
 /// Close a session when its device stops being allowed to have it.
 ///
 /// Returns as soon as it has closed one, so the caller can tell a revocation
@@ -2281,6 +2297,10 @@ async fn serve(
     // What the transport has been told, so the same number is not announced
     // every half second.
     let mut told_capacity: Option<u32> = None;
+    // What the controller has been told this session may do, so one decision
+    // produces one message. `None` until something is taken away: the opening
+    // grant was already agreed when the session was set up.
+    let mut told_permissions: Option<Vec<Permission>> = None;
     loop {
         let turn = tokio::select! {
             _ = stopping.changed() => Turn::Stop,
@@ -2316,11 +2336,17 @@ async fn serve(
                 break;
             }
             // **A revocation reaches the session that device already has.**
-            // Ending it rather than narrowing it: telling a controller
-            // mid-session that it may now do less needs a message on a stream
-            // that can carry one, and the first control stream carries media.
-            // So the session ends with a reason code that says why, and the
-            // controller's next attempt gets the narrower grant.
+            //
+            // Ended only when what the session *is* has gone: a media session
+            // is a picture, so losing `view` ends it and losing anything else
+            // narrows it. That is the same rule the other session kinds
+            // follow, and the reason is that ending a working session over
+            // something it was not doing is a worse answer than either.
+            //
+            // Narrowing is not the controller's decision to accept. Injection
+            // has already stopped at the host — in the code doing the
+            // injecting, on the same signal — so this message is how the
+            // person at the far end finds out, not how it is enforced.
             Turn::Permissions => match attending.live.standing() {
                 crate::permits::Standing::Unchanged => continue,
                 crate::permits::Standing::Forgotten => {
@@ -2331,14 +2357,41 @@ async fn serve(
                     break;
                 }
                 crate::permits::Standing::Narrowed(lost) => {
+                    if lost.contains(&Permission::View) {
+                        println!(
+                            "      · ending this session: {} was taken away",
+                            lost.iter().map(|p| p.name()).collect::<Vec<_>>().join(", ")
+                        );
+                        record_revocation(attending.log, &device);
+                        media.close(esper_proto::Reason::REVOKED);
+                        ours = Some(esper_proto::Reason::REVOKED);
+                        break;
+                    }
+                    let granted = esper_transport::Grants::granted(&attending.live);
+                    // **Only when it has actually moved.** This arm runs on
+                    // every change to the store, including ones about other
+                    // devices, and a controller handed the same set again
+                    // would be told twice about one decision.
+                    if told_permissions.as_ref() == Some(&granted) {
+                        continue;
+                    }
                     println!(
-                        "      · ending this session: {} was taken away",
+                        "      · narrowing this session: {} was taken away, the picture keeps \
+                         flowing",
                         lost.iter().map(|p| p.name()).collect::<Vec<_>>().join(", ")
                     );
-                    record_revocation(attending.log, &device);
-                    media.close(esper_proto::Reason::REVOKED);
-                    ours = Some(esper_proto::Reason::REVOKED);
-                    break;
+                    record_narrowing(attending.log, &device, &granted);
+                    told_permissions = Some(granted.clone());
+                    if control
+                        .send(&MediaMessage::Permissions(esper_proto::PermissionChange {
+                            granted,
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
                 }
             },
             Turn::FromController(Ok(message)) => {
@@ -3010,6 +3063,9 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // to read: said plainly rather than accepted and silently doing
         // nothing.
         let mut driving = None;
+        // What this session holds, as the host last said. Starts from the
+        // grant it opened with, so the first narrowing can say what went.
+        let mut held_permissions: Vec<Permission> = grant.granted.clone();
         if o.control && may_drive {
             match presenter.as_mut() {
                 Some(p) => match announce(&session, esper_proto::StreamPurpose::Input).await {
@@ -3343,6 +3399,37 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             if happened.contains(&esper_present::PresentEvent::CloseRequested) {
                 println!("  · the window was closed");
                 break;
+            }
+            // **What the host says this session may now do.**
+            //
+            // Acted on before anything else in this turn, so a keystroke the
+            // window produced a moment ago is not sent under a permission that
+            // has just gone. It would be refused at the host either way -- the
+            // enforcement is there, not here -- but sending it anyway would
+            // mean this end knew and carried on.
+            if let Some(now_granted) = link.take_permissions() {
+                let lost: Vec<&str> = held_permissions
+                    .iter()
+                    .filter(|p| !now_granted.contains(p))
+                    .map(|p| p.name())
+                    .collect();
+                held_permissions = now_granted;
+                if !lost.is_empty() {
+                    println!("  · the host took away: {}", lost.join(", "));
+                }
+                if !held_permissions.contains(&Permission::Control)
+                    && let Some((source, control)) = driving.as_mut()
+                {
+                    // **Let go of what is held, then stop driving.** A
+                    // modifier held at the moment control went away is one the
+                    // host is about to release on its own timer; saying so
+                    // takes one message and gets there at once.
+                    if source.is_holding() {
+                        let _ = control.send(&esper_proto::InputMessage::ReleaseAll).await;
+                    }
+                    println!("  · no longer driving this session; watching only");
+                    driving = None;
+                }
             }
             if let Some((source, control)) = driving.as_mut() {
                 let mut failed = None;

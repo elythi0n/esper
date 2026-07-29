@@ -564,6 +564,15 @@ impl HostStream {
                 role: Role::Controller,
                 what: message.name(),
             }),
+            // **And this one is an escalation attempt, not a mistake.** A
+            // controller that could state its own permissions could grant
+            // itself any of them, so it is refused here as well as being
+            // refused by `may_be_sent_by` — the host never asks a controller
+            // what it may do, it tells it.
+            MediaMessage::Permissions(_) => Err(StreamError::WrongDirection {
+                role: Role::Controller,
+                what: message.name(),
+            }),
         }
     }
 

@@ -1130,6 +1130,15 @@ fn the_direction_rule_and_what_the_host_accepts_agree() {
         MediaMessage::Keyframe(esper_proto::KeyframeRequest {
             reason: KeyframeReason::LostSync,
         }),
+        // **The one where the direction is the whole point.** A controller
+        // that could state its own permissions could grant itself any of
+        // them, so this must be refused rather than merely ignored.
+        MediaMessage::Permissions(esper_proto::PermissionChange {
+            granted: vec![
+                esper_proto::Permission::View,
+                esper_proto::Permission::Control,
+            ],
+        }),
     ];
     for message in messages {
         let allowed = message.may_be_sent_by(Role::Controller);

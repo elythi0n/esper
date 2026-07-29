@@ -1946,6 +1946,49 @@ print(s.getsockname()[1]); s.close()')
       # revocation — and this is the only test that can catch it, because the
       # two halves are in different processes and the only thing they share is
       # the device store on disk.
+      # **A narrowing is not an ending.** Withdrawing `control` from a session
+      # that is also showing a screen used to close it, which is correct and
+      # heavier than it needs to be: the picture is still permitted. So the
+      # host says what the session may now do and keeps sending.
+      #
+      # The evidence is the clock. A session closed at the revocation would
+      # print its summary four seconds in; one that was narrowed prints it
+      # twelve seconds in, having gone on showing the screen for the eight
+      # seconds in between.
+      echo "  — narrowing a live session instead of ending it"
+      began=$(date +%s)
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        timeout 60 "$BIN/esper-engine" connect "$host_addr" --seconds 12 --control \
+        > "$term_b/narrowed.log" 2>&1 &
+      client=$!
+      sleep 4
+      ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" control >/dev/null
+      wait "$client" || true
+      lasted=$(( $(date +%s) - began ))
+      shown=$( { awk '/^  pictures /{print $2}' "$term_b/narrowed.log" 2>/dev/null || true; } | head -1)
+      if grep -q 'the host took away: control' "$term_b/narrowed.log" &&
+        ! grep -q 'ended the session' "$term_b/narrowed.log" &&
+        [ "$lasted" -ge 10 ]; then
+        printf '  ✓ control was withdrawn and the picture kept flowing: %ss, %s pictures\n' \
+          "$lasted" "${shown:-no}"
+      else
+        printf '  ✗ withdrawing control did not narrow the session (%ss, %s pictures)\n' \
+          "$lasted" "${shown:-no}"
+        sed 's/^/      /' "$term_b/narrowed.log"
+        fail=1
+      fi
+      # And the host called it what it was, rather than logging an ending.
+      if grep -q 'narrowing this session' "$term_a/host.log"; then
+        printf '  ✓ and the host narrowed it rather than ending it\n'
+      else
+        printf '  ✗ the host did not report narrowing the session\n'
+        grep -E 'narrowing|ending this session' "$term_a/host.log" | sed 's/^/      /' || true
+        fail=1
+      fi
+      # Put it back, so what follows is not running against a narrower device
+      # than it was written for.
+      ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" control >/dev/null
+
       echo "  — revoking a device that is connected right now"
       { printf 'echo holding\n'; sleep 15; } | \
         env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" TERM=dumb \

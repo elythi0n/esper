@@ -317,6 +317,16 @@ impl ControllerLink {
         self.stream.take_cursor()
     }
 
+    /// What the host has said this session may now do, if it has said so.
+    ///
+    /// See [`esper_stream::ControllerStream::take_permissions`]: taken rather
+    /// than read, and held until taken, so a narrowing cannot be missed by a
+    /// caller that was busy.
+    #[must_use]
+    pub fn take_permissions(&mut self) -> Option<Vec<esper_proto::Permission>> {
+        self.stream.take_permissions()
+    }
+
     /// Wait for the next control message from the host.
     pub async fn recv_control(&mut self) -> Result<MediaMessage, LinkError> {
         Ok(self.control.recv().await?)
