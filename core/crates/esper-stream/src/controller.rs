@@ -160,6 +160,13 @@ const BASELINE_WINDOWS: usize = 10;
 /// on an unknown link the storm is the worse failure.
 const UNKNOWN_ROUND_TRIP: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// What this build can decode.
+///
+/// Stated rather than assumed, so the check below is already right on the day
+/// a second codec arrives — and so the list a controller *offers* and the list
+/// it will *accept* are the same list rather than two that can drift.
+pub const DECODES: &[esper_proto::Codec] = &[esper_proto::Codec::H264];
+
 /// The floor, so a link measured at nothing still paces.
 ///
 /// Rarely the binding constraint, because the pace also includes the time to
@@ -1036,6 +1043,22 @@ impl ControllerStream {
                 what: "a stream config",
             });
         }
+        // **And a codec this end can decode, checked on every announcement
+        // rather than only on the first.**
+        //
+        // The host refuses a session whose controller cannot decode what it
+        // will send, so by the time a config arrives the codec is agreed. This
+        // is the re-check: a config is re-announced whenever the stream
+        // changes shape, and a stream that came back naming a different codec
+        // would otherwise be reassembled and handed to a decoder that cannot
+        // read it — a session that is up and showing nothing, which is the
+        // failure this product has had twice and would not notice a third
+        // time.
+        if !DECODES.contains(&config.codec) {
+            return Err(StreamError::CannotDecode {
+                codec: config.codec,
+            });
+        }
         // A new SSRC is a new stream, so reassembly starts over rather than
         // trying to interpret the old sequence space.
         self.depacketizer = Depacketizer::new(config.ssrc);
@@ -1567,6 +1590,47 @@ mod tests {
             Some(vec![esper_proto::Permission::View]),
             "the narrower of the two, not the first one seen"
         );
+    }
+
+    /// **A config is checked against what this build decodes, on every
+    /// announcement rather than only the first.**
+    ///
+    /// The host refuses a session whose controller cannot decode what it will
+    /// send, so this is the re-check rather than the check — worth having
+    /// because a config is re-announced whenever the stream changes shape, and
+    /// a stream that came back naming something else would be handed to a
+    /// decoder that cannot read it: a session that is up and showing nothing.
+    ///
+    /// **What this asserts is the accepting half**, because `Codec` has one
+    /// variant today and a codec this build cannot decode is therefore not
+    /// something a test can construct. Naming it after the refusal would be a
+    /// test that passes without exercising anything. The refusing half is
+    /// proven by sabotage — emptying [`DECODES`] fails this — and becomes
+    /// directly testable on the day a second codec exists.
+    #[test]
+    fn a_config_is_checked_against_what_this_build_decodes() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        let config = announced(30);
+        assert!(DECODES.contains(&config.codec), "arrange the case");
+        assert!(
+            c.reconfigure(&config).is_ok(),
+            "a codec this build decodes must be accepted"
+        );
+    }
+
+    /// And the two lists are the same list.
+    ///
+    /// A controller that offered a codec it would then refuse would negotiate
+    /// itself into a session it cannot render. One constant, used by both.
+    #[test]
+    fn what_this_build_offers_is_what_it_accepts() {
+        assert!(!DECODES.is_empty(), "a controller that decodes nothing");
+        for c in DECODES {
+            assert!(
+                c.is_named_in(&[c.name().to_owned()]),
+                "{c:?} does not answer to its own name"
+            );
+        }
     }
 
     /// **A burst measures the link; everything else measures the demand.**

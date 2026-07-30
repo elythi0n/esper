@@ -39,12 +39,20 @@ fi
 endef
 
 .PHONY: all
-all: check-isolation build test
+all: check-isolation check-reached build test
 
 ## Verify the repository references nothing outside itself
 .PHONY: check-isolation
 check-isolation:
 	@./scripts/check-isolation.sh
+
+## Verify every name the security path declares is reached, or recorded as not
+##
+## Rust cannot find this: a `pub` item in a library crate is never dead code,
+## which is where three security types hid in one week. See the script.
+.PHONY: check-reached
+check-reached:
+	@python3 ./scripts/check-reached.py
 
 ## Build both binaries → ./build
 .PHONY: build
@@ -303,7 +311,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation fmt-check lint test build smoke
+ci: check-isolation check-reached fmt-check lint test build smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

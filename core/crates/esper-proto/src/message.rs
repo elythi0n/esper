@@ -569,6 +569,22 @@ impl SessionKind {
     /// sends cannot disagree about what a kind requires. A list rather than
     /// one, because moving files is two permissions that are granted
     /// separately and either of them is a reason to open a session.
+    /// Whether a session of this kind carries video, and so needs a codec
+    /// both ends understand.
+    ///
+    /// One place, for the same reason [`Self::requires`] is one place: the
+    /// check the host makes and the list the controller sends must not
+    /// disagree about whether a codec matters. A shell and a file transfer
+    /// carry no pictures, and refusing one for a codec would refuse it for
+    /// something it was never going to use.
+    #[must_use]
+    pub const fn carries_video(self) -> bool {
+        match self {
+            Self::Screen => true,
+            Self::Terminal | Self::Forward | Self::Files => false,
+        }
+    }
+
     #[must_use]
     pub const fn requires(self) -> &'static [Permission] {
         match self {
@@ -979,6 +995,16 @@ impl Codec {
         match self {
             Self::H264 => "h264",
         }
+    }
+
+    /// Whether a controller listing these names can decode this.
+    ///
+    /// Case-insensitive, because the list is text a peer wrote and `H264` is
+    /// the same codec as `h264`. Not a *prefix* match: a peer offering
+    /// `h264-something-else` is offering something else.
+    #[must_use]
+    pub fn is_named_in(self, offered: &[String]) -> bool {
+        offered.iter().any(|n| n.eq_ignore_ascii_case(self.name()))
     }
 }
 

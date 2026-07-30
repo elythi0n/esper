@@ -44,6 +44,14 @@ build rather than reaching review.
 **This repository must be self-contained.** No file may reference a path outside
 it. `make check-isolation` enforces this.
 
+**Every permission, reason code and audit event must be reached by code that
+is not a test.** `make check-reached` enforces this. A `pub` item in a library
+crate is never dead code, so the compiler cannot tell a permission that is
+enforced from one that nothing consults — and the second grants nothing while
+looking exactly like the first. If a name genuinely has no producer yet, add it
+to the ledger in `scripts/check-reached.py` with the reason; the check also
+fails on a ledger entry that has become untrue.
+
 **No `unwrap`, `expect` or `panic!` in engine code.** A panic reachable from the
 network is a denial of service. Tests and build scripts are exempt; everything
 else returns an error. Clippy enforces it.

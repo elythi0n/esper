@@ -115,6 +115,7 @@ async fn a_controller_is_told_the_permissions_it_actually_holds() {
                 std::sync::Arc::new(GrantStoredPermissions),
                 &device,
                 [1u8; 16],
+                &[esper_proto::Codec::H264],
             )
             .await
             .expect("the host must answer")
@@ -160,6 +161,7 @@ async fn a_refused_session_says_why() {
                 std::sync::Arc::new(RefuseAll),
                 &device,
                 [2u8; 16],
+                &[esper_proto::Codec::H264],
             )
             .await
             .expect("the host must answer")
@@ -197,6 +199,7 @@ async fn asking_for_only_what_you_do_not_hold_is_denied_out_loud() {
                 std::sync::Arc::new(GrantStoredPermissions),
                 &device,
                 [3u8; 16],
+                &[esper_proto::Codec::H264],
             )
             .await
             .expect("the host must answer")
@@ -236,6 +239,7 @@ async fn a_malformed_request_is_refused_rather_than_dropped() {
                 std::sync::Arc::new(GrantStoredPermissions),
                 &device,
                 [4u8; 16],
+                &[esper_proto::Codec::H264],
             )
             .await
             .expect("the host must answer")
@@ -274,6 +278,7 @@ async fn a_silent_controller_is_given_up_on() {
             &device,
             [5u8; 16],
             wait,
+            &[esper_proto::Codec::H264],
         )
         .await
         .expect_err("silence is not a session");

@@ -73,6 +73,14 @@ pub enum SinkError {
 /// Anything that went wrong in a stream.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
+    /// The host announced a codec this build cannot decode.
+    ///
+    /// Its own variant rather than a malformed config: the config is perfectly
+    /// well formed, it just describes a stream this end cannot render, and a
+    /// person told "malformed" would look for a protocol bug instead of a
+    /// build that is missing a decoder.
+    #[error("this build cannot decode {}", codec.name())]
+    CannotDecode { codec: esper_proto::Codec },
     #[error(transparent)]
     Pipeline(#[from] esper_pipeline::pipeline::PipelineError),
     #[error(transparent)]

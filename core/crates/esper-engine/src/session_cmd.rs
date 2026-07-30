@@ -1013,7 +1013,18 @@ async fn agree(
     let id = esper_transport::parked::new_session_id()
         .map_err(|e| format!("no randomness for a session identifier: {e}"))?;
 
-    match answer_session(control, Arc::clone(policy) as _, record, *id.as_bytes()).await {
+    match answer_session(
+        control,
+        Arc::clone(policy) as _,
+        record,
+        *id.as_bytes(),
+        // What this host can send. One entry, because software H.264 is what
+        // Phase 3 shipped -- and stated rather than assumed, so the day a
+        // second codec arrives the refusal below is already correct.
+        &[esper_proto::Codec::H264],
+    )
+    .await
+    {
         Ok(Answered::Granted { grant, kind }) => {
             if let Some(how) = policy.how_the_last_one_was_allowed() {
                 println!("      allowed by {}", crate::consent::describe(how));
@@ -1598,6 +1609,8 @@ async fn serve_session(
     // from anything the peer said about itself.
     let may_control = granted.contains(&Permission::Control);
 
+    // Set when the grant said control and the machine cannot deliver it.
+    let mut cannot_inject = false;
     let input = if may_control {
         let chosen = crate::injector::open();
         for line in &chosen.attempts {
@@ -1610,11 +1623,22 @@ async fn serve_session(
                 true,
             ))
         } else {
-            // Said out loud rather than accepted quietly. A host that took
-            // keystrokes and dropped them would look like a working session
-            // where nothing happens, which is the hardest fault to diagnose
-            // from the other end.
+            // **Said out loud, and said to the end that needs to hear it.**
+            //
+            // A host that took keystrokes and dropped them would look like a
+            // working session where nothing happens, which is the hardest
+            // fault to diagnose from the other end -- and the other end is
+            // exactly where it has to be diagnosed, because that is where
+            // somebody is typing. Printing it here told the wrong person.
+            //
+            // So the session is narrowed to what it can actually do. It is not
+            // a revocation: the grant stands and the next session gets it
+            // again, on a host where the display may well have come back.
+            // Checked per session rather than once at startup for that reason
+            // -- an availability read at startup is a snapshot, which is the
+            // shape of several bugs already in this tree.
             println!("      view only: nothing on this machine can inject input");
+            cannot_inject = true;
             None
         }
     } else {
@@ -1698,6 +1722,12 @@ async fn serve_session(
         }
     };
 
+    // Noted before the three are handed to the task that serves them, because
+    // what the controller has to be told is *whether* each arrived, not the
+    // thing itself.
+    let clipboard_missing = clipboard.is_none();
+    let files_missing = files.is_none();
+
     let waiting_for_streams =
         (input.is_some() || clipboard.is_some() || files.is_some()).then(|| {
             // Accepted in a task because the controller opens these lazily — a
@@ -1751,6 +1781,50 @@ async fn serve_session(
             (None, None)
         }
     };
+
+    // **What this session can actually deliver, which is not always what it
+    // was granted — and the far end has to be told which.**
+    //
+    // Three capabilities can be granted and then turn out to be missing: a
+    // machine with nothing to inject input through, one with no clipboard, one
+    // serving no files. Each of those already said so, carefully, on the
+    // *host's* own output — and each comment explaining why says the fault is
+    // hardest to diagnose from the other end, which is exactly the end that
+    // was not told. A controller offering a cursor that does nothing, or a
+    // paste that goes nowhere, looks like a broken session rather than a
+    // machine that cannot do it.
+    //
+    // So the session is narrowed to what it can do, in one message carrying
+    // the complete set. It is **not** a revocation: the grant stands, the
+    // device keeps it, and the next session gets it again on a machine where
+    // the display may well have come back.
+    let mut deliverable = granted.clone();
+    if cannot_inject {
+        deliverable.retain(|p| *p != Permission::Control);
+    }
+    if clipboard_missing {
+        deliverable.retain(|p| !matches!(p, Permission::ClipboardOut | Permission::ClipboardIn));
+    }
+    if files_missing {
+        deliverable.retain(|p| !matches!(p, Permission::FilesOut | Permission::FilesIn));
+    }
+    if deliverable != granted {
+        let lost: Vec<&str> = granted
+            .iter()
+            .filter(|p| !deliverable.contains(p))
+            .map(|p| p.name())
+            .collect();
+        println!(
+            "      telling the controller this session cannot do: {}",
+            lost.join(", ")
+        );
+        if let Err(e) = link.narrowed_to(deliverable).await {
+            // Not fatal to the session. A controller that was not told offers
+            // something that does not work, which is worse than this line and
+            // better than no session at all.
+            println!("      · could not say so ({e})");
+        }
+    }
 
     let served = serve(
         link,

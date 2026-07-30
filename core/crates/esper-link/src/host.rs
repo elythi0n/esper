@@ -118,6 +118,29 @@ impl HostLink {
         Ok(config)
     }
 
+    /// Tell the controller this session may do less than it was granted.
+    ///
+    /// **Not a revocation** — the grant stands, and the next session gets it
+    /// again. This is for a host that cannot deliver what it agreed to: one
+    /// with nothing to inject input through has a session that is view-only in
+    /// fact, whatever the permissions say, and a controller that was not told
+    /// would offer a cursor that does nothing.
+    ///
+    /// The complete set, never a delta, for the reason
+    /// [`esper_proto::PermissionChange`] gives: two ends that disagree about
+    /// the current state drift further apart with every message.
+    pub async fn narrowed_to(
+        &mut self,
+        granted: Vec<esper_proto::Permission>,
+    ) -> Result<(), LinkError> {
+        self.control
+            .send(&MediaMessage::Permissions(esper_proto::PermissionChange {
+                granted,
+            }))
+            .await?;
+        Ok(())
+    }
+
     /// Run one turn of capture, encode and send.
     ///
     /// Synchronous, and meant to be called from a thread of its own: capture

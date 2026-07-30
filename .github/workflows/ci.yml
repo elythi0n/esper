@@ -204,6 +204,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: ./scripts/check-isolation.sh
 
+  # A `pub` item in a library crate is never dead code, so `dead_code` cannot
+  # see a security type that nothing calls -- and three of those shipped in one
+  # week. This is the check that covers the blind spot; the ledger inside it is
+  # where a name with no producer has to say why.
+  reached:
+    name: every declared name is reached
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 ./scripts/check-reached.py
+
   # Both halves are built by different toolchains from one VERSION file. If they
   # disagree about the release or the protocol, the seam is broken in a way no
   # unit test catches — each half passes its own suite.

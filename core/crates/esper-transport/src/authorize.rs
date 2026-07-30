@@ -121,6 +121,7 @@ pub fn decide_and_clamp(
     policy: &dyn Policy,
     device: &Device,
     request: &SessionRequest,
+    offering: &[esper_proto::Codec],
 ) -> (Verdict, Vec<Permission>) {
     // **The kind first, because it is the answer somebody can act on.** A
     // device asking for a shell it may not have is told which permission it
@@ -140,6 +141,51 @@ pub fn decide_and_clamp(
             ),
             Vec::new(),
         );
+    }
+
+    // **Then whether the two ends can agree on a codec, before anybody is
+    // asked anything.**
+    //
+    // A session that opens and shows nothing is the worst failure this product
+    // has: it looks alive. It has happened twice already for other reasons --
+    // a packetizer sizing datagrams the transport refused, and a keyframe that
+    // never arrived whole -- and both times the session was up and the screen
+    // was blank. A codec mismatch is the same shape, reached by agreeing to
+    // send something the far end cannot decode.
+    //
+    // Before the policy, deliberately. Asking somebody to allow a session that
+    // is about to be refused anyway is asking a question with no consequence,
+    // which is the same rule the consent policy applies to an empty grant.
+    if request.kind.carries_video() {
+        let common = offering.iter().any(|c| c.is_named_in(&request.codecs));
+        if !common {
+            let ours = offering
+                .iter()
+                .map(|c| c.name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return (
+                Verdict::Deny(
+                    Reason::NO_COMMON_CODEC,
+                    // Both lists, because either end may be the one that is
+                    // wrong and whoever reads this cannot see the other side.
+                    format!(
+                        "this host sends {}; that controller offered {}",
+                        if ours.is_empty() {
+                            "no video codec"
+                        } else {
+                            &ours
+                        },
+                        if request.codecs.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            request.codecs.join(", ")
+                        }
+                    ),
+                ),
+                Vec::new(),
+            );
+        }
     }
 
     let verdict = policy.decide(device, request);
@@ -279,8 +325,17 @@ pub async fn answer_session(
     policy: Arc<dyn Policy>,
     device: &Device,
     session_id: [u8; 16],
+    offering: &[esper_proto::Codec],
 ) -> Result<Answered, AuthorizeError> {
-    answer_session_within(control, policy, device, session_id, REQUEST_TIMEOUT).await
+    answer_session_within(
+        control,
+        policy,
+        device,
+        session_id,
+        REQUEST_TIMEOUT,
+        offering,
+    )
+    .await
 }
 
 /// [`answer_session`], with the wait as an argument.
@@ -293,6 +348,7 @@ pub async fn answer_session_within(
     device: &Device,
     session_id: [u8; 16],
     wait: Duration,
+    offering: &[esper_proto::Codec],
 ) -> Result<Answered, AuthorizeError> {
     let request = match tokio::time::timeout(wait, control.recv::<SessionRequest>()).await {
         Ok(r) => r?,
@@ -316,8 +372,10 @@ pub async fn answer_session_within(
     let (verdict, over_reach) = {
         let device = device.clone();
         let request = request.clone();
-        let deciding =
-            tokio::task::spawn_blocking(move || decide_and_clamp(&*policy, &device, &request));
+        let offering = offering.to_vec();
+        let deciding = tokio::task::spawn_blocking(move || {
+            decide_and_clamp(&*policy, &device, &request, &offering)
+        });
         match deciding.await {
             Ok(answer) => answer,
             Err(e) => {
@@ -486,6 +544,9 @@ impl SessionRegistry {
 
 #[cfg(test)]
 mod tests {
+    /// What a host offers, for the tests that are not about codecs.
+    const ANY_CODEC: &[esper_proto::Codec] = &[esper_proto::Codec::H264];
+
     use super::*;
 
     fn key(n: u8) -> [u8; KEY_LEN] {
@@ -559,7 +620,7 @@ mod tests {
             SessionKind::Forward,
             &[Permission::View, Permission::Forward],
         );
-        let (verdict, _) = decide_and_clamp(&GrantStoredPermissions, &d, &r);
+        let (verdict, _) = decide_and_clamp(&GrantStoredPermissions, &d, &r, ANY_CODEC);
         match verdict {
             Verdict::Deny(reason, detail) => {
                 assert_eq!(reason, Reason::PERMISSION_DENIED);
@@ -576,7 +637,7 @@ mod tests {
             &[Permission::View, Permission::Terminal],
         );
         assert!(matches!(
-            decide_and_clamp(&GrantStoredPermissions, &d, &r).0,
+            decide_and_clamp(&GrantStoredPermissions, &d, &r, ANY_CODEC).0,
             Verdict::Deny(Reason::PERMISSION_DENIED, _)
         ));
     }
@@ -589,7 +650,7 @@ mod tests {
             SessionKind::Forward,
             &[Permission::View, Permission::Forward],
         );
-        match decide_and_clamp(&GrantStoredPermissions, &d, &r).0 {
+        match decide_and_clamp(&GrantStoredPermissions, &d, &r, ANY_CODEC).0 {
             Verdict::Grant(g) => assert!(g.contains(&Permission::Forward)),
             other => panic!("expected a grant, got {other:?}"),
         }
@@ -620,7 +681,7 @@ mod tests {
             SessionKind::Forward,
             &[Permission::View, Permission::Forward],
         );
-        let (verdict, _) = decide_and_clamp(&asked, &d, &r);
+        let (verdict, _) = decide_and_clamp(&asked, &d, &r, ANY_CODEC);
         assert!(matches!(verdict, Verdict::Deny(..)));
         assert!(
             !asked.0.load(std::sync::atomic::Ordering::Relaxed),
@@ -631,7 +692,7 @@ mod tests {
         // that nothing gets through.
         let asked = Noticed(std::sync::atomic::AtomicBool::new(false));
         let d = device_with(&[Permission::View, Permission::Forward]);
-        let (verdict, _) = decide_and_clamp(&asked, &d, &r);
+        let (verdict, _) = decide_and_clamp(&asked, &d, &r, ANY_CODEC);
         assert!(matches!(verdict, Verdict::Grant(_)));
         assert!(asked.0.load(std::sync::atomic::Ordering::Relaxed));
     }
@@ -653,7 +714,7 @@ mod tests {
         let d = device_with(&[Permission::View, Permission::Forward]);
         let r = asking_for(SessionKind::Forward, &[Permission::Forward]);
         assert!(matches!(
-            decide_and_clamp(&ViewOnly, &d, &r).0,
+            decide_and_clamp(&ViewOnly, &d, &r, ANY_CODEC).0,
             Verdict::Deny(Reason::PERMISSION_DENIED, _)
         ));
     }
@@ -688,7 +749,7 @@ mod tests {
         }
 
         let d = device_with(&[Permission::View]);
-        let (verdict, over_reach) = decide_and_clamp(&OverReaching, &d, &request(&[]));
+        let (verdict, over_reach) = decide_and_clamp(&OverReaching, &d, &request(&[]), ANY_CODEC);
 
         match verdict {
             Verdict::Grant(g) => {
@@ -720,7 +781,8 @@ mod tests {
             }
         }
         let d = device_with(&[Permission::View, Permission::Control]);
-        let (verdict, over_reach) = decide_and_clamp(&GrantsUnattended, &d, &request(&[]));
+        let (verdict, over_reach) =
+            decide_and_clamp(&GrantsUnattended, &d, &request(&[]), ANY_CODEC);
         assert!(
             matches!(verdict, Verdict::Deny(Reason::PERMISSION_DENIED, _)),
             "a grant of nothing permitted must become a denial, not an empty grant"
@@ -731,7 +793,8 @@ mod tests {
     #[test]
     fn a_denial_passes_through_the_clamp_unchanged() {
         let d = device_with(&[Permission::View]);
-        let (verdict, over) = decide_and_clamp(&RefuseAll, &d, &request(&[Permission::View]));
+        let (verdict, over) =
+            decide_and_clamp(&RefuseAll, &d, &request(&[Permission::View]), ANY_CODEC);
         assert!(matches!(verdict, Verdict::Deny(Reason::HOST_DISABLED, _)));
         assert!(over.is_empty());
     }
@@ -749,7 +812,7 @@ mod tests {
             }
         }
         let d = device_with(&[Permission::View, Permission::Control]);
-        let (verdict, _) = decide_and_clamp(&Repeats, &d, &request(&[]));
+        let (verdict, _) = decide_and_clamp(&Repeats, &d, &request(&[]), ANY_CODEC);
         match verdict {
             Verdict::Grant(g) => {
                 assert_eq!(g.len(), 2, "duplicates must not survive: {g:?}");
@@ -816,6 +879,109 @@ mod tests {
         assert!(r.is_well_formed());
         r.reason = "x".repeat(esper_proto::MAX_REASON_LEN + 1);
         assert!(!r.is_well_formed());
+    }
+
+    /// **A session that opens and shows nothing is the worst failure there
+    /// is, because it looks alive.**
+    ///
+    /// It has happened twice for other reasons — a packetizer sizing datagrams
+    /// the transport refused, and a keyframe that never arrived whole — and
+    /// both times the session was up and the screen was blank. Agreeing to
+    /// send a codec the far end cannot decode is the same shape, so the two
+    /// ends have to agree before the session opens rather than after.
+    #[test]
+    fn a_controller_that_cannot_decode_what_the_host_sends_is_refused() {
+        let d = device_with(&[Permission::View]);
+        let mut r = request(&[Permission::View]);
+        r.codecs = vec!["av1".to_owned()];
+        let (verdict, _) = decide_and_clamp(&GrantStoredPermissions, &d, &r, ANY_CODEC);
+        match verdict {
+            Verdict::Deny(reason, detail) => {
+                assert_eq!(reason, esper_proto::Reason::NO_COMMON_CODEC);
+                // Both lists, because either end may be the wrong one and
+                // whoever reads this cannot see the other side.
+                assert!(detail.contains("h264"), "{detail}");
+                assert!(detail.contains("av1"), "{detail}");
+            }
+            Verdict::Grant(g) => panic!("granted {g:?} for a codec nobody shares"),
+        }
+    }
+
+    /// And a controller that says nothing is asking the host to guess.
+    #[test]
+    fn an_empty_codec_list_is_not_a_codec() {
+        let d = device_with(&[Permission::View]);
+        let mut r = request(&[Permission::View]);
+        r.codecs = Vec::new();
+        let (verdict, _) = decide_and_clamp(&GrantStoredPermissions, &d, &r, ANY_CODEC);
+        assert!(
+            matches!(
+                verdict,
+                Verdict::Deny(esper_proto::Reason::NO_COMMON_CODEC, _)
+            ),
+            "{verdict:?}"
+        );
+    }
+
+    /// Named case-insensitively, because the list is text a peer wrote.
+    #[test]
+    fn a_codec_is_matched_by_name_whatever_case_it_was_written_in() {
+        let d = device_with(&[Permission::View]);
+        let mut r = request(&[Permission::View]);
+        r.codecs = vec!["H264".to_owned()];
+        let (verdict, _) = decide_and_clamp(&GrantStoredPermissions, &d, &r, ANY_CODEC);
+        assert!(matches!(verdict, Verdict::Grant(_)), "{verdict:?}");
+        // But not by prefix: something else is something else.
+        r.codecs = vec!["h264-annexb-flavour".to_owned()];
+        let (verdict, _) = decide_and_clamp(&GrantStoredPermissions, &d, &r, ANY_CODEC);
+        assert!(matches!(verdict, Verdict::Deny(..)), "{verdict:?}");
+    }
+
+    /// **A shell is not refused for a codec it was never going to use.**
+    ///
+    /// The check that would be easiest to get wrong: every non-screen session
+    /// sends an empty codec list, because it carries no pictures. A codec
+    /// check that did not ask what the session was *for* would refuse every
+    /// terminal, forward and file transfer in the product.
+    #[test]
+    fn a_session_that_carries_no_video_needs_no_codec() {
+        for kind in [
+            esper_proto::SessionKind::Terminal,
+            esper_proto::SessionKind::Forward,
+            esper_proto::SessionKind::Files,
+        ] {
+            assert!(!kind.carries_video(), "{kind:?}");
+            let d = device_with(&[
+                Permission::Terminal,
+                Permission::Forward,
+                Permission::FilesOut,
+            ]);
+            let mut r = request(&[]);
+            r.kind = kind;
+            r.codecs = Vec::new();
+            r.want = kind.requires().to_vec();
+            let (verdict, _) = decide_and_clamp(&GrantStoredPermissions, &d, &r, ANY_CODEC);
+            assert!(
+                matches!(verdict, Verdict::Grant(_)),
+                "{kind:?} was refused: {verdict:?}"
+            );
+        }
+    }
+
+    /// A host that can send nothing refuses rather than opening a session it
+    /// cannot serve.
+    #[test]
+    fn a_host_offering_no_codec_refuses_a_screen() {
+        let d = device_with(&[Permission::View]);
+        let r = request(&[Permission::View]);
+        let (verdict, _) = decide_and_clamp(&GrantStoredPermissions, &d, &r, &[]);
+        match verdict {
+            Verdict::Deny(reason, detail) => {
+                assert_eq!(reason, esper_proto::Reason::NO_COMMON_CODEC);
+                assert!(detail.contains("no video codec"), "{detail}");
+            }
+            Verdict::Grant(g) => panic!("granted {g:?} with nothing to send"),
+        }
     }
 
     #[test]
