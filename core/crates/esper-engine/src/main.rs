@@ -356,7 +356,8 @@ fn print_help() {
            pair       pair with another device, in either direction\n  \
            config     show every setting and where its value came from\n  \
            devices    list paired devices and what they may do\n  \
-           grant      give a paired device a permission\n  \
+           grant      give a paired device a permission (--yes to confirm a\n  \
+           \x20          dangerous one without being asked)\n  \
            revoke     take a permission away\n  \
            keep       make a one-session pairing last\n  \
            forget     unpair a device entirely\n  \

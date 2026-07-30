@@ -1609,6 +1609,20 @@ async fn serve_session(
     // from anything the peer said about itself.
     let may_control = granted.contains(&Permission::Control);
 
+    // **The monitor table the injector maps pointer positions through, as it
+    // changes.**
+    //
+    // A `watch` because only the latest layout matters and an input stream
+    // opened later must get the current one rather than a queue of old ones.
+    //
+    // The outgoing pointer path has done this since multi-monitor shipped --
+    // "a switch would leave every pointer position expressed as a fraction of
+    // the screen that is no longer on show" -- and the incoming path had the
+    // same problem with nothing to fix it. `Dispatcher::set_monitors` was
+    // written for exactly this, with the comment "after the host's screens
+    // changed", and had no caller.
+    let (layout, layout_now) = tokio::sync::watch::channel(monitors_from(&config));
+
     // Set when the grant said control and the machine cannot deliver it.
     let mut cannot_inject = false;
     let input = if may_control {
@@ -1619,7 +1633,7 @@ async fn serve_session(
         if chosen.real {
             Some(esper_input::Dispatcher::new(
                 chosen.sink,
-                monitors_from(&config),
+                layout_now.borrow().clone(),
                 true,
             ))
         } else {
@@ -1740,6 +1754,7 @@ async fn serve_session(
             tokio::spawn(serve_extra_streams(ExtraStreams {
                 accepting,
                 input,
+                layout: layout_now,
                 clipboard,
                 files,
                 stopping,
@@ -1838,6 +1853,7 @@ async fn serve_session(
             pointer,
             watch: watch.as_ref(),
             live: live.clone(),
+            layout,
             log,
             capacity,
         },
@@ -1905,6 +1921,8 @@ struct ExtraStreams {
     accepting: esper_transport::ControlAcceptor,
     /// Taken by the first input stream. There is only one keyboard.
     input: Option<esper_input::Dispatcher>,
+    /// The host's screens, as they change, for the injector to map through.
+    layout: tokio::sync::watch::Receiver<Vec<esper_input::Monitor>>,
     /// Taken by the first clipboard stream. There is only one clipboard.
     clipboard: Option<crate::clipboard_task::Attached>,
     /// **Shared, not taken.** A file stream is one file, so a session has as
@@ -1987,8 +2005,9 @@ async fn serve_extra_streams(mut extras: ExtraStreams) {
                     served_input = true;
                     let stopping = extras.stopping.clone();
                     let live = extras.live.clone();
+                    let layout = extras.layout.clone();
                     children.0.push(tokio::spawn(serve_input(
-                        control, dispatcher, stopping, live,
+                        control, dispatcher, stopping, live, layout,
                     )));
                 }
                 // **Two different refusals, said differently.** One keyboard
@@ -2033,6 +2052,7 @@ async fn serve_input(
     mut dispatcher: esper_input::Dispatcher,
     mut stopping: tokio::sync::watch::Receiver<bool>,
     mut live: crate::permits::Live,
+    mut layout: tokio::sync::watch::Receiver<Vec<esper_input::Monitor>>,
 ) {
     let mut control = session_input;
     let mut refusals = 0u64;
@@ -2061,6 +2081,16 @@ async fn serve_input(
                     }
                     continue;
                 }
+                // **The screens moved, so the table this maps through has to.**
+                // A pointer position is a fraction of a monitor, so a stale
+                // table puts a click at the right fraction of the wrong
+                // screen -- or names a monitor that is no longer there, which
+                // is refused and counted and looks to the person clicking
+                // like a session that stopped taking input.
+                Ok(()) = layout.changed() => {
+                    dispatcher.set_monitors(layout.borrow_and_update().clone());
+                    continue;
+                }
                 m = control.recv::<esper_proto::InputMessage>() => m,
             }
         } else {
@@ -2070,6 +2100,10 @@ async fn serve_input(
                     if !esper_transport::Grants::allows(&live, esper_proto::Permission::Control) {
                         break;
                     }
+                    continue;
+                }
+                Ok(()) = layout.changed() => {
+                    dispatcher.set_monitors(layout.borrow_and_update().clone());
                     continue;
                 }
                 m = control.recv::<esper_proto::InputMessage>() => m,
@@ -2189,6 +2223,9 @@ struct Attending<'a> {
     watch: Option<&'a crate::cursor_task::CursorWatch>,
     /// What this session's device may do, as it changes.
     live: crate::permits::Live,
+    /// The host's screens, published whenever they change, so the injector
+    /// maps pointer positions through the layout that is on show.
+    layout: tokio::sync::watch::Sender<Vec<esper_input::Monitor>>,
     /// What happened, for somebody reading it afterwards.
     log: &'a Log,
     /// Where what the controller measures the link at goes, for this
@@ -2555,11 +2592,23 @@ async fn serve(
                 // a switch would leave every pointer position expressed as a
                 // fraction of the screen that is no longer on show — drawn at
                 // the right fraction of the wrong monitor.
-                if let MediaMessage::Config(config) = &message
-                    && let Some(watch) = attending.watch
-                    && let Some(m) = config.monitors.iter().find(|m| m.id == config.selected)
-                {
-                    watch.watch(m.id, m.x, m.y, m.width, m.height);
+                if let MediaMessage::Config(config) = &message {
+                    if let Some(watch) = attending.watch
+                        && let Some(m) = config.monitors.iter().find(|m| m.id == config.selected)
+                    {
+                        watch.watch(m.id, m.x, m.y, m.width, m.height);
+                    }
+                    // **And a new monitor to inject through**, which is the
+                    // same event and the same reasoning read the other way: a
+                    // pointer position arriving from the controller is a
+                    // fraction of a monitor, so an injector working from the
+                    // table this session opened with would put a click at the
+                    // right fraction of the wrong screen.
+                    //
+                    // Sent even with no input stream open: the channel holds
+                    // the latest layout, so a stream opened afterwards starts
+                    // from the current one rather than from the opening one.
+                    attending.layout.send_replace(monitors_from(config));
                 }
                 if control.send(&message).await.is_err() {
                     break;

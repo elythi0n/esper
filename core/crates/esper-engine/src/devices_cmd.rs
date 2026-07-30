@@ -89,9 +89,18 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
         Change::Grant => "grant",
         Change::Revoke => "revoke",
     };
-    let [prefix, names @ ..] = args else {
+    // **Answering the confirmation in advance, for a machine that has nobody
+    // to ask.** Provisioning a host over a pipeline has no terminal, and the
+    // alternative to a flag is somebody editing the device store by hand —
+    // which skips the validation and the audit entry as well as the question.
+    //
+    // Taken out before the positional arguments are read, so its position does
+    // not matter and it cannot be mistaken for a fingerprint.
+    let answered_already = args.iter().any(|a| a == "--yes");
+    let args: Vec<String> = args.iter().filter(|a| *a != "--yes").cloned().collect();
+    let [prefix, names @ ..] = args.as_slice() else {
         return Err(format!(
-            "usage: {} {verb} <fingerprint> <permission>...\n\
+            "usage: {} {verb} <fingerprint> <permission>... [--yes]\n\
              permissions: {}",
             crate::net::me(),
             every_permission()
@@ -117,6 +126,29 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
         })?;
         if !wanted.contains(&p) {
             wanted.push(p);
+        }
+    }
+
+    // **A sensitive permission is confirmed before it is written.**
+    //
+    // `security.md` has always said so — "`unattended` is the dangerous one
+    // and is treated as such: granting it requires confirmation at the host" —
+    // and `Permission::is_sensitive` was written to express it. Every
+    // reference to that function was a test, so the rule was stated,
+    // expressed, and enforced nowhere: `grant <fp> unattended` wrote
+    // permanent unattended access and printed a success line.
+    //
+    // It matters most for that one permission, because `unattended` is what
+    // removes the prompt a *session* is otherwise held up by. Granting it
+    // without a word is a way to switch off consent without being asked.
+    if matches!(what, Change::Grant) {
+        let sensitive: Vec<Permission> = wanted
+            .iter()
+            .copied()
+            .filter(|p| p.is_sensitive())
+            .collect();
+        if !sensitive.is_empty() && !answered_already {
+            confirm_sensitive(prefix, &sensitive)?;
         }
     }
 
@@ -302,11 +334,110 @@ fn find<'a>(store: &'a DeviceStore, prefix: &str) -> Result<&'a [u8; 32], String
     }
 }
 
+/// How long somebody has to confirm a sensitive grant.
+///
+/// Shorter than a session prompt, because whoever typed the command is at the
+/// keyboard: they are answering a question they just caused.
+const CONFIRM_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Ask before writing a permission that is dangerous to hold.
+///
+/// **Fail closed, and say what to do instead.** A grant run by a script, or in
+/// a pipeline, or anywhere with no terminal, has nobody to ask — so it is
+/// refused rather than assumed. The way to grant one deliberately is to be at
+/// the machine, which is the whole point of the rule.
+///
+/// # What this does not defend against
+///
+/// A shell **on** this machine, including one Esper itself is serving to a
+/// device holding `terminal`. That shell has a terminal of its own, so a
+/// confirmation printed into it is answered by whoever is driving it. Closing
+/// that needs something the remote side cannot supply, which is a Phase 14
+/// question and is recorded as one. What this closes is the accident and the
+/// unattended script, which is worth closing on its own.
+fn confirm_sensitive(prefix: &str, sensitive: &[Permission]) -> Result<(), String> {
+    let names = sensitive
+        .iter()
+        .map(|p| p.name())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let console = crate::consent::Console::open();
+    if !console.can_ask() {
+        return Err(format!(
+            "granting {names} needs confirming at the host, and there is no terminal here \
+             to confirm at.\nRun it where somebody can answer, or say so in the command:\n    \
+             {} grant {prefix} {names} --yes",
+            crate::net::me()
+        ));
+    }
+    let lines = vec![
+        format!("about to grant {names}"),
+        "this is held until somebody takes it away, and applies to every session".to_owned(),
+    ];
+    match console.confirm(&lines, "grant it?", CONFIRM_WITHIN) {
+        crate::consent::Answer::Yes => Ok(()),
+        crate::consent::Answer::No => Err("nothing was changed".to_owned()),
+        crate::consent::Answer::Silence => {
+            Err("nobody answered, so nothing was changed".to_owned())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// **Which permissions need confirming is one list, and it is the
+    /// protocol's.**
+    ///
+    /// Not a second copy here: a list in this file that drifted from
+    /// `is_sensitive` would mean the rule the design states and the rule the
+    /// command applies were two different rules, and the one that mattered
+    /// would be whichever was written last.
+    #[test]
+    fn the_dangerous_permissions_are_the_ones_the_protocol_says_are() {
+        // Each of these is dangerous for a different reason, and each is worth
+        // a question: `unattended` removes the prompt a session is otherwise
+        // held up by, `files_in` writes to somebody's machine, and `record`
+        // keeps a copy of what happened on it.
+        for p in [
+            Permission::Unattended,
+            Permission::FilesIn,
+            Permission::Record,
+        ] {
+            assert!(p.is_sensitive(), "{} must be confirmed", p.name());
+        }
+        // And the ordinary ones are not, or the confirmation becomes a thing
+        // people learn to type through.
+        for p in [
+            Permission::View,
+            Permission::Control,
+            Permission::ClipboardOut,
+            Permission::FilesOut,
+            Permission::Terminal,
+        ] {
+            assert!(!p.is_sensitive(), "{} must not need a question", p.name());
+        }
+    }
+
+    /// `--yes` is taken out wherever it appears, so it cannot be read as a
+    /// fingerprint or as a permission name.
+    #[test]
+    fn the_confirmation_flag_is_not_a_positional_argument() {
+        for args in [
+            vec!["--yes", "abc", "unattended"],
+            vec!["abc", "--yes", "unattended"],
+            vec!["abc", "unattended", "--yes"],
+        ] {
+            let owned: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+            let answered = owned.iter().any(|a| a == "--yes");
+            let rest: Vec<String> = owned.into_iter().filter(|a| a != "--yes").collect();
+            assert!(answered);
+            assert_eq!(rest, vec!["abc".to_owned(), "unattended".to_owned()]);
+        }
+    }
 
     /// A device with a real key.
     ///

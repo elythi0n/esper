@@ -387,6 +387,129 @@ mod tests {
 
     /// What a sink was actually asked to do, checked directly rather than
     /// through the dispatcher's counts.
+    /// A sink whose record survives being handed to a dispatcher.
+    ///
+    /// [`NullSink`] keeps its own, and a dispatcher owns its sink in a box, so
+    /// a test that wants to see what was injected *through* a dispatcher needs
+    /// somewhere shared to look.
+    #[derive(Debug, Default)]
+    struct Shared {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Point>>>,
+        held: Held,
+    }
+
+    impl crate::InputSink for Shared {
+        fn key(&mut self, _event: KeyEvent) -> Result<(), InputError> {
+            Ok(())
+        }
+        fn pointer(&mut self, at: Point) -> Result<(), InputError> {
+            self.seen.lock().expect("not poisoned").push(at);
+            Ok(())
+        }
+        fn button(&mut self, _event: PointerButton) -> Result<(), InputError> {
+            Ok(())
+        }
+        fn scroll(&mut self, _scroll: Scroll) -> Result<(), InputError> {
+            Ok(())
+        }
+        fn release_all(&mut self) -> Result<(), InputError> {
+            Ok(())
+        }
+        fn held(&self) -> &Held {
+            &self.held
+        }
+        fn backend(&self) -> &'static str {
+            "shared"
+        }
+    }
+
+    /// **A pointer is a fraction of a monitor, so the table it maps through
+    /// decides where a click lands.**
+    ///
+    /// The host's screens move while a session is running — a monitor plugged
+    /// in, unplugged, rearranged, or the viewer asking for a different one —
+    /// and the injector working from the table the session *opened* with puts
+    /// every click at the right fraction of the wrong screen. The outgoing
+    /// pointer path has followed the layout since multi-monitor shipped; this
+    /// is the incoming half, which had `set_monitors` written for it and no
+    /// caller.
+    #[test]
+    fn a_pointer_follows_the_screens_when_they_move() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut d = Dispatcher::new(
+            Box::new(Shared {
+                seen: std::sync::Arc::clone(&seen),
+                held: Held::default(),
+            }),
+            vec![Monitor {
+                id: 1,
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }],
+            true,
+        );
+        let middle = InputMessage::Pointer(PointerMove {
+            monitor: 1,
+            x: u16::MAX / 2,
+            y: u16::MAX / 2,
+        });
+        d.apply(&middle).expect("injected");
+
+        // The same screen, rearranged: further right and a different shape.
+        d.set_monitors(vec![Monitor {
+            id: 1,
+            x: 3000,
+            y: 200,
+            width: 2560,
+            height: 1440,
+        }]);
+        d.apply(&middle).expect("injected");
+
+        let points = seen.lock().expect("not poisoned").clone();
+        assert_eq!(points.len(), 2);
+        let first = points.first().expect("one");
+        let second = points.get(1).expect("two");
+        assert!(
+            first.x < 1920 && first.y < 1080,
+            "the middle of the first arrangement: {first:?}"
+        );
+        assert!(
+            second.x > 3000 && second.y > 200,
+            "the same message must land on the screen as it is now, not as it \
+             was: {second:?}"
+        );
+    }
+
+    /// And a screen that has been unplugged is refused rather than mapped
+    /// through a table that still remembers it.
+    #[test]
+    fn a_pointer_on_a_screen_that_was_unplugged_is_refused() {
+        let mut d = dispatcher(true);
+        let on_the_second = InputMessage::Pointer(PointerMove {
+            monitor: 1,
+            x: 0,
+            y: 0,
+        });
+        d.apply(&on_the_second).expect("two screens to begin with");
+
+        d.set_monitors(vec![Monitor {
+            id: 0,
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }]);
+        let e = d
+            .apply(&on_the_second)
+            .expect_err("monitor 1 is not there any more");
+        assert!(
+            matches!(e, InputError::NoSuchMonitor { monitor: 1, .. }),
+            "{e:?}"
+        );
+    }
+
     #[test]
     fn the_sink_is_asked_for_the_right_point() {
         let mut sink = NullSink::new();

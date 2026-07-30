@@ -176,42 +176,46 @@ impl Console {
     }
 }
 
-impl Ask for Console {
-    fn can_ask(&self) -> bool {
+impl Console {
+    /// Whether there is a terminal to ask at.
+    ///
+    /// Inherent as well as on [`Ask`], so a caller that only wants to ask one
+    /// question does not have to import a trait to find out whether it can.
+    #[must_use]
+    pub const fn can_ask(&self) -> bool {
         self.a_terminal
     }
 
-    fn ask(&self, about: &Asked, within: Duration) -> Answer {
-        let Ok(lines) = self.lines.lock() else {
+    /// Ask a person at the terminal a yes-or-no question, safely.
+    ///
+    /// **One place that knows how to do this**, because the two things that
+    /// make it safe are the two easiest to leave out, and leaving either out
+    /// is a hole rather than a papercut:
+    ///
+    /// - **Anything already typed is thrown away first.** A newline sitting in
+    ///   the terminal's buffer from before the question was printed is not an
+    ///   answer to it, and something granted by a stray keystroke is something
+    ///   nobody agreed to.
+    /// - **Only yes is yes.** An empty line is the default and the default is
+    ///   no; anything unrecognised is asked again rather than guessed at,
+    ///   because a guess in this direction is the one that says yes.
+    ///
+    /// `lines` is the question's context, one line each; `question` is the
+    /// last line, which is what somebody is answering.
+    pub fn confirm(&self, lines: &[String], question: &str, within: Duration) -> Answer {
+        let Ok(typed) = self.lines.lock() else {
             // The reader's channel is poisoned, which means a panic somewhere
             // holding it. Refusing is the only safe answer.
             return Answer::No;
         };
-        // **Anything already typed is thrown away first.** A newline sitting in
-        // the buffer from before the question was asked is not an answer to it,
-        // and a session opened by a stray keystroke is a session nobody agreed
-        // to.
-        while lines.try_recv().is_ok() {}
+        while typed.try_recv().is_ok() {}
 
-        let what = if about.granted.is_empty() {
-            "nothing".to_owned()
-        } else {
-            about
-                .granted
-                .iter()
-                .map(|p| p.name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
         println!();
-        println!("  ┌ a device wants to open a {} session", about.kind);
-        println!(
-            "  │ from     {} ({})",
-            shown(&about.name),
-            shown(&about.fingerprint)
-        );
-        println!("  │ allowing {what}");
-        print!("  └ allow it? [y/N] ({}s) ", within.as_secs().max(1));
+        for (i, line) in lines.iter().enumerate() {
+            let edge = if i == 0 { '┌' } else { '│' };
+            println!("  {edge} {line}");
+        }
+        print!("  └ {question} [y/N] ({}s) ", within.as_secs().max(1));
         // Flushed, because the prompt has no newline: without this it sits in
         // the buffer and somebody is asked a question they cannot see.
         let _ = std::io::stdout().flush();
@@ -223,13 +227,9 @@ impl Ask for Console {
                 println!("\n  · nobody answered");
                 return Answer::Silence;
             }
-            match lines.recv_timeout(left) {
+            match typed.recv_timeout(left) {
                 Ok(line) => {
                     let said = line.trim().to_ascii_lowercase();
-                    // **Only yes is yes.** An empty line is the default, and
-                    // the default is no; anything unrecognised is asked again
-                    // rather than guessed at, because guessing in this
-                    // direction opens a session.
                     if said == "y" || said == "yes" {
                         return Answer::Yes;
                     }
@@ -247,6 +247,38 @@ impl Ask for Console {
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Answer::Silence,
             }
         }
+    }
+}
+
+impl Ask for Console {
+    fn can_ask(&self) -> bool {
+        Self::can_ask(self)
+    }
+
+    fn ask(&self, about: &Asked, within: Duration) -> Answer {
+        let what = if about.granted.is_empty() {
+            "nothing".to_owned()
+        } else {
+            about
+                .granted
+                .iter()
+                .map(|p| p.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        self.confirm(
+            &[
+                format!("a device wants to open a {} session", about.kind),
+                format!(
+                    "from     {} ({})",
+                    shown(&about.name),
+                    shown(&about.fingerprint)
+                ),
+                format!("allowing {what}"),
+            ],
+            "allow it?",
+            within,
+        )
     }
 }
 

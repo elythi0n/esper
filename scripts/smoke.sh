@@ -364,7 +364,46 @@ else
     # host started with no terminal has nobody — so it refuses, which is the
     # point. The suite runs headless, so every session in it is an unattended
     # one and has to say so. Checked directly a few lines down.
-    ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended >/dev/null
+    ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null
+
+    # **And a dangerous permission is not granted by accident.** `security.md`
+    # has always said granting `unattended` requires confirming at the host,
+    # and `Permission::is_sensitive` was written to say which ones — with every
+    # reference to it in a test, so the rule was enforced nowhere. There is no
+    # terminal here to confirm at, so the bare form must refuse and say how.
+    if ! ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" record > "$term_a/sensitive.log" 2>&1; then
+      if grep -q 'needs confirming at the host' "$term_a/sensitive.log" &&
+        grep -q -- '--yes' "$term_a/sensitive.log"; then
+        printf '  ✓ a dangerous permission is not granted without confirming, and says how\n'
+      else
+        printf '  ✗ the refusal did not explain itself\n'
+        sed 's/^/      /' "$term_a/sensitive.log"
+        fail=1
+      fi
+    else
+      printf '  ✗ a dangerous permission was granted with nobody to confirm it\n'
+      fail=1
+    fi
+    # And it really was not written: the refusal must come before the store.
+    #
+    # Reading only the device's own `may` line, because the listing also prints
+    # every permission there is as help — the first version of this check
+    # grepped the whole output and reported a failure that was the help text.
+    if ESPER_HOME="$term_a" "$BIN/esper-engine" devices |
+      awk '/^      may /' | grep -q 'record'; then
+      printf '  ✗ the refused permission was written anyway\n'
+      fail=1
+    else
+      printf '  ✓ and nothing was written\n'
+    fi
+    # An ordinary permission still needs no ceremony.
+    if ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" clipboard-out >/dev/null 2>&1; then
+      printf '  ✓ an ordinary permission is granted without a question\n'
+    else
+      printf '  ✗ an ordinary permission was held up by the confirmation\n'
+      fail=1
+    fi
+    ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" clipboard-out >/dev/null 2>&1 || true
 
     # **The timeout is longer than the suite takes, with room.** This host is
     # used by the last check in the file as well as the first, so its own
@@ -1418,7 +1457,10 @@ print(s.getsockname()[1]); s.close()')
         fail=1
       fi
 
-      ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" files-out files-in >/dev/null
+      # `files-in` is one of the dangerous ones — writing to somebody's machine
+      # is not the same as reading from it — so it needs the confirmation this
+      # suite has nobody to give.
+      ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" files-out files-in --yes >/dev/null
       pushed=$(cd "$cp_work" && ESPER_HOME="$term_b" timeout 90 \
         "$cp_bin" cp report.bin "$cp_addr:reports/report.bin" 2>&1 || true)
       want=$( { sha256sum "$cp_work/report.bin" || true; } | awk '{print $1}')
@@ -1980,7 +2022,7 @@ print(s.getsockname()[1]); s.close()')
         printf '%s\n' "$alone" | grep -i 'refus' | sed 's/^/      /'
         fail=1
       fi
-      ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended >/dev/null
+      ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null
 
       # **And the ordinary case says nothing about waiting.** A device that may
       # connect unattended is answered inside a round trip, so a note about

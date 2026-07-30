@@ -86,6 +86,44 @@ LEDGER = {
 
 CRATES = Path("core/crates")
 
+# Functions whose absence of a caller was, or would be, a silent bug.
+#
+# The other half of this check, with the opposite polarity to the ledger: the
+# ledger says "unreached is fine if you say why", and this says "these
+# specific ones must be called". A `pub fn` in a library crate is never dead
+# code, so nothing else notices when a call site goes away -- and twice now
+# the call site was the whole feature.
+#
+# Deliberately short. Every entry is a bug that happened or would be silent;
+# adding one without that would dilute the list into the 100-odd accessors and
+# test builders that legitimately have no production caller.
+MUST_BE_CALLED = {
+    "set_mtu": (
+        "the packetizer follows the path, and the path moves. Both of these "
+        "existed with no caller while QUIC's estimate went 1351 -> 1382 -> 1414 "
+        "-> 1162 in one session, and the transport silently refused every "
+        "datagram that was then too large: the session looked alive and showed "
+        "nothing"
+    ),
+    "set_monitors": (
+        "the injector's monitor table, and the host's screens move. A pointer "
+        "position is a fraction of a monitor, so without a caller every click "
+        "after a layout change lands at the right fraction of the wrong screen "
+        "-- or names a monitor that is gone and is refused, which looks like a "
+        "session that stopped taking input"
+    ),
+    "is_sensitive": (
+        "which permissions may not be granted without somebody confirming. "
+        "Every reference to it was a test, so `grant <fp> unattended` wrote "
+        "permanent unattended access and printed a success line -- while "
+        "security.md said it required confirmation at the host"
+    ),
+    "release_all": (
+        "what stops a key being left held down on somebody else's machine when "
+        "a session ends however it ends"
+    ),
+}
+
 
 def strip_test_modules(text: str) -> str:
     """Remove `#[cfg(test)] mod ... { ... }` blocks, matching braces.
@@ -183,12 +221,82 @@ FAMILIES = [
 ]
 
 
+DECL = re.compile(r"^\s*pub (?:const |async |unsafe )?fn (\w+)", re.M)
+CALL = re.compile(r"\b([a-z_][a-z0-9_]*)\s*\(")
+
+
+def called_in_production() -> set[str]:
+    """Every function name that production code calls."""
+    called: set[str] = set()
+    for f in sorted(CRATES.rglob("*.rs")):
+        if "/tests/" in str(f):
+            continue
+        for line in strip_test_modules(f.read_text()).split("\n"):
+            t = line.lstrip()
+            if t.startswith("//") or DECL.match(line):
+                continue
+            called.update(CALL.findall(line))
+    return called
+
+
+def message_unions() -> list[tuple[str, str, Path, str, str]]:
+    """Every message enum the protocol declares, found rather than listed.
+
+    So a union added later is covered without anybody remembering to add it
+    here — which is the failure this whole script is about.
+
+    # What this catches, and what it does not
+
+    It counts *references*, and does not tell a construction from a match arm.
+    So it catches a variant nobody mentions at all — added to the protocol and
+    wired into neither end, which is the `PermissionChange` shape — and it does
+    **not** catch a variant that is handled and never sent.
+
+    Distinguishing the two needs to know an expression from a pattern, and
+    `Variant(_)` in a match reads exactly like `Variant(x)` in a call. A
+    heuristic on `=>` would miss `matches!` and would start reporting live code
+    as dead, which is how a check earns the right to be ignored. Both ends
+    match exhaustively with no `_` arm, so a variant that is never *handled*
+    fails to compile; this covers the other half as far as counting can.
+    """
+    out = []
+    for f in sorted((CRATES / "esper-proto/src").rglob("*.rs")):
+        for m in re.finditer(r"pub enum (\w*(?:Message|Refusal|Reply))\s*\{", f.read_text()):
+            name = m.group(1)
+            out.append((
+                f"{name} variants",
+                f"{name}::",
+                f,
+                f"pub enum {name} {{",
+                r"^    ([A-Z]\w*)\s*[\({,]",
+            ))
+    return out
+
+
 def main() -> int:
     if not CRATES.is_dir():
         sys.exit("check-reached: run me from the repository root")
     problems: list[str] = []
     used_ledger: set[str] = set()
-    for label, prefix, home, header, pattern in FAMILIES:
+
+    # The functions that must have a caller, first: it is the shortest check
+    # and the one whose failure is least ambiguous.
+    called = called_in_production()
+    for name, why in sorted(MUST_BE_CALLED.items()):
+        if name not in called:
+            problems.append(
+                f"nothing in production calls {name}(), and something must:\n"
+                f"      {why}"
+            )
+    print(f"  {len(MUST_BE_CALLED):>3} load-bearing functions: "
+          f"{sum(1 for n in MUST_BE_CALLED if n in called)} called")
+
+    unions = message_unions()
+    # Counted together and reported as one line: twelve unions that are all
+    # clean is twelve lines saying nothing. A failure names its own union.
+    union_total = 0
+    union_reached = 0
+    for label, prefix, home, header, pattern in FAMILIES + unions:
         names = declared(home, header, pattern)
         if not names:
             sys.exit(f"check-reached: found no {label} to check — the pattern has rotted")
@@ -221,8 +329,15 @@ def main() -> int:
                     f"      Remove the entry: a stale ledger is how a check stops "
                     f"being read."
                 )
-        print(f"  {len(names):>3} {label}: {len(names) - len(unreached)} reached, "
-              f"{len(unreached)} recorded as not")
+        if (label, prefix, home, header, pattern) in unions:
+            union_total += len(names)
+            union_reached += len(names) - len(unreached)
+        else:
+            print(f"  {len(names):>3} {label}: {len(names) - len(unreached)} reached, "
+                  f"{len(unreached)} recorded as not")
+    if unions:
+        print(f"  {union_total:>3} message variants across {len(unions)} unions: "
+              f"{union_reached} reached")
     stale = set(LEDGER) - used_ledger
     for key in sorted(stale):
         problems.append(
