@@ -70,6 +70,20 @@ impl Reason {
     pub const OUT_OF_SCHEDULE: Self = Self(302);
     pub const HOST_DISABLED: Self = Self(303);
     pub const PROMPT_TIMEOUT: Self = Self(304);
+    /// Somebody at the host was asked and said no.
+    ///
+    /// Its own code rather than a timeout, because the two mean opposite
+    /// things to whoever is waiting: nobody answered is worth trying again
+    /// when they are back, and somebody declined is not.
+    pub const PROMPT_REFUSED: Self = Self(305);
+    /// The host had nobody to ask, and this device may not connect unattended.
+    ///
+    /// The fail-closed answer, and one a real deployment meets: a host running
+    /// as a service has no terminal to ask at, so a device that was never
+    /// granted `unattended` cannot open a session there. Its own code because
+    /// the fix is a specific one — grant that permission — and a device told
+    /// "permission denied" would go looking at the wrong ones.
+    pub const NOBODY_TO_ASK: Self = Self(306);
 
     // 4xx — capability
     pub const NO_COMMON_CODEC: Self = Self(400);
@@ -136,6 +150,10 @@ impl Reason {
             Self::OUT_OF_SCHEDULE => "outside the permitted schedule",
             Self::HOST_DISABLED => "this machine is not accepting sessions",
             Self::PROMPT_TIMEOUT => "nobody responded to the connection prompt",
+            Self::PROMPT_REFUSED => "somebody at the host declined this session",
+            Self::NOBODY_TO_ASK => {
+                "this host has nobody to ask, and this device may not connect unattended"
+            }
             Self::NO_COMMON_CODEC => "no codec in common",
             Self::NO_CAPTURE_BACKEND => "no screen capture backend available",
             Self::NO_DISPLAY => "no display to capture",
@@ -220,6 +238,8 @@ mod tests {
             Reason::OUT_OF_SCHEDULE,
             Reason::HOST_DISABLED,
             Reason::PROMPT_TIMEOUT,
+            Reason::PROMPT_REFUSED,
+            Reason::NOBODY_TO_ASK,
             Reason::NO_COMMON_CODEC,
             Reason::NO_CAPTURE_BACKEND,
             Reason::NO_DISPLAY,

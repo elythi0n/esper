@@ -110,9 +110,14 @@ async fn a_controller_is_told_the_permissions_it_actually_holds() {
         let device = device(&[Permission::View]);
 
         let host = async {
-            answer_session(&mut host_ctl, &GrantStoredPermissions, &device, [1u8; 16])
-                .await
-                .expect("the host must answer")
+            answer_session(
+                &mut host_ctl,
+                std::sync::Arc::new(GrantStoredPermissions),
+                &device,
+                [1u8; 16],
+            )
+            .await
+            .expect("the host must answer")
         };
         let controller = async {
             request_session(
@@ -150,9 +155,14 @@ async fn a_refused_session_says_why() {
         let device = device(&[Permission::View]);
 
         let host = async {
-            answer_session(&mut host_ctl, &RefuseAll, &device, [2u8; 16])
-                .await
-                .expect("the host must answer")
+            answer_session(
+                &mut host_ctl,
+                std::sync::Arc::new(RefuseAll),
+                &device,
+                [2u8; 16],
+            )
+            .await
+            .expect("the host must answer")
         };
         let controller = async {
             request_session(&mut ctrl_ctl, &asking_for(&[Permission::View]))
@@ -182,9 +192,14 @@ async fn asking_for_only_what_you_do_not_hold_is_denied_out_loud() {
         let device = device(&[Permission::View]);
 
         let host = async {
-            answer_session(&mut host_ctl, &GrantStoredPermissions, &device, [3u8; 16])
-                .await
-                .expect("the host must answer")
+            answer_session(
+                &mut host_ctl,
+                std::sync::Arc::new(GrantStoredPermissions),
+                &device,
+                [3u8; 16],
+            )
+            .await
+            .expect("the host must answer")
         };
         let controller = async {
             request_session(&mut ctrl_ctl, &asking_for(&[Permission::Terminal]))
@@ -216,9 +231,14 @@ async fn a_malformed_request_is_refused_rather_than_dropped() {
         bad.reason = "helping\u{7}with email".to_owned();
 
         let host = async {
-            answer_session(&mut host_ctl, &GrantStoredPermissions, &device, [4u8; 16])
-                .await
-                .expect("the host must answer")
+            answer_session(
+                &mut host_ctl,
+                std::sync::Arc::new(GrantStoredPermissions),
+                &device,
+                [4u8; 16],
+            )
+            .await
+            .expect("the host must answer")
         };
         let controller = async {
             request_session(&mut ctrl_ctl, &bad)
@@ -250,7 +270,7 @@ async fn a_silent_controller_is_given_up_on() {
         let wait = Duration::from_millis(150);
         let err = answer_session_within(
             &mut host_ctl,
-            &GrantStoredPermissions,
+            std::sync::Arc::new(GrantStoredPermissions),
             &device,
             [5u8; 16],
             wait,

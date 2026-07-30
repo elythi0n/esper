@@ -52,6 +52,18 @@ pub trait Policy: Send + Sync + 'static {
     /// `device` is the stored record, so its permissions are the ceiling. The
     /// policy may grant less — it must never grant more, and
     /// [`decide_and_clamp`] enforces that regardless of what a policy returns.
+    ///
+    /// # This may block for as long as a person takes to answer
+    ///
+    /// Which is why it is not `async`, and why [`answer_session_within`] runs
+    /// it on the blocking pool rather than calling it inline. The host's
+    /// runtime is single-threaded: a policy that asked somebody a question on
+    /// it would stop every other session, the device-store watcher and the
+    /// pointer along with it.
+    ///
+    /// A policy that blocks must bound its own wait. Nothing above it can:
+    /// the session request has already been read, so the transport's own
+    /// timeout has been spent by the time this is called.
     fn decide(&self, device: &Device, request: &SessionRequest) -> Verdict;
 }
 
@@ -264,7 +276,7 @@ pub async fn request_session(
 /// A malformed request is denied rather than dropped, for the same reason.
 pub async fn answer_session(
     control: &mut Control,
-    policy: &dyn Policy,
+    policy: Arc<dyn Policy>,
     device: &Device,
     session_id: [u8; 16],
 ) -> Result<Answered, AuthorizeError> {
@@ -277,7 +289,7 @@ pub async fn answer_session(
 /// timeout by waiting ten seconds is a test nobody runs.
 pub async fn answer_session_within(
     control: &mut Control,
-    policy: &dyn Policy,
+    policy: Arc<dyn Policy>,
     device: &Device,
     session_id: [u8; 16],
     wait: Duration,
@@ -296,7 +308,35 @@ pub async fn answer_session_within(
         return Ok(Answered::Denied(deny));
     }
 
-    let (verdict, over_reach) = decide_and_clamp(policy, device, &request);
+    // **On the blocking pool, because deciding may be asking somebody.** See
+    // [`Policy::decide`]: the host's runtime is single-threaded, so a question
+    // answered inline would freeze the whole process for as long as nobody
+    // answered it. A panic in a policy is that policy's bug and not a reason
+    // to open a session, so it is refused.
+    let (verdict, over_reach) = {
+        let device = device.clone();
+        let request = request.clone();
+        let deciding =
+            tokio::task::spawn_blocking(move || decide_and_clamp(&*policy, &device, &request));
+        match deciding.await {
+            Ok(answer) => answer,
+            Err(e) => {
+                tracing::error!(error = %e, "the session policy did not return; refusing");
+                // **`HOST_DISABLED`, and not a permission code.** A policy
+                // that panicked is a host that cannot answer the question,
+                // which is what that code says. Reporting a permission
+                // problem would send somebody to check permissions that are
+                // fine.
+                (
+                    Verdict::Deny(
+                        Reason::HOST_DISABLED,
+                        "the host could not decide whether to allow this session".to_owned(),
+                    ),
+                    Vec::new(),
+                )
+            }
+        }
+    };
     if !over_reach.is_empty() {
         // A policy that tried to widen is a bug someone should see. The
         // session still opens with what the device holds.

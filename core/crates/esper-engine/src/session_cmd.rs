@@ -34,8 +34,8 @@ use esper_proto::{Hello, MediaMessage, Permission, Profile, Role, Sharpness};
 use esper_scale::Ceiling;
 use esper_stream::{Decoded, Expired, Handled, HostStep, PARK_TIMEOUT, Parked};
 use esper_transport::{
-    Answered, AnyOf, Control, Endpoint, GrantStoredPermissions, NoPeers, OnlyPeer, Session,
-    TerminalPolicy, TerminalService, answer_session,
+    Answered, AnyOf, Control, Endpoint, NoPeers, OnlyPeer, Session, TerminalPolicy,
+    TerminalService, answer_session,
 };
 
 use crate::backend::Choice;
@@ -545,6 +545,15 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     let log_path = paths::audit_log()?;
     println!("  audit      {}", log_path.display());
     let log = Log::at(log_path);
+    // **One for the host, not one per session.** It owns the terminal reader,
+    // and its record of who was just accepted is what stops a reconnect after
+    // a network blip asking the same person the same question again.
+    let policy = Arc::new(crate::consent::AskAtTheHost::on_the_terminal());
+    if policy.can_ask() {
+        println!("  consent    a device without `unattended` is asked about here");
+    } else {
+        println!("  consent    nothing to ask at: only devices holding `unattended` may connect");
+    }
 
     // **Terminal sessions outlive their connections**, so the service that
     // owns them belongs to the host and not to one session: a shell parked
@@ -715,6 +724,7 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                     terminals: &terminals,
                     log: &log,
                     permits: permits.clone(),
+                    policy: &policy,
                     capacity,
                 },
             )
@@ -978,6 +988,13 @@ const fn config_codec_name() -> &'static str {
 /// waiting and not the host.
 const GOODBYE: Duration = Duration::from_secs(2);
 
+/// How long to wait for a grant before saying it is being waited for.
+///
+/// The ordinary answer arrives inside a round trip, so a note printed at once
+/// would be a note about nothing. A host that has to ask somebody takes as
+/// long as they take, and that is the case worth explaining.
+const SAY_WE_ARE_WAITING: Duration = Duration::from_millis(750);
+
 /// Agree what this session may do.
 ///
 /// The store is read **per session**, not once at startup: a permission
@@ -987,6 +1004,7 @@ const GOODBYE: Duration = Duration::from_secs(2);
 async fn agree(
     control: &mut Control,
     device: &[u8; 32],
+    policy: &Arc<crate::consent::AskAtTheHost>,
 ) -> Result<(esper_proto::SessionKind, Vec<Permission>), String> {
     let (store, _) = paths::devices()?;
     let record = store
@@ -995,8 +1013,13 @@ async fn agree(
     let id = esper_transport::parked::new_session_id()
         .map_err(|e| format!("no randomness for a session identifier: {e}"))?;
 
-    match answer_session(control, &GrantStoredPermissions, record, *id.as_bytes()).await {
-        Ok(Answered::Granted { grant, kind }) => Ok((kind, grant.granted)),
+    match answer_session(control, Arc::clone(policy) as _, record, *id.as_bytes()).await {
+        Ok(Answered::Granted { grant, kind }) => {
+            if let Some(how) = policy.how_the_last_one_was_allowed() {
+                println!("      allowed by {}", crate::consent::describe(how));
+            }
+            Ok((kind, grant.granted))
+        }
         // The peer has already been told the same reason.
         Ok(Answered::Denied(d)) => Err(format!("refused: {}", d.detail)),
         Err(e) => Err(format!("agreeing what the session may do: {e}")),
@@ -1302,6 +1325,7 @@ async fn serve_session(
         terminals,
         log,
         permits,
+        policy,
         capacity,
     } = machine;
     println!(
@@ -1320,9 +1344,20 @@ async fn serve_session(
     // controller says what it wants and the host grants a subset of what the
     // device holds; the answer goes out before a frame or a shell exists, so
     // the far side never has to infer its permissions from what turns up.
-    let (kind, granted) = match agree(&mut control, &device).await {
+    let (kind, granted) = match agree(&mut control, &device, policy).await {
         Ok(g) => g,
-        Err(e) => return Err((e, parked)),
+        Err(e) => {
+            // **A session that was refused is the one worth recording.** An
+            // attempt somebody declined, or that nobody was there to allow,
+            // is a fact about this machine's security posture -- and it was
+            // the only refusal in the product that left no trace, because
+            // until now nothing could refuse a session for a reason a person
+            // chose.
+            if let Err(w) = log.append(&Entry::now(&device, Event::Refused { reason: e.clone() })) {
+                tracing::warn!(error = %w, "could not record a refused session");
+            }
+            return Err((e, parked));
+        }
     };
     println!(
         "      granted {} — for a {} session",
@@ -2055,6 +2090,12 @@ struct Machine<'a> {
     log: &'a Log,
     /// What every paired device may do, as it changes.
     permits: crate::permits::Watching,
+    /// Who to ask before a session opens, and what it remembers.
+    ///
+    /// One for the host rather than one per session: it owns the terminal
+    /// reader, and its record of who has just been accepted is what stops a
+    /// reconnect asking the same question twice.
+    policy: &'a Arc<crate::consent::AskAtTheHost>,
     /// Where to put what the controller measures the link at, for this
     /// connection's own congestion controller to pace from.
     ///
@@ -2920,25 +2961,39 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // The grant may be smaller than the request and the controller renders
         // what it holds: asking for control and assuming it was given is how a
         // client offers a cursor that does nothing.
-        let grant = esper_transport::request_session(
-            &mut control,
-            &esper_proto::SessionRequest {
-                kind: esper_proto::SessionKind::Screen,
-                want: {
-                    // Asked for, not assumed: the host grants a subset, and
-                    // this side renders what it holds.
-                    let mut want = vec![Permission::View];
-                    if o.control {
-                        want.push(Permission::Control);
-                    }
-                    want.extend(o.clipboard.wanted());
-                    want
-                },
-                codecs: vec![config_codec_name().to_owned()],
-                reason: "a screen".to_owned(),
+        // **A wait a person can see.** A host that has to ask somebody takes as
+        // long as they take to walk over, and a controller showing nothing for
+        // three quarters of a minute is one somebody kills before it works.
+        // Said after a beat rather than up front, because the ordinary case is
+        // an answer inside a round trip and a note about waiting would be a
+        // note about nothing.
+        let request = esper_proto::SessionRequest {
+            kind: esper_proto::SessionKind::Screen,
+            want: {
+                // Asked for, not assumed: the host grants a subset, and
+                // this side renders what it holds.
+                let mut want = vec![Permission::View];
+                if o.control {
+                    want.push(Permission::Control);
+                }
+                want.extend(o.clipboard.wanted());
+                want
             },
-        )
-        .await
+            codecs: vec![config_codec_name().to_owned()],
+            reason: "a screen".to_owned(),
+        };
+        let asking = esper_transport::request_session(&mut control, &request);
+        let grant = {
+            let mut asking = std::pin::pin!(asking);
+            let said = tokio::time::timeout(SAY_WE_ARE_WAITING, &mut asking).await;
+            match said {
+                Ok(answer) => answer,
+                Err(_) => {
+                    println!("  waiting    for somebody at the host to allow this session");
+                    asking.await
+                }
+            }
+        }
         .map_err(|e| match e {
             esper_transport::AuthorizeError::Refused(d) => {
                 format!("the host refused: {} ({})", d.detail, d.reason.0)

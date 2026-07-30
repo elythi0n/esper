@@ -359,6 +359,13 @@ else
   else
     ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" terminal >/dev/null
 
+    # **And `unattended`, because this host has nobody to ask.** A device that
+    # does not hold it needs somebody at the host to accept the session, and a
+    # host started with no terminal has nobody — so it refuses, which is the
+    # point. The suite runs headless, so every session in it is an unattended
+    # one and has to say so. Checked directly a few lines down.
+    ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended >/dev/null
+
     # **The timeout is longer than the suite takes, with room.** This host is
     # used by the last check in the file as well as the first, so its own
     # timeout is a bound on how long everything between them may take — and a
@@ -1946,6 +1953,50 @@ print(s.getsockname()[1]); s.close()')
       # revocation — and this is the only test that can catch it, because the
       # two halves are in different processes and the only thing they share is
       # the device store on disk.
+      # **A device that may not connect unattended cannot connect to an empty
+      # room.** `unattended` used to be a permission that granted nothing and
+      # withholding it prevented nothing: every paired device could open a
+      # session on a host with nobody at it. Now the host asks, and a host with
+      # no terminal to ask at refuses — which is the answer that makes the
+      # permission mean something.
+      echo "  — a session nobody is there to allow"
+      ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" unattended >/dev/null
+      # The host reads the store per session, so this needs no restart.
+      alone=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        timeout 30 "$BIN/esper-engine" connect "$host_addr" --seconds 2 2>&1 || true)
+      if printf '%s' "$alone" | grep -q 'nobody to ask'; then
+        printf '  ✓ a device that may not connect unattended was refused, and told why\n'
+      else
+        printf '  ✗ a session opened on a host with nobody to allow it\n'
+        printf '%s\n' "$alone" | sed 's/^/      /'
+        fail=1
+      fi
+      # And the refusal names the fix, or a working deployment stops for a
+      # reason nobody can act on.
+      if printf '%s' "$alone" | grep -q 'grant .* unattended'; then
+        printf '  ✓ and the refusal names the one command that changes it\n'
+      else
+        printf '  ✗ the refusal did not say how to fix it\n'
+        printf '%s\n' "$alone" | grep -i 'refus' | sed 's/^/      /'
+        fail=1
+      fi
+      ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended >/dev/null
+
+      # **And the ordinary case says nothing about waiting.** A device that may
+      # connect unattended is answered inside a round trip, so a note about
+      # waiting for somebody would be a note about nothing -- on every single
+      # connection.
+      quiet=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        timeout 30 "$BIN/esper-engine" connect "$host_addr" --seconds 2 2>&1 || true)
+      if printf '%s' "$quiet" | grep -q '^  granted' &&
+        ! printf '%s' "$quiet" | grep -q 'waiting'; then
+        printf '  ✓ and an unattended device is answered without a word about waiting\n'
+      else
+        printf '  ✗ the unattended path printed a wait it did not have\n'
+        printf '%s\n' "$quiet" | grep -E 'granted|waiting|refus' | sed 's/^/      /'
+        fail=1
+      fi
+
       # **A narrowing is not an ending.** Withdrawing `control` from a session
       # that is also showing a screen used to close it, which is correct and
       # heavier than it needs to be: the picture is still permitted. So the

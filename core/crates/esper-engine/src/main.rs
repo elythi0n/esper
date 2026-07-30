@@ -11,6 +11,7 @@
 mod backend;
 mod broker_cmd;
 mod clipboard_task;
+mod consent;
 mod cp_cmd;
 mod cursor_task;
 mod devices_cmd;

@@ -55,6 +55,16 @@ const (
 	OutOfSchedule    Reason = 302
 	HostDisabled     Reason = 303
 	PromptTimeout    Reason = 304
+	// PromptRefused is its own code rather than a timeout, because the two
+	// mean opposite things to whoever is waiting: nobody answered is worth
+	// trying again when they are back, and somebody declined is not.
+	PromptRefused Reason = 305
+	// NobodyToAsk is the fail-closed answer, and one a real deployment meets:
+	// a host running as a service has no terminal to ask at, so a device that
+	// was never granted unattended cannot open a session there. Its own code
+	// because the fix is a specific one — grant that permission — and a device
+	// told "permission denied" would go looking at the wrong ones.
+	NobodyToAsk Reason = 306
 )
 
 // Capability.
@@ -143,6 +153,8 @@ var descriptions = map[Reason]string{
 	OutOfSchedule:           "outside the permitted schedule",
 	HostDisabled:            "this machine is not accepting sessions",
 	PromptTimeout:           "nobody responded to the connection prompt",
+	PromptRefused:           "somebody at the host declined this session",
+	NobodyToAsk:             "this host has nobody to ask, and this device may not connect unattended",
 	NoCommonCodec:           "no codec in common",
 	NoCaptureBackend:        "no screen capture backend available",
 	NoDisplay:               "no display to capture",
