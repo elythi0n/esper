@@ -1995,6 +1995,36 @@ print(s.getsockname()[1]); s.close()')
       # revocation — and this is the only test that can catch it, because the
       # two halves are in different processes and the only thing they share is
       # the device store on disk.
+      # **A machine with no screen is never warned about a door it has not
+      # got.** A session ending now locks the host when nobody here was asked
+      # to allow it — which is right on a desktop and meaningless on a server
+      # reached over ssh, where there is nothing to leave readable. Every host
+      # in this suite runs with no display, and every session in it is an
+      # unattended one, so this is the exact case: if the rule ever stops
+      # asking whether there is a screen, this whole log fills with an alarm
+      # about nothing, and that is how people learn to ignore alarms.
+      # Neither message: not the alarm, and not the success either. A host
+      # with no display that reported *locking* something would be a host
+      # running a locker it had no business running -- and on a machine where
+      # `loginctl` is on PATH that is somebody's real session. Grepping only
+      # for the alarm would pass while exactly that shipped, which is how the
+      # first version of this check was written.
+      # `clipx.log` is excluded deliberately: it is the one host in this suite
+      # started on a display — a scratch Xvfb, for the X11 clipboard checks —
+      # so it is the one host where locking is a question at all, and what it
+      # reports depends on whether a locker happens to be installed on the
+      # machine running the suite. Every other host here has no display, and
+      # those are the ones this check is about.
+      if grep -rqE 'COULD NOT LOCK THE SCREEN AFTER|locked the screen with' \
+        $(ls "$term_a"/*.log 2>/dev/null | grep -v clipx) 2>/dev/null; then
+        printf '  ✗ a host with no display had something to say about locking it\n'
+        grep -rlE 'COULD NOT LOCK THE SCREEN AFTER|locked the screen with' \
+          $(ls "$term_a"/*.log | grep -v clipx) | head -3 | sed 's/^/      in /'
+        fail=1
+      else
+        printf '  ✓ a host with no screen said nothing about locking one\n'
+      fi
+
       # **A device that may not connect unattended cannot connect to an empty
       # room.** `unattended` used to be a permission that granted nothing and
       # withholding it prevented nothing: every paired device could open a

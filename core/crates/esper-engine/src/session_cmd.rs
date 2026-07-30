@@ -739,6 +739,13 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                     parked = still;
                 }
             }
+            // **However it ended**, including badly: a session that dropped
+            // because the network went away left the screen exactly as
+            // readable as one that closed politely.
+            lock_after_session(
+                LockAfter::from_settings(),
+                policy.how_the_last_one_was_allowed(),
+            );
             if o.once {
                 break Ok(());
             }
@@ -793,6 +800,113 @@ async fn wait_for_panic(presses: Option<&mut crate::presence_task::Presses>) {
             let _ = queue.recv().await;
         }
         None => std::future::pending().await,
+    }
+}
+
+/// When this machine locks itself after a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockAfter {
+    /// Only when nobody here was asked to allow the session.
+    Unattended,
+    /// Whatever happened.
+    Always,
+    /// Not at all.
+    Never,
+}
+
+impl LockAfter {
+    /// From `host.lock_after_session`.
+    ///
+    /// An unknown word cannot reach here — the setting is a choice, so a typo
+    /// is refused rather than defaulted — which is why anything unrecognised
+    /// falls to the shipping rule rather than to `Never`. A misreading that
+    /// silently stopped locking would be a misreading nobody could see.
+    fn from_settings() -> Self {
+        match crate::settings::text("host.lock_after_session").as_str() {
+            "always" => Self::Always,
+            "never" => Self::Never,
+            _ => Self::Unattended,
+        }
+    }
+}
+
+/// Whether to lock the screen now that a session has ended.
+///
+/// # Why an ordinary ending is worth locking for
+///
+/// The panic key has always locked, and nothing else did. So a device that
+/// connects to an unattended machine, does something, and disconnects leaves
+/// that machine logged in, unlocked, and showing whatever it was left showing
+/// — for anybody who walks past. That is the same exposure a screen lock
+/// exists for, reached by a door nobody thought of as a door.
+///
+/// # Why it is derived rather than configured
+///
+/// The host already knows whether anybody was here: a session somebody
+/// answered a prompt for was allowed by a person who is still at the machine,
+/// and one nobody was asked about was not. So the rule needs no setting to be
+/// right in both cases, and the setting exists only for the two deliberate
+/// overrides.
+///
+/// **Not knowing counts as nobody.** A session that reached here without the
+/// policy recording how it was allowed is one this host cannot vouch for, and
+/// the safe reading of an unknown is the one that locks.
+///
+/// # Why the display is a parameter
+///
+/// **A machine with no screen has nothing to leave readable.** A server
+/// reached over ssh cannot lock and does not need to, and a warning after
+/// every session on such a host would be an alarm about a door that is not
+/// there. Passed in rather than read here so the rule can be tested without
+/// arranging an environment — the same reason the clock is a parameter
+/// everywhere else in this tree.
+///
+/// The question is whether there is a *display*, not whether there is a
+/// locker: a desktop with no locker installed is a real problem and does get
+/// the warning.
+const fn lock_now(
+    after: LockAfter,
+    allowed: Option<crate::consent::Allowed>,
+    has_display: bool,
+) -> bool {
+    if !has_display {
+        return false;
+    }
+    match after {
+        LockAfter::Never => false,
+        LockAfter::Always => true,
+        LockAfter::Unattended => match allowed {
+            Some(how) => !crate::consent::somebody_answered(how),
+            None => true,
+        },
+    }
+}
+
+/// Whether this machine has a screen somebody could read.
+fn has_a_display() -> bool {
+    std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+/// Lock the screen after a session, if this machine should.
+fn lock_after_session(after: LockAfter, allowed: Option<crate::consent::Allowed>) {
+    if !lock_now(after, allowed, has_a_display()) {
+        return;
+    }
+    // **Only as far as the display this host was serving.** Nobody asked for
+    // this lock -- a session ended, that is all -- so it must not reach past
+    // the screen the session was on. A locker that asks the session manager
+    // would lock the *person's* desktop when a host is serving a second X
+    // server, another seat or a test, and the first thing that would tell
+    // them is their own screen going black.
+    //
+    // The panic key keeps the full reach, and correctly: somebody standing at
+    // the machine has asked for it all to stop.
+    match esper_presence::lock_reaching(esper_presence::Reach::OnlyThisDisplay) {
+        Ok(how) => println!("  · locked the screen with {how}"),
+        // Said, not swallowed, for the same reason the panic key says it:
+        // somebody who believes their screen is locked and is wrong is worse
+        // off than somebody who has been told.
+        Err(e) => println!("  · ⚠ COULD NOT LOCK THE SCREEN AFTER THE SESSION: {e}"),
     }
 }
 
@@ -3874,6 +3988,79 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// **An ordinary ending is worth locking for, and the host already knows
+    /// when.**
+    ///
+    /// A device that connects to an unattended machine, does something and
+    /// disconnects used to leave it logged in, unlocked and showing whatever
+    /// it was left showing. The panic key locked; nothing else did.
+    #[test]
+    fn a_session_nobody_was_asked_about_locks_the_screen_after_it() {
+        use crate::consent::Allowed;
+        for how in [Allowed::Unattended, Allowed::Invited] {
+            assert!(
+                lock_now(LockAfter::Unattended, Some(how), true),
+                "{how:?}: nobody here was asked, so nobody here is watching"
+            );
+        }
+    }
+
+    /// And a session somebody answered for does not, because they are still
+    /// at the machine and locking it under them is rude and useless.
+    #[test]
+    fn a_session_somebody_answered_for_leaves_the_screen_alone() {
+        use crate::consent::Allowed;
+        for how in [Allowed::Accepted, Allowed::StillAccepted] {
+            assert!(
+                !lock_now(LockAfter::Unattended, Some(how), true),
+                "{how:?}: somebody answered a prompt here a moment ago"
+            );
+        }
+    }
+
+    /// **Not knowing counts as nobody.** A session this host cannot say how it
+    /// allowed is one it cannot vouch for, and the safe reading of an unknown
+    /// is the one that locks.
+    #[test]
+    fn a_session_of_unknown_provenance_locks() {
+        assert!(lock_now(LockAfter::Unattended, None, true));
+    }
+
+    /// **A machine with no screen is not warned about a door it has not got.**
+    ///
+    /// A server reached over ssh cannot lock and has nothing to leave
+    /// readable, and an alarming line after every session on such a host is
+    /// how people learn to ignore alarming lines.
+    #[test]
+    fn a_host_with_no_display_says_nothing_about_locking() {
+        use crate::consent::Allowed;
+        for after in [LockAfter::Unattended, LockAfter::Always, LockAfter::Never] {
+            for how in [None, Some(Allowed::Unattended), Some(Allowed::Accepted)] {
+                assert!(
+                    !lock_now(after, how, false),
+                    "{after:?} with {how:?} tried to lock a machine with no screen"
+                );
+            }
+        }
+    }
+
+    /// The two overrides do what they say, whatever happened.
+    #[test]
+    fn always_and_never_do_not_consult_anything() {
+        use crate::consent::Allowed;
+        for how in [
+            None,
+            Some(Allowed::Accepted),
+            Some(Allowed::StillAccepted),
+            Some(Allowed::Unattended),
+            Some(Allowed::Invited),
+        ] {
+            assert!(lock_now(LockAfter::Always, how, true), "{how:?}");
+            assert!(!lock_now(LockAfter::Never, how, true), "{how:?}");
+        }
+    }
+
     use super::*;
 
     /// **The two failures that look identical from here.**

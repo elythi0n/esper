@@ -158,6 +158,9 @@ const BACKENDS: &[&str] = &["auto", "x11", "synthetic"];
 /// What the synthetic screen may be doing.
 const MOTIONS: &[&str] = &["screen", "still", "video"];
 
+/// When to lock this machine after a session ends.
+const LOCK_AFTER: &[&str] = &["unattended", "always", "never"];
+
 /// Every setting there is.
 ///
 /// In the order somebody would read them: what this machine *is*, then what it
@@ -208,6 +211,22 @@ pub static SETTINGS: &[Setting] = &[
         about: "What the synthetic backend's screen is doing: `screen` has a counter and a \
                 moving box, `still` is a screen nobody is touching, `video` is every pixel \
                 changing every frame. Only applies when the synthetic backend is in use.",
+    },
+    Setting {
+        key: "host.lock_after_session",
+        kind: Kind::Choice(LOCK_AFTER),
+        // **`unattended` is a rule rather than a compromise between the other
+        // two.** A session somebody answered a prompt for was watched by a
+        // person who is still at the machine, and locking it under them is
+        // rude and useless. A session nobody was asked about happened on a
+        // machine with nobody at it, and leaving whatever the far end was
+        // doing on the screen is exactly the exposure this closes. The host
+        // already knows which of those happened, so the default needs no
+        // configuring to be right in both cases.
+        default: Value::Text(Cow::Borrowed("unattended")),
+        about: "Lock this machine when a session ends: `unattended` locks only when nobody \
+                here was asked to allow it, `always` locks whatever happened, `never` does \
+                not. The panic key always locks, whatever this says.",
     },
     Setting {
         key: "host.monitor",

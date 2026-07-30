@@ -23,16 +23,34 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// What a locker actually locks.
+///
+/// **The distinction is not academic, and it was found the hard way.** A host
+/// serving a scratch display — a second X server, another seat, a test — is
+/// not serving the login session, and a locker that asks the session manager
+/// locks the *person's* screen rather than the one the host was showing. The
+/// suite caught it: a host on an `Xvfb` reported locking a screen, and the
+/// screen it would have locked on a desktop is the developer's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Locks {
+    /// The display this process is pointed at, and nothing else.
+    ThisDisplay,
+    /// Whatever the session manager considers the current session.
+    ThisLoginSession,
+}
+
 /// The commands that lock a screen, in the order they are tried.
 ///
 /// `loginctl` first because it asks the session manager rather than a
 /// particular locker, so it works whatever the person is running — and on a
-/// machine with no seat it fails quickly and the next one is tried.
-pub const LOCKERS: &[(&str, &[&str])] = &[
-    ("loginctl", &["lock-session"]),
-    ("xdg-screensaver", &["lock"]),
-    ("swaylock", &["-f"]),
-    ("i3lock", &[]),
+/// machine with no seat it fails quickly and the next one is tried. It is also
+/// the one that locks something other than the display it was asked about,
+/// which is why each entry says what it locks.
+pub const LOCKERS: &[(&str, &[&str], Locks)] = &[
+    ("loginctl", &["lock-session"], Locks::ThisLoginSession),
+    ("xdg-screensaver", &["lock"], Locks::ThisDisplay),
+    ("swaylock", &["-f"], Locks::ThisDisplay),
+    ("i3lock", &[], Locks::ThisDisplay),
 ];
 
 /// Find an executable on `PATH`.
@@ -54,9 +72,36 @@ pub fn find_on(path: &str, program: &str) -> Option<PathBuf> {
 /// The first locker present on this machine.
 #[must_use]
 pub fn available_locker_on(path: &str) -> Option<(&'static str, &'static [&'static str])> {
+    locker_on(path, Reach::Anything).map(|(p, a, _)| (p, a))
+}
+
+/// How far a caller is willing to let a lock reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Any locker. What the panic key wants: somebody standing at the machine
+    /// has asked for it all to stop, and locking their login session as well
+    /// as the display in front of them is what they meant.
+    Anything,
+    /// Only a locker that acts on the display this process is pointed at.
+    ///
+    /// What an *automatic* lock wants. Nobody asked for this one, so it must
+    /// not reach past the screen the session was on — a host serving a second
+    /// X server, another seat or a test would otherwise lock the person's real
+    /// desktop because something disconnected from a display they were not
+    /// looking at.
+    OnlyThisDisplay,
+}
+
+/// The first locker on `path` that reaches no further than asked.
+#[must_use]
+pub fn locker_on(
+    path: &str,
+    reach: Reach,
+) -> Option<(&'static str, &'static [&'static str], Locks)> {
     LOCKERS
         .iter()
-        .find(|(program, _)| find_on(path, program).is_some())
+        .filter(|(_, _, locks)| reach == Reach::Anything || *locks == Locks::ThisDisplay)
+        .find(|(program, _, _)| find_on(path, program).is_some())
         .copied()
 }
 
@@ -74,12 +119,25 @@ pub fn available_locker() -> Option<(&'static str, &'static [&'static str])> {
 /// the last thing a panic key should do to the process it is trying to stop
 /// sessions from.
 pub fn lock_screen() -> Result<&'static str, String> {
-    let Some((program, args)) = available_locker() else {
+    lock_reaching(Reach::Anything)
+}
+
+/// Lock, going no further than `reach` allows.
+///
+/// # Errors
+///
+/// If nothing within reach is installed, or it will not start.
+pub fn lock_reaching(reach: Reach) -> Result<&'static str, String> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let Some((program, args, _)) = locker_on(&path, reach) else {
         return Err(format!(
             "no screen locker found: tried {}",
             LOCKERS
                 .iter()
-                .map(|(p, _)| *p)
+                .filter(|(_, _, locks)| {
+                    reach == Reach::Anything || *locks == Locks::ThisDisplay
+                })
+                .map(|(p, _, _)| *p)
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -96,6 +154,47 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// **An automatic lock must not reach past the display it was serving.**
+    ///
+    /// Found by the suite, which runs a host on a scratch `Xvfb` for the
+    /// clipboard checks: that host reported locking a screen, and the screen
+    /// it would have locked on a desktop is the developer's own — because
+    /// `loginctl lock-session` asks the session manager, which has nothing to
+    /// do with the display anybody was looking at.
+    #[test]
+    fn an_automatic_lock_uses_no_locker_that_reaches_the_login_session() {
+        for (program, _, locks) in LOCKERS {
+            if *locks == Locks::ThisLoginSession {
+                let path = "/usr/bin";
+                // Whatever is installed, the filtered list never offers it.
+                let offered = locker_on(path, Reach::OnlyThisDisplay);
+                assert!(
+                    offered.is_none_or(|(p, _, _)| p != *program),
+                    "{program} locks the login session and was offered to an \
+                     automatic lock"
+                );
+            }
+        }
+    }
+
+    /// And the panic key keeps the full reach, correctly: somebody standing at
+    /// the machine has asked for all of it to stop.
+    #[test]
+    fn the_panic_key_may_use_any_locker() {
+        let with_everything: Vec<&str> = LOCKERS.iter().map(|(p, _, _)| *p).collect();
+        let display_only: Vec<&str> = LOCKERS
+            .iter()
+            .filter(|(_, _, l)| *l == Locks::ThisDisplay)
+            .map(|(p, _, _)| *p)
+            .collect();
+        assert!(
+            with_everything.len() > display_only.len(),
+            "the two reaches must actually differ, or the distinction is decoration"
+        );
+        assert!(with_everything.contains(&"loginctl"));
+        assert!(!display_only.contains(&"loginctl"));
+    }
 
     #[test]
     fn nothing_on_an_empty_path() {

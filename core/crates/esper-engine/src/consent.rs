@@ -296,6 +296,22 @@ pub enum Allowed {
     Invited,
 }
 
+/// Whether a person was at the host when this session was allowed.
+///
+/// The distinction the screen locker needs: somebody who answered a prompt is
+/// at the machine and would not thank you for locking it under them, and
+/// somebody who was never asked is, as far as this host can tell, not there.
+#[must_use]
+pub const fn somebody_answered(how: Allowed) -> bool {
+    match how {
+        Allowed::Accepted | Allowed::StillAccepted => true,
+        // An invitation was made by a person, minutes or hours ago, and says
+        // nothing about whether they are still in the room. Unattended says
+        // outright that nobody was asked.
+        Allowed::Invited | Allowed::Unattended => false,
+    }
+}
+
 /// How a session was allowed, for the host's own output.
 #[must_use]
 pub const fn describe(how: Allowed) -> &'static str {

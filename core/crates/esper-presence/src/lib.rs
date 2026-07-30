@@ -32,7 +32,7 @@
 pub mod lock;
 pub mod null;
 
-pub use lock::{available_locker, lock_screen};
+pub use lock::{Locks, Reach, available_locker, lock_reaching, lock_screen};
 pub use null::{NullPresence, Shown};
 
 /// Anything that went wrong showing presence.
