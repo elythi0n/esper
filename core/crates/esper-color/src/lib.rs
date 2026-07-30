@@ -2,6 +2,7 @@
 
 pub mod convert;
 pub mod i420;
+pub mod mosaic;
 pub mod rgb;
 pub mod space;
 

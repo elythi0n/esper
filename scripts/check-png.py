@@ -39,4 +39,24 @@ for y in range(h):
     cur = bytes((row[1+k] + prev[k]) & 0xFF for k in range(w*3))
     out += cur; prev = cur
 distinct = len(set(bytes(out[k:k+3]) for k in range(0, len(out), 3)))
-print(f"{w}x{h} {len(d)} bytes on disk, {len(out)} raw, {distinct} distinct colours, chunks {'+'.join(order)}")
+
+# **How many distinct colours each vertical third holds.**
+#
+# The size of a mosaic comes from the geometry the host advertised, so an
+# image whose screens were all placed at the origin measures exactly right and
+# is two thirds black. A third holding one colour is a third nothing was drawn
+# into, which is the failure a dimension check cannot see.
+thirds = []
+for t in range(3):
+    lo, hi = w * t // 3, w * (t + 1) // 3
+    seen = set()
+    for y in range(h):
+        row = y * w * 3
+        for x in range(lo, hi):
+            seen.add(bytes(out[row + x * 3: row + x * 3 + 3]))
+    thirds.append(len(seen))
+
+print(
+    f"{w}x{h} {len(d)} bytes on disk, {len(out)} raw, {distinct} distinct colours, "
+    f"thirds {'/'.join(str(n) for n in thirds)}, chunks {'+'.join(order)}"
+)

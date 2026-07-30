@@ -317,7 +317,7 @@ cleanup_terminal() {
              "${profile_host:-}" "${short_host:-}" "${pinch_pid:-}" \
              "${clip_host:-}" "${clip_host2:-}" "${clip_viewer:-}" \
              "${clip_x1:-}" "${clip_x2:-}" "${cp_host:-}" "${cp_wire:-}" "${cp_along:-}" \
-             "${multi_host:-}" "${idle_host:-}" \
+             "${multi_host:-}" "${idle_host:-}" "${tiled_host:-}" \
              "${pace_host:-}" "${pace_wire:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
@@ -2019,6 +2019,51 @@ print(s.getsockname()[1]); s.close()')
         sed 's/^/      /' "$term_b/shot.log"
         fail=1
       fi
+      # **Every screen, laid out the way the host has them.** A screenshot is
+      # a still, so the screens are taken one at a time on the one stream
+      # there already is — which is why this works without any of the machinery
+      # a live tiled session needs. Three synthetic screens, each half the
+      # size of the one before, so a mosaic that dropped one or overlapped two
+      # comes out the wrong size rather than merely looking odd.
+      sed -i '/host.synthetic_monitors/d' "$term_a/config.toml"
+      printf 'host.synthetic_monitors = 3\n' >> "$term_a/config.toml"
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/tiled.log" 2>&1 &
+      tiled_host=$!
+      tiled_addr=""
+      for _ in $(seq 1 100); do
+        tiled_addr=$( { awk '/listening/{print $2}' "$term_a/tiled.log" 2>/dev/null || true; } | head -1)
+        [ -n "$tiled_addr" ] && break
+        sleep 0.1
+      done
+      if ESPER_HOME="$term_b" timeout 90 "$BIN/esper-engine" screenshot "$tiled_addr" \
+        --all -o "$term_b/all.png" > "$term_b/all.log" 2>&1; then
+        got=$(python3 ./scripts/check-png.py "$term_b/all.png" 2>&1 || echo FAILED)
+        # The synthetic screens are 1280x720, 640x360 and 320x180, side by
+        # side at the origin — so the mosaic is 2240 across and 720 tall.
+        # The size *and* the content. A mosaic is as large as the box round
+        # every screen, so one that placed all three at the origin measures
+        # exactly right and is two thirds black — which is why the checker
+        # reports the colours in each vertical third, and why a third holding
+        # one colour is a screen that never arrived.
+        empty=$(printf '%s' "$got" | sed -n 's/.*thirds \([0-9/]*\),.*/\1/p' | tr '/' '\n' | grep -cx '1' || true)
+        if printf '%s' "$got" | grep -q '^2240x720 ' && [ "${empty:-1}" = 0 ]; then
+          printf '  ✓ three screens came back as one picture: %s\n' "$got"
+        else
+          printf '  ✗ the mosaic is not three screens laid out: %s\n' "$got"
+          grep -E 'screen |laid out' "$term_b/all.log" | sed 's/^/      /'
+          fail=1
+        fi
+      else
+        printf '  ✗ taking a screenshot of every screen failed\n'
+        sed 's/^/      /' "$term_b/all.log"
+        fail=1
+      fi
+      kill "$tiled_host" 2>/dev/null || true
+      tiled_host=""
+      sed -i '/host.synthetic_monitors/d' "$term_a/config.toml"
+
       # And to stdout, which is the form a pipeline uses — with everything it
       # says going to stderr so the image is not corrupted by its own banner.
       if ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" screenshot "$host_addr" \

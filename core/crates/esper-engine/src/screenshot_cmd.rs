@@ -46,6 +46,8 @@ pub struct ShotOptions {
     pub mdns: bool,
     /// Which monitor, when the host has more than one.
     pub monitor: Option<u32>,
+    /// Every screen, laid out the way the host has them.
+    pub all: bool,
     /// Where the PNG goes. `None` or `-` is stdout.
     pub out: Option<String>,
 }
@@ -134,7 +136,6 @@ pub fn run(o: &ShotOptions) -> Result<(), String> {
             eprintln!("  monitor    asking for {wanted}");
         }
 
-        let picture = wait_for_a_picture(&mut link).await?;
         // **The same space the viewer opens with**, which is the default the
         // host encodes in. It is not carried in `StreamConfig`: the host
         // signals it in the bitstream's VUI, where a decoder would have to
@@ -144,8 +145,12 @@ pub fn run(o: &ShotOptions) -> Result<(), String> {
         // differ by a couple of levels with nothing to say which was right.
         // Reading the VUI is the fix for both at once, and neither does it.
         let space = ColorSpace::default();
-        let png = to_png(&picture, space)?;
-
+        let png = if o.all {
+            every_screen(&mut link, space).await?
+        } else {
+            let picture = wait_for_a_picture(&mut link).await?;
+            to_png(&picture, space)?
+        };
         link.close(esper_proto::Reason::SESSION_COMPLETE);
         // The close is queued, not sent; a process that exits immediately
         // leaves the host waiting out its idle timeout for a session that
@@ -169,6 +174,123 @@ pub fn run(o: &ShotOptions) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// Every screen the host has, laid out the way the host has them.
+///
+/// # Why one at a time rather than all at once
+///
+/// A host serving several screens at once means a pipeline, an encoder and a
+/// packetizer for each, several streams reassembled on the controller, and a
+/// CPU budget divided between them. That is what a *live* tiled session needs
+/// and it is a large piece of work.
+///
+/// **A screenshot is a still, so it does not need any of it.** Each screen is
+/// selected in turn on the one stream there already is, given a moment to
+/// arrive, and kept. The screens end up a few hundred milliseconds apart,
+/// which is invisible in a photograph and would be quite wrong in a video —
+/// which is exactly why this is a screenshot and not the tiled session.
+///
+/// A screen the host refuses is skipped with a line saying so rather than
+/// abandoning the picture: two screens out of three is a useful image, and a
+/// host is entitled to decline one.
+async fn every_screen(
+    link: &mut esper_link::ControllerLink,
+    space: ColorSpace,
+) -> Result<Vec<u8>, String> {
+    let advertised = link.config().monitors.clone();
+    let mut taken: Vec<(esper_color::mosaic::At, esper_color::I420)> = Vec::new();
+    for screen in &advertised {
+        if link.config().selected != screen.id {
+            link.select_monitor(screen.id);
+            link.flush_outbound()
+                .await
+                .map_err(|e| format!("asking for screen {}: {e}", screen.id))?;
+            match wait_for_the_switch(link, screen.id).await {
+                Ok(()) => {}
+                Err(why) => {
+                    eprintln!("  screen {} skipped: {why}", screen.id);
+                    continue;
+                }
+            }
+        }
+        let picture = wait_for_a_picture(link).await?;
+        eprintln!(
+            "  screen {}  {} — {}x{} at {},{}",
+            screen.id,
+            screen.name,
+            picture.width(),
+            picture.height(),
+            screen.x,
+            screen.y
+        );
+        taken.push((
+            esper_color::mosaic::At {
+                x: screen.x,
+                y: screen.y,
+            },
+            picture,
+        ));
+    }
+    if taken.is_empty() {
+        return Err("no screen could be captured".to_owned());
+    }
+
+    // The layout comes from the geometry the host advertised, against the
+    // *picture* sizes rather than the advertised ones: a host whose governor
+    // has lowered the resolution sends a smaller picture of the same screen,
+    // and a mosaic sized from what was advertised would leave a gap.
+    let boxes: Vec<(esper_color::mosaic::At, u32, u32)> = taken
+        .iter()
+        .map(|(at, p)| (*at, p.width(), p.height()))
+        .collect();
+    let bounds = esper_color::mosaic::Bounds::around(&boxes)
+        .ok_or_else(|| "no screen to lay out".to_owned())?;
+    let mut mosaic = esper_color::I420::new(bounds.width, bounds.height)
+        .map_err(|e| format!("a mosaic of {}x{}: {e}", bounds.width, bounds.height))?;
+    esper_color::mosaic::clear(&mut mosaic);
+    for (at, picture) in &taken {
+        esper_color::mosaic::place(&mut mosaic, bounds, *at, picture);
+    }
+    eprintln!(
+        "  laid out   {} screen(s) as {}x{}",
+        taken.len(),
+        bounds.width,
+        bounds.height
+    );
+    to_png(&mosaic, space)
+}
+
+/// Wait for the host to say it has switched, or to say it has not.
+///
+/// **A host's answer to a selection is never silence** — it sends either the
+/// new config or the one it is keeping — so this waits for a config and reads
+/// which of the two arrived rather than assuming the switch happened.
+async fn wait_for_the_switch(
+    link: &mut esper_link::ControllerLink,
+    wanted: u32,
+) -> Result<(), String> {
+    let deadline = Instant::now() + PATIENCE;
+    let mut out = Vec::new();
+    while Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(left, link.pump(&mut out)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("the session ended: {e}")),
+            Err(_) => break,
+        }
+        out.clear();
+        if let Some(config) = link.take_announcement() {
+            if config.selected == wanted {
+                return Ok(());
+            }
+            return Err(format!(
+                "the host is keeping screen {} instead",
+                config.selected
+            ));
+        }
+    }
+    Err("the host did not answer".to_owned())
 }
 
 /// Wait for the first decoded picture, or give up saying what did arrive.
@@ -268,6 +390,8 @@ pub fn usage() -> String {
          \x20 -o, --out <path>     where to write it; `-` is stdout, and so is\n  \
          \x20                      leaving this out\n  \
          \x20 --monitor <id>       which screen, when the host has more than one\n  \
+         \x20 --all                every screen, laid out the way the host has\n  \
+         \x20                      them\n  \
          \x20 --via <addr>         a broker to be introduced through\n  \
          \x20 --broker-key <key>   the broker's key\n  \
          \x20 --no-mdns            do not ask the segment where the host is\n\
@@ -289,6 +413,7 @@ pub fn parse(args: &[String]) -> Result<ShotOptions, String> {
     let mut via_key: Option<[u8; 32]> = None;
     let mut mdns = crate::settings::flag("discovery.mdns", true);
     let mut monitor: Option<u32> = None;
+    let mut all = false;
     let mut out: Option<String> = None;
     let mut i = 0usize;
     // **No `--help` arm, deliberately.** `main` answers it before any parser
@@ -313,6 +438,10 @@ pub fn parse(args: &[String]) -> Result<ShotOptions, String> {
             }
             "--no-mdns" => {
                 mdns = false;
+                i += 1;
+            }
+            "--all" => {
+                all = true;
                 i += 1;
             }
             "--monitor" => {
@@ -348,6 +477,18 @@ pub fn parse(args: &[String]) -> Result<ShotOptions, String> {
             }
         }
     }
+    // **Both is a confused intent, and refusing beats picking one.** A person
+    // who asked for every screen and also for one of them wants something
+    // this cannot do, and quietly honouring whichever the code happened to
+    // check first is how somebody gets a picture of the wrong thing and does
+    // not find out.
+    if all && monitor.is_some() {
+        return Err(format!(
+            "--all and --monitor ask for different pictures: --all is every \
+             screen laid out together, --monitor is one of them\n\n{}",
+            usage()
+        ));
+    }
     // A broker on the command line replaces the configured one; without one,
     // whatever the settings say. The same rule `connect` follows.
     let via = match crate::session_cmd::broker_from(via_addr, via_key)? {
@@ -360,6 +501,59 @@ pub fn parse(args: &[String]) -> Result<ShotOptions, String> {
         via,
         mdns,
         monitor,
+        all,
         out,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    fn args(of: &[&str]) -> Vec<String> {
+        of.iter().map(|a| (*a).to_owned()).collect()
+    }
+
+    /// **Asking for everything and for one thing is refused, not guessed at.**
+    ///
+    /// Honouring whichever the code checked first is how somebody gets a
+    /// picture of the wrong screen and does not find out.
+    #[test]
+    fn every_screen_and_one_screen_are_not_asked_for_together() {
+        let both = parse(&args(&["--all", "--monitor", "1"]));
+        let message = both.expect_err("both must be refused");
+        assert!(message.contains("--all and --monitor"), "{message}");
+        // And either alone is fine.
+        assert!(parse(&args(&["--all"])).is_ok());
+        assert!(parse(&args(&["--monitor", "1"])).is_ok());
+    }
+
+    /// A screen id has to be a number, and a typo is named rather than
+    /// silently becoming a host's name.
+    #[test]
+    fn a_screen_that_is_not_a_number_is_refused_by_name() {
+        let e = parse(&args(&["--monitor", "left"])).expect_err("not a number");
+        assert!(e.contains("left"), "{e}");
+    }
+
+    /// The output path is taken wherever it appears, and `-` means stdout —
+    /// which is also what leaving it out means.
+    #[test]
+    fn the_output_path_is_read_from_either_form() {
+        for form in [
+            args(&["-o", "shot.png"]),
+            args(&["--out", "shot.png"]),
+            args(&["--all", "-o", "shot.png"]),
+        ] {
+            let o = parse(&form).expect("parsed");
+            assert_eq!(o.out.as_deref(), Some("shot.png"), "{form:?}");
+        }
+        assert_eq!(parse(&args(&[])).expect("parsed").out, None);
+        assert_eq!(
+            parse(&args(&["-o", "-"])).expect("parsed").out.as_deref(),
+            Some("-")
+        );
+    }
 }

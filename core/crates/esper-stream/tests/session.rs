@@ -203,6 +203,25 @@ fn a_clean_link_delivers_the_hosts_screen() {
     assert!(!c.awaiting_keyframe(), "the session never got in sync");
 }
 
+/// How many of these messages are keyframe requests.
+///
+/// **Not the length of the queue**, which is what three tests here used to
+/// count and call "asks". The outbound queue also carries the ladders' hints
+/// and the link reports, and both of those are driven by a *clock* — so on a
+/// busy machine the loop in a test runs slowly enough for a hint to join the
+/// queue, and a test counting everything reported two keyframe requests where
+/// exactly one had been made. It then blamed the coalescing, which was working
+/// perfectly.
+///
+/// That made `a_burst_of_loss_produces_one_keyframe_request` fail about one run
+/// in three under load and pass every time on its own.
+fn keyframe_asks(messages: &[MediaMessage]) -> usize {
+    messages
+        .iter()
+        .filter(|m| matches!(m, MediaMessage::Keyframe(_)))
+        .count()
+}
+
 /// **Under loss, the session recovers.** Every abandoned frame becomes one
 /// keyframe request, the host obliges, and the picture comes back.
 #[test]
@@ -239,8 +258,9 @@ fn a_lossy_link_recovers_and_keeps_delivering() {
                 Decoded::Skipped { .. } => {}
             }
         }
-        for m in c.take_outbound() {
-            asks += 1;
+        let said = c.take_outbound();
+        asks += keyframe_asks(&said) as u32;
+        for m in said {
             h.handle(&m).expect("accepted");
         }
     }
@@ -1011,10 +1031,13 @@ fn a_burst_of_loss_produces_one_keyframe_request() {
             .count() as u32;
         // Deliberately *not* draining the outbound queue.
     }
-    let asks = c.take_outbound().len();
+    let queued = c.take_outbound();
+    let asks = keyframe_asks(&queued);
     println!(
-        "{} dropped, {lost} frames lost, {asks} keyframe request(s)",
-        link.dropped
+        "{} dropped, {lost} frames lost, {asks} keyframe request(s) out of {} \
+         message(s) queued",
+        link.dropped,
+        queued.len()
     );
     assert!(
         lost >= 2,
@@ -1071,7 +1094,7 @@ fn sustained_loss_asks_no_faster_than_the_pace() {
             .drain(..)
             .filter(|d| matches!(d, Decoded::Lost { .. }))
             .count() as u32;
-        asks += c.take_outbound().len() as u32;
+        asks += keyframe_asks(&c.take_outbound()) as u32;
     }
 
     println!(
