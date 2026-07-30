@@ -473,7 +473,24 @@ fn convert_row_pair<const R: usize, const G: usize, const B: usize>(
 
     // The hot loop. Every iterator here proves its own length, so there are no
     // bounds checks inside, and with the channel offsets folded to constants
-    // this is straight-line arithmetic the optimiser can vectorise.
+    // this is straight-line arithmetic.
+    //
+    // **It does not vectorise, and it is not going to.** This said "arithmetic
+    // the optimiser can vectorise" for a long time and that was measurably
+    // untrue: the instantiated loop disassembles to five hundred instructions
+    // with not one packed operation in it. Six loop shapes were tried —
+    // zipped chunks, indexed, whole-word reads, unsigned accumulate, a
+    // deinterleaving pass, and this one — and none of them vectorises, with or
+    // without `-C target-cpu=native` on a machine with AVX2. LLVM will not
+    // turn a four-byte strided load into a one-byte store with a three-term
+    // dot product and a clamp.
+    //
+    // So this is the scalar limit, and the way past it is explicit SIMD:
+    // intrinsics, which are `unsafe` and this workspace forbids, or
+    // `std::simd`, which is not stable. Reading a pixel as a `u32` instead of
+    // three bytes was also measured — nine runs each, medians 3.19 against
+    // 3.21 ms — and changes nothing, because the loop is not limited by how
+    // the pixel is read.
     // `as_chunks` rather than `chunks_exact`: it yields `&[u8; 8]`, so a
     // constant offset into a pixel is provably in bounds after
     // monomorphisation and the load folds to a single instruction. With
