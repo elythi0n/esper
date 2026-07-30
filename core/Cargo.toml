@@ -17,6 +17,7 @@ esper-crypto = { path = "crates/esper-crypto" }
 esper-transport = { path = "crates/esper-transport" }
 esper-rendezvous = { path = "crates/esper-rendezvous" }
 esper-config = { path = "crates/esper-config" }
+esper-png = { path = "crates/esper-png" }
 esper-pty = { path = "crates/esper-pty" }
 esper-audit = { path = "crates/esper-audit" }
 esper-buildinfo = { path = "crates/esper-buildinfo" }

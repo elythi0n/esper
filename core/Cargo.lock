@@ -485,6 +485,7 @@ dependencies = [
  "esper-link",
  "esper-media",
  "esper-pipeline",
+ "esper-png",
  "esper-presence",
  "esper-presence-x11",
  "esper-present",
@@ -588,6 +589,13 @@ dependencies = [
  "rustix",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "esper-png"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

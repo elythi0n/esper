@@ -1995,6 +1995,47 @@ print(s.getsockname()[1]); s.close()')
       # revocation — and this is the only test that can catch it, because the
       # two halves are in different processes and the only thing they share is
       # the device store on disk.
+      # **One picture, through the built binaries and out to a real decoder.**
+      #
+      # The PNG writer in this repository is about two hundred lines including
+      # its own deflate, which is a thing to be suspicious of — so what checks
+      # it is not its own reader. Python's `zlib` is an independent
+      # implementation: it verifies every chunk CRC, inflates the image data,
+      # undoes the row filters and counts what came out. A stream that only
+      # looked like deflate, or a CRC computed with the wrong polynomial,
+      # fails here rather than in somebody's image viewer.
+      echo "  — one picture of a host's screen, as a PNG"
+      shot="$term_b/shot.png"
+      if ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" screenshot "$host_addr" \
+        -o "$shot" > "$term_b/shot.log" 2>&1; then
+        if out=$(python3 ./scripts/check-png.py "$shot" 2>&1); then
+          printf '  ✓ python decoded the PNG this wrote: %s\n' "$out"
+        else
+          printf '  ✗ the PNG this wrote is not one python can read: %s\n' "$out"
+          fail=1
+        fi
+      else
+        printf '  ✗ taking a screenshot failed\n'
+        sed 's/^/      /' "$term_b/shot.log"
+        fail=1
+      fi
+      # And to stdout, which is the form a pipeline uses — with everything it
+      # says going to stderr so the image is not corrupted by its own banner.
+      if ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" screenshot "$host_addr" \
+        > "$term_b/piped.png" 2>"$term_b/piped.log"; then
+        if python3 ./scripts/check-png.py "$term_b/piped.png" >/dev/null 2>&1; then
+          printf '  ✓ and to stdout, with its own output kept off it\n'
+        else
+          printf '  ✗ the piped image is corrupt — something printed on stdout\n'
+          head -c 120 "$term_b/piped.png" | sed 's/^/      /'
+          fail=1
+        fi
+      else
+        printf '  ✗ taking a screenshot to stdout failed\n'
+        sed 's/^/      /' "$term_b/piped.log"
+        fail=1
+      fi
+
       # **A machine with no screen is never warned about a door it has not
       # got.** A session ending now locks the host when nobody here was asked
       # to allow it — which is right on a desktop and meaningless on a server

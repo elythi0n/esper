@@ -4119,9 +4119,13 @@ mod tests {
     /// remembering.
     #[test]
     fn every_flag_the_parser_takes_is_in_its_usage() {
-        let source = include_str!("session_cmd.rs");
-        // The arms of one parser, between its own name and the next `pub fn`.
-        let flags_of = |parser: &str| -> Vec<String> {
+        // **Each parser says which file it is in.** The check read only this
+        // one, so a command whose parser lived elsewhere was outside it — and
+        // `screenshot`'s does. Searching every source for the parser's name
+        // was the first fix and it was wrong in a way worth recording: this
+        // file *contains* the name of every parser, because the table below
+        // names them, so the search found this file and scanned its own test.
+        let flags_of = |source: &str, parser: &str| -> Vec<String> {
             let from = source
                 .find(parser)
                 .unwrap_or_else(|| panic!("{parser} is gone"));
@@ -4147,11 +4151,19 @@ mod tests {
             found
         };
 
-        for (parser, usage, command) in [
-            ("pub fn parse_connect", connect_usage(), "connect"),
-            ("pub fn parse_host", host_usage(), "host"),
+        let here = include_str!("session_cmd.rs");
+        let shot = include_str!("screenshot_cmd.rs");
+        for (source, parser, usage, command) in [
+            (here, "pub fn parse_connect", connect_usage(), "connect"),
+            (here, "pub fn parse_host", host_usage(), "host"),
+            (
+                shot,
+                "pub fn parse",
+                crate::screenshot_cmd::usage(),
+                "screenshot",
+            ),
         ] {
-            for flag in flags_of(parser) {
+            for flag in flags_of(source, parser) {
                 assert!(
                     usage.contains(&flag),
                     "{command} takes {flag} and its usage does not mention it: \
@@ -4164,7 +4176,7 @@ mod tests {
                 let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
                 if word.starts_with("--") && word.len() > 2 {
                     assert!(
-                        flags_of(parser).iter().any(|f| f == word),
+                        flags_of(source, parser).iter().any(|f| f == word),
                         "{command}'s usage names {word}, which its parser does not take"
                     );
                 }

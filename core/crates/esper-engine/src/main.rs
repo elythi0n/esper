@@ -28,6 +28,7 @@ mod pairing;
 mod paths;
 mod permits;
 mod presence_task;
+mod screenshot_cmd;
 mod serve;
 mod session_cmd;
 mod settings;
@@ -145,6 +146,16 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("connect: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("screenshot") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match screenshot_cmd::parse(&rest).and_then(|o| screenshot_cmd::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("screenshot: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -333,6 +344,7 @@ fn usage_for(command: &str) -> Option<String> {
         "connect" => Some(session_cmd::connect_usage()),
         "cp" => Some(cp_cmd::usage()),
         "host" => Some(session_cmd::host_usage()),
+        "screenshot" => Some(screenshot_cmd::usage()),
         _ => None,
     }
 }
@@ -356,6 +368,7 @@ fn print_help() {
            pair       pair with another device, in either direction\n  \
            config     show every setting and where its value came from\n  \
            devices    list paired devices and what they may do\n  \
+           screenshot one picture of a paired host's screen, as a PNG\n  \
            grant      give a paired device a permission (--yes to confirm a\n  \
            \x20          dangerous one without being asked)\n  \
            revoke     take a permission away\n  \

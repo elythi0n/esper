@@ -32,6 +32,7 @@ esper-input.workspace = true
 esper-clipboard.workspace = true
 esper-files.workspace = true
 esper-presence.workspace = true
+esper-png.workspace = true
 esper-pty.workspace = true
 esper-audit.workspace = true
 # Thirty-two random bytes for an invitation's token, and nothing else. Already
