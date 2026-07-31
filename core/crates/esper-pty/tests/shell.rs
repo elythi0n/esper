@@ -25,25 +25,52 @@ fn request(cols: u16, rows: u16) -> TerminalOpen {
 /// Read until `needle` appears, or fail reporting what was actually seen —
 /// far more useful than "timed out" when a shell misbehaves.
 async fn read_until(read: &mut ReadHalf, needle: &str) -> String {
+    read_until_in_chunks_of(read, needle, 4096).await
+}
+
+/// The same, reading at most `chunk` bytes at a time.
+///
+/// # Why the bytes are kept and decoded, rather than decoded and kept
+///
+/// **This helper used to destroy the thing one of its tests is named for.** It
+/// accumulated a `String`, pushing `String::from_utf8_lossy` of each read —
+/// and a pseudo-terminal hands over bytes, so a multi-byte character can
+/// straddle two reads. The lossy decode of the first half replaces the
+/// incomplete tail with `U+FFFD` and the second half's continuation bytes
+/// become more of them, so the character is gone: not mangled by the terminal,
+/// mangled by the test.
+///
+/// Whether that happened depended on where a read boundary fell, which depends
+/// on how busy the machine is — so `utf8_survives_including_wide_and_combining_characters`
+/// failed about one run in nine with three suites competing, and passed every
+/// time on its own. With a three-byte buffer it failed every time, which is
+/// what identified it.
+///
+/// Keeping the bytes and decoding the whole buffer fixes it for any chunk
+/// size: only an incomplete tail at the very end is ever replaced, and the
+/// next read completes it.
+async fn read_until_in_chunks_of(read: &mut ReadHalf, needle: &str, chunk: usize) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    let mut seen = String::new();
-    let mut buf = [0u8; 4096];
+    let mut seen: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; chunk.max(1)];
     loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let so_far = String::from_utf8_lossy(&seen).into_owned();
         assert!(
             !left.is_zero(),
-            "never saw {needle:?}; the shell produced: {seen:?}"
+            "never saw {needle:?}; the shell produced: {so_far:?}"
         );
         match tokio::time::timeout(left, read.read(&mut buf)).await {
-            Ok(Ok(0)) => panic!("the pty closed before {needle:?}; saw: {seen:?}"),
+            Ok(Ok(0)) => panic!("the pty closed before {needle:?}; saw: {so_far:?}"),
             Ok(Ok(n)) => {
-                seen.push_str(&String::from_utf8_lossy(buf.get(..n).unwrap_or(&[])));
-                if seen.contains(needle) {
-                    return seen;
+                seen.extend_from_slice(buf.get(..n).unwrap_or(&[]));
+                let text = String::from_utf8_lossy(&seen);
+                if text.contains(needle) {
+                    return text.into_owned();
                 }
             }
-            Ok(Err(e)) => panic!("pty read failed: {e}; saw: {seen:?}"),
-            Err(_) => panic!("never saw {needle:?}; the shell produced: {seen:?}"),
+            Ok(Err(e)) => panic!("pty read failed: {e}; saw: {so_far:?}"),
+            Err(_) => panic!("never saw {needle:?}; the shell produced: {so_far:?}"),
         }
     }
 }
@@ -131,7 +158,12 @@ async fn utf8_survives_including_wide_and_combining_characters() {
         .await
         .expect("write");
 
-    let seen = read_until(&mut read, ":END").await;
+    // **Three bytes at a time, deliberately.** Every character here is
+    // multi-byte, so a small buffer guarantees each one straddles a read
+    // boundary — which is the case that broke, and which a realistic buffer
+    // exercises only when the machine happens to be busy. A test for whether
+    // UTF-8 survives should not be one that tries the hard part by luck.
+    let seen = read_until_in_chunks_of(&mut read, ":END", 3).await;
     for needle in [
         "\u{65e5}\u{672c}\u{8a9e}",
         "\u{1f512}",

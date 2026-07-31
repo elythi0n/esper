@@ -9,8 +9,7 @@ problem.
 
 **Do not open a public issue.**
 
-Email **security@esper.invalid** — *(placeholder: replace with a monitored
-address and publish a PGP key before the first release)*.
+Email **security@elythion.com**.
 
 - We aim to acknowledge within **72 hours**.
 - We follow **90-day coordinated disclosure**, shortened by agreement if a fix ships sooner.

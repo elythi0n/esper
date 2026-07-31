@@ -46,6 +46,18 @@ all: check-isolation check-reached build test
 check-isolation:
 	@./scripts/check-isolation.sh
 
+## Run the suite under contention and name anything that did not pass every time
+##
+## Not part of `ci`: nine full runs is twenty minutes. This is what to run when
+## a test has been *seen* to fail once — and before believing that running it
+## again fixed it. `make flaky ROUNDS=5 PARALLEL=4` to lean on it harder.
+ROUNDS ?= 3
+PARALLEL ?= 3
+
+.PHONY: flaky
+flaky:
+	@./scripts/check-flaky.sh $(ROUNDS) $(PARALLEL)
+
 ## Verify every name the security path declares is reached, or recorded as not
 ##
 ## Rust cannot find this: a `pub` item in a library crate is never dead code,
