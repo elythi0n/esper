@@ -98,7 +98,7 @@ impl Drop for Indicator {
 /// A press is an *event*, acted on once by whoever is waiting. Only one loop
 /// waits at a time — while a session is running the accept loop is inside it —
 /// so one receiver is the whole mechanism.
-pub type Presses = tokio::sync::mpsc::Receiver<()>;
+pub type Presses = tokio::sync::mpsc::Receiver<HostEvent>;
 
 /// Start the indicator and grab the panic key.
 ///
@@ -138,7 +138,7 @@ pub fn start() -> Result<(Indicator, Presses), String> {
 fn run<P: Presence>(
     mut presence: P,
     commands: Receiver<Command>,
-    presses: tokio::sync::mpsc::Sender<()>,
+    presses: tokio::sync::mpsc::Sender<HostEvent>,
 ) {
     loop {
         // **Polled before the commands are read**, so a panic pressed at the
@@ -147,12 +147,16 @@ fn run<P: Presence>(
         // other order drops it on the floor.
         match presence.poll() {
             Ok(events) => {
-                for _ in events.iter().filter(|e| **e == HostEvent::Panic) {
+                // **Which key, not just that one was pressed.** This
+                // forwarded a bare `()` and filtered for `Panic`, which was
+                // right while there was one key — and would have made the
+                // pause key end the session.
+                for event in events {
                     // `try_send`, and a full queue is dropped on purpose: four
                     // presses nobody has acted on yet means the fifth adds
                     // nothing, and blocking this thread would stop the
                     // indicator being kept on top.
-                    let _ = presses.try_send(());
+                    let _ = presses.try_send(event);
                 }
             }
             Err(e) => {
@@ -191,7 +195,37 @@ mod tests {
         Watching {
             peer: "somebody".to_owned(),
             controlling,
+            paused: false,
         }
+    }
+
+    /// **The two hotkeys are told apart, and neither becomes the other.**
+    ///
+    /// The press channel used to carry `()` and the thread filtered for
+    /// `Panic`, which was right while there was one key — and would have made
+    /// the pause key end every session, which is the worst possible way for a
+    /// key called "pause" to be wrong.
+    #[test]
+    fn a_pause_press_is_not_a_panic_press() {
+        let mut presence = NullPresence::new();
+        presence.pause_key();
+        presence.panic_key();
+        presence.pause_key();
+        let (to_thread, commands) = channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        // Stopped after one turn, the way the tests above do it: the presses
+        // are already queued, so there is nothing to wait for.
+        to_thread.send(Command::Stop).expect("send");
+        run(presence, commands, tx);
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(event);
+        }
+        assert_eq!(
+            seen,
+            vec![HostEvent::Pause, HostEvent::Panic, HostEvent::Pause],
+            "the presses arrived as something other than what was pressed"
+        );
     }
 
     /// The thread does what it is told and reports what happened, checked with
@@ -213,7 +247,7 @@ mod tests {
 
         assert_eq!(
             panic_rx.try_recv(),
-            Ok(()),
+            Ok(HostEvent::Panic),
             "the press must have been reported"
         );
     }
@@ -230,7 +264,11 @@ mod tests {
         to_thread.send(Command::Stop).expect("send");
         run(presence, commands, panic_tx);
 
-        assert_eq!(panic_rx.try_recv(), Ok(()), "one press arrives");
+        assert_eq!(
+            panic_rx.try_recv(),
+            Ok(HostEvent::Panic),
+            "one press arrives"
+        );
         assert!(
             panic_rx.try_recv().is_err(),
             "and there is not a second one waiting"
@@ -248,8 +286,8 @@ mod tests {
         let (panic_tx, mut panic_rx) = tokio::sync::mpsc::channel(4);
         to_thread.send(Command::Stop).expect("send");
         run(presence, commands, panic_tx);
-        assert_eq!(panic_rx.try_recv(), Ok(()));
-        assert_eq!(panic_rx.try_recv(), Ok(()));
+        assert_eq!(panic_rx.try_recv(), Ok(HostEvent::Panic));
+        assert_eq!(panic_rx.try_recv(), Ok(HostEvent::Panic));
         assert!(panic_rx.try_recv().is_err());
     }
 
@@ -264,7 +302,7 @@ mod tests {
         let (panic_tx, mut panic_rx) = tokio::sync::mpsc::channel(4);
         to_thread.send(Command::Stop).expect("send");
         run(presence, commands, panic_tx);
-        assert_eq!(panic_rx.try_recv(), Ok(()));
+        assert_eq!(panic_rx.try_recv(), Ok(HostEvent::Panic));
     }
 
     /// Dropping the handle stops the thread, so a host that finishes does not

@@ -36,6 +36,11 @@ impl NullPresence {
         self.pending.push(HostEvent::Panic);
     }
 
+    /// Pretend the person hit the pause key.
+    pub fn pause_key(&mut self) {
+        self.pending.push(HostEvent::Pause);
+    }
+
     /// What the indicator currently says.
     #[must_use]
     pub const fn saying(&self) -> Option<&Watching> {

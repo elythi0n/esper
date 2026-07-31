@@ -1162,6 +1162,9 @@ fn the_direction_rule_and_what_the_host_accepts_agree() {
                 esper_proto::Permission::Control,
             ],
         }),
+        // And the other one: a controller that could hold the picture could
+        // stop a host showing what is happening on its own screen.
+        MediaMessage::Paused(esper_proto::Paused { paused: true }),
     ];
     for message in messages {
         let allowed = message.may_be_sent_by(Role::Controller);

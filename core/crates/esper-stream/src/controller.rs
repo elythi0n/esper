@@ -271,6 +271,12 @@ pub struct ControllerStream {
     ///
     /// Coalesces the asking: a burst of loss produces one request.
     awaiting_keyframe: bool,
+    /// Whether the host last said the picture was held, if it has said.
+    ///
+    /// `None` once a caller has taken it. Like the narrowing, held until
+    /// taken: a viewer that missed a pause would show a frozen picture with
+    /// nothing to explain it, which is what a dead link looks like.
+    paused: Option<bool>,
     /// The permission set the host last said this session holds.
     ///
     /// `None` once a caller has taken it. See
@@ -382,6 +388,7 @@ impl ControllerStream {
             awaiting_keyframe: true,
             asked_for: KeyframeReason::Joined,
             granted_now: None,
+            paused: None,
             round_trip: UNKNOWN_ROUND_TRIP,
             frame_interval: frame_interval(config.max_fps),
             announced_fps: config.max_fps,
@@ -1346,6 +1353,14 @@ impl ControllerStream {
             // request, a monitor selection and a link report all need only
             // `View`, and a session that has lost `View` is ending rather than
             // narrowing.
+            // **Kept for the caller, like the pointer and the narrowing.** What
+            // to do about a held picture is a viewer's decision — say so in a
+            // title bar, dim what is on show, leave it alone — and this layer
+            // has no window to do any of it in.
+            MediaMessage::Paused(state) => {
+                self.paused = Some(state.paused);
+                Ok(())
+            }
             MediaMessage::Permissions(change) => {
                 // The last word wins. Two narrowings in a row are not a delta
                 // to accumulate -- each carries the complete set, which is
@@ -1375,6 +1390,14 @@ impl ControllerStream {
     #[must_use]
     pub fn take_permissions(&mut self) -> Option<Vec<esper_proto::Permission>> {
         self.granted_now.take()
+    }
+
+    /// Whether the host has said the picture is held, if it has said so.
+    ///
+    /// Taken rather than read, so a caller that acts on it cannot act twice.
+    #[must_use]
+    pub fn take_paused(&mut self) -> Option<bool> {
+        self.paused.take()
     }
 
     /// Everything the host has said about the pointer since this was last
@@ -1562,6 +1585,27 @@ mod tests {
         );
         assert_eq!(c.take_permissions(), None, "and not a second time");
         assert_eq!(c.stats().narrowings, 1);
+    }
+
+    /// **A pause is handed over once, and both edges arrive.**
+    ///
+    /// Same shape as a narrowing and for the same reason: the caller that has
+    /// to say something to a person is not the one reading the stream. The
+    /// release matters as much as the hold — a viewer left saying "held" after
+    /// the frames came back is worse than one that never said it.
+    #[test]
+    fn a_pause_and_its_release_are_each_kept_until_taken() {
+        let mut c = ControllerStream::new(&announced(30)).expect("a well-formed config");
+        assert_eq!(c.take_paused(), None, "nothing has been said yet");
+
+        c.handle(&MediaMessage::Paused(esper_proto::Paused { paused: true }))
+            .expect("a host may say this");
+        assert_eq!(c.take_paused(), Some(true));
+        assert_eq!(c.take_paused(), None, "and not a second time");
+
+        c.handle(&MediaMessage::Paused(esper_proto::Paused { paused: false }))
+            .expect("a host may say this");
+        assert_eq!(c.take_paused(), Some(false), "the release arrives too");
     }
 
     /// **The last word wins, because each message is the complete set.**

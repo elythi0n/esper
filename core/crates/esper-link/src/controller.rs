@@ -317,6 +317,14 @@ impl ControllerLink {
         self.stream.take_cursor()
     }
 
+    /// Whether the host has said the picture is held, if it has said so.
+    ///
+    /// See [`esper_stream::ControllerStream::take_paused`].
+    #[must_use]
+    pub fn take_paused(&mut self) -> Option<bool> {
+        self.stream.take_paused()
+    }
+
     /// What the host has said this session may now do, if it has said so.
     ///
     /// See [`esper_stream::ControllerStream::take_permissions`]: taken rather

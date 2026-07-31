@@ -689,6 +689,23 @@ pub struct SessionDeny {
     pub detail: String,
 }
 
+/// The host holding the picture, or letting it go again.
+///
+/// **Not an ending, and not a revocation.** The connection stays up, the
+/// permissions stand, the clipboard and any file transfer carry on — what
+/// stops is the picture. Somebody at the host needed a moment, and the
+/// alternative products offer for that moment is ending the session and
+/// setting it up again.
+///
+/// Sent whenever it changes, and it is the *state* rather than a toggle: two
+/// ends that each flip a boolean on a message drift apart the first time one
+/// is lost, and the state cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Paused {
+    /// Whether the host is holding the picture right now.
+    pub paused: bool,
+}
+
 /// The host narrowing or widening a live session.
 ///
 /// Sent whenever policy changes mid-session — a human revoking control, a
@@ -1913,6 +1930,13 @@ pub enum MediaMessage {
     /// and the only other traffic here is rare. See [`LinkReport`] for why the
     /// measuring end is the receiving one.
     Report(LinkReport),
+    /// The picture is held, or let go again. Host to controller.
+    ///
+    /// **A controller has to be told, or a held picture is a broken one.** A
+    /// viewer whose frames simply stopped shows the last one it had, which is
+    /// indistinguishable from a link that died — and the person watching would
+    /// reconnect, which is precisely what pausing exists to avoid.
+    Paused(Paused),
     /// What this session may now do. Host to controller.
     ///
     /// **On this stream because it is the only one the host can push on.**
@@ -1947,6 +1971,8 @@ impl MediaMessage {
             // name a permission that does not exist, and a repeat of one it
             // already named grants nothing, so applying it is idempotent.
             Self::Permissions(_) => true,
+            // A boolean is within bounds by being one.
+            Self::Paused(_) => true,
         }
     }
 
@@ -1964,6 +1990,7 @@ impl MediaMessage {
             Self::Cursor(c) => c.name(),
             Self::Report(_) => "a link report",
             Self::Permissions(_) => "a permission change",
+            Self::Paused(_) => "a pause",
         }
     }
 
@@ -1980,7 +2007,12 @@ impl MediaMessage {
             // A controller announcing its own permissions would be a
             // controller granting itself permissions, which is the whole
             // reason this is checked at the boundary rather than trusted.
-            Self::Config(_) | Self::Cursor(_) | Self::Permissions(_) => matches!(role, Role::Host),
+            // A controller that could pause the host's own screen would be
+            // deciding for the person at it, which is the opposite of what
+            // this is for.
+            Self::Config(_) | Self::Cursor(_) | Self::Permissions(_) | Self::Paused(_) => {
+                matches!(role, Role::Host)
+            }
             Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) | Self::Report(_) => {
                 matches!(role, Role::Controller)
             }
@@ -2018,6 +2050,30 @@ mod tests {
                 m.is_well_formed(),
                 "a withdrawal a receiver refuses is a withdrawal that did not \
                  happen: {m:?}"
+            );
+        }
+    }
+
+    /// **A pause is host to controller only, and always well formed.**
+    ///
+    /// Only the person at the host decides whether their screen is being
+    /// shown; a controller that could send this could tell a host to stop
+    /// sending, which is a way of hiding what is happening on it. And, like a
+    /// withdrawal, it may not be discarded: a receiver that dropped the
+    /// release would show a held picture for the rest of the session.
+    #[test]
+    fn only_a_host_may_hold_the_picture() {
+        use super::{MediaMessage, Paused};
+        for paused in [true, false] {
+            let m = MediaMessage::Paused(Paused { paused });
+            assert!(m.may_be_sent_by(super::Role::Host));
+            assert!(
+                !m.may_be_sent_by(super::Role::Controller),
+                "a controller could tell the host to stop showing its screen"
+            );
+            assert!(
+                m.is_well_formed(),
+                "a pause a receiver refuses is a lie: {m:?}"
             );
         }
     }

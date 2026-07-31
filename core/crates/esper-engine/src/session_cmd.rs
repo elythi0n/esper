@@ -662,8 +662,14 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                 match accept_deadline(parked.as_ref().map(|p| p.parked_for(Instant::now()))) {
                     Some(left) => tokio::select! {
                         _ = stopping.changed() => break Ok(()),
-                        () = wait_for_panic(presses.as_mut()) => {
-                            panic_now(indicator.as_ref());
+                        // **Pause does nothing with nothing connected.** There
+                        // is no picture to hold, and a key that appeared to do
+                        // something while no session existed would be a key
+                        // whose effect nobody could predict.
+                        event = wait_for_press(presses.as_mut()) => {
+                            if event == esper_presence::HostEvent::Panic {
+                                panic_now(indicator.as_ref());
+                            }
                             continue;
                         }
                         waited = tokio::time::timeout(left, endpoint.accept()) => match waited {
@@ -674,8 +680,10 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                     },
                     None => tokio::select! {
                         _ = stopping.changed() => break Ok(()),
-                        () = wait_for_panic(presses.as_mut()) => {
-                            panic_now(indicator.as_ref());
+                        event = wait_for_press(presses.as_mut()) => {
+                            if event == esper_presence::HostEvent::Panic {
+                                panic_now(indicator.as_ref());
+                            }
                             continue;
                         }
                         accepted = endpoint.accept() => accepted,
@@ -786,19 +794,42 @@ async fn wait_for_cursor(
     }
 }
 
-/// Wait for the panic key, or for ever when there is none.
+/// Wait for `SIGUSR1`, or for ever when it could not be listened for.
+///
+/// The same shape as [`wait_for_press`] and for the same reason: a `select!`
+/// branch needs a future either way.
+async fn wait_for_usr1(signal: Option<&mut tokio::signal::unix::Signal>) {
+    match signal {
+        Some(s) => {
+            s.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Wait for one of the host's hotkeys, or for ever when there are none.
 ///
 /// A `select!` branch needs a future either way, and a host with no working
-/// panic key must not fall out of its loop immediately — so the absence is a
+/// hotkey must not fall out of its loop immediately — so the absence is a
 /// future that never completes rather than a special case at every call site.
-async fn wait_for_panic(presses: Option<&mut crate::presence_task::Presses>) {
+///
+/// **Which key it was comes back**, because there are two now and they do
+/// opposite things: one ends every session, the other holds one.
+async fn wait_for_press(
+    presses: Option<&mut crate::presence_task::Presses>,
+) -> esper_presence::HostEvent {
     match presses {
         // One press, taken from the queue: acted on once by whoever was
         // waiting. See `presence_task::Presses` for what the first version of
         // this did instead.
-        Some(queue) => {
-            let _ = queue.recv().await;
-        }
+        //
+        // A closed queue means the indicator's thread is gone, which happens
+        // when the host is shutting down — and then waiting for ever is right,
+        // because the branch that owns the shutdown is the one that should act.
+        Some(queue) => match queue.recv().await {
+            Some(event) => event,
+            None => std::future::pending().await,
+        },
         None => std::future::pending().await,
     }
 }
@@ -1101,6 +1132,13 @@ const fn config_codec_name() -> &'static str {
 /// enough that a controller which never closes costs one session's worth of
 /// waiting and not the host.
 const GOODBYE: Duration = Duration::from_secs(2);
+
+/// How long the sending thread sleeps between looks while the picture is held.
+///
+/// Short enough that letting go is not perceptible — a person who presses the
+/// key expects the far end to see their screen again, not to see it in a
+/// moment — and long enough that a paused session is not a thread spinning.
+const HELD_TICK: Duration = Duration::from_millis(50);
 
 /// How long to wait for a grant before saying it is being waited for.
 ///
@@ -1884,6 +1922,7 @@ async fn serve_session(
         indicator.show(esper_presence::Watching {
             peer: session.peer_hello().name.clone(),
             controlling: may_control,
+            paused: false,
         });
     }
 
@@ -1967,6 +2006,11 @@ async fn serve_session(
             pointer,
             watch: watch.as_ref(),
             live: live.clone(),
+            watching: esper_presence::Watching {
+                peer: session.peer_hello().name.clone(),
+                controlling: may_control,
+                paused: false,
+            },
             layout,
             log,
             capacity,
@@ -2337,6 +2381,9 @@ struct Attending<'a> {
     watch: Option<&'a crate::cursor_task::CursorWatch>,
     /// What this session's device may do, as it changes.
     live: crate::permits::Live,
+    /// What the session indicator is saying, so pausing can change one field
+    /// of it rather than rebuilding what the rest should be.
+    watching: esper_presence::Watching,
     /// The host's screens, published whenever they change, so the injector
     /// maps pointer positions through the layout that is on show.
     layout: tokio::sync::watch::Sender<Vec<esper_input::Monitor>>,
@@ -2359,6 +2406,13 @@ async fn serve(
     // The controller's messages have to reach the pipeline, which lives on the
     // sending thread; and a monitor switch has to be announced back, which
     // only the control stream can do. One channel each way.
+    // **Whether the picture is held, read by the thread that sends it.**
+    //
+    // A `watch` because only the latest answer matters: a queue of pauses and
+    // resumes would be a queue the sending thread worked through one frame at
+    // a time, so a press and an unpress in quick succession would hold the
+    // picture for as long as it took to drain rather than not at all.
+    let (hold, held) = tokio::sync::watch::channel(false);
     let (to_pipeline, mut from_control) = tokio::sync::mpsc::unbounded_channel::<MediaMessage>();
     let (to_controller, mut from_pipeline) = tokio::sync::mpsc::unbounded_channel::<MediaMessage>();
     let (mut pump, mut control) = link.split();
@@ -2384,6 +2438,29 @@ async fn serve(
         // is struggling.
         let mut said = pump.profile();
         loop {
+            // **Held: nothing captured, nothing encoded, nothing sent.**
+            //
+            // Not a frame dropped on the way out — the capture never happens,
+            // so a paused session costs the host nothing, which is half the
+            // reason to pause rather than end. The controller was told, so its
+            // last picture staying on screen is a picture it can explain.
+            //
+            // Messages are still read below: a keyframe request arriving
+            // during a pause is answered by the first frame after it, and a
+            // controller whose request was silently dropped would wait a pace
+            // and ask again for as long as the pause lasted.
+            if *held.borrow() {
+                std::thread::sleep(HELD_TICK);
+                while let Ok(message) = from_control.try_recv() {
+                    if let Err(e) = pump.handle(&message) {
+                        eprintln!("      · refused a message from the controller: {e}");
+                    }
+                }
+                if !pump.is_open() {
+                    break;
+                }
+                continue;
+            }
             // Anything the controller asked for, before the next frame, so a
             // keyframe request is acted on by the very next one.
             while let Ok(message) = from_control.try_recv() {
@@ -2550,8 +2627,8 @@ async fn serve(
         ToController(Option<MediaMessage>),
         /// The operator asked this process to stop.
         Stop,
-        /// The person at the host hit the panic key.
-        Panic,
+        /// The person at the host hit one of the hotkeys.
+        Pressed(esper_presence::HostEvent),
         /// What this device may do changed while the session was running.
         Permissions,
     }
@@ -2567,10 +2644,36 @@ async fn serve(
     // produces one message. `None` until something is taken away: the opening
     // grant was already agreed when the session was set up.
     let mut told_permissions: Option<Vec<Permission>> = None;
+    // Whether the picture is held. The session owns this, and the key and the
+    // signal are two ways of asking it to change — which is why neither of
+    // them carries a state.
+    let mut paused = false;
+    // One per session, dropped with it. `signal` may be called more than once
+    // and every stream receives, so this does not have to be threaded down
+    // from the host's own start.
+    let mut usr1 =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                // Said, not swallowed: a host whose pause signal is unavailable
+                // still works, and somebody who tried it would otherwise be left
+                // wondering which end was broken.
+                eprintln!("      · `kill -USR1` will not hold this session: {e}");
+                None
+            }
+        };
     loop {
         let turn = tokio::select! {
             _ = stopping.changed() => Turn::Stop,
-            () = wait_for_panic(attending.presses.as_deref_mut()) => Turn::Panic,
+            event = wait_for_press(attending.presses.as_deref_mut()) => Turn::Pressed(event),
+            // **And the same thing from a signal**, because a host with no
+            // display has no hotkey and still has a reason to hold a session:
+            // `kill -USR1` is the trigger a script and a machine without a
+            // screen both have. One `Turn`, so there is one place that decides
+            // what pausing means.
+            () = wait_for_usr1(usr1.as_mut()) => {
+                Turn::Pressed(esper_presence::HostEvent::Pause)
+            }
             () = attending.live.changed() => Turn::Permissions,
             incoming = control.recv::<MediaMessage>() => Turn::FromController(incoming),
             outgoing = from_pipeline.recv() => Turn::ToController(outgoing),
@@ -2589,7 +2692,33 @@ async fn serve(
             // down" would wait for it to come back, and told "you were
             // disconnected" would reconnect. Neither happened: a person
             // standing at the machine decided they had seen enough.
-            Turn::Panic => {
+            Turn::Pressed(esper_presence::HostEvent::Pause) => {
+                paused = !paused;
+                // **The thread first, then the far end.** Holding the picture
+                // is the thing being asked for; telling the controller is how
+                // it is explained. In the other order a frame captured between
+                // the two would arrive after the pause was announced.
+                let _ = hold.send(paused);
+                if let Some(i) = attending.indicator {
+                    i.show(esper_presence::Watching {
+                        paused,
+                        ..attending.watching.clone()
+                    });
+                }
+                println!(
+                    "      · {} the picture at the host",
+                    if paused { "holding" } else { "released" }
+                );
+                if control
+                    .send(&MediaMessage::Paused(esper_proto::Paused { paused }))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            Turn::Pressed(esper_presence::HostEvent::Panic) => {
                 media.close(esper_proto::Reason::STOPPED_AT_HOST);
                 ours = Some(esper_proto::Reason::STOPPED_AT_HOST);
                 // **The whole action, here.** Whoever takes the press does
@@ -3691,6 +3820,23 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             if happened.contains(&esper_present::PresentEvent::CloseRequested) {
                 println!("  · the window was closed");
                 break;
+            }
+            // **A held picture, said rather than shown as a frozen one.**
+            //
+            // A viewer whose frames stopped shows the last one it had, which
+            // is exactly what a dead link looks like — and somebody watching
+            // that would reconnect, which is the thing pausing exists to
+            // avoid.
+            if let Some(held) = link.take_paused() {
+                println!(
+                    "  · the host {} the picture{}",
+                    if held { "is holding" } else { "released" },
+                    if held {
+                        " — the session, its permissions and anything in flight are kept"
+                    } else {
+                        ""
+                    }
+                );
             }
             // **What the host says this session may now do.**
             //

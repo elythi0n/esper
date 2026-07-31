@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use esper_presence::{HostEvent, Presence, Watching};
 use esper_presence_x11::X11Presence;
-use x11rb::connection::Connection as _;
+use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, GrabMode, InputFocus, StackMode,
     Window, WindowClass,
@@ -47,6 +47,51 @@ fn exclusive() -> esper_display_lock::DisplayLock {
     esper_display_lock::DisplayLock::take()
 }
 
+/// Hold Ctrl+Alt+Shift, tap `usage`, let go.
+///
+/// The keycodes come from the HID table the input crate already owns, so this
+/// presses the same key the backend grabbed rather than a keysym that happens
+/// to look right on this layout.
+fn hotkey(conn: &impl Connection, root: Window, usage: u16) {
+    let key = |usage: u16| -> u8 {
+        u8::try_from(
+            esper_input::hid::evdev_for_usage(usage)
+                .expect("in the table")
+                .0
+                + 8,
+        )
+        .expect("a keycode")
+    };
+    const PRESS: u8 = 2;
+    const RELEASE: u8 = 3;
+    for held in [0xE0u16, 0xE2, 0xE1] {
+        conn.xtest_fake_input(PRESS, key(held), 0, root, 0, 0, 0)
+            .expect("a modifier down");
+    }
+    conn.xtest_fake_input(PRESS, key(usage), 0, root, 0, 0, 0)
+        .expect("the key down");
+    conn.xtest_fake_input(RELEASE, key(usage), 0, root, 0, 0, 0)
+        .expect("the key up");
+    for held in [0xE1u16, 0xE2, 0xE0] {
+        conn.xtest_fake_input(RELEASE, key(held), 0, root, 0, 0, 0)
+            .expect("a modifier up");
+    }
+    conn.flush().expect("flush");
+}
+
+/// Poll until something arrives, or give up after a second.
+fn presses(p: &mut X11Presence) -> Vec<HostEvent> {
+    let mut seen = Vec::new();
+    for _ in 0..40 {
+        seen.extend(p.poll().expect("poll"));
+        if !seen.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    seen
+}
+
 fn open() -> Option<X11Presence> {
     if std::env::var_os("DISPLAY").is_none() {
         println!("skipped: no DISPLAY. CI runs these under Xvfb.");
@@ -65,6 +110,7 @@ fn watching(controlling: bool) -> Watching {
     Watching {
         peer: "a test".to_owned(),
         controlling,
+        paused: false,
     }
 }
 
@@ -349,37 +395,9 @@ fn the_panic_key_arrives_even_when_another_window_has_the_focus() {
     std::thread::sleep(Duration::from_millis(80));
 
     // Ctrl+Alt+Shift+Escape, from the keycodes the table gives.
-    let key = |usage: u16| -> u8 {
-        u8::try_from(
-            esper_input::hid::evdev_for_usage(usage)
-                .expect("in the table")
-                .0
-                + 8,
-        )
-        .expect("a keycode")
-    };
-    for usage in [0xE0u16, 0xE2, 0xE1] {
-        conn.xtest_fake_input(2, key(usage), 0, root, 0, 0, 0)
-            .expect("down");
-    }
-    conn.xtest_fake_input(2, key(0x29), 0, root, 0, 0, 0)
-        .expect("escape down");
-    conn.xtest_fake_input(3, key(0x29), 0, root, 0, 0, 0)
-        .expect("escape up");
-    for usage in [0xE1u16, 0xE2, 0xE0] {
-        conn.xtest_fake_input(3, key(usage), 0, root, 0, 0, 0)
-            .expect("up");
-    }
-    conn.flush().expect("flush");
-
-    let mut seen = Vec::new();
-    for _ in 0..40 {
-        seen.extend(p.poll().expect("poll"));
-        if !seen.is_empty() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    // Ctrl+Alt+Shift+Escape.
+    hotkey(&conn, root, 0x29);
+    let seen = presses(&mut p);
     let _ = conn.destroy_window(thief);
     let _ = conn.flush();
 
@@ -437,37 +455,8 @@ fn an_active_keyboard_grab_takes_the_panic_key_and_that_is_x11() {
         .expect("reply");
     println!("keyboard grab status: {:?}", grabbed.status);
 
-    let key = |usage: u16| -> u8 {
-        u8::try_from(
-            esper_input::hid::evdev_for_usage(usage)
-                .expect("in the table")
-                .0
-                + 8,
-        )
-        .expect("a keycode")
-    };
-    for usage in [0xE0u16, 0xE2, 0xE1] {
-        conn.xtest_fake_input(2, key(usage), 0, root, 0, 0, 0)
-            .expect("down");
-    }
-    conn.xtest_fake_input(2, key(0x29), 0, root, 0, 0, 0)
-        .expect("escape");
-    conn.xtest_fake_input(3, key(0x29), 0, root, 0, 0, 0)
-        .expect("escape up");
-    for usage in [0xE1u16, 0xE2, 0xE0] {
-        conn.xtest_fake_input(3, key(usage), 0, root, 0, 0, 0)
-            .expect("up");
-    }
-    conn.flush().expect("flush");
-
-    let mut seen = Vec::new();
-    for _ in 0..40 {
-        seen.extend(p.poll().expect("poll"));
-        if !seen.is_empty() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    hotkey(&conn, root, 0x29);
+    let seen = presses(&mut p);
     let _ = conn.ungrab_keyboard(x11rb::CURRENT_TIME);
     let _ = conn.flush();
 
@@ -496,4 +485,102 @@ fn the_panic_key_is_grabbed_before_any_session() {
         "the panic key should be grabbed as soon as presence is open"
     );
     assert!(!p.is_showing(), "and no indicator until there is a session");
+}
+
+/// **A held session still says somebody is connected.**
+///
+/// The frame changes colour rather than coming down: taking it away would say
+/// "nobody is watching", which is false — the session is there, the
+/// permissions stand, and the far end is one keystroke from seeing the screen
+/// again. That is the one lie this crate exists to prevent, and pausing is the
+/// state most likely to produce it.
+#[test]
+fn a_paused_session_changes_the_frame_rather_than_removing_it() {
+    let _display = exclusive();
+    if !may_disturb_the_display() {
+        return;
+    }
+    let Some(mut p) = open() else { return };
+
+    p.show(&watching(false)).expect("shown");
+    let amber = pixel_at(1, 1).expect("a pixel");
+    assert!(p.is_showing(), "a frame while watching");
+
+    p.show(&Watching {
+        paused: true,
+        ..watching(false)
+    })
+    .expect("shown");
+    assert!(p.is_showing(), "and a frame while held");
+    assert_eq!(p.windows().len(), 4, "all four edges are still there");
+    let held = pixel_at(1, 1).expect("a pixel");
+    assert_ne!(
+        amber, held,
+        "a held session looks exactly like a watched one, so nobody can tell"
+    );
+
+    // And back, so the colour is a state rather than a one-way trip.
+    p.show(&watching(false)).expect("shown");
+    assert_eq!(
+        pixel_at(1, 1).expect("a pixel"),
+        amber,
+        "letting go did not put the colour back"
+    );
+    p.hide().expect("hidden");
+}
+
+/// **Both hotkeys are grabbed, and the panic key is the one that must be.**
+///
+/// If only one grab can be had — something else already holds a combination —
+/// it has to be the one that makes a session stop: a pause key nobody can
+/// reach is an inconvenience, and a panic key nobody can reach is a promise
+/// this crate is not keeping.
+#[test]
+fn both_hotkeys_are_grabbed_before_any_session() {
+    let _display = exclusive();
+    let Some(p) = open() else { return };
+    assert!(
+        p.panic_key_grabbed(),
+        "the panic key should be grabbed as soon as presence is open"
+    );
+    assert!(
+        p.pause_key_grabbed(),
+        "and so should the pause key, which is the one people will actually use"
+    );
+}
+
+/// **Pressing the pause key pauses, and does not end the session.**
+///
+/// Both hotkeys are the same three modifiers and differ only in the last key,
+/// so telling them apart is a keycode comparison — the kind of thing that is
+/// easy to write and easy to get away with getting wrong, because the panic
+/// key would keep working and only the pause key would be catastrophic.
+#[test]
+fn the_pause_key_arrives_as_a_pause() {
+    if !may_disturb_the_display() {
+        return;
+    }
+    let _display = exclusive();
+    let Some(mut p) = open() else { return };
+    if !p.pause_key_grabbed() {
+        println!("skipped: something else on this display already holds the pause key");
+        return;
+    }
+    let _ = p.poll();
+
+    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let root = conn.setup().roots.get(screen_num).expect("a screen").root;
+
+    // Ctrl+Alt+Shift+P.
+    hotkey(&conn, root, 0x13);
+    let seen = presses(&mut p);
+
+    assert!(
+        seen.contains(&HostEvent::Pause),
+        "the pause key did not arrive as a pause, it arrived as {seen:?}"
+    );
+    assert!(
+        !seen.contains(&HostEvent::Panic),
+        "the pause key ended the session — {seen:?}"
+    );
 }

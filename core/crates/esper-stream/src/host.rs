@@ -573,6 +573,13 @@ impl HostStream {
                 role: Role::Controller,
                 what: message.name(),
             }),
+            // Whose screen it is decides who may hold it. A controller that
+            // could pause the host would be deciding for the person sitting
+            // at it, which is the opposite of what pausing is for.
+            MediaMessage::Paused(_) => Err(StreamError::WrongDirection {
+                role: Role::Controller,
+                what: message.name(),
+            }),
         }
     }
 

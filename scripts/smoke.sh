@@ -2197,6 +2197,74 @@ print(s.getsockname()[1]); s.close()')
       # Put it back, so what follows is not running against a narrower device
       # than it was written for.
       ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" control >/dev/null
+      flowing="${shown:-}"
+
+      # **Holding the picture is not losing the session.** A pause stops the
+      # screen going out and keeps everything else: the connection, the
+      # permissions, the terminal, the clipboard. Both ends have to say so —
+      # a viewer whose frames merely stopped is indistinguishable from a dead
+      # link, and somebody looking at one would reconnect.
+      #
+      # `SIGUSR1` is the trigger here rather than the hotkey, because this host
+      # has no display to press a key on — which is exactly why the signal
+      # exists.
+      #
+      # The evidence that it actually stopped is the picture count: the same
+      # host, the same flags and the same twelve seconds, with eight of them
+      # held, should show a fraction of what the run above showed.
+      echo "  — holding a live session and letting it go"
+      began=$(date +%s)
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        timeout 60 "$BIN/esper-engine" connect "$host_addr" --seconds 12 --control \
+        > "$term_b/held.log" 2>&1 &
+      client=$!
+      # **The engine, not the `timeout` around it.** `$host_pid` is the
+      # wrapper, and `timeout` does not handle `USR1`: the default action ends
+      # it. The engine happens to get the signal anyway, because the two share
+      # a process group — and then the wrapper is gone, so the second signal
+      # has nothing to send to. That looked exactly like a host that could
+      # pause and not resume, and it also left the host with nothing bounding
+      # how long it may run.
+      engine_pid=$(pgrep -P "$host_pid" -x esper-engine 2>/dev/null | head -1)
+      engine_pid="${engine_pid:-$host_pid}"
+      sleep 2
+      kill -USR1 "$engine_pid" 2>/dev/null || true
+      sleep 8
+      kill -USR1 "$engine_pid" 2>/dev/null || true
+      wait "$client" || true
+      lasted=$(( $(date +%s) - began ))
+      held_shown=$( { awk '/^  pictures /{print $2}' "$term_b/held.log" 2>/dev/null || true; } | head -1)
+      if grep -q 'the host is holding the picture' "$term_b/held.log" &&
+        grep -q 'the host released the picture' "$term_b/held.log" &&
+        ! grep -q 'ended the session' "$term_b/held.log" &&
+        [ "$lasted" -ge 10 ]; then
+        printf '  ✓ the session was held and let go, and survived both: %ss, %s pictures\n' \
+          "$lasted" "${held_shown:-no}"
+      else
+        printf '  ✗ holding the session did not reach the controller (%ss, %s pictures)\n' \
+          "$lasted" "${held_shown:-no}"
+        sed 's/^/      /' "$term_b/held.log"
+        fail=1
+      fi
+      if grep -q 'holding the picture at the host' "$term_a/host.log" &&
+        grep -q 'released the picture at the host' "$term_a/host.log"; then
+        printf '  ✓ and the host said it was holding it, and then that it was not\n'
+      else
+        printf '  ✗ the host did not report holding the picture\n'
+        grep -E 'the picture at the host' "$term_a/host.log" | sed 's/^/      /' || true
+        fail=1
+      fi
+      # Held for two thirds of the session, so a host that ignored the pause
+      # and went on encoding is caught by the count rather than by the words.
+      if [ -n "$flowing" ] && [ -n "${held_shown:-}" ] &&
+        [ "$held_shown" -lt $(( flowing / 2 )) ]; then
+        printf '  ✓ and the screen actually stopped: %s pictures held against %s flowing\n' \
+          "$held_shown" "$flowing"
+      else
+        printf '  ✗ a held session sent %s pictures against %s flowing — it did not stop\n' \
+          "${held_shown:-no}" "${flowing:-no}"
+        fail=1
+      fi
 
       echo "  — revoking a device that is connected right now"
       { printf 'echo holding\n'; sleep 15; } | \

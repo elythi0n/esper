@@ -70,6 +70,14 @@ pub struct Watching {
     /// an indicator that stayed amber until the first one would be a
     /// reassurance that expires without warning.
     pub controlling: bool,
+    /// Whether the picture is being held right now.
+    ///
+    /// **A third thing to say, not the absence of the other two.** Taking the
+    /// indicator down while paused would say "nobody is connected", which is
+    /// false and is the one lie this crate exists to prevent: the session is
+    /// still there, the permissions still stand, and the far end is one
+    /// keystroke from seeing the screen again.
+    pub paused: bool,
 }
 
 /// Something the person at the host did.
@@ -81,6 +89,19 @@ pub enum HostEvent {
     /// this is not making a policy decision, they are making it stop — and the
     /// screen is locked, so whatever was on it is not left visible.
     Panic,
+    /// The pause key.
+    ///
+    /// **The thing to reach for instead of the panic key**, and the reason it
+    /// exists: the panic key is for "stop", and most of the time somebody
+    /// wants "wait". Holding the picture keeps the connection, the permissions
+    /// and any transfer in flight, so nothing has to be set up again — where
+    /// ending the session means pairing state, a prompt, and a keyframe.
+    ///
+    /// A press rather than a state, because the *session* owns whether it is
+    /// paused. A key that reported "now paused" would be a second place the
+    /// answer lived, and the two would disagree the first time a press was
+    /// missed.
+    Pause,
 }
 
 /// Somewhere to show that a session is happening.

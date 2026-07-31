@@ -60,12 +60,42 @@ const WATCHING: u32 = 0x00FF_B000;
 /// would train a person to ignore the one that matters.
 const CONTROLLING: u32 = 0x00FF_2020;
 
+/// The colour while the picture is held: blue.
+///
+/// **Deliberately not amber or red.** Those two mean "somebody is watching"
+/// and "somebody can type", and a paused session is neither — the point of the
+/// third colour is that a person glancing at their own screen can tell "held"
+/// from "being watched" without reading anything, which is the whole design of
+/// this indicator.
+///
+/// And it is a colour rather than the frame coming down: taking it away would
+/// say "nobody is connected", which is false and is the one lie this crate
+/// exists to prevent.
+const PAUSED: u32 = 0x0020_60FF;
+
 /// The panic key's keycode, from the same table the injector uses.
 ///
 /// Escape is HID usage 0x29. Looked up rather than written as 9, so that this
 /// and the injecting side cannot disagree about which key Escape is.
 fn escape_keycode() -> Option<u8> {
-    let evdev = esper_input::hid::evdev_for_usage(0x29)?;
+    keycode_for_usage(0x29)
+}
+
+/// The pause key's keycode: `P`, HID usage 0x13.
+///
+/// The same modifiers as the panic key, because they are the same kind of
+/// thing — something the person at the machine reaches for about their own
+/// screen — and one modifier combination to learn is better than two.
+fn pause_keycode() -> Option<u8> {
+    keycode_for_usage(0x13)
+}
+
+/// An X keycode for a HID usage.
+///
+/// Looked up rather than written as a number, so this and the injecting side
+/// cannot disagree about which key is which.
+fn keycode_for_usage(usage: u16) -> Option<u8> {
+    let evdev = esper_input::hid::evdev_for_usage(usage)?;
     u8::try_from(evdev.0.saturating_add(8)).ok()
 }
 
@@ -92,6 +122,8 @@ pub struct X11Presence {
     screen: (u16, u16),
     shaped: bool,
     grabbed: bool,
+    /// Whether the pause key was had as well.
+    paused_key: bool,
     showing: Option<Watching>,
 }
 
@@ -101,6 +133,7 @@ impl std::fmt::Debug for X11Presence {
             .field("showing", &self.showing.is_some())
             .field("input_shaped", &self.shaped)
             .field("panic_key", &self.grabbed)
+            .field("pause_key", &self.paused_key)
             .finish_non_exhaustive()
     }
 }
@@ -165,6 +198,7 @@ impl X11Presence {
             screen: size,
             shaped,
             grabbed: false,
+            paused_key: false,
             showing: None,
         };
         me.grab_panic_key();
@@ -179,6 +213,16 @@ impl X11Presence {
     #[must_use]
     pub const fn panic_key_grabbed(&self) -> bool {
         self.grabbed
+    }
+
+    /// Whether the pause key was had.
+    ///
+    /// Separate from the panic key because they fail differently: a pause key
+    /// nobody can reach is an inconvenience, and a panic key nobody can reach
+    /// is a promise this crate is not keeping.
+    #[must_use]
+    pub const fn pause_key_grabbed(&self) -> bool {
+        self.paused_key
     }
 
     /// Whether the frame can be shown without swallowing clicks.
@@ -198,9 +242,20 @@ impl X11Presence {
     }
 
     fn grab_panic_key(&mut self) {
-        let Some(code) = escape_keycode() else {
-            tracing::error!("no keycode for Escape, so the panic key cannot be grabbed");
-            return;
+        // **Both keys, and the panic key first.** If only one grab can be had
+        // — something else already holds a combination — it must be the one
+        // that makes a session stop, because a pause key nobody can reach is
+        // an inconvenience and a panic key nobody can reach is the property
+        // this crate promises.
+        self.grabbed = self.grab_one(escape_keycode(), "Escape");
+        self.paused_key = self.grab_one(pause_keycode(), "P");
+    }
+
+    /// Grab one key with the shared modifiers, saying whether it was had.
+    fn grab_one(&self, code: Option<u8>, name: &str) -> bool {
+        let Some(code) = code else {
+            tracing::error!("no keycode for {name}, so that hotkey cannot be grabbed");
+            return false;
         };
         let mut got = 0;
         for lock in LOCKS {
@@ -217,20 +272,20 @@ impl X11Presence {
             ) {
                 Ok(cookie) => match cookie.check() {
                     Ok(()) => got += 1,
-                    Err(e) => tracing::warn!("could not grab the panic key ({modifiers:?}): {e}"),
+                    Err(e) => tracing::warn!("could not grab {name} ({modifiers:?}): {e}"),
                 },
-                Err(e) => tracing::warn!("could not ask for the panic key: {e}"),
+                Err(e) => tracing::warn!("could not ask for {name}: {e}"),
             }
         }
-        self.grabbed = got > 0;
         if got > 0 && got < LOCKS.len() {
             // Said, because a key that works with Caps Lock off and not on is
             // the kind of thing somebody discovers at the worst moment.
             tracing::warn!(
-                "the panic key was grabbed for {got} of {} modifier combinations",
+                "{name} was grabbed for {got} of {} modifier combinations",
                 LOCKS.len()
             );
         }
+        got > 0
     }
 
     /// Build the four edge windows.
@@ -360,7 +415,9 @@ impl Presence for X11Presence {
                     .to_owned(),
             });
         }
-        let colour = if watching.controlling {
+        let colour = if watching.paused {
+            PAUSED
+        } else if watching.controlling {
             CONTROLLING
         } else {
             WATCHING
@@ -370,7 +427,7 @@ impl Presence for X11Presence {
         if self
             .showing
             .as_ref()
-            .is_some_and(|s| s.controlling != watching.controlling)
+            .is_some_and(|s| s.controlling != watching.controlling || s.paused != watching.paused)
         {
             self.destroy_edges();
         }
@@ -393,11 +450,20 @@ impl Presence for X11Presence {
         let mut somebody_moved = false;
         while let Ok(Some(event)) = self.conn.poll_for_event() {
             match event {
-                // The only key this connection is given is the one it
-                // grabbed, so there is nothing to check: the grab is the
-                // filter, and checking the keycode again would be checking
-                // the server's own work.
-                Event::KeyPress(_) => out.push(HostEvent::Panic),
+                // **Two keys now, so the keycode has to be read.** This
+                // used to say the grab was the filter and there was nothing
+                // to check, which was true of one key and would silently
+                // make the pause key end the session.
+                Event::KeyPress(key) => {
+                    if Some(key.detail) == pause_keycode() {
+                        out.push(HostEvent::Pause);
+                    } else {
+                        // Anything else this connection is given can only be
+                        // the other grab, and a keycode that somehow was
+                        // neither is safer read as the one that stops.
+                        out.push(HostEvent::Panic);
+                    }
+                }
                 // Something appeared, moved or was raised — which is the only
                 // way the frame can end up underneath anything.
                 Event::MapNotify(e) if !self.is_ours(e.window) => somebody_moved = true,
