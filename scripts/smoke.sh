@@ -1634,13 +1634,92 @@ print(s.getsockname()[1]); s.close()')
       # **A screen that is not there is refused, not silently substituted.**
       missing=$(ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$multi_addr" \
         --seconds 3 --monitor 7 2>&1 || true)
-      if printf '%s' "$missing" | grep -q 'would not switch to monitor 7'; then
+      if printf '%s' "$missing" | grep -q 'would not send monitor 7'; then
         printf '  ✓ and asking for a screen that is not there is refused by name\n'
       else
         printf '  ✗ a screen that does not exist was not refused\n'
         printf '%s\n' "$missing" | grep -iE 'monitor|showing' | sed 's/^/      /'
         fail=1
       fi
+      # **Several screens at once, as one picture.** The synthetic host's
+      # screens are 1280x720, 640x360 and 320x180, laid out left to right — so
+      # two of them are a 1920x720 arrangement and all three are 2240x720.
+      #
+      # The *shape* is the evidence rather than the size: a picture of two
+      # screens is much wider than it is tall, and a host that sent one screen
+      # and called it two would be 16:9. The size itself is the host's
+      # business — it caps a bigger picture to stay inside its CPU budget, and
+      # it did: 1920x720 arrives as 1440x540, which is the same shape.
+      shape_of() {
+        printf '%s' "$1" | awk -Fx '{ if ($2 > 0) printf "%d", ($1 * 1000) / $2; else printf "0" }'
+      }
+      tiled=$(ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$multi_addr" \
+        --seconds 3 --monitor 0,1 2>&1 || true)
+      tiled_size=$( { printf '%s' "$tiled" | \
+        sed -n 's/.*now showing monitors 0 and 1: \([0-9]*x[0-9]*\).*/\1/p' || true; } | head -1)
+      tiled_shape=$(shape_of "${tiled_size:-0x0}")
+      # 1920/720 is 2.667; a single 1280x720 screen would be 1.778.
+      if [ -n "$tiled_size" ] && [ "$tiled_shape" -gt 2620 ] && [ "$tiled_shape" -lt 2720 ]; then
+        printf '  ✓ two screens arrive as one picture shaped like both: %s\n' "$tiled_size"
+      else
+        printf '  ✗ two screens did not arrive as one picture (%s)\n' "${tiled_size:-nothing}"
+        printf '%s\n' "$tiled" | grep -iE 'monitor|showing|stream' | sed 's/^/      /'
+        fail=1
+      fi
+      # And pixels actually flowed for it: a picture nobody could decode is
+      # not a picture.
+      tiled_shown=$( { printf '%s' "$tiled" | awk '/^  pictures /{print $2}' || true; } | head -1)
+      if [ -n "${tiled_shown:-}" ] && [ "$tiled_shown" -gt 0 ]; then
+        printf '  ✓ and it decoded: %s pictures of two screens\n' "$tiled_shown"
+      else
+        printf '  ✗ a tiled session showed no pictures\n'
+        printf '%s\n' "$tiled" | sed 's/^/      /'
+        fail=1
+      fi
+
+      # `--all-monitors` asks for whatever the host turns out to have, which
+      # is the only way a controller can ask for "everything" — it does not
+      # know what exists until the host says so.
+      every=$(ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$multi_addr" \
+        --seconds 3 --all-monitors 2>&1 || true)
+      every_size=$( { printf '%s' "$every" | \
+        sed -n 's/.*now showing monitors 0, 1 and 2: \([0-9]*x[0-9]*\).*/\1/p' || true; } | head -1)
+      every_shape=$(shape_of "${every_size:-0x0}")
+      # 2240/720 is 3.111, which is wider still.
+      if [ -n "$every_size" ] && [ "$every_shape" -gt 3060 ] && [ "$every_shape" -lt 3160 ]; then
+        printf '  ✓ --all-monitors asks for every screen the host has: %s\n' "$every_size"
+      else
+        printf '  ✗ --all-monitors did not get every screen (%s)\n' "${every_size:-nothing}"
+        printf '%s\n' "$every" | grep -iE 'monitor|showing|stream' | sed 's/^/      /'
+        fail=1
+      fi
+
+      # **One bad name refuses the whole set**, rather than sending the screens
+      # it recognised: a person who asked for two screens and got one has been
+      # told the wrong thing about what they are looking at.
+      partly=$(ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$multi_addr" \
+        --seconds 3 --monitor 0,7 2>&1 || true)
+      if printf '%s' "$partly" | grep -q 'would not send monitors 0 and 7' &&
+        printf '%s' "$partly" | grep -q 'still sending monitor 0'; then
+        printf '  ✓ a set with a screen that is not there is refused whole\n'
+      else
+        printf '  ✗ a set naming a missing screen was not refused whole\n'
+        printf '%s\n' "$partly" | grep -iE 'monitor|showing|stream' | sed 's/^/      /'
+        fail=1
+      fi
+
+      # A person who typed the same screen twice meant something, and it was
+      # not "show it once". Refused before a connection is even opened.
+      twice=$(ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$multi_addr" \
+        --seconds 1 --monitor 1,1 2>&1 || true)
+      if printf '%s' "$twice" | grep -q 'names monitor 1 twice'; then
+        printf '  ✓ and naming one screen twice is refused by name\n'
+      else
+        printf '  ✗ naming a screen twice was accepted\n'
+        printf '%s\n' "$twice" | sed 's/^/      /'
+        fail=1
+      fi
+
       kill "$multi_host" 2>/dev/null || true
       multi_host=""
 

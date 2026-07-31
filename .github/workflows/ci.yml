@@ -69,7 +69,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils
+          sudo apt-get install -y xvfb x11-utils x11-xserver-utils
           # `-noreset` is not optional. An X server without it **resets when
           # its last client disconnects** — every resource destroyed and every
           # connection closed — and this suite is a stream of short-lived
@@ -90,6 +90,22 @@ jobs:
           DISPLAY=:99 xdpyinfo | grep -q DAMAGE
           DISPLAY=:99 xdpyinfo | grep -q XFIXES
           DISPLAY=:99 xdpyinfo | grep -q RANDR
+          # **Three monitors, so the multi-screen tests actually run.** An
+          # `Xvfb` reports one, and every test about laying several screens
+          # into one picture — including the one that checks a screen nobody
+          # asked for is not in it — skips itself on a display with one. RandR
+          # 1.5 logical monitors need no second cable and no second screen:
+          # they are three named rectangles of the framebuffer, which is
+          # exactly what the capture backend reads.
+          #
+          # The automatic full-screen monitor RandR always reports stays, and
+          # overlaps all three. That is not in the way — it is the case that
+          # made overlapping screens a refusal rather than a picture with one
+          # desktop in it twice.
+          DISPLAY=:99 xrandr --setmonitor esper-a 500/100x900/200+0+0 none
+          DISPLAY=:99 xrandr --setmonitor esper-b 500/100x900/200+500+0 none
+          DISPLAY=:99 xrandr --setmonitor esper-c 600/100x900/200+1000+0 none
+          DISPLAY=:99 xrandr --listmonitors
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
           # Tests that disturb a display — injecting keys, taking the focus,
           # drawing a frame over the whole screen — are off unless asked for.

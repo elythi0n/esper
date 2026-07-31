@@ -1039,8 +1039,28 @@ impl ControllerStream {
 
     /// Ask for a different monitor.
     pub fn select_monitor(&mut self, monitor: u32) {
+        self.select_monitors(vec![monitor]);
+    }
+
+    /// Ask for these screens, as one picture.
+    ///
+    /// **The previous ask is replaced rather than queued behind.** A host acts
+    /// on every selection it receives, and each one costs a reshape and a
+    /// keyframe — so two asks a person made in half a second, before either
+    /// had been flushed, would switch twice and charge the session for a
+    /// picture nobody ever saw. Only the latest can be what they meant.
+    ///
+    /// A set that could not be sent — empty, repeated, longer than a desktop
+    /// can be — is dropped here, the same way a malformed hint is: the host
+    /// would refuse it, and the round trip teaches nobody anything.
+    pub fn select_monitors(&mut self, monitors: Vec<u32>) {
+        let select = MonitorSelect { monitors };
+        if !select.is_well_formed() {
+            return;
+        }
         self.outbound
-            .push(MediaMessage::Select(MonitorSelect { monitor }));
+            .retain(|m| !matches!(m, MediaMessage::Select(_)));
+        self.outbound.push(MediaMessage::Select(select));
     }
 
     /// A host sent a new config, so the stream's shape changed.
@@ -1448,6 +1468,7 @@ mod tests {
                 primary: true,
             }],
             selected: 0,
+            serving: vec![0],
             codec: esper_proto::Codec::H264,
             width: 640,
             height: 360,

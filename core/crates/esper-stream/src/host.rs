@@ -255,6 +255,16 @@ impl HostStream {
         StreamConfig {
             monitors,
             selected: self.monitor,
+            // Read from the pipeline rather than held here: the capturer is
+            // the only thing that knows what it is actually capturing, and a
+            // second copy of the answer is a second answer.
+            serving: self
+                .pipeline
+                .serving()
+                .iter()
+                .map(|m| m.0)
+                .take(MAX_MONITORS)
+                .collect(),
             codec: Codec::H264,
             width,
             height,
@@ -522,15 +532,18 @@ impl HostStream {
                 Ok(Handled::Nothing)
             }
             MediaMessage::Select(select) => {
-                // Not a reset: a controller clicking the monitor it is already
+                let want: Vec<esper_capture::capturer::MonitorId> = select
+                    .monitors
+                    .iter()
+                    .copied()
+                    .map(esper_capture::capturer::MonitorId)
+                    .collect();
+                // Not a reset: a controller clicking the screens it is already
                 // watching should not cost it a keyframe.
-                if select.monitor == self.monitor {
+                if want == self.pipeline.serving() {
                     return Ok(Handled::Nothing);
                 }
-                if let Err(e) = self
-                    .pipeline
-                    .select_monitor(esper_capture::capturer::MonitorId(select.monitor))
-                {
+                if let Err(e) = self.pipeline.serve_monitors(&want) {
                     // **Not an error of the session's.** The host would not do
                     // it; the session is intact and still sending. So the
                     // answer is the config it is keeping, which tells the
@@ -539,17 +552,19 @@ impl HostStream {
                     return Ok(Handled::Refused {
                         config: self.config(),
                         why: StreamError::CannotSwitchMonitor {
-                            current: self.monitor,
-                            wanted: select.monitor,
+                            current: self.pipeline.serving().iter().map(|m| m.0).collect(),
+                            wanted: select.monitors.clone(),
                             why: e.to_string(),
                         },
                     });
                 }
-                self.monitor = select.monitor;
+                self.monitor = self.pipeline.selected_monitor().0;
                 // A different screen is a different synchronisation source,
                 // which is what RTP means by one, and what makes the switch
-                // legible in a packet capture.
-                self.packetizer.set_ssrc(ssrc_for(select.monitor));
+                // legible in a packet capture. Several screens are one stream
+                // and so one source, keyed on the first of them — which is
+                // what `selected` means once there is more than one.
+                self.packetizer.set_ssrc(ssrc_for(self.monitor));
                 Ok(Handled::Announce(self.config()))
             }
             // Host to controller only, both of them: a controller announcing

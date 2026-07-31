@@ -82,14 +82,19 @@ pub struct X11Capturer {
     /// Owned here because this is the thing with the lifetime they are stable
     /// across. See [`esper_capture::Numbering`] for what goes wrong without it.
     numbering: esper_capture::Numbering,
-    selected: MonitorId,
+    /// The screens being captured, in the order they are laid out.
+    ///
+    /// Never empty. Several are one picture: the root window *is* the desktop,
+    /// so a picture of two screens is one read of the rectangle around them —
+    /// cheaper than two reads, and atomic, which two reads are not.
+    served: Vec<MonitorId>,
     /// `None` when the server has no DAMAGE, in which case every frame is
     /// reported as wholly changed and the idle ladder is the only thing
     /// keeping a static screen cheap.
     tracker: Option<Tracker>,
     segment: Option<Segment>,
     transport: Transport,
-    /// The current picture of the selected monitor, tightly packed.
+    /// The current picture of the screens being served, tightly packed.
     surface: Vec<u8>,
     /// Somewhere to land a band's packed pixels before they are placed into
     /// the surface. Reused.
@@ -105,7 +110,7 @@ impl std::fmt::Debug for X11Capturer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("X11Capturer")
             .field("monitors", &self.monitors.len())
-            .field("selected", &self.selected)
+            .field("serving", &self.served)
             .field("format", &self.format.name())
             .field("transport", &self.transport)
             .field("damage", &self.tracker.is_some())
@@ -196,7 +201,7 @@ impl X11Capturer {
             monitors: list,
             source,
             numbering,
-            selected,
+            served: vec![selected],
             tracker,
             segment,
             transport,
@@ -205,16 +210,25 @@ impl X11Capturer {
             pool: BufferPool::default(),
             started: false,
         };
-        me.resize_for_selected()?;
+        me.resize_for_served()?;
         Ok(me)
     }
 
-    /// Where the monitor being captured sits on the desktop.
+    /// Where the screens being captured sit on the desktop.
+    ///
+    /// The rectangle around all of them, which is the picture's size. With one
+    /// screen it is that screen.
     fn geometry(&self) -> Rect {
-        self.monitors
+        esper_capture::geometry::tiles(&self.screens()).0
+    }
+
+    /// Each served screen, in desktop coordinates, in the order asked for.
+    fn screens(&self) -> Vec<Rect> {
+        self.served
             .iter()
-            .find(|m| m.id == self.selected)
-            .map_or(Rect::sized(0, 0), |m| m.geometry)
+            .filter_map(|id| self.monitors.iter().find(|m| m.id == *id))
+            .map(|m| m.geometry)
+            .collect()
     }
 
     /// How the monitor list was obtained, for the log.
@@ -244,8 +258,12 @@ impl X11Capturer {
         // The surface still holds the last picture, so damage stays valid.
     }
 
-    /// Size the surface and the shared segment for the selected monitor.
-    fn resize_for_selected(&mut self) -> Result<(), CaptureError> {
+    /// Size the surface and the shared segment for the screens being served.
+    ///
+    /// The surface is zeroed, which is what makes a gap between two screens
+    /// black: nothing ever writes to it again, because a fetch only ever asks
+    /// for bands inside a served screen.
+    fn resize_for_served(&mut self) -> Result<(), CaptureError> {
         let g = self.geometry();
         let bytes = (g.width as usize)
             .saturating_mul(g.height as usize)
@@ -253,7 +271,7 @@ impl X11Capturer {
         if bytes == 0 {
             return Err(CaptureError::Backend {
                 backend: BACKEND,
-                detail: format!("{} has no size", self.selected),
+                detail: format!("{:?} has no size", self.served),
             });
         }
         self.surface.clear();
@@ -294,14 +312,17 @@ impl X11Capturer {
         let was = self.geometry();
         self.monitors = found.list;
         self.source = found.source;
-        // The selected monitor may be gone. Falling back to the first is
-        // better than failing: a session watching a screen that was unplugged
-        // should show something.
-        if !self.monitors.iter().any(|m| m.id == self.selected) {
-            self.selected = self.monitors.first().map(|m| m.id).unwrap_or(MonitorId(0));
+        // A served screen may be gone. Falling back to the first is better
+        // than failing: a session watching a screen that was unplugged should
+        // show something. A session watching three of which one went keeps the
+        // two that are left, which is the same rule applied to a set.
+        self.served
+            .retain(|id| self.monitors.iter().any(|m| m.id == *id));
+        if self.served.is_empty() {
+            self.served = self.monitors.first().map_or_else(Vec::new, |m| vec![m.id]);
         }
         if self.geometry() != was {
-            self.resize_for_selected()?;
+            self.resize_for_served()?;
         }
         Ok(true)
     }
@@ -410,8 +431,8 @@ impl Capturer for X11Capturer {
         &self.monitors
     }
 
-    fn selected(&self) -> MonitorId {
-        self.selected
+    fn serving(&self) -> &[MonitorId] {
+        &self.served
     }
 
     fn format(&self) -> PixelFormat {
@@ -426,24 +447,39 @@ impl Capturer for X11Capturer {
     /// is the rectangle of it that gets read. No new connection, no new
     /// permission, and the accumulated damage stays valid because the surface
     /// it described has been discarded and the next frame is whole.
-    fn select(&mut self, monitor: MonitorId) -> Result<(), CaptureError> {
-        if monitor == self.selected {
+    fn serve(&mut self, monitors: &[MonitorId]) -> Result<(), CaptureError> {
+        if monitors == self.served.as_slice() {
             return Ok(());
         }
-        if !self.monitors.iter().any(|m| m.id == monitor) {
-            return Err(CaptureError::NoSuchMonitor {
-                id: monitor,
-                count: self.monitors.len(),
+        if monitors.is_empty() {
+            return Err(CaptureError::NothingToServe);
+        }
+        for id in monitors {
+            if !self.monitors.iter().any(|m| m.id == *id) {
+                return Err(CaptureError::NoSuchMonitor {
+                    id: *id,
+                    count: self.monitors.len(),
+                });
+            }
+        }
+        let geometry: Vec<Rect> = monitors
+            .iter()
+            .filter_map(|id| self.monitors.iter().find(|m| m.id == *id))
+            .map(|m| m.geometry)
+            .collect();
+        if let Some((a, b)) = esper_capture::geometry::first_overlap(&geometry) {
+            return Err(CaptureError::ScreensOverlap {
+                first: monitors.get(a).copied().unwrap_or(MonitorId(u32::MAX)),
+                second: monitors.get(b).copied().unwrap_or(MonitorId(u32::MAX)),
             });
         }
-        let was = self.selected;
-        self.selected = monitor;
+        let was = std::mem::replace(&mut self.served, monitors.to_vec());
         // A segment that could not be made for the new size leaves the
-        // capturer sized for a monitor it is no longer pointed at, so the old
-        // selection goes back.
-        if let Err(e) = self.resize_for_selected() {
-            self.selected = was;
-            let _ = self.resize_for_selected();
+        // capturer sized for screens it is no longer pointed at, so the old
+        // set goes back.
+        if let Err(e) = self.resize_for_served() {
+            self.served = was;
+            let _ = self.resize_for_served();
             return Err(e);
         }
         Ok(())
@@ -493,10 +529,11 @@ impl Capturer for X11Capturer {
                 None => Vec::new(),
             };
 
+            let screens = self.screens();
             let damage = if whole {
                 Damage::Everything
             } else {
-                to_frame_coordinates(&raw, &g)
+                to_frame_coordinates(&raw, &screens, &g)
             };
 
             if damage.is_empty() {
@@ -514,7 +551,20 @@ impl Capturer for X11Capturer {
                 continue;
             }
 
-            let bands = damage.rects(&Rect::sized(g.width, g.height));
+            // **What is read is what belongs to a served screen**, never the
+            // picture around them. `Damage::Everything` is the whole picture,
+            // and the whole picture includes any gap — so the bands are
+            // intersected with the screens before anything is asked of the
+            // server. With one screen this changes nothing: the screen is the
+            // picture.
+            let bands =
+                only_the_screens(&damage.rects(&Rect::sized(g.width, g.height)), &screens, &g);
+            if bands.is_empty() {
+                if remaining().is_zero() {
+                    return Ok(Capture::Unchanged);
+                }
+                continue;
+            }
             self.fetch(&g, &bands)?;
             self.started = true;
 
@@ -667,6 +717,14 @@ impl X11Capturer {
 /// would report a strip of this monitor's edge as damaged every time anything
 /// moved anywhere on the desktop.
 ///
+/// **Clipped to the screens, not to the picture around them.** With several
+/// screens the picture is the rectangle they sit in, and that rectangle can
+/// contain a screen nobody asked for — in the middle of an L, or between two
+/// that were selected. Clipping to the picture would report that screen's
+/// activity as damage, and the fetch that followed would read its pixels out
+/// of the root window and send them. So the screens are the clip, one at a
+/// time, and what belongs to none of them belongs to nothing.
+///
 /// The clip here is deliberately **redundant**: `Regions::coalesce` clamps to
 /// the frame as well, and clipping before translation is the same operation as
 /// clipping after it, because translation is a bijection. Removing this line
@@ -679,17 +737,42 @@ impl X11Capturer {
 /// Lifted out of the capture path because it is arithmetic, and arithmetic can
 /// be tested on a machine with no display. The live tests can only check this
 /// on a host that *has* an off-origin monitor, and CI does not have one.
-fn to_frame_coordinates(raw: &[Rect], monitor: &Rect) -> Damage {
-    let bounds = Rect::sized(monitor.width, monitor.height);
+fn to_frame_coordinates(raw: &[Rect], screens: &[Rect], picture: &Rect) -> Damage {
+    let bounds = Rect::sized(picture.width, picture.height);
     let local: Vec<Rect> = raw
         .iter()
-        .filter_map(|r| r.clamp_to(monitor))
-        .map(|r| r.translate(-monitor.x, -monitor.y))
+        .flat_map(|r| screens.iter().filter_map(move |s| r.clamp_to(s)))
+        .map(|r| r.translate(-picture.x, -picture.y))
         .collect();
     if local.is_empty() {
         return Damage::Nothing;
     }
     Regions::coalesce(&local, &bounds)
+}
+
+/// Keep only the parts of `bands` that belong to a served screen.
+///
+/// `bands` and the result are in picture coordinates; `screens` are in desktop
+/// coordinates, which is why `picture` is needed to move them.
+///
+/// **This is the privacy rule of a tiled capture, in one function.** Anything
+/// it drops is a region of the root window that no served screen covers, and
+/// the reason such a region exists is usually that a screen is sitting there
+/// which the controller was not given.
+fn only_the_screens(bands: &[Rect], screens: &[Rect], picture: &Rect) -> Vec<Rect> {
+    // The overwhelmingly common case, kept free of arithmetic: one screen is
+    // the whole picture, so every band is already inside it.
+    if screens.len() == 1 {
+        return bands.to_vec();
+    }
+    let local: Vec<Rect> = screens
+        .iter()
+        .map(|s| s.translate(-picture.x, -picture.y))
+        .collect();
+    bands
+        .iter()
+        .flat_map(|b| local.iter().filter_map(move |s| b.intersect(s)))
+        .collect()
 }
 
 /// Copy a band's tightly packed rows into the surface.
@@ -752,7 +835,7 @@ mod tests {
     #[test]
     fn damage_is_moved_into_frame_coordinates() {
         // The top-left pixel of this monitor, as the desktop names it.
-        let d = to_frame_coordinates(&[rect(1920, 521, 10, 10)], &OFF_ORIGIN);
+        let d = to_frame_coordinates(&[rect(1920, 521, 10, 10)], &[OFF_ORIGIN], &OFF_ORIGIN);
         assert_eq!(
             d.rects(&Rect::sized(2560, 1440)),
             vec![rect(0, 0, 10, 10)],
@@ -767,7 +850,7 @@ mod tests {
         // translate or forgot to clip shows up.
         for x in (0..6000).step_by(97) {
             for y in (0..3000).step_by(89) {
-                let d = to_frame_coordinates(&[rect(x, y, 200, 150)], &OFF_ORIGIN);
+                let d = to_frame_coordinates(&[rect(x, y, 200, 150)], &[OFF_ORIGIN], &OFF_ORIGIN);
                 for r in d.rects(&bounds) {
                     assert!(
                         bounds.contains(&r),
@@ -782,7 +865,7 @@ mod tests {
     fn damage_on_another_monitor_is_dropped_not_clamped() {
         // The laptop panel on the same desktop, well clear of OFF_ORIGIN.
         let elsewhere = rect(0, 1777, 1920, 1200);
-        let d = to_frame_coordinates(&[elsewhere], &OFF_ORIGIN);
+        let d = to_frame_coordinates(&[elsewhere], &[OFF_ORIGIN], &OFF_ORIGIN);
         assert_eq!(
             d,
             Damage::Nothing,
@@ -794,7 +877,7 @@ mod tests {
     #[test]
     fn a_rectangle_straddling_the_edge_keeps_only_the_part_inside() {
         // Half on this monitor, half to the left of it.
-        let d = to_frame_coordinates(&[rect(1820, 521, 200, 100)], &OFF_ORIGIN);
+        let d = to_frame_coordinates(&[rect(1820, 521, 200, 100)], &[OFF_ORIGIN], &OFF_ORIGIN);
         assert_eq!(
             d.rects(&Rect::sized(2560, 1440)),
             vec![rect(0, 0, 100, 100)],
@@ -804,11 +887,92 @@ mod tests {
 
     #[test]
     fn nothing_in_means_nothing_out() {
-        assert_eq!(to_frame_coordinates(&[], &OFF_ORIGIN), Damage::Nothing);
         assert_eq!(
-            to_frame_coordinates(&[rect(0, 0, 0, 0)], &OFF_ORIGIN),
+            to_frame_coordinates(&[], &[OFF_ORIGIN], &OFF_ORIGIN),
             Damage::Nothing
         );
+        assert_eq!(
+            to_frame_coordinates(&[rect(0, 0, 0, 0)], &[OFF_ORIGIN], &OFF_ORIGIN),
+            Damage::Nothing
+        );
+    }
+
+    /// **A screen in the middle that nobody asked for is not damage, and is
+    /// never read.**
+    ///
+    /// Two screens are served with a third between them, so the picture
+    /// contains a screen this session was not given. This is the one test that
+    /// says so: activity on the middle screen must produce no damage, and a
+    /// band covering the whole picture must be cut back to the two served
+    /// screens before anything is asked of the server.
+    #[test]
+    fn a_screen_between_two_served_ones_is_neither_damage_nor_read() {
+        let left = rect(0, 0, 1920, 1080);
+        let right = rect(3840, 0, 1920, 1080);
+        let picture = left.union(&right);
+        assert_eq!((picture.width, picture.height), (5760, 1080));
+
+        // Something moves on the middle screen, which is not served.
+        let middle = rect(2000, 200, 400, 300);
+        assert_eq!(
+            to_frame_coordinates(&[middle], &[left, right], &picture),
+            Damage::Nothing,
+            "a screen nobody asked for reported activity as damage"
+        );
+
+        // And a whole-picture band is cut back to the served screens.
+        let bands = only_the_screens(
+            &[Rect::sized(picture.width, picture.height)],
+            &[left, right],
+            &picture,
+        );
+        let covered: u64 = bands
+            .iter()
+            .map(|r| u64::from(r.width) * u64::from(r.height))
+            .sum();
+        assert_eq!(
+            covered,
+            2 * 1920 * 1080,
+            "the read covers {covered} pixels, which is not the two served screens"
+        );
+        assert!(
+            !bands.iter().any(|b| b.overlaps(&rect(1920, 0, 1920, 1080))),
+            "a read reaches into the middle screen: {bands:?}"
+        );
+    }
+
+    /// Damage on **either** served screen arrives, at the offset that screen
+    /// sits at in the picture. Only checking the first would pass with a
+    /// capturer that silently froze the second.
+    #[test]
+    fn damage_on_the_second_screen_lands_where_the_second_screen_is() {
+        let left = rect(0, 0, 1920, 1080);
+        let right = rect(1920, 0, 1280, 720);
+        let picture = left.union(&right);
+        let d = to_frame_coordinates(&[rect(1930, 10, 40, 40)], &[left, right], &picture);
+        assert_eq!(
+            d.rects(&Rect::sized(picture.width, picture.height)),
+            vec![rect(1930, 10, 40, 40)],
+            "damage on the right-hand screen must keep its place in the picture"
+        );
+    }
+
+    /// **One screen is the whole picture, and the fast path must agree with
+    /// the arithmetic.** `only_the_screens` returns the bands untouched when
+    /// there is one screen; this is the check that the untouched answer is the
+    /// same one the general case would give.
+    #[test]
+    fn the_single_screen_shortcut_agrees_with_the_general_case() {
+        let one = OFF_ORIGIN;
+        let bands = [rect(0, 0, 100, 100), rect(1500, 800, 400, 300)];
+        let shortcut = only_the_screens(&bands, &[one], &one);
+        let general: Vec<Rect> = bands
+            .iter()
+            .flat_map(|b| {
+                std::iter::once(one.translate(-one.x, -one.y)).filter_map(move |s| b.intersect(&s))
+            })
+            .collect();
+        assert_eq!(shortcut, general);
     }
 
     /// A monitor at the origin is the case that hides a missing translation,
@@ -816,7 +980,7 @@ mod tests {
     #[test]
     fn a_monitor_at_the_origin_is_unchanged() {
         let at_origin = Rect::sized(1600, 900);
-        let d = to_frame_coordinates(&[rect(32, 32, 64, 64)], &at_origin);
+        let d = to_frame_coordinates(&[rect(32, 32, 64, 64)], &[at_origin], &at_origin);
         assert_eq!(d.rects(&Rect::sized(1600, 900)), vec![rect(32, 32, 64, 64)]);
     }
 
@@ -824,7 +988,7 @@ mod tests {
     /// which is the region tracker's decision and has to survive translation.
     #[test]
     fn most_of_the_screen_becomes_the_whole_screen() {
-        let d = to_frame_coordinates(&[OFF_ORIGIN], &OFF_ORIGIN);
+        let d = to_frame_coordinates(&[OFF_ORIGIN], &[OFF_ORIGIN], &OFF_ORIGIN);
         assert_eq!(d, Damage::Everything);
     }
 
@@ -838,7 +1002,7 @@ mod tests {
         for x in (-500..6200).step_by(131) {
             for y in (-500..3200).step_by(113) {
                 let raw = rect(x, y, 300, 220);
-                let with_clip = to_frame_coordinates(&[raw], &OFF_ORIGIN);
+                let with_clip = to_frame_coordinates(&[raw], &[OFF_ORIGIN], &OFF_ORIGIN);
                 // The same thing with the clip left out: translate, then let
                 // coalesce do the clamping.
                 let translated = raw.translate(-OFF_ORIGIN.x, -OFF_ORIGIN.y);
@@ -863,7 +1027,7 @@ mod tests {
     fn crossing_strips_survive_translation_without_merging() {
         let vertical = rect(2000, 521, 8, 1440);
         let horizontal = rect(1920, 1000, 2560, 8);
-        let d = to_frame_coordinates(&[vertical, horizontal], &OFF_ORIGIN);
+        let d = to_frame_coordinates(&[vertical, horizontal], &[OFF_ORIGIN], &OFF_ORIGIN);
         let bounds = Rect::sized(2560, 1440);
         let area: u64 = d.rects(&bounds).iter().map(Rect::area).sum();
         let bounding_box = 2560u64 * 1440;

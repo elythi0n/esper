@@ -85,25 +85,33 @@ impl CursorTracker {
 
     /// What to send about this reading, if anything.
     ///
-    /// `monitor` is the one being captured, with its geometry, because a
-    /// position is a fraction of that monitor. A pointer somewhere else on the
-    /// desktop is **not sent**: it is not in the picture, and a controller
-    /// given a clamped position would draw a pointer sitting against an edge
-    /// that nothing is near.
+    /// `screens` are the ones being captured, with their geometry, because a
+    /// position is a fraction of the screen it is *on*. A pointer somewhere
+    /// else on the desktop is **not sent**: it is not in the picture, and a
+    /// controller given a clamped position would draw a pointer sitting
+    /// against an edge that nothing is near.
+    ///
+    /// **A set, because a picture can be of several screens.** With one
+    /// screen this is the same question with one answer; with two, a pointer
+    /// that crossed from one to the other used to be reported as gone — so
+    /// the pointer vanished half way across a picture it was plainly still
+    /// in.
     pub fn update(
         &mut self,
         state: &CursorState,
-        monitor: (u32, i32, i32, u32, u32),
+        screens: &[(u32, i32, i32, u32, u32)],
         now: Instant,
     ) -> Vec<CursorMessage> {
         let mut out = Vec::new();
-        let (id, mx, my, width, height) = monitor;
-
-        // Whether the pointer is on the screen being sent.
-        let on_this_monitor = state.x >= mx
-            && state.y >= my
-            && state.x < mx.saturating_add(i32::try_from(width).unwrap_or(i32::MAX))
-            && state.y < my.saturating_add(i32::try_from(height).unwrap_or(i32::MAX));
+        // Whichever screen being sent the pointer is on, if any.
+        let on = screens.iter().copied().find(|(_, mx, my, width, height)| {
+            state.x >= *mx
+                && state.y >= *my
+                && state.x < mx.saturating_add(i32::try_from(*width).unwrap_or(i32::MAX))
+                && state.y < my.saturating_add(i32::try_from(*height).unwrap_or(i32::MAX))
+        });
+        let on_this_monitor = on.is_some();
+        let (id, mx, my, width, height) = on.unwrap_or((0, 0, 0, 0, 0));
 
         // **A pointer on another screen is a pointer that is not there**, and
         // the far end has to be told so rather than left with the last
@@ -235,7 +243,7 @@ mod tests {
     #[test]
     fn the_first_reading_sends_a_shape_and_a_position() {
         let mut t = CursorTracker::new();
-        let out = t.update(&state(1, 2000, 400), MONITOR, Instant::now());
+        let out = t.update(&state(1, 2000, 400), &[MONITOR], Instant::now());
         assert_eq!(shapes(&out), 1);
         assert_eq!(positions(&out).len(), 1);
         assert_eq!(t.counts(), (1, 1));
@@ -248,12 +256,12 @@ mod tests {
     fn an_unchanged_shape_is_never_sent_twice() {
         let mut t = CursorTracker::new();
         let now = Instant::now();
-        t.update(&state(1, 2000, 400), MONITOR, now);
+        t.update(&state(1, 2000, 400), &[MONITOR], now);
         for i in 1..20u32 {
             let later = now + POSITION_INTERVAL * i;
             // Moving each time, so positions flow and only the shape is at
             // issue.
-            let out = t.update(&state(1, 2000 + i as i32, 400), MONITOR, later);
+            let out = t.update(&state(1, 2000 + i as i32, 400), &[MONITOR], later);
             assert_eq!(shapes(&out), 0, "reading {i} re-sent the shape");
         }
         assert_eq!(t.counts().0, 1, "one shape in all");
@@ -264,8 +272,8 @@ mod tests {
     fn a_changed_serial_sends_the_new_shape() {
         let mut t = CursorTracker::new();
         let now = Instant::now();
-        t.update(&state(1, 2000, 400), MONITOR, now);
-        let out = t.update(&state(2, 2000, 400), MONITOR, now + POSITION_INTERVAL);
+        t.update(&state(1, 2000, 400), &[MONITOR], now);
+        let out = t.update(&state(2, 2000, 400), &[MONITOR], now + POSITION_INTERVAL);
         assert_eq!(shapes(&out), 1);
         assert_eq!(t.counts().0, 2);
     }
@@ -279,7 +287,7 @@ mod tests {
     fn hiding_and_showing_are_sent_even_when_the_serial_does_not_move() {
         let mut t = CursorTracker::new();
         let now = Instant::now();
-        t.update(&state(5, 2000, 400), MONITOR, now);
+        t.update(&state(5, 2000, 400), &[MONITOR], now);
         assert_eq!(t.counts().0, 1);
 
         let hidden = CursorState {
@@ -288,7 +296,7 @@ mod tests {
             x: 2000,
             y: 400,
         };
-        let out = t.update(&hidden, MONITOR, now + POSITION_INTERVAL);
+        let out = t.update(&hidden, &[MONITOR], now + POSITION_INTERVAL);
         assert_eq!(shapes(&out), 1, "the hiding must be told");
         assert!(matches!(
             out.first(),
@@ -299,11 +307,15 @@ mod tests {
         ));
 
         // Still hidden: nothing more to say.
-        let out = t.update(&hidden, MONITOR, now + POSITION_INTERVAL * 2);
+        let out = t.update(&hidden, &[MONITOR], now + POSITION_INTERVAL * 2);
         assert_eq!(shapes(&out), 0);
 
         // And back again.
-        let out = t.update(&state(5, 2000, 400), MONITOR, now + POSITION_INTERVAL * 3);
+        let out = t.update(
+            &state(5, 2000, 400),
+            &[MONITOR],
+            now + POSITION_INTERVAL * 3,
+        );
         assert_eq!(shapes(&out), 1, "the showing must be told too");
         assert_eq!(t.counts().0, 3);
     }
@@ -314,9 +326,13 @@ mod tests {
     fn a_still_pointer_says_nothing() {
         let mut t = CursorTracker::new();
         let now = Instant::now();
-        t.update(&state(1, 2000, 400), MONITOR, now);
+        t.update(&state(1, 2000, 400), &[MONITOR], now);
         for i in 1..50u32 {
-            let out = t.update(&state(1, 2000, 400), MONITOR, now + POSITION_INTERVAL * i);
+            let out = t.update(
+                &state(1, 2000, 400),
+                &[MONITOR],
+                now + POSITION_INTERVAL * i,
+            );
             assert!(out.is_empty(), "reading {i} said something about nothing");
         }
         assert_eq!(t.counts(), (1, 1));
@@ -328,20 +344,79 @@ mod tests {
     fn positions_are_not_sent_faster_than_the_limit() {
         let mut t = CursorTracker::new();
         let start = Instant::now();
-        t.update(&state(1, 2000, 400), MONITOR, start);
+        t.update(&state(1, 2000, 400), &[MONITOR], start);
         // Twenty readings inside one interval, each at a new place.
         for i in 1..21i32 {
             let out = t.update(
                 &state(1, 2000 + i, 400),
-                MONITOR,
+                &[MONITOR],
                 start + Duration::from_micros(100) * i as u32,
             );
             assert!(positions(&out).is_empty(), "reading {i} beat the limit");
         }
         // And once the interval has passed, the latest place goes.
-        let out = t.update(&state(1, 2100, 400), MONITOR, start + POSITION_INTERVAL);
+        let out = t.update(&state(1, 2100, 400), &[MONITOR], start + POSITION_INTERVAL);
         assert_eq!(positions(&out).len(), 1);
         assert_eq!(t.counts().1, 2);
+    }
+
+    /// **A pointer that crosses between two screens in one picture stays in
+    /// the picture.**
+    ///
+    /// Both screens are being sent, so the pointer is on the picture the whole
+    /// way across — and each position is a fraction of the screen it is
+    /// actually on. Reporting only the first screen would have made the
+    /// pointer vanish half way over, which is exactly what a viewer shows when
+    /// it is told `Hidden`.
+    #[test]
+    fn a_pointer_crossing_between_two_served_screens_stays_visible() {
+        // The screen at the origin, and MONITOR to the right of it.
+        const LEFT: (u32, i32, i32, u32, u32) = (0, 0, 0, 1920, 1080);
+        let both = [LEFT, MONITOR];
+        let mut t = CursorTracker::new();
+        let now = Instant::now();
+
+        // On the left-hand screen.
+        let out = t.update(&state(1, 100, 200), &both, now);
+        let on_left = positions(&out);
+        assert_eq!(on_left.len(), 1, "a pointer on the first screen is sent");
+        assert_eq!(
+            on_left.first().map(|p| p.monitor),
+            Some(0),
+            "and named as being on that screen"
+        );
+        assert!(
+            !out.iter().any(|m| matches!(
+                m,
+                CursorMessage::Shape(CursorShape {
+                    image: CursorImage::Hidden,
+                    ..
+                })
+            )),
+            "a pointer plainly in the picture was reported as hidden"
+        );
+
+        // And on the right-hand one, a moment later.
+        let out = t.update(&state(1, 2000, 400), &both, now + POSITION_INTERVAL);
+        let on_right = positions(&out);
+        assert_eq!(
+            on_right.first().map(|p| p.monitor),
+            Some(1),
+            "crossing to the second screen must be reported as the second screen"
+        );
+
+        // Off both of them is still nothing, which is the property the test
+        // below is about — checked here too, so this test cannot pass by
+        // reporting every position everywhere.
+        let out = t.update(
+            &state(1, -50, 400),
+            &both,
+            now + POSITION_INTERVAL + POSITION_INTERVAL,
+        );
+        assert!(
+            positions(&out).is_empty(),
+            "a pointer on neither screen is not in the picture"
+        );
     }
 
     /// **A pointer on another monitor is not in the picture.**
@@ -353,7 +428,7 @@ mod tests {
         let mut t = CursorTracker::new();
         let now = Instant::now();
         // Left of this monitor, on the one at the origin.
-        let out = t.update(&state(1, 100, 400), MONITOR, now);
+        let out = t.update(&state(1, 100, 400), &[MONITOR], now);
         assert!(positions(&out).is_empty(), "not on this monitor");
 
         // **And the far end is told there is no pointer to draw.**
@@ -380,7 +455,7 @@ mod tests {
         // Below it, too.
         let out = t.update(
             &state(1, 2000, 300 + 1440),
-            MONITOR,
+            &[MONITOR],
             now + POSITION_INTERVAL,
         );
         assert!(positions(&out).is_empty());
@@ -400,12 +475,12 @@ mod tests {
         let now = Instant::now();
 
         // On this screen: a shape and a position.
-        let out = t.update(&state(1, 2000, 400), MONITOR, now);
+        let out = t.update(&state(1, 2000, 400), &[MONITOR], now);
         assert_eq!(shapes(&out), 1);
         assert_eq!(positions(&out).len(), 1);
 
         // Away, and told so.
-        let out = t.update(&state(1, 100, 400), MONITOR, now + POSITION_INTERVAL);
+        let out = t.update(&state(1, 100, 400), &[MONITOR], now + POSITION_INTERVAL);
         assert!(matches!(
             out.first(),
             Some(CursorMessage::Shape(CursorShape {
@@ -417,7 +492,11 @@ mod tests {
         // Back to **exactly where it was**, with the same serial. The shape has
         // to be sent again, because the far end was told there was none — and
         // so does the position, because the far end stopped drawing it.
-        let out = t.update(&state(1, 2000, 400), MONITOR, now + POSITION_INTERVAL * 2);
+        let out = t.update(
+            &state(1, 2000, 400),
+            &[MONITOR],
+            now + POSITION_INTERVAL * 2,
+        );
         assert_eq!(shapes(&out), 1, "the pointer never came back: {out:?}");
         assert!(matches!(
             out.first(),
@@ -449,7 +528,7 @@ mod tests {
         for (i, (x, y)) in inside.into_iter().enumerate() {
             let out = t.update(
                 &state(1, x, y),
-                MONITOR,
+                &[MONITOR],
                 now + POSITION_INTERVAL * (i as u32 + 1),
             );
             assert_eq!(positions(&out).len(), 1, "{x},{y} should be on the monitor");
@@ -463,7 +542,7 @@ mod tests {
         for (i, (x, y)) in outside.into_iter().enumerate() {
             let out = t.update(
                 &state(1, x, y),
-                MONITOR,
+                &[MONITOR],
                 now + POSITION_INTERVAL * (i as u32 + 10),
             );
             assert!(positions(&out).is_empty(), "{x},{y} should be off it");
@@ -477,7 +556,7 @@ mod tests {
         let mut t = CursorTracker::new();
         let (_, mx, my, w, h) = MONITOR;
         // The monitor's own top-left corner.
-        let out = t.update(&state(1, mx, my), MONITOR, Instant::now());
+        let out = t.update(&state(1, mx, my), &[MONITOR], Instant::now());
         let p = positions(&out).first().copied().expect("a position");
         assert_eq!((p.monitor, p.x, p.y), (1, 0, 0));
         assert_eq!(p.to_pixels(w, h), (0, 0));
@@ -486,7 +565,7 @@ mod tests {
         let mut t = CursorTracker::new();
         let out = t.update(
             &state(1, mx + w as i32 - 1, my + h as i32 - 1),
-            MONITOR,
+            &[MONITOR],
             Instant::now(),
         );
         let p = positions(&out).first().copied().expect("a position");
@@ -503,12 +582,16 @@ mod tests {
     fn forgetting_makes_the_next_reading_say_everything() {
         let mut t = CursorTracker::new();
         let now = Instant::now();
-        t.update(&state(1, 2000, 400), MONITOR, now);
-        let out = t.update(&state(1, 2000, 400), MONITOR, now + POSITION_INTERVAL);
+        t.update(&state(1, 2000, 400), &[MONITOR], now);
+        let out = t.update(&state(1, 2000, 400), &[MONITOR], now + POSITION_INTERVAL);
         assert!(out.is_empty(), "nothing changed");
 
         t.forget();
-        let out = t.update(&state(1, 2000, 400), MONITOR, now + POSITION_INTERVAL * 2);
+        let out = t.update(
+            &state(1, 2000, 400),
+            &[MONITOR],
+            now + POSITION_INTERVAL * 2,
+        );
         assert_eq!(shapes(&out), 1, "the new peer needs the shape");
         assert_eq!(positions(&out).len(), 1, "and the position");
     }
@@ -533,11 +616,11 @@ mod tests {
             x: 2000,
             y: 400,
         };
-        let out = t.update(&broken, MONITOR, now);
+        let out = t.update(&broken, &[MONITOR], now);
         assert_eq!(shapes(&out), 0, "a broken shape must not be passed on");
         assert_eq!(t.counts().0, 0);
 
-        let out = t.update(&state(3, 2000, 400), MONITOR, now + POSITION_INTERVAL);
+        let out = t.update(&state(3, 2000, 400), &[MONITOR], now + POSITION_INTERVAL);
         assert_eq!(shapes(&out), 1, "the same serial, now well formed, must go");
     }
 
@@ -556,7 +639,7 @@ mod tests {
                 x: 1920 + (i as i32 * 37) % 2560,
                 y: 300 + (i as i32 * 53) % 1440,
             };
-            for m in t.update(&s, MONITOR, start + POSITION_INTERVAL * i) {
+            for m in t.update(&s, &[MONITOR], start + POSITION_INTERVAL * i) {
                 assert!(m.is_well_formed(), "{m:?}");
                 assert!(m.may_be_sent_by(esper_proto::Role::Host));
                 produced += 1;

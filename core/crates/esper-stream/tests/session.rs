@@ -790,7 +790,7 @@ fn switching_monitor_re_announces_a_new_size_and_a_new_stream() {
         .expect("another monitor");
 
     let Handled::Announce(after) = h
-        .handle(&MediaMessage::Select(MonitorSelect { monitor: other }))
+        .handle(&MediaMessage::Select(MonitorSelect::just(other)))
         .expect("the switch")
     else {
         panic!("a switch must answer with the config the controller has to be told");
@@ -863,9 +863,7 @@ fn selecting_the_current_monitor_changes_nothing() {
     let mut h = host_with_two_monitors(30);
     let before = h.config();
     let announced = h
-        .handle(&MediaMessage::Select(MonitorSelect {
-            monitor: before.selected,
-        }))
+        .handle(&MediaMessage::Select(MonitorSelect::just(before.selected)))
         .expect("selecting the current monitor is fine");
     assert!(
         matches!(announced, Handled::Nothing),
@@ -888,15 +886,19 @@ fn switching_to_a_monitor_that_is_not_there_keeps_the_one_that_is() {
     let mut h = host_with_two_monitors(30);
     let before = h.config();
     let answer = h
-        .handle(&MediaMessage::Select(MonitorSelect { monitor: 99 }))
+        .handle(&MediaMessage::Select(MonitorSelect::just(99)))
         .expect("a refusal is not a session failure");
     let Handled::Refused { config, why } = answer else {
         panic!("the controller has to be told, and told why: {answer:?}");
     };
     let text = why.to_string();
     assert!(
-        text.contains("cannot switch") && text.contains("99"),
+        text.contains("cannot send") && text.contains("99"),
         "the refusal must name what was asked for: {text}"
+    );
+    assert!(
+        text.contains("sending monitor 0"),
+        "and what it is sending instead, which is what the controller keeps: {text}"
     );
     assert_eq!(
         config.selected, before.selected,
@@ -1141,9 +1143,7 @@ fn the_direction_rule_and_what_the_host_accepts_agree() {
     let mut h = host(30);
     let messages = [
         MediaMessage::Config(h.config()),
-        MediaMessage::Select(MonitorSelect {
-            monitor: h.config().selected,
-        }),
+        MediaMessage::Select(MonitorSelect::just(h.config().selected)),
         MediaMessage::Hint(esper_proto::QualityHint {
             max_fps: Some(30),
             max_long_edge: None,

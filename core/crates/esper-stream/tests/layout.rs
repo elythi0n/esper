@@ -85,7 +85,7 @@ fn a_monitor_that_is_unplugged_does_not_leave_the_host_announcing_it() {
     let mut host = host_around(two().with_unplug_at(3, MonitorId(0)));
 
     // Watching the one that is about to go.
-    host.handle(&MediaMessage::Select(MonitorSelect { monitor: 0 }))
+    host.handle(&MediaMessage::Select(MonitorSelect::just(0)))
         .expect("monitor 0 is there");
     let before = host.config();
     assert_eq!(before.selected, 0);
@@ -246,7 +246,7 @@ fn a_monitor_nobody_is_watching_costs_the_session_nothing() {
     // Now switch to the other and back, which is the only thing a test at this
     // level can do to the *other* monitor — and check the switch itself is what
     // costs, not the mere existence of a second screen.
-    host.handle(&MediaMessage::Select(MonitorSelect { monitor: 1 }))
+    host.handle(&MediaMessage::Select(MonitorSelect::just(1)))
         .expect("monitor 1 is there");
     let after_switch = sink.sent.len();
     assert_eq!(
@@ -294,4 +294,207 @@ fn every_layout_the_host_announces_is_one_a_controller_accepts() {
         checked >= 3,
         "only {checked} layout changes were seen; the fixture is not exercising this"
     );
+}
+
+/// **Two screens are one stream of one picture**, and the picture is the size
+/// of the arrangement rather than of either screen.
+#[test]
+fn asking_for_two_screens_announces_one_picture_of_both() {
+    let mut host = host_around(two());
+    let answer = host
+        .handle(&MediaMessage::Select(MonitorSelect {
+            monitors: vec![0, 1],
+        }))
+        .expect("both screens are there");
+    let esper_stream::Handled::Announce(config) = answer else {
+        panic!("a selection the host honoured must be announced: {answer:?}");
+    };
+    assert_eq!(config.serving, vec![0, 1]);
+    assert_eq!(
+        config.selected, 0,
+        "the first served screen is what everything per-stream keys on"
+    );
+    assert_eq!(
+        (config.width, config.height),
+        (W + W / 2, H),
+        "the picture must be as wide as both screens and as tall as the taller"
+    );
+    assert!(config.is_well_formed(), "{config:?}");
+    assert!(
+        ControllerStream::new(&config).is_ok(),
+        "a controller could not open on a tiled config: {config:?}"
+    );
+}
+
+/// **Both ends work out the same arrangement.** The host lays the picture out;
+/// the controller derives where each screen sits from the config alone. If
+/// those two rules ever disagree, every click in a tiled session lands on the
+/// wrong screen — so the derived layout is checked against the sizes the host
+/// announced.
+#[test]
+fn the_layout_a_controller_derives_matches_the_picture_the_host_sends() {
+    let mut host = host_around(two());
+    host.handle(&MediaMessage::Select(MonitorSelect {
+        monitors: vec![0, 1],
+    }))
+    .expect("both screens are there");
+    let config = host.config();
+
+    // This host is uncapped, so the picture is the arrangement's own size and
+    // each tile is its screen's own size. The scaled case is the test below.
+    assert_eq!((config.width, config.height), (W + W / 2, H));
+    let tiles = esper_stream::tiles_of(&config);
+    assert_eq!(tiles.len(), 2, "both screens should have a place");
+    // Every tile is inside the picture, and each is the size of its screen.
+    for (id, at) in &tiles {
+        let m = config
+            .monitors
+            .iter()
+            .find(|m| m.id == *id)
+            .expect("a served screen is in the list");
+        assert_eq!((at.width, at.height), (m.width, m.height));
+        assert!(
+            at.right() <= i64::from(config.width) && at.bottom() <= i64::from(config.height),
+            "{id} sits at {at:?}, outside a {}x{} picture",
+            config.width,
+            config.height
+        );
+    }
+    // And they do not overlap, or one screen would be drawn over another.
+    let (first, second) = (tiles.first().expect("one").1, tiles.get(1).expect("two").1);
+    assert!(
+        first.intersect(&second).is_none(),
+        "two screens were laid out on top of each other: {first:?} and {second:?}"
+    );
+}
+
+/// A tiled session that loses a screen keeps the other one, at the other
+/// one's size — rather than ending, or going on announcing a screen that is
+/// not there.
+#[test]
+fn a_tiled_session_that_loses_a_screen_keeps_the_rest() {
+    let mut sink = RecordingSink::new();
+    let mut host = host_around(two().with_unplug_at(3, MonitorId(1)));
+    host.handle(&MediaMessage::Select(MonitorSelect {
+        monitors: vec![0, 1],
+    }))
+    .expect("both screens are there");
+    assert_eq!(host.config().width, W + W / 2);
+
+    let announced = until_it_says_something(&mut host, &mut sink);
+    let after = announced.first().cloned().unwrap_or_else(|| host.config());
+    assert_eq!(after.serving, vec![0], "the screen that went is not served");
+    assert_eq!(
+        (after.width, after.height),
+        (W, H),
+        "the picture should now be the one screen that is left"
+    );
+    assert!(after.is_well_formed(), "{after:?}");
+}
+
+/// Asking for the same two screens again costs nothing: no announcement, no
+/// keyframe, no reshape.
+#[test]
+fn asking_again_for_the_same_two_screens_changes_nothing() {
+    let mut host = host_around(two());
+    let ask = MediaMessage::Select(MonitorSelect {
+        monitors: vec![0, 1],
+    });
+    host.handle(&ask).expect("both screens are there");
+    let answer = host.handle(&ask).expect("still there");
+    assert!(
+        matches!(answer, esper_stream::Handled::Nothing),
+        "re-asking for what is already being sent cost the session something: {answer:?}"
+    );
+}
+
+/// **An odd-sized picture still encodes.** Two screens whose widths sum to an
+/// odd number are a picture no chroma plane divides evenly, which is a real
+/// arrangement — X11 monitors can be any size — and would be a session that
+/// connects and shows nothing.
+#[test]
+fn a_tiled_picture_of_an_odd_width_still_sends_frames() {
+    let mut sink = RecordingSink::new();
+    let capturer = SyntheticCapturer::new(W, H, 1_000_000)
+        .expect("a valid size")
+        .with_extra_monitor(101, 61)
+        .expect("an odd second size");
+    let mut host = host_around(capturer);
+    host.handle(&MediaMessage::Select(MonitorSelect {
+        monitors: vec![0, 1],
+    }))
+    .expect("both screens are there");
+    let config = host.config();
+    assert!(config.is_well_formed(), "{config:?}");
+
+    let mut sent = 0;
+    for _ in 0..40 {
+        if let Ok(HostStep::Sent { datagrams, .. }) = host.step(TICK, &mut sink) {
+            sent += datagrams;
+        }
+        if sent > 0 {
+            break;
+        }
+    }
+    assert!(
+        sent > 0,
+        "a {}x{} picture produced no datagrams",
+        config.width,
+        config.height
+    );
+    assert!(
+        ControllerStream::new(&config).is_ok(),
+        "a controller could not open on {config:?}"
+    );
+}
+
+/// **The derived layout follows the picture, not the desktop.**
+///
+/// A host short of bandwidth encodes something smaller than the screens it is
+/// capturing. The tiles a controller derives have to be in the picture's own
+/// pixels, or every click on the second screen of a scaled-down session lands
+/// outside the picture and is dropped.
+#[test]
+fn the_derived_layout_is_in_the_pictures_pixels_not_the_desktops() {
+    let mut host = host_around(two());
+    host.handle(&MediaMessage::Select(MonitorSelect {
+        monitors: vec![0, 1],
+    }))
+    .expect("both screens are there");
+
+    // Halve the picture, the way a ceiling does.
+    let full = host.config();
+    let mut config = full.clone();
+    config.width = full.width / 2;
+    config.height = full.height / 2;
+
+    let tiles = esper_stream::tiles_of(&config);
+    let widest = tiles
+        .iter()
+        .map(|(_, r)| r.right())
+        .max()
+        .expect("two tiles");
+    assert_eq!(
+        widest,
+        i64::from(config.width),
+        "the tiles must reach the edge of the picture and no further"
+    );
+    let tallest = tiles
+        .iter()
+        .map(|(_, r)| r.bottom())
+        .max()
+        .expect("two tiles");
+    assert!(tallest <= i64::from(config.height));
+
+    // Contiguous screens stay contiguous: the seam is one line, not a gap
+    // where clicks land on nothing and not an overlap where two screens claim
+    // the same pixel.
+    let first = tiles.first().expect("one").1;
+    let second = tiles.get(1).expect("two").1;
+    assert_eq!(
+        first.right(),
+        i64::from(second.x),
+        "a seam opened between {first:?} and {second:?}"
+    );
+    assert!(first.intersect(&second).is_none());
 }

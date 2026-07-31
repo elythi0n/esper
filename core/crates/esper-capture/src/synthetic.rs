@@ -23,10 +23,33 @@ use crate::pool::BufferPool;
 /// The backend name reported in logs and the session HUD.
 pub const BACKEND: &str = "synthetic";
 
+/// One screen inside the picture.
+///
+/// Which screen it is lives in `served`, at the same position: the two are
+/// built together by `retile` and are never written anywhere else, so a tile
+/// carries where it sits and what to draw and nothing about identity.
+#[derive(Debug)]
+struct Tile {
+    /// Where this screen sits in the picture, in picture coordinates.
+    at: Rect,
+    pattern: Pattern,
+}
+
 /// A synthetic screen, rendered on demand.
 #[derive(Debug)]
 pub struct SyntheticCapturer {
-    pattern: Pattern,
+    /// The screens being rendered, in the order they were asked for.
+    ///
+    /// Never empty: `serve` refuses an empty set and the constructor starts
+    /// with one. Laid out by [`crate::geometry::tiles`], so this is the same
+    /// arrangement a real backend produces from the same monitor list.
+    tiles: Vec<Tile>,
+    /// The ids in `tiles`, kept only because [`Capturer::serving`] hands back
+    /// a slice. Built in the one place that builds `tiles`.
+    served: Vec<MonitorId>,
+    /// The size of the whole picture, which is the bounding box of the tiles
+    /// rather than any one screen's size.
+    picture: (u32, u32),
     monitors: Vec<MonitorInfo>,
     format: PixelFormat,
     /// Extra bytes per row beyond the pixels.
@@ -59,7 +82,6 @@ pub struct SyntheticCapturer {
     /// The same sticky numbering a real backend uses, so a fixture cannot be
     /// kinder about monitor identity than the thing it stands in for.
     numbering: crate::capturer::Numbering,
-    selected: MonitorId,
 }
 
 /// A change to which monitors exist.
@@ -86,8 +108,14 @@ impl SyntheticCapturer {
             primary: true,
         }];
         numbering.number(&mut monitors);
+        let first = monitors.first().map_or(MonitorId(0), |m| m.id);
         Ok(Self {
-            pattern,
+            tiles: vec![Tile {
+                at: Rect::sized(width, height),
+                pattern,
+            }],
+            served: vec![first],
+            picture: (width, height),
             monitors,
             format: PixelFormat::Bgrx8,
             row_padding: 0,
@@ -100,7 +128,6 @@ impl SyntheticCapturer {
             reconfigure_at: None,
             replugs: Vec::new(),
             numbering,
-            selected: MonitorId(0),
         })
     }
 
@@ -111,7 +138,9 @@ impl SyntheticCapturer {
     /// [`crate::pattern::Motion`].
     #[must_use]
     pub fn with_motion(mut self, motion: crate::pattern::Motion) -> Self {
-        self.pattern = self.pattern.with_motion(motion);
+        for tile in &mut self.tiles {
+            tile.pattern = tile.pattern.with_motion(motion);
+        }
         self
     }
 
@@ -284,24 +313,29 @@ impl SyntheticCapturer {
                 }
             }
         }
-        // The selected monitor may be the one that went. Falling back to the
-        // first is what a real backend does: a session watching a screen that
-        // was unplugged should show something.
-        if !self.monitors.iter().any(|m| m.id == self.selected) {
-            self.selected = self.monitors.first().map_or(MonitorId(0), |m| m.id);
-        }
-        // And the pattern has to be the size of whatever is now selected,
-        // because the frame's size is what everything downstream sizes itself
-        // from. Rendering the old monitor's size into a stream announced at the
-        // new one's would be a fixture that lies about the host.
-        if let Some(now) = self.monitors.iter().find(|m| m.id == self.selected) {
-            let (w, h) = now.size();
-            if (self.pattern.width(), self.pattern.height()) != (w, h)
-                && let Ok(fresh) = Pattern::new(w, h)
-            {
-                self.pattern = fresh;
-                self.started = false;
-            }
+        // A served screen may be the one that went, and a served screen may
+        // have moved — which changes where it sits in a picture of several.
+        // Re-tiling covers both: it drops what is gone, falls back to the
+        // first monitor if that leaves nothing, and re-reads the geometry of
+        // whatever is left.
+        //
+        // The picture's size is what everything downstream sizes itself from,
+        // so rendering the old size into a stream announced at the new one
+        // would be a fixture that lies about the host.
+        let still_there: Vec<MonitorId> = self
+            .served
+            .iter()
+            .copied()
+            .filter(|id| self.monitors.iter().any(|m| m.id == *id))
+            .collect();
+        let want = if still_there.is_empty() {
+            self.monitors.first().map_or(Vec::new(), |m| vec![m.id])
+        } else {
+            still_there
+        };
+        let before = self.picture;
+        if self.retile(&want).is_ok() && self.picture != before {
+            self.started = false;
         }
         true
     }
@@ -314,22 +348,76 @@ impl SyntheticCapturer {
 
     /// The pattern being rendered, for a test that wants to compute expected
     /// pixels or expected damage.
+    ///
+    /// The first screen's, which is the only one while one is served — and the
+    /// frame of reference for the others, which sit beside it.
+    ///
+    /// `None` only if a backend broke the "never empty" contract, which is a
+    /// bug rather than a state to render around.
     #[must_use]
-    pub const fn pattern(&self) -> &Pattern {
-        &self.pattern
+    pub fn pattern(&self) -> Option<Pattern> {
+        self.tiles.first().map(|t| t.pattern)
+    }
+
+    /// Lay out these screens and make a pattern for each.
+    ///
+    /// The one place `tiles`, `served` and `picture` are written, because
+    /// three fields describing one arrangement is three chances to describe
+    /// different arrangements.
+    fn retile(&mut self, want: &[MonitorId]) -> Result<(), CaptureError> {
+        if want.is_empty() {
+            return Err(CaptureError::NothingToServe);
+        }
+        let mut geometry = Vec::with_capacity(want.len());
+        for id in want {
+            let Some(info) = self.monitors.iter().find(|m| m.id == *id) else {
+                return Err(CaptureError::NoSuchMonitor {
+                    id: *id,
+                    count: self.monitors.len(),
+                });
+            };
+            geometry.push(info.geometry);
+        }
+        if let Some((a, b)) = crate::geometry::first_overlap(&geometry) {
+            return Err(CaptureError::ScreensOverlap {
+                first: want.get(a).copied().unwrap_or(MonitorId(u32::MAX)),
+                second: want.get(b).copied().unwrap_or(MonitorId(u32::MAX)),
+            });
+        }
+        let (bounds, placed) = crate::geometry::tiles(&geometry);
+        let mut tiles = Vec::with_capacity(want.len());
+        for at in placed {
+            // A pattern per screen rather than one stretched across the
+            // picture: a test that cannot tell two screens apart cannot tell
+            // whether either arrived.
+            let pattern = Pattern::new(at.width, at.height).map_err(|e| CaptureError::Backend {
+                backend: BACKEND,
+                detail: e.to_string(),
+            })?;
+            tiles.push(Tile { at, pattern });
+        }
+        self.tiles = tiles;
+        self.served = want.to_vec();
+        self.picture = (bounds.width, bounds.height);
+        Ok(())
     }
 
     /// Bytes per row, pixels plus padding.
     fn stride(&self) -> usize {
-        (self.pattern.width() as usize)
+        (self.picture.0 as usize)
             .saturating_mul(self.format.bytes_per_pixel())
             .saturating_add(self.row_padding)
     }
 
     /// Render the current frame into a pooled buffer.
+    ///
+    /// **Blanked first when there is more than one screen.** A pooled buffer
+    /// arrives with whatever was in it — poison in a debug build, a previous
+    /// frame in a release one — so a gap between two screens would show
+    /// recycled pixels of somewhere else. With one screen the tile is the
+    /// whole picture and there is nothing to blank.
     fn render(&mut self, damage: Damage) -> Result<Frame, CaptureError> {
-        let width = self.pattern.width();
-        let height = self.pattern.height();
+        let (width, height) = self.picture;
         let stride = self.stride();
         let bpp = self.format.bytes_per_pixel();
         let (r_at, g_at, b_at) = self.format.rgb_offsets();
@@ -337,32 +425,43 @@ impl SyntheticCapturer {
         let frame_no = self.frame;
 
         let mut buffer = self.pool.take(stride.saturating_mul(height as usize));
+        if self.tiles.len() > 1 {
+            buffer.fill(0);
+        }
 
-        for y in 0..height {
-            let start = stride.saturating_mul(y as usize);
-            let row_bytes = (width as usize).saturating_mul(bpp);
-            let Some(row) = buffer.get_mut(start..start.saturating_add(row_bytes)) else {
-                continue;
-            };
-            for (x, px) in row.chunks_exact_mut(bpp).enumerate() {
-                let [r, g, b] = self
-                    .pattern
-                    .pixel(u32::try_from(x).unwrap_or(0), y, frame_no);
-                if let Some(c) = px.get_mut(r_at) {
-                    *c = r;
-                }
-                if let Some(c) = px.get_mut(g_at) {
-                    *c = g;
-                }
-                if let Some(c) = px.get_mut(b_at) {
-                    *c = b;
-                }
-                // The fourth byte is set only when the format says it means
-                // something. Leaving it alone in an X format is the honest
-                // thing: a consumer that reads it is reading padding, and this
-                // is where that should be caught.
-                if opaque && let Some(a) = px.get_mut(3) {
-                    *a = 255;
+        for tile in &self.tiles {
+            // Tile coordinates are the picture's own, so they are never
+            // negative and the casts below cannot lose anything.
+            let left = usize::try_from(tile.at.x).unwrap_or(0);
+            let top = usize::try_from(tile.at.y).unwrap_or(0);
+            for local_y in 0..tile.at.height {
+                let row_at = stride
+                    .saturating_mul(top.saturating_add(local_y as usize))
+                    .saturating_add(left.saturating_mul(bpp));
+                let row_bytes = (tile.at.width as usize).saturating_mul(bpp);
+                let Some(row) = buffer.get_mut(row_at..row_at.saturating_add(row_bytes)) else {
+                    continue;
+                };
+                for (x, px) in row.chunks_exact_mut(bpp).enumerate() {
+                    let [r, g, b] =
+                        tile.pattern
+                            .pixel(u32::try_from(x).unwrap_or(0), local_y, frame_no);
+                    if let Some(c) = px.get_mut(r_at) {
+                        *c = r;
+                    }
+                    if let Some(c) = px.get_mut(g_at) {
+                        *c = g;
+                    }
+                    if let Some(c) = px.get_mut(b_at) {
+                        *c = b;
+                    }
+                    // The fourth byte is set only when the format says it
+                    // means something. Leaving it alone in an X format is the
+                    // honest thing: a consumer that reads it is reading
+                    // padding, and this is where that should be caught.
+                    if opaque && let Some(a) = px.get_mut(3) {
+                        *a = 255;
+                    }
                 }
             }
         }
@@ -380,8 +479,8 @@ impl Capturer for SyntheticCapturer {
         &self.monitors
     }
 
-    fn selected(&self) -> MonitorId {
-        self.selected
+    fn serving(&self) -> &[MonitorId] {
+        &self.served
     }
 
     fn format(&self) -> PixelFormat {
@@ -392,26 +491,13 @@ impl Capturer for SyntheticCapturer {
         true
     }
 
-    fn select(&mut self, monitor: MonitorId) -> Result<(), CaptureError> {
-        if monitor == self.selected {
+    fn serve(&mut self, monitors: &[MonitorId]) -> Result<(), CaptureError> {
+        if monitors == self.served.as_slice() {
             return Ok(());
         }
-        let Some(info) = self.monitors.iter().find(|m| m.id == monitor) else {
-            return Err(CaptureError::NoSuchMonitor {
-                id: monitor,
-                count: self.monitors.len(),
-            });
-        };
-        let (width, height) = (info.geometry.width, info.geometry.height);
-        // `with_extra_monitor` refused a size no pattern can render, so this
-        // is unreachable unless a monitor list was built some other way.
-        self.pattern = Pattern::new(width, height).map_err(|e| CaptureError::Backend {
-            backend: BACKEND,
-            detail: e.to_string(),
-        })?;
-        self.selected = monitor;
-        // The new monitor has never been rendered, so the next frame is whole
-        // and due immediately.
+        self.retile(monitors)?;
+        // What is being rendered has never been rendered, so the next frame is
+        // whole and due immediately.
         self.started = false;
         self.next_due = None;
         Ok(())
@@ -452,10 +538,20 @@ impl Capturer for SyntheticCapturer {
         // The first frame is a whole frame however little the picture
         // changed: a decoder with no reference has nothing to build on.
         let damage = if self.started {
-            let raw = self
-                .pattern
-                .damage_between(self.frame.saturating_sub(1), self.frame);
-            Regions::coalesce(&raw, &self.pattern.bounds())
+            // Each screen's own damage, moved to where that screen sits. A
+            // picture of two screens has two things moving in it, and a
+            // consumer told only about the first would leave the second
+            // stale.
+            let mut raw = Vec::new();
+            for tile in &self.tiles {
+                raw.extend(
+                    tile.pattern
+                        .damage_between(self.frame.saturating_sub(1), self.frame)
+                        .into_iter()
+                        .map(|r| r.translate(tile.at.x, tile.at.y)),
+                );
+            }
+            Regions::coalesce(&raw, &Rect::sized(self.picture.0, self.picture.1))
         } else {
             Damage::Everything
         };
@@ -511,6 +607,120 @@ mod tests {
         );
     }
 
+    /// **Two screens arrive as one picture, in the arrangement of the desk.**
+    ///
+    /// The picture is as wide as both and as tall as the taller, each screen
+    /// carries its own pattern, and a consumer that only ever received the
+    /// first screen's pixels would fail here.
+    #[test]
+    fn two_screens_are_one_picture_with_both_in_it() {
+        let mut cap = SyntheticCapturer::new(320, 240, 1000)
+            .expect("valid")
+            .with_extra_monitor(160, 120)
+            .expect("a second screen");
+        let ids: Vec<MonitorId> = cap.monitors().iter().map(|m| m.id).collect();
+        cap.serve(&ids).expect("both screens");
+        assert_eq!(cap.serving(), ids.as_slice());
+        assert_eq!(
+            cap.selected(),
+            ids.first().copied().expect("an id"),
+            "the first served screen is the one everything per-stream keys on"
+        );
+
+        let f = grab(&mut cap);
+        assert_eq!(
+            (f.width(), f.height()),
+            (480, 240),
+            "as wide as both and as tall as the taller"
+        );
+
+        // The second screen's own pattern, at the offset it sits at.
+        let second = Pattern::new(160, 120).expect("valid");
+        let want = second.pixel(3, 5, 0);
+        let got = f.pixel(320 + 3, 5).expect("in bounds");
+        assert_eq!(
+            [
+                got.get(2).copied().unwrap_or(0),
+                got.get(1).copied().unwrap_or(0),
+                got.first().copied().unwrap_or(0)
+            ],
+            want,
+            "the second screen's pixels are not where the layout says they are"
+        );
+    }
+
+    /// **The part of the picture that belongs to no screen is black.**
+    ///
+    /// The 160x120 screen sits beside a 320x240 one, so the picture has 120
+    /// rows below it that belong to nothing. A pooled buffer arrives with
+    /// whatever was in it last — in a release build, the pixels of a previous
+    /// frame — so this is the check that a gap is blanked rather than
+    /// inherited.
+    #[test]
+    fn the_gap_beside_a_shorter_screen_is_black() {
+        let mut cap = SyntheticCapturer::new(320, 240, 1000)
+            .expect("valid")
+            .with_extra_monitor(160, 120)
+            .expect("a second screen");
+        let ids: Vec<MonitorId> = cap.monitors().iter().map(|m| m.id).collect();
+        cap.serve(&ids).expect("both screens");
+        // Twice, because the second frame is the one that gets a recycled
+        // buffer: the first may well have had a fresh one.
+        let _ = grab(&mut cap);
+        let f = grab(&mut cap);
+        for (x, y) in [(320u32, 200u32), (479, 239), (400, 130)] {
+            let px = f.pixel(x, y).expect("in bounds");
+            assert_eq!(
+                (px.first().copied(), px.get(1).copied(), px.get(2).copied()),
+                (Some(0), Some(0), Some(0)),
+                "({x},{y}) belongs to no screen and is not black"
+            );
+        }
+    }
+
+    /// A picture of no screens is refused, rather than becoming a zero-sized
+    /// frame that something downstream divides by.
+    #[test]
+    fn serving_nothing_is_refused() {
+        let mut cap = SyntheticCapturer::new(320, 240, 1000).expect("valid");
+        assert!(matches!(cap.serve(&[]), Err(CaptureError::NothingToServe)));
+        assert_eq!(cap.serving().len(), 1, "and it keeps what it had");
+    }
+
+    /// A screen that is not there is refused **by name**, and the capturer
+    /// goes on sending what it was sending: a controller asking for a monitor
+    /// somebody unplugged should see a refusal, not a stopped session.
+    #[test]
+    fn a_screen_that_is_not_there_is_refused_and_changes_nothing() {
+        let mut cap = SyntheticCapturer::new(320, 240, 1000).expect("valid");
+        let before = cap.serving().to_vec();
+        let missing = MonitorId(77);
+        assert!(matches!(
+            cap.serve(&[missing]),
+            Err(CaptureError::NoSuchMonitor { id, .. }) if id == missing
+        ));
+        assert_eq!(cap.serving(), before.as_slice());
+        let f = grab(&mut cap);
+        assert_eq!((f.width(), f.height()), (320, 240));
+    }
+
+    /// **Asking for what is already being sent costs nothing.** A controller
+    /// clicking the screen it is watching should not cost a keyframe, and the
+    /// evidence is that the next frame is still a damage report rather than a
+    /// whole picture.
+    #[test]
+    fn serving_the_same_screens_again_is_not_a_reset() {
+        let mut cap = SyntheticCapturer::new(320, 240, 1000).expect("valid");
+        let ids = cap.serving().to_vec();
+        let _ = grab(&mut cap);
+        cap.serve(&ids).expect("the same screens");
+        let next = grab(&mut cap);
+        assert!(
+            matches!(next.damage(), Damage::Regions(_)),
+            "re-serving the same screens threw away the reference picture"
+        );
+    }
+
     /// **The point of the synthetic source.** Every pixel is exactly what the
     /// pattern says it should be, in the format the capturer was asked for —
     /// so a consumer can be checked against the source rather than against a
@@ -535,7 +745,7 @@ mod tests {
 
             for y in 0..48u32 {
                 for x in 0..64u32 {
-                    let want = cap.pattern().pixel(x, y, 0);
+                    let want = cap.pattern().expect("a tile").pixel(x, y, 0);
                     let got = f.pixel(x, y).expect("in bounds");
                     assert_eq!(
                         [
@@ -590,7 +800,7 @@ mod tests {
             );
             for y in 0..48u32 {
                 for x in 0..64u32 {
-                    let want = cap.pattern().pixel(x, y, 0);
+                    let want = cap.pattern().expect("a tile").pixel(x, y, 0);
                     let got = f.pixel(x, y).expect("in bounds");
                     assert_eq!(
                         [got[2], got[1], got[0]],
@@ -614,7 +824,7 @@ mod tests {
         let mut cap = SyntheticCapturer::new(320, 240, 10_000).expect("valid");
         for expected in 0..20u64 {
             let f = grab(&mut cap);
-            let read = cap.pattern().read_counter(|x, y| {
+            let read = cap.pattern().expect("a tile").read_counter(|x, y| {
                 let p = f.pixel(x, y).unwrap_or([0; 4]);
                 [p[2], p[1], p[0]]
             });

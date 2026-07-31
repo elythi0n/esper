@@ -267,6 +267,14 @@ impl ControllerLink {
         self.stream.select_monitor(monitor);
     }
 
+    /// Ask the host for these screens, as one picture.
+    ///
+    /// See [`esper_stream::ControllerStream::select_monitors`]: the latest ask
+    /// replaces any earlier one that has not gone out yet.
+    pub fn select_monitors(&mut self, monitors: Vec<u32>) {
+        self.stream.select_monitors(monitors);
+    }
+
     /// Tell the host what this viewer would prefer.
     pub async fn hint(
         &mut self,

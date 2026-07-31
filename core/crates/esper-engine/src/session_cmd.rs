@@ -116,8 +116,18 @@ pub struct ConnectOptions {
     pub present: bool,
     /// Send this window's keys and pointer to the host.
     pub control: bool,
-    /// A monitor to ask the host for, when it is not the one announced.
-    pub monitor: Option<u32>,
+    /// Screens to ask the host for, when they are not the ones announced.
+    ///
+    /// Several are shown as one picture, in the arrangement the host's desktop
+    /// has. The order is the order they were asked for, which only matters to
+    /// the refusal message: where they *sit* is the desk's business, not the
+    /// controller's.
+    pub monitors: Option<Vec<u32>>,
+    /// Ask for every screen the host has, whatever they turn out to be.
+    ///
+    /// Which screens exist is something only the host knows, so this cannot be
+    /// a list at connect time: it becomes one when the config arrives.
+    pub all_monitors: bool,
     /// A broker to be introduced through, when nothing direct works.
     pub via: Option<esper_rendezvous::Via>,
     /// Which paired host, by name or fingerprint prefix.
@@ -297,7 +307,8 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut clipboard = ClipboardWish::default();
     let mut present = false;
     let mut control = false;
-    let mut monitor: Option<u32> = None;
+    let mut monitors: Option<Vec<u32>> = None;
+    let mut all_monitors = false;
     let mut via_addr: Option<SocketAddr> = None;
     let mut via_key: Option<[u8; 32]> = None;
     let mut named: Option<String> = None;
@@ -367,13 +378,31 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
                 i += 1;
             }
             "--monitor" => {
-                monitor = Some(
-                    args.get(i + 1)
-                        .ok_or_else(|| "--monitor needs a monitor number".to_owned())?
-                        .parse()
-                        .map_err(|_| "--monitor wants a monitor number".to_owned())?,
-                );
+                let list = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--monitor needs a monitor number".to_owned())?;
+                let mut wanted = Vec::new();
+                for part in list.split(',') {
+                    let n: u32 = part.trim().parse().map_err(|_| {
+                        "--monitor wants monitor numbers, like `1` or `0,1`".to_owned()
+                    })?;
+                    // Refused rather than deduplicated: a person who typed
+                    // `0,0` meant something, and it was not "show screen 0
+                    // once".
+                    if wanted.contains(&n) {
+                        return Err(format!("--monitor names monitor {n} twice"));
+                    }
+                    wanted.push(n);
+                }
+                if wanted.is_empty() {
+                    return Err("--monitor needs a monitor number".to_owned());
+                }
+                monitors = Some(wanted);
                 i += 2;
+            }
+            "--all-monitors" => {
+                all_monitors = true;
+                i += 1;
             }
             // **An address or a name.** An address says where without saying
             // which; a name says which without saying where. Both are
@@ -393,6 +422,11 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     }
     // A broker on the command line replaces the configured one; without one,
     // whatever the settings say.
+    // Two ways of naming the same thing, and no way to tell which was meant.
+    // Refused by name, the way `screenshot` refuses the same pair.
+    if all_monitors && monitors.is_some() {
+        return Err("--all-monitors and --monitor ask for different things".to_owned());
+    }
     let via = match broker_from(via_addr, via_key)? {
         Some(via) => Some(via),
         None => crate::settings::broker()?,
@@ -403,7 +437,8 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
         profile,
         present,
         control,
-        monitor,
+        monitors,
+        all_monitors,
         via,
         named,
         mdns,
@@ -1745,16 +1780,9 @@ async fn serve_session(
         config.width, config.height, config.max_fps, config.ssrc
     );
 
-    // Where the captured monitor is on the desktop, so a pointer position can
-    // be expressed as a fraction of it. Taken from the config that was just
-    // announced, so both ends are working from the same list.
-    let selected_geometry = config
-        .monitors
-        .iter()
-        .find(|m| m.id == config.selected)
-        .map_or((0, 0, config.width, config.height), |m| {
-            (m.x, m.y, m.width, m.height)
-        });
+    // Where the captured screens are on the desktop, so a pointer position can
+    // be expressed as a fraction of the one it is on. Taken from the config
+    // that was just announced, so both ends are working from the same list.
 
     // **Whether this device may drive the machine comes from the grant**, and
     // the grant came from the stored record clamped by the transport — never
@@ -1933,13 +1961,7 @@ async fn serve_session(
     // A host with no cursor source — a synthetic screen has no pointer — says
     // so once and sends nothing, rather than inventing a pointer in the middle
     // of the picture.
-    let (watch, pointer) = match crate::cursor_task::start((
-        config.selected,
-        selected_geometry.0,
-        selected_geometry.1,
-        selected_geometry.2,
-        selected_geometry.3,
-    )) {
+    let (watch, pointer) = match crate::cursor_task::start(served_geometry(&config)) {
         Ok((watch, messages)) => {
             println!("      pointer    {} — sent out of band", watch.backend());
             (Some(watch), Some(messages))
@@ -2028,6 +2050,21 @@ async fn serve_session(
         task.abort();
     }
     served
+}
+
+/// Where each screen the session is sending sits on the host's desktop.
+///
+/// A pointer position is a fraction of the screen it is *on*, so the pointer
+/// reader needs all of them: with several screens in one picture, a reader
+/// given only the first reports the pointer as gone half way across a picture
+/// it is plainly still in.
+fn served_geometry(config: &esper_proto::StreamConfig) -> Vec<(u32, i32, i32, u32, u32)> {
+    config
+        .serving
+        .iter()
+        .filter_map(|id| config.monitors.iter().find(|m| m.id == *id))
+        .map(|m| (m.id, m.x, m.y, m.width, m.height))
+        .collect()
 }
 
 /// Open a capture backend and build a sender around it.
@@ -2317,10 +2354,19 @@ const HELD_SILENCE: Duration = Duration::from_secs(3);
 /// monitor the *controller was told about*, and a host that resolved it
 /// against a newer list would put the pointer somewhere the person did not
 /// click.
+///
+/// **Only the screens being sent.** A position naming a screen this session
+/// cannot see is refused by the injector rather than acted on: a controller
+/// cannot produce one from a picture it does not have, so one arriving is
+/// either a stale message from before a switch — which would land at the right
+/// fraction of the wrong screen — or a peer clicking somewhere it cannot see.
+/// The picture and the input surface are the same set, and that is a rule
+/// worth being able to state.
 fn monitors_from(config: &esper_proto::StreamConfig) -> Vec<esper_input::Monitor> {
     config
         .monitors
         .iter()
+        .filter(|m| config.serving.contains(&m.id))
         .map(|m| esper_input::Monitor {
             id: m.id,
             x: m.x,
@@ -2836,10 +2882,8 @@ async fn serve(
                 // fraction of the screen that is no longer on show — drawn at
                 // the right fraction of the wrong monitor.
                 if let MediaMessage::Config(config) = &message {
-                    if let Some(watch) = attending.watch
-                        && let Some(m) = config.monitors.iter().find(|m| m.id == config.selected)
-                    {
-                        watch.watch(m.id, m.x, m.y, m.width, m.height);
+                    if let Some(watch) = attending.watch {
+                        watch.watch(served_geometry(config));
                     }
                     // **And a new monitor to inject through**, which is the
                     // same event and the same reasoning read the other way: a
@@ -2987,7 +3031,10 @@ pub fn connect_usage() -> String {
          \n\
          \x20 --present            open a window and show the pictures\n\
          \x20 --control            send this window's keys and pointer to the host\n\
-         \x20 --monitor <n>        ask for a monitor other than the one announced\n\
+         \x20 --monitor <n[,n]>   ask for these screens rather than the one\n\
+         \x20                      announced. Several arrive as one picture, in the\n\
+         \x20                      arrangement the host's desktop has\n\
+         \x20 --all-monitors       ask for every screen the host has\n\
          \x20 --profile <what>     text, balanced or motion: what you are doing,\n\
          \x20                      which decides what the host gives up first\n\
          \x20 --clipboard <what>   both, from-host, to-host or none. Nothing is ever\n\
@@ -3387,16 +3434,25 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             .map_err(|e| format!("the host did not announce a stream: {e}"))?;
         let config = link.config().clone();
         println!(
-            "  stream     {}x{} {} at up to {} fps",
+            "  stream     {}x{} {} at up to {} fps{}",
             config.width,
             config.height,
             config.codec.name(),
-            config.max_fps
+            config.max_fps,
+            if config.serving.len() > 1 {
+                format!(" — {} screens as one picture", config.serving.len())
+            } else {
+                String::new()
+            }
         );
         for m in &config.monitors {
             println!(
                 "      {} {}  {}x{} at {},{}{}",
-                if m.id == config.selected { "→" } else { " " },
+                if config.serving.contains(&m.id) {
+                    "→"
+                } else {
+                    " "
+                },
                 m.name,
                 m.width,
                 m.height,
@@ -3447,19 +3503,28 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             .await
             .map_err(|e| format!("saying what this viewer will settle for: {e}"))?;
 
-        let mut asked_for: Option<u32> = None;
-        // Which monitor the picture is of, so a layout change can be told
+        let mut asked_for: Option<Vec<u32>> = None;
+        // Which screens the picture is of, so a layout change can be told
         // apart from a switch — the host sends one message for both.
-        let mut showing: Option<u32> = Some(config.selected);
-        if let Some(wanted) = o.monitor {
-            if wanted == config.selected {
-                println!("  monitor    {wanted} is the one the host is already sending");
+        let mut showing: Option<Vec<u32>> = Some(config.serving.clone());
+        // **`--all-monitors` becomes a list here and not before**: which
+        // screens a host has is something only the host knows, and it has just
+        // said so.
+        let wanted = if o.all_monitors {
+            Some(config.monitors.iter().map(|m| m.id).collect::<Vec<u32>>())
+        } else {
+            o.monitors.clone()
+        };
+        if let Some(wanted) = wanted {
+            let named = esper_stream::screens_named(&wanted);
+            if wanted == config.serving {
+                println!("  monitor    the host is already sending {named}");
             } else {
-                println!("  monitor    asking for {wanted}");
-                link.select_monitor(wanted);
+                println!("  monitor    asking for {named}");
+                link.select_monitors(wanted.clone());
                 link.flush_outbound()
                     .await
-                    .map_err(|e| format!("asking for monitor {wanted}: {e}"))?;
+                    .map_err(|e| format!("asking for {named}: {e}"))?;
                 asked_for = Some(wanted);
             }
         }
@@ -3495,7 +3560,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                         println!("  control    keys and pointer go to the host");
                         driving = Some((
                             crate::input_source::InputSource::new(
-                                config.selected,
+                                esper_stream::tiles_of(&config),
                                 (config.width, config.height),
                             ),
                             control,
@@ -3599,13 +3664,13 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                         // a viewer that said the same sentence for all of them
                         // would tell somebody their picture had changed when
                         // only the host's monitor list had.
-                        let was = showing.replace(announced.selected);
-                        let layout_only = was == Some(announced.selected);
-                        match asked_for.take_if(|m| *m != announced.selected) {
+                        let was = showing.replace(announced.serving.clone());
+                        let layout_only = was.as_ref() == Some(&announced.serving);
+                        match asked_for.take_if(|m| *m != announced.serving) {
                             Some(refused) => println!(
-                                "  · the host would not switch to monitor {refused}; \
-                                 it is still sending monitor {}",
-                                announced.selected
+                                "  · the host would not send {}; it is still sending {}",
+                                esper_stream::screens_named(&refused),
+                                esper_stream::screens_named(&announced.serving)
                             ),
                             // Nothing was asked for and the picture is still
                             // the same screen: the host's desktop changed
@@ -3625,7 +3690,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                                         m.height,
                                         m.x,
                                         m.y,
-                                        if m.id == announced.selected {
+                                        if announced.serving.contains(&m.id) {
                                             " — showing"
                                         } else {
                                             ""
@@ -3636,22 +3701,36 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                             None => {
                                 // A switch this end did not ask for is the
                                 // screen it was watching having gone away.
-                                if asked_for.is_none() && was.is_some() {
-                                    println!(
-                                        "  · the host's monitor {} went away",
-                                        was.unwrap_or_default()
-                                    );
+                                if asked_for.is_none()
+                                    && let Some(gone) = was.as_ref()
+                                {
+                                    // What is no longer being sent, which with
+                                    // one screen is the screen that went and
+                                    // with several is whichever of them did.
+                                    let lost: Vec<u32> = gone
+                                        .iter()
+                                        .copied()
+                                        .filter(|id| !announced.serving.contains(id))
+                                        .collect();
+                                    if !lost.is_empty() {
+                                        println!(
+                                            "  · the host's {} went away",
+                                            esper_stream::screens_named(&lost)
+                                        );
+                                    }
                                 }
                                 asked_for = None;
                                 println!(
-                                    "  · now showing monitor {}: {}x{}",
-                                    announced.selected, announced.width, announced.height
+                                    "  · now showing {}: {}x{}",
+                                    esper_stream::screens_named(&announced.serving),
+                                    announced.width,
+                                    announced.height
                                 );
                                 // The same window position is now a fraction
                                 // of a different screen.
                                 if let Some((source, _)) = driving.as_mut() {
                                     source.showing(
-                                        announced.selected,
+                                        esper_stream::tiles_of(&announced),
                                         (announced.width, announced.height),
                                     );
                                 }
@@ -3792,15 +3871,31 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                             }
                         };
                         if let Some(p) = presenter.as_mut() {
-                            let showing = link.config();
-                            let where_to =
-                                draw.then(|| at.to_pixels(showing.width, showing.height));
-                            let same_monitor = at.monitor == showing.selected;
-                            // A pointer on another monitor is not in this
-                            // picture: nothing to draw, and nothing to wear
-                            // either — a worn pointer would be showing the
-                            // person a cursor for a screen they cannot see.
-                            let target = if same_monitor { where_to } else { None };
+                            // **Which screen it is on, and where in the
+                            // picture that screen is.** A position on the wire
+                            // is a fraction of a named screen, so with two
+                            // screens tiled the same fraction is two different
+                            // places — and drawing it against the whole
+                            // picture would put the pointer on the wrong
+                            // screen, at the wrong scale.
+                            //
+                            // A pointer on a screen this session is not being
+                            // shown is not in the picture: nothing to draw,
+                            // and nothing to wear either — a worn pointer
+                            // would be showing the person a cursor for a
+                            // screen they cannot see.
+                            let on_screen = esper_stream::tiles_of(link.config())
+                                .into_iter()
+                                .find(|(id, _)| *id == at.monitor);
+                            let target = on_screen.and_then(|(_, tile)| {
+                                draw.then(|| {
+                                    let (x, y) = at.to_pixels(tile.width, tile.height);
+                                    (
+                                        x.saturating_add(tile.x.unsigned_abs()),
+                                        y.saturating_add(tile.y.unsigned_abs()),
+                                    )
+                                })
+                            });
                             if let Err(e) = p.draw_cursor_at(target)
                                 && cursor_moves == 1
                             {
@@ -4134,6 +4229,46 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The input surface is the picture, and nothing else.**
+    ///
+    /// A position naming a screen the session is not sending is refused by the
+    /// injector, and this is where that is decided: the table it works from is
+    /// built from `serving`. A controller cannot produce such a position from a
+    /// picture it does not have, so one arriving is a stale message from before
+    /// a switch — which would land at the right fraction of the wrong screen —
+    /// or a peer acting on a screen it cannot see.
+    #[test]
+    fn the_injector_is_told_only_about_the_screens_being_sent() {
+        use super::monitors_from;
+        let screen = |id: u32, x: i32| esper_proto::MonitorDescription {
+            id,
+            name: format!("screen-{id}"),
+            x,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale_percent: 100,
+            primary: id == 0,
+        };
+        let config = esper_proto::StreamConfig {
+            monitors: vec![screen(0, 0), screen(1, 1920), screen(2, 3840)],
+            selected: 0,
+            serving: vec![0, 2],
+            codec: esper_proto::Codec::H264,
+            width: 5760,
+            height: 1080,
+            max_fps: 30,
+            clock_hz: 90_000,
+            ssrc: 1,
+        };
+        let told: Vec<u32> = monitors_from(&config).iter().map(|m| m.id).collect();
+        assert_eq!(
+            told,
+            vec![0, 2],
+            "the injector was told about a screen this session is not sending"
+        );
+    }
 
     /// **An ordinary ending is worth locking for, and the host already knows
     /// when.**

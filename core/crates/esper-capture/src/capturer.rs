@@ -217,6 +217,30 @@ pub enum CaptureError {
     #[error("the {backend} backend cannot change monitor once it is capturing")]
     CannotSwitchMonitor { backend: &'static str },
 
+    /// This backend can capture one screen at a time.
+    ///
+    /// Its own variant for the same reason [`Self::CannotSwitchMonitor`] is:
+    /// a controller asking for two screens on a host that can only send one
+    /// should be told that, not told the screens do not exist.
+    #[error("the {backend} backend cannot send {asked} screens at once")]
+    CannotTile { backend: &'static str, asked: usize },
+
+    /// Two screens in one picture that cover the same pixels.
+    ///
+    /// Mirrored displays, or a logical monitor laid over a physical one. A
+    /// picture of both would show one desktop twice and charge the session for
+    /// it, so the request is refused and names the pair.
+    #[error("{first} and {second} show the same pixels; a picture of both would show it twice")]
+    ScreensOverlap { first: MonitorId, second: MonitorId },
+
+    /// A selection asking for no screens at all.
+    ///
+    /// Refused rather than treated as "keep what you have": a caller that
+    /// asked for nothing has a bug, and quietly carrying on would hide it
+    /// until something downstream divided by the number of screens.
+    #[error("a capture must have at least one screen")]
+    NothingToServe,
+
     /// The user has not granted, or has withdrawn, screen capture permission.
     ///
     /// Its own variant because it is the one failure a person can fix, and it
@@ -246,8 +270,27 @@ pub trait Capturer: std::fmt::Debug + Send {
     /// Every monitor this capturer can see.
     fn monitors(&self) -> &[MonitorInfo];
 
-    /// The monitor being captured.
-    fn selected(&self) -> MonitorId;
+    /// The screens being captured, in the order they are laid out.
+    ///
+    /// **Never empty.** A capturer serving nothing has no picture to give and
+    /// no size to describe, and every caller would have to carry a branch for
+    /// a state no backend has any reason to be in.
+    fn serving(&self) -> &[MonitorId];
+
+    /// The first screen being captured.
+    ///
+    /// What a caller means by "the monitor" while there is one, and the
+    /// per-stream frame of reference while there are several: the SSRC, the
+    /// cursor's coordinates and the config's `selected` all key on it.
+    fn selected(&self) -> MonitorId {
+        self.serving()
+            .first()
+            .copied()
+            // Unreachable by the contract above, and a number rather than a
+            // panic if a backend breaks it: the caller gets a monitor that
+            // does not exist and says so, instead of taking the host down.
+            .unwrap_or(MonitorId(u32::MAX))
+    }
 
     /// The pixel layout frames arrive in.
     fn format(&self) -> PixelFormat;
@@ -263,17 +306,39 @@ pub trait Capturer: std::fmt::Debug + Send {
     /// Wait up to `timeout` for the next frame.
     fn next_frame(&mut self, timeout: Duration) -> Result<Capture, CaptureError>;
 
-    /// Capture a different monitor from now on.
+    /// Capture these screens from now on, as one picture.
     ///
     /// Required rather than defaulted, so a new backend has to answer the
     /// question instead of inheriting a refusal nobody notices. A backend that
-    /// genuinely cannot switch says [`CaptureError::CannotSwitchMonitor`], and
-    /// the session keeps the monitor it has.
+    /// genuinely cannot change screens says
+    /// [`CaptureError::CannotSwitchMonitor`], one that can only ever send a
+    /// single screen says [`CaptureError::CannotTile`], and the session keeps
+    /// what it has.
     ///
-    /// Selecting the monitor already selected is a no-op, **not** a reset: a
-    /// controller clicking the current monitor should not cost a keyframe.
-    /// Anything else discards the previous picture, so the next frame is whole.
-    fn select(&mut self, monitor: MonitorId) -> Result<(), CaptureError>;
+    /// Serving exactly what is already served is a no-op, **not** a reset: a
+    /// controller clicking the screen it is already watching should not cost a
+    /// keyframe. Anything else discards the previous picture, so the next frame
+    /// is whole.
+    ///
+    /// Screens that cover the same pixels are refused with
+    /// [`CaptureError::ScreensOverlap`] — see
+    /// [`crate::geometry::first_overlap`] for why that is a refusal rather
+    /// than a picture.
+    ///
+    /// Several screens are laid out by [`crate::geometry::tiles`] — the
+    /// desktop's own arrangement — and **whatever region belongs to no screen
+    /// must be blanked**. A gap in an L-shaped desktop is one thing; a screen
+    /// somebody deliberately did not ask for sitting in the middle of two they
+    /// did is quite another, and a backend that copied the bounding rectangle
+    /// straight out of the framebuffer would send it.
+    fn serve(&mut self, monitors: &[MonitorId]) -> Result<(), CaptureError>;
+
+    /// Capture one screen from now on.
+    ///
+    /// The single-screen case of [`Self::serve`], which is most of them.
+    fn select(&mut self, monitor: MonitorId) -> Result<(), CaptureError> {
+        self.serve(&[monitor])
+    }
 }
 
 #[cfg(test)]

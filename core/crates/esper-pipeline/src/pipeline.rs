@@ -410,19 +410,54 @@ impl Pipeline {
         &mut self,
         monitor: esper_capture::capturer::MonitorId,
     ) -> Result<(u32, u32), PipelineError> {
-        if monitor == self.capturer.selected() {
+        self.serve_monitors(&[monitor])
+    }
+
+    /// Capture these screens from now on, as one picture, and say what will be
+    /// encoded.
+    ///
+    /// The general form of [`Self::select_monitor`]: a picture of several
+    /// screens is, to everything from here on, simply a bigger monitor. The
+    /// reshape is the one a resolution change already takes, for the same
+    /// reason — the gate is resized, the scaler is dropped because it was
+    /// built for the old size, and a keyframe is requested because every
+    /// reference picture the decoder holds is of somewhere else.
+    ///
+    /// Serving what is already being served does nothing at all, rather than
+    /// costing a keyframe and a whole frame's conversion.
+    pub fn serve_monitors(
+        &mut self,
+        monitors: &[esper_capture::capturer::MonitorId],
+    ) -> Result<(u32, u32), PipelineError> {
+        if monitors == self.capturer.serving() {
             return Ok(self.encode_size());
         }
-        self.capturer.select(monitor)?;
-        let (width, height) = self
+        self.capturer.serve(monitors)?;
+        // The size of the whole picture, which the capturer worked out when it
+        // laid the screens out. Asking it beats repeating the arithmetic: two
+        // answers to "how big is the picture" is one too many.
+        let screens: Vec<esper_capture::geometry::Rect> = self
             .capturer
-            .monitors()
+            .serving()
             .iter()
-            .find(|m| m.id == monitor)
-            .map_or(self.native, esper_capture::capturer::MonitorInfo::size);
+            .filter_map(|id| self.capturer.monitors().iter().find(|m| m.id == *id))
+            .map(|m| m.geometry)
+            .collect();
+        let (bounds, _) = esper_capture::geometry::tiles(&screens);
+        let (width, height) = if bounds.is_empty() {
+            self.native
+        } else {
+            (bounds.width, bounds.height)
+        };
         self.reconfigure(width, height)?;
         self.request_keyframe();
         Ok(self.encode_size())
+    }
+
+    /// The screens being captured, in the order they are laid out.
+    #[must_use]
+    pub fn serving(&self) -> &[esper_capture::capturer::MonitorId] {
+        self.capturer.serving()
     }
 
     /// The monitor being captured.

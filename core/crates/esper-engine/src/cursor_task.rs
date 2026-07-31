@@ -38,11 +38,12 @@ const TICK: Duration = Duration::from_millis(8);
 enum Command {
     /// The monitor being captured changed, or its geometry did.
     Watch {
-        monitor: u32,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
+        /// The screens being captured: id, position and size of each.
+        ///
+        /// A set rather than one, because a picture can be of several screens
+        /// and the pointer is on one of them — reporting only the first would
+        /// make the pointer disappear half way across the picture.
+        screens: Vec<(u32, i32, i32, u32, u32)>,
     },
     Stop,
 }
@@ -61,20 +62,15 @@ impl CursorWatch {
         self.backend
     }
 
-    /// Watch this monitor: positions are a fraction of it.
+    /// Watch these screens: a position is a fraction of whichever one the
+    /// pointer is on.
     ///
-    /// **Called again whenever the session's monitor changes.** Without it a
-    /// switch would leave every position expressed as a fraction of the
-    /// monitor that is no longer on screen — a pointer drawn at the right
-    /// fraction of the wrong screen.
-    pub fn watch(&self, monitor: u32, x: i32, y: i32, width: u32, height: u32) {
-        let _ = self.to_thread.send(Command::Watch {
-            monitor,
-            x,
-            y,
-            width,
-            height,
-        });
+    /// **Called again whenever the session's screens change.** Without it a
+    /// switch would leave every position expressed as a fraction of a screen
+    /// that is no longer on show — a pointer drawn at the right fraction of
+    /// the wrong screen.
+    pub fn watch(&self, screens: Vec<(u32, i32, i32, u32, u32)>) {
+        let _ = self.to_thread.send(Command::Watch { screens });
     }
 }
 
@@ -91,7 +87,7 @@ pub type Messages = tokio::sync::mpsc::Receiver<CursorMessage>;
 ///
 /// `Err` when this machine has no way to see one — a synthetic screen has no
 /// pointer, and a session over it should say so rather than invent one.
-pub fn start(monitor: (u32, i32, i32, u32, u32)) -> Result<(CursorWatch, Messages), String> {
+pub fn start(screens: Vec<(u32, i32, i32, u32, u32)>) -> Result<(CursorWatch, Messages), String> {
     #[cfg(target_os = "linux")]
     {
         let source = esper_capture_x11::cursor::X11Cursor::open().map_err(|e| e.to_string())?;
@@ -102,19 +98,13 @@ pub fn start(monitor: (u32, i32, i32, u32, u32)) -> Result<(CursorWatch, Message
         // must not be able to stall the thread that reads the pointer — and a
         // position nobody has sent yet is worth less than the one after it.
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let _ = to_thread.send(Command::Watch {
-            monitor: monitor.0,
-            x: monitor.1,
-            y: monitor.2,
-            width: monitor.3,
-            height: monitor.4,
-        });
+        let _ = to_thread.send(Command::Watch { screens });
         std::thread::spawn(move || run(source, commands, tx));
         Ok((CursorWatch { to_thread, backend }, rx))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = monitor;
+        let _ = screens;
         Err("no cursor backend is compiled in for this platform".to_owned())
     }
 }
@@ -126,37 +116,34 @@ fn run<S: CursorSource>(
     out: tokio::sync::mpsc::Sender<CursorMessage>,
 ) {
     let mut tracker = CursorTracker::new();
-    let mut watching: Option<(u32, i32, i32, u32, u32)> = None;
+    let mut watching: Vec<(u32, i32, i32, u32, u32)> = Vec::new();
     let mut complained = false;
     loop {
         loop {
             match commands.try_recv() {
-                Ok(Command::Watch {
-                    monitor,
-                    x,
-                    y,
-                    width,
-                    height,
-                }) => {
-                    // A different monitor means every position said so far was
-                    // about somewhere else, so the far end starts again.
-                    if watching.map(|w| w.0) != Some(monitor) {
+                Ok(Command::Watch { screens }) => {
+                    // Different screens mean every position said so far was
+                    // about somewhere else, so the far end starts again. The
+                    // geometry counts as well as the ids: a screen that moved
+                    // is the same screen at a different place, and a fraction
+                    // of it means something else.
+                    if watching != screens {
                         tracker.forget();
                     }
-                    watching = Some((monitor, x, y, width, height));
+                    watching = screens;
                 }
                 Ok(Command::Stop) | Err(TryRecvError::Disconnected) => return,
                 Err(TryRecvError::Empty) => break,
             }
         }
-        let Some(monitor) = watching else {
+        if watching.is_empty() {
             std::thread::sleep(TICK);
             continue;
-        };
+        }
 
         match source.read() {
             Ok(Some(state)) => {
-                for message in tracker.update(&state, monitor, Instant::now()) {
+                for message in tracker.update(&state, &watching, Instant::now()) {
                     // `try_send`: see the channel's own note. A dropped
                     // position is superseded by the next one a few
                     // milliseconds later; a dropped *shape* would not be, so
@@ -217,11 +204,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         to_thread
             .send(Command::Watch {
-                monitor: 0,
-                x: 0,
-                y: 0,
-                width: 100,
-                height: 100,
+                screens: vec![(0, 0, 0, 100, 100)],
             })
             .expect("send");
         let thread = std::thread::spawn(move || run(source, commands, tx));
@@ -281,11 +264,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         to_thread
             .send(Command::Watch {
-                monitor: 0,
-                x: 0,
-                y: 0,
-                width: 100,
-                height: 100,
+                screens: vec![(0, 0, 0, 100, 100)],
             })
             .expect("send");
         let thread = std::thread::spawn(move || run(source, commands, tx));
@@ -305,11 +284,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         to_thread
             .send(Command::Watch {
-                monitor: 0,
-                x: 0,
-                y: 0,
-                width: 100,
-                height: 100,
+                screens: vec![(0, 0, 0, 100, 100)],
             })
             .expect("send");
         let thread = std::thread::spawn(move || run(source, commands, tx));

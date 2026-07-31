@@ -229,6 +229,60 @@ const fn ceil_to(v: i64, step: i64) -> i64 {
     if f == v { v } else { f + step }
 }
 
+/// The first pair of screens that cover any of the same pixels.
+///
+/// **Two screens showing the same pixels cannot be tiled.** Mirrored displays
+/// are the ordinary case, and a picture with both in it would show the same
+/// desktop twice, at the same place, with one drawn over the other — while
+/// costing the session the pixels of both. A caller refuses the request and
+/// says which two, which is something a person can act on.
+///
+/// It is also the rule that keeps a tiled fetch bounded: the screens in a
+/// picture cover no pixel twice, so reading all of them is never more work
+/// than reading the picture once.
+#[must_use]
+pub fn first_overlap(screens: &[Rect]) -> Option<(usize, usize)> {
+    for (i, a) in screens.iter().enumerate() {
+        for (j, b) in screens.iter().enumerate().skip(i.saturating_add(1)) {
+            if a.overlaps(b) {
+                return Some((i, j));
+            }
+        }
+    }
+    None
+}
+
+/// Where each screen sits in a picture holding several of them.
+///
+/// **The desktop's own arrangement, moved to the origin.** Two screens
+/// side by side arrive side by side; one above another arrives above another.
+/// There is no layout policy to agree on because there is no layout decision:
+/// a screen's place in the picture is its place on the desk, less the top-left
+/// corner of the set. So both ends work it out from the same monitor list and
+/// cannot disagree — and a person looking at the picture sees the arrangement
+/// they would see standing at the machine.
+///
+/// Any gap between them — a hole in an L-shaped desktop, or a screen in the
+/// middle that nobody asked for — is part of the picture and belongs to no
+/// screen. **A caller must fill it rather than leave it,** which is why this
+/// returns the tiles rather than only the size: the region that belongs to no
+/// tile is exactly the region a capture must not show, and the unserved screen
+/// sitting there is the reason.
+///
+/// Returns the bounding rectangle in desktop coordinates and, in the order
+/// given, each screen's rectangle within the picture.
+#[must_use]
+pub fn tiles(screens: &[Rect]) -> (Rect, Vec<Rect>) {
+    let bounds = screens
+        .iter()
+        .fold(Rect::sized(0, 0), |acc, r| acc.union(r));
+    let placed = screens
+        .iter()
+        .map(|r| r.translate(-bounds.x, -bounds.y))
+        .collect();
+    (bounds, placed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,5 +523,118 @@ mod tests {
             let _ = a.inflate(next() as u32 % 64);
             let _ = a.align_out(next() as u32 % 64);
         }
+    }
+
+    /// Mirrored screens are found, and screens merely touching are not: a
+    /// desktop's screens share an edge, and sharing an edge is not sharing a
+    /// pixel.
+    #[test]
+    fn screens_that_share_pixels_are_found_and_neighbours_are_not() {
+        let a = Rect::sized(1920, 1080);
+        let same = Rect::sized(1920, 1080);
+        let beside = Rect {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let over = Rect {
+            x: 1900,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        assert_eq!(first_overlap(&[a, same]), Some((0, 1)));
+        assert_eq!(first_overlap(&[a, beside]), None, "an edge is not a pixel");
+        assert_eq!(first_overlap(&[a, beside, over]), Some((0, 2)));
+        assert_eq!(first_overlap(&[a]), None);
+        assert_eq!(first_overlap(&[]), None);
+    }
+
+    /// One screen tiles to itself at the origin, whatever its position.
+    #[test]
+    fn one_screen_is_the_whole_picture() {
+        let screen = Rect {
+            x: -1920,
+            y: 200,
+            width: 1920,
+            height: 1080,
+        };
+        let (bounds, placed) = tiles(&[screen]);
+        assert_eq!(bounds, screen, "the picture is exactly that screen");
+        assert_eq!(placed, vec![Rect::sized(1920, 1080)], "and it sits at 0,0");
+    }
+
+    /// **Two screens keep the arrangement the desk has**, including one to the
+    /// left of the primary, which is where negative coordinates come from.
+    #[test]
+    fn two_screens_arrive_in_the_order_the_desk_has_them() {
+        let left = Rect {
+            x: -1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let right = Rect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        // Asked for in the other order: the *order* is the caller's, the
+        // *places* are the desk's.
+        let (bounds, placed) = tiles(&[right, left]);
+        assert_eq!(bounds.width, 4480);
+        assert_eq!(bounds.height, 1440, "the taller screen sets the height");
+        assert_eq!(placed.first().map(|r| (r.x, r.y)), Some((1920, 0)));
+        assert_eq!(placed.get(1).map(|r| (r.x, r.y)), Some((0, 0)));
+    }
+
+    /// **A screen in the middle that nobody asked for leaves a hole**, and the
+    /// hole is in the picture. What fills it is the capture's business; that it
+    /// is not the middle screen is the whole point of returning the tiles.
+    #[test]
+    fn a_screen_left_out_of_the_middle_leaves_a_hole_in_the_picture() {
+        let a = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let c = Rect {
+            x: 3840,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let (bounds, placed) = tiles(&[a, c]);
+        assert_eq!(bounds.width, 5760);
+        let covered: u64 = placed
+            .iter()
+            .map(|r| u64::from(r.width) * u64::from(r.height))
+            .sum();
+        let whole = u64::from(bounds.width) * u64::from(bounds.height);
+        assert!(
+            covered < whole,
+            "the middle screen's place must be part of the picture and belong to no tile"
+        );
+        assert!(
+            !placed.iter().any(|r| r.contains(&Rect {
+                x: 1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            })),
+            "the hole must not be covered by either tile"
+        );
+    }
+
+    /// Nothing served is a picture of nothing, rather than a panic or a
+    /// rectangle at the origin that a caller would then try to encode.
+    #[test]
+    fn no_screens_tile_to_nothing() {
+        let (bounds, placed) = tiles(&[]);
+        assert!(bounds.is_empty());
+        assert!(placed.is_empty());
     }
 }

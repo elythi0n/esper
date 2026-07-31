@@ -1084,7 +1084,31 @@ pub struct StreamConfig {
     /// Every monitor the host can send.
     pub monitors: Vec<MonitorDescription>,
     /// Which one it is sending now. One of `monitors`' ids.
+    ///
+    /// With several screens tiled into one picture this is the *first* of
+    /// them, in the order [`Self::serving`] gives — the one a controller
+    /// showing a single screen would have asked for. It is kept because
+    /// everything that is per-stream rather than per-screen keys on it: the
+    /// SSRC, the cursor's frame of reference, a keyframe after a switch.
     pub selected: u32,
+    /// Every screen in the picture, in the order they were asked for.
+    ///
+    /// **One picture, several screens.** A host serving more than one lays
+    /// them out in the arrangement the desktop already has — each screen at
+    /// its own position relative to the top-left corner of the set — and sends
+    /// the result as a single stream. So a controller does not reassemble
+    /// anything: the picture it decodes *is* the arrangement, and any gap
+    /// between screens is black rather than the screen that happens to sit
+    /// there.
+    ///
+    /// Repeated in every config rather than sent once, for the reason
+    /// [`PermissionChange`] gives: a set both ends have to agree about must
+    /// not be reconstructed from a history of deltas, because one lost message
+    /// makes the two disagree for the rest of the session.
+    ///
+    /// It always contains [`Self::selected`] and is never empty — a session
+    /// serving nothing is a session that should have been closed.
+    pub serving: Vec<u32>,
     pub codec: Codec,
     /// The size of picture that will arrive.
     ///
@@ -1116,6 +1140,7 @@ impl StreamConfig {
             && self.monitors.len() <= MAX_MONITORS
             && self.monitors.iter().all(MonitorDescription::is_well_formed)
             && self.monitors.iter().any(|m| m.id == self.selected)
+            && self.serving_is_a_set()
             && self.width > 0
             && self.height > 0
             && self.width <= MAX_PICTURE_EDGE
@@ -1128,6 +1153,33 @@ impl StreamConfig {
 
     /// Ids have to be unique, or `selected` is ambiguous and a controller
     /// cannot tell two monitors apart.
+    /// Whether `serving` names real screens, each once, including `selected`.
+    ///
+    /// A config that fails this describes a picture nobody can lay out: a
+    /// screen that is not there has no rectangle, a repeated one would be
+    /// placed twice, and a set without `selected` contradicts the field every
+    /// per-stream decision keys on.
+    fn serving_is_a_set(&self) -> bool {
+        if self.serving.is_empty() || self.serving.len() > MAX_MONITORS {
+            return false;
+        }
+        if !self.serving.contains(&self.selected) {
+            return false;
+        }
+        if !self
+            .serving
+            .iter()
+            .all(|id| self.monitors.iter().any(|m| m.id == *id))
+        {
+            return false;
+        }
+        let mut seen = self.serving.clone();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        seen.len() == before
+    }
+
     fn no_duplicate_monitor_ids(&self) -> bool {
         let mut seen: Vec<u32> = self.monitors.iter().map(|m| m.id).collect();
         seen.sort_unstable();
@@ -1143,11 +1195,47 @@ impl StreamConfig {
     }
 }
 
-/// A controller asking for a different monitor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// A controller asking for different monitors.
+///
+/// **A set, because "show me both screens" is the same request as "show me
+/// that one" with a different number of answers.** Two messages for one job
+/// would be two things to keep in step, and the host's answer is the same
+/// either way: a config saying what it is now sending, or a refusal naming
+/// what it is keeping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MonitorSelect {
-    /// One of the ids from [`StreamConfig::monitors`].
-    pub monitor: u32,
+    /// Ids from [`StreamConfig::monitors`], in the order they should be laid
+    /// out. Never empty: a controller that wants no picture has a close for
+    /// that, and a session serving nothing would be a window showing black
+    /// with a connection still paid for.
+    pub monitors: Vec<u32>,
+}
+
+impl MonitorSelect {
+    /// Ask for one screen.
+    #[must_use]
+    pub fn just(monitor: u32) -> Self {
+        Self {
+            monitors: vec![monitor],
+        }
+    }
+
+    /// Whether this asks for something a host could serve.
+    ///
+    /// The ids themselves are the host's to judge — it is the only end that
+    /// knows what is plugged in — so this is shape only: a set, not empty, and
+    /// no longer than a desktop can be.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        if self.monitors.is_empty() || self.monitors.len() > MAX_MONITORS {
+            return false;
+        }
+        let mut seen = self.monitors.clone();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        seen.len() == before
+    }
 }
 
 /// What a controller would prefer, if the host has the headroom.
@@ -1957,7 +2045,13 @@ impl MediaMessage {
     pub fn is_well_formed(&self) -> bool {
         match self {
             Self::Config(c) => c.is_well_formed(),
-            Self::Select(_) | Self::Keyframe(_) => true,
+            // **A selection has a shape now that it is a set.** It used to
+            // be one number, and every number was a well-formed request the
+            // host would either honour or refuse by name. An empty set is
+            // not: it asks for a session with no picture, which is a close
+            // rather than a selection.
+            Self::Select(s) => s.is_well_formed(),
+            Self::Keyframe(_) => true,
             Self::Hint(h) => h.is_well_formed(),
             Self::Cursor(c) => c.is_well_formed(),
             Self::Report(r) => r.is_well_formed(),
@@ -2249,6 +2343,7 @@ mod media_tests {
         StreamConfig {
             monitors: vec![monitor(0, "eDP-1"), monitor(1, "DP-3")],
             selected: 1,
+            serving: vec![1],
             codec: Codec::H264,
             width: 1920,
             height: 1080,
@@ -2279,7 +2374,7 @@ mod media_tests {
     fn every_media_message_round_trips_through_the_framing() {
         for message in [
             MediaMessage::Config(config()),
-            MediaMessage::Select(MonitorSelect { monitor: 1 }),
+            MediaMessage::Select(MonitorSelect::just(1)),
             MediaMessage::Hint(QualityHint {
                 max_fps: Some(15),
                 max_long_edge: Some(1280),
@@ -2450,7 +2545,7 @@ mod media_tests {
         assert!(!config.may_be_sent_by(Role::Controller));
 
         for from_controller in [
-            MediaMessage::Select(MonitorSelect { monitor: 0 }),
+            MediaMessage::Select(MonitorSelect::just(0)),
             MediaMessage::Hint(QualityHint {
                 max_fps: None,
                 max_long_edge: None,
@@ -2483,7 +2578,7 @@ mod media_tests {
                 }),
                 "keyframe",
             ),
-            (MediaMessage::Select(MonitorSelect { monitor: 0 }), "select"),
+            (MediaMessage::Select(MonitorSelect::just(0)), "select"),
         ] {
             let text: String = encoded(&message).iter().map(|&b| b as char).collect();
             assert!(

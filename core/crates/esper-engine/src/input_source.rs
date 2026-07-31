@@ -52,9 +52,14 @@ pub const HEARTBEAT: Duration = Duration::from_secs(1);
 /// Translates a window's events for one session.
 #[derive(Debug)]
 pub struct InputSource {
-    /// The monitor the picture is of, which every pointer position is a
-    /// fraction of.
-    monitor: u32,
+    /// Where each screen sits in the picture, which is what turns a point in
+    /// the window into a fraction of a *screen*.
+    ///
+    /// One entry while one screen is being shown, covering the whole picture.
+    /// Several when the host is sending several, in which case a point can
+    /// land in none of them — the gap between two screens of different heights
+    /// — and a click there belongs to no screen at all.
+    tiles: Vec<(u32, esper_capture::geometry::Rect)>,
     /// The picture's size, which is the window's size too.
     size: (u32, u32),
     /// Dropped events, counted so a session can say it happened rather than
@@ -78,11 +83,11 @@ pub struct InputSource {
 }
 
 impl InputSource {
-    /// A source for a picture of this monitor at this size.
+    /// A source for a picture of these screens at this size.
     #[must_use]
-    pub const fn new(monitor: u32, size: (u32, u32)) -> Self {
+    pub const fn new(tiles: Vec<(u32, esper_capture::geometry::Rect)>, size: (u32, u32)) -> Self {
         Self {
-            monitor,
+            tiles,
             size,
             dropped: 0,
             holding: Held::new(),
@@ -117,10 +122,26 @@ impl InputSource {
         Some(InputMessage::Holding)
     }
 
-    /// The picture changed shape or monitor, so positions mean something else.
-    pub const fn showing(&mut self, monitor: u32, size: (u32, u32)) {
-        self.monitor = monitor;
+    /// The picture changed shape, screens or arrangement, so positions mean
+    /// something else.
+    pub fn showing(&mut self, tiles: Vec<(u32, esper_capture::geometry::Rect)>, size: (u32, u32)) {
+        self.tiles = tiles;
         self.size = size;
+    }
+
+    /// Which screen a point in the picture is on, and where on it.
+    ///
+    /// `None` for a point in the picture that belongs to no screen, which is
+    /// the gap between screens of different heights. **Dropped rather than
+    /// given to the nearest screen**, for the reason a point outside the
+    /// picture is dropped: a click somewhere there is no screen is not a click
+    /// on the screen next to it.
+    fn screen_at(&self, x: i32, y: i32) -> Option<(u32, i32, i32, u32, u32)> {
+        self.tiles.iter().find_map(|(id, at)| {
+            let inside =
+                x >= at.x && y >= at.y && i64::from(x) < at.right() && i64::from(y) < at.bottom();
+            inside.then(|| (*id, x - at.x, y - at.y, at.width, at.height))
+        })
     }
 
     /// How many events could not be translated.
@@ -157,7 +178,11 @@ impl InputSource {
                     self.dropped = self.dropped.saturating_add(1);
                     return None;
                 }
-                let asked = PointerMove::from_pixels(self.monitor, *x, *y, w, h);
+                let Some((monitor, local_x, local_y, mw, mh)) = self.screen_at(*x, *y) else {
+                    self.dropped = self.dropped.saturating_add(1);
+                    return None;
+                };
+                let asked = PointerMove::from_pixels(monitor, local_x, local_y, mw, mh);
                 self.asked = Some((asked, Instant::now()));
                 Some(InputMessage::Pointer(asked))
             }
@@ -257,9 +282,31 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use esper_capture::geometry::Rect;
 
+    /// One screen, filling the picture: the ordinary case.
     fn source() -> InputSource {
-        InputSource::new(0, (1920, 1080))
+        InputSource::new(vec![(0, Rect::sized(1920, 1080))], (1920, 1080))
+    }
+
+    /// Two screens side by side, the second shorter — so the picture has a
+    /// corner that belongs to no screen.
+    fn two_screens() -> InputSource {
+        InputSource::new(
+            vec![
+                (0, Rect::sized(1920, 1080)),
+                (
+                    1,
+                    Rect {
+                        x: 1920,
+                        y: 0,
+                        width: 1280,
+                        height: 720,
+                    },
+                ),
+            ],
+            (3200, 1080),
+        )
     }
 
     /// **The two tables meet here**, and a mistake in either direction is a
@@ -346,12 +393,83 @@ mod tests {
         assert_eq!(s.dropped(), 5);
     }
 
+    /// **A click on the second screen is a click on the second screen.**
+    ///
+    /// With two screens in one picture, a point is a fraction of *whichever*
+    /// screen it landed on — so the same window position is two entirely
+    /// different messages depending on which side of the picture it is. A
+    /// controller that sent every position as a fraction of the whole picture
+    /// would put every click on the first screen, at roughly half the x it
+    /// meant.
+    #[test]
+    fn a_point_on_the_second_screen_is_a_fraction_of_the_second_screen() {
+        let mut s = two_screens();
+        // The middle of the right-hand screen: 1920 + 640 across, 360 down.
+        let m = s
+            .translate(&PresentEvent::Pointer { x: 2560, y: 360 })
+            .expect("a pointer message");
+        let InputMessage::Pointer(p) = m else {
+            panic!("expected a pointer message, got {m:?}");
+        };
+        assert_eq!(p.monitor, 1, "the point is on the second screen");
+        // Half way across and half way down that screen, in whole-edge
+        // fractions, give or take the rounding of one pixel in 1280.
+        assert!(
+            (i32::from(p.x) - 32767).abs() < 64,
+            "x should be about half of {}, got {}",
+            u16::MAX,
+            p.x
+        );
+        assert!(
+            (i32::from(p.y) - 32767).abs() < 64,
+            "y should be about half of {}, got {}",
+            u16::MAX,
+            p.y
+        );
+
+        // And the same y on the left-hand screen is a *different* fraction,
+        // because that screen is taller. This is the assertion that fails if
+        // positions are taken against the picture instead of the screen.
+        let m = s
+            .translate(&PresentEvent::Pointer { x: 100, y: 360 })
+            .expect("a pointer message");
+        let InputMessage::Pointer(q) = m else {
+            panic!("expected a pointer message, got {m:?}");
+        };
+        assert_eq!(q.monitor, 0);
+        assert!(
+            q.y < p.y,
+            "360 of 1080 must be a smaller fraction than 360 of 720: {} against {}",
+            q.y,
+            p.y
+        );
+    }
+
+    /// **A click in the gap goes nowhere.**
+    ///
+    /// The picture of a tall screen beside a short one has a corner that is
+    /// no screen at all. It is drawn black, and a press there is dropped for
+    /// the same reason a press outside the window is: it is not a press on the
+    /// screen next to it, and putting it there would click something the
+    /// person was moving away from.
+    #[test]
+    fn a_point_in_the_gap_between_screens_is_dropped() {
+        let mut s = two_screens();
+        let before = s.dropped();
+        assert!(
+            s.translate(&PresentEvent::Pointer { x: 2560, y: 900 })
+                .is_none(),
+            "the corner below the shorter screen belongs to no screen"
+        );
+        assert_eq!(s.dropped(), before + 1, "and it is counted");
+    }
+
     /// After a monitor switch the same window position means a fraction of a
     /// different screen — which is the whole point of carrying the monitor id.
     #[test]
     fn a_switch_changes_what_a_position_means() {
         let mut s = source();
-        s.showing(2, (1280, 720));
+        s.showing(vec![(2, Rect::sized(1280, 720))], (1280, 720));
         let m = s
             .translate(&PresentEvent::Pointer { x: 1279, y: 719 })
             .expect("a pointer message");

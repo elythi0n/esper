@@ -108,10 +108,17 @@ pub enum StreamError {
     /// on are opposite: a monitor that does not exist means ask for another
     /// one, and a backend that cannot switch means the monitor it is watching
     /// is the only one it will get on this session.
-    #[error("this session is sending monitor {current} and cannot switch to {wanted}: {why}")]
+    ///
+    /// Sets rather than numbers, because a selection is a set: "screens 1 and
+    /// 3" is one request, and a refusal has to say what is still being sent.
+    #[error(
+        "this session is sending {} and cannot send {}: {why}",
+        screens_named(current),
+        screens_named(wanted)
+    )]
     CannotSwitchMonitor {
-        current: u32,
-        wanted: u32,
+        current: Vec<u32>,
+        wanted: Vec<u32>,
         why: String,
     },
 }
@@ -153,5 +160,111 @@ impl DatagramSink for RecordingSink {
 
     fn max_datagram_size(&self) -> Option<usize> {
         self.limit
+    }
+}
+
+/// Where each screen the host is serving sits in the picture it is sending.
+///
+/// **The one place a controller works out the arrangement**, and it works it
+/// out from the same rule the host laid the picture out with — the desktop's
+/// own geometry, moved to the origin — rather than from a description of the
+/// layout on the wire. Nothing has to be agreed because nothing is stated: a
+/// second copy of the layout is a second chance for the two ends to disagree
+/// about it, and a viewer that disagreed would map every click onto the wrong
+/// screen.
+///
+/// **In picture pixels, not desktop pixels.** The picture is not always the
+/// size of the screens in it: a ceiling, a bandwidth rung or an odd size
+/// rounded to an even one all mean the host encodes something smaller. So each
+/// screen's *edges* are scaled from the arrangement's size to the announced
+/// size, per axis — edges rather than an origin and a size, because scaling
+/// those separately is what leaves a one-pixel seam between two screens where
+/// a click lands on neither.
+///
+/// Screens named in `serving` that are not in `monitors` are skipped, which a
+/// well-formed config cannot contain — [`esper_proto::StreamConfig::is_well_formed`]
+/// refuses one — so this is the shape of the answer rather than a case.
+#[must_use]
+pub fn tiles_of(config: &esper_proto::StreamConfig) -> Vec<(u32, esper_capture::geometry::Rect)> {
+    let ids: Vec<u32> = config
+        .serving
+        .iter()
+        .copied()
+        .filter(|id| config.monitors.iter().any(|m| m.id == *id))
+        .collect();
+    let screens: Vec<esper_capture::geometry::Rect> = ids
+        .iter()
+        .filter_map(|id| config.monitors.iter().find(|m| m.id == *id))
+        .map(|m| esper_capture::geometry::Rect {
+            x: m.x,
+            y: m.y,
+            width: m.width,
+            height: m.height,
+        })
+        .collect();
+    let (bounds, placed) = esper_capture::geometry::tiles(&screens);
+    let across = |v: u32| scaled(v, bounds.width, config.width);
+    let down = |v: u32| scaled(v, bounds.height, config.height);
+    ids.into_iter()
+        .zip(placed)
+        .map(|(id, r)| {
+            // Non-negative by construction: `tiles` moves the arrangement to
+            // the origin.
+            let (left, top) = (across(r.x.unsigned_abs()), down(r.y.unsigned_abs()));
+            let right = across(r.x.unsigned_abs().saturating_add(r.width));
+            let bottom = down(r.y.unsigned_abs().saturating_add(r.height));
+            (
+                id,
+                esper_capture::geometry::Rect {
+                    x: i32::try_from(left).unwrap_or(0),
+                    y: i32::try_from(top).unwrap_or(0),
+                    width: right.saturating_sub(left),
+                    height: bottom.saturating_sub(top),
+                },
+            )
+        })
+        .collect()
+}
+
+/// `v` moved from a `from`-sized picture to a `to`-sized one.
+fn scaled(v: u32, from: u32, to: u32) -> u32 {
+    if from == 0 {
+        return 0;
+    }
+    let scaled = u64::from(v)
+        .saturating_mul(u64::from(to))
+        .saturating_div(u64::from(from));
+    u32::try_from(scaled).unwrap_or(to).min(to)
+}
+
+/// Name a set of screens for a person: `monitor 1`, or `monitors 1 and 3`.
+///
+/// Public because a controller says the same things about the same sets, and
+/// two ways of writing "monitors 1 and 3" is one too many.
+#[must_use]
+pub fn screens_named(ids: &[u32]) -> String {
+    match ids {
+        [] => "nothing".to_owned(),
+        [one] => format!("monitor {one}"),
+        [rest @ .., last] => {
+            let names: Vec<String> = rest.iter().map(u32::to_string).collect();
+            format!("monitors {} and {last}", names.join(", "))
+        }
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::screens_named as screens;
+
+    /// A refusal is read by a person, so the list has to read like one.
+    #[test]
+    fn a_set_of_screens_reads_as_a_sentence() {
+        assert_eq!(screens(&[]), "nothing");
+        assert_eq!(screens(&[1]), "monitor 1");
+        assert_eq!(screens(&[1, 3]), "monitors 1 and 3");
+        assert_eq!(screens(&[0, 1, 2]), "monitors 0, 1 and 2");
     }
 }

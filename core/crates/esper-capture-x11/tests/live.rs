@@ -1036,3 +1036,167 @@ fn damage_on_another_monitor_does_not_end_the_wait_early() {
     }
     println!("{judged} of 6 rounds returned Unchanged, all after the full wait");
 }
+
+/// Three monitors that do not overlap, left to right, if this display has
+/// them.
+///
+/// The `Xvfb` the suite runs against is given them with `xrandr
+/// --setmonitor`; a real desktop may or may not have three, and the automatic
+/// full-screen monitor RandR always reports overlaps everything, so a set has
+/// to be *found* rather than assumed.
+fn three_in_a_row(monitors: &[esper_capture::capturer::MonitorInfo]) -> Option<[usize; 3]> {
+    let mut order: Vec<usize> = (0..monitors.len()).collect();
+    order.sort_by_key(|i| monitors.get(*i).map_or(0, |m| m.geometry.x));
+    for a in 0..order.len() {
+        for b in (a + 1)..order.len() {
+            for c in (b + 1)..order.len() {
+                let (Some(&ia), Some(&ib), Some(&ic)) = (order.get(a), order.get(b), order.get(c))
+                else {
+                    continue;
+                };
+                let (Some(ma), Some(mb), Some(mc)) =
+                    (monitors.get(ia), monitors.get(ib), monitors.get(ic))
+                else {
+                    continue;
+                };
+                let (ra, rb, rc) = (ma.geometry, mb.geometry, mc.geometry);
+                if !ra.overlaps(&rb) && !rb.overlaps(&rc) && !ra.overlaps(&rc) {
+                    return Some([ia, ib, ic]);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// **A screen nobody asked for is black in a tiled picture, not its own
+/// pixels.**
+///
+/// This is the privacy property of serving several screens, checked against a
+/// real X server rather than arithmetic. Two screens are served with a third
+/// between them, so the middle of the picture belongs to no served screen —
+/// and the root window, which is what this backend reads, has that screen's
+/// content in exactly that place.
+///
+/// Non-vacuous by construction: the same place is checked with the middle
+/// screen served as well, where the colour *must* arrive. A capturer that
+/// simply read the bounding rectangle passes the second half and fails the
+/// first.
+#[test]
+fn a_screen_nobody_asked_for_is_black_in_a_tiled_picture() {
+    let _display = exclusive();
+    let Some(mut cap) = open() else { return };
+    let monitors = cap.monitors().to_vec();
+    let Some([left, middle, right]) = three_in_a_row(&monitors) else {
+        println!(
+            "skipped: this display has no three non-overlapping monitors ({} reported)",
+            monitors.len()
+        );
+        return;
+    };
+    let (Some(l), Some(m), Some(r)) = (
+        monitors.get(left),
+        monitors.get(middle),
+        monitors.get(right),
+    ) else {
+        return;
+    };
+    let format = cap.format();
+    let (r_at, g_at, b_at) = format.rgb_offsets();
+
+    // A colour with all three channels distinct, on the middle screen.
+    const SIZE: u16 = 32;
+    let pixel = (0x22u32 << 16) | (0x99u32 << 8) | 0xEEu32;
+    let at = (m.geometry.x + 8, m.geometry.y + 8);
+    let _patch = Patch::map(at.0, at.1, SIZE, pixel);
+
+    // Where that is in a picture of the outer two screens: the arrangement is
+    // moved to the origin, and both cases below have the same origin because
+    // the middle screen sits between the outer two.
+    let bounds = l.geometry.union(&r.geometry);
+    let look = (
+        u32::try_from(at.0 - bounds.x + 4).expect("inside"),
+        u32::try_from(at.1 - bounds.y + 4).expect("inside"),
+    );
+
+    let read = |cap: &mut X11Capturer| -> [u8; 3] {
+        let f = first_frame(cap);
+        assert_eq!(
+            (f.width(), f.height()),
+            (bounds.width, bounds.height),
+            "the picture is not the size of the screens it is of"
+        );
+        let px = f.pixel(look.0, look.1).expect("inside the picture");
+        [
+            px.get(r_at).copied().unwrap_or(0),
+            px.get(g_at).copied().unwrap_or(0),
+            px.get(b_at).copied().unwrap_or(0),
+        ]
+    };
+
+    cap.serve(&[l.id, r.id]).expect("the outer two screens");
+    let without = read(&mut cap);
+    assert_eq!(
+        without,
+        [0, 0, 0],
+        "a screen this session was not given arrived in the picture"
+    );
+
+    cap.serve(&[l.id, m.id, r.id]).expect("all three screens");
+    let with = read(&mut cap);
+    assert_eq!(
+        with,
+        [0x22, 0x99, 0xEE],
+        "the colour did not arrive when the screen it is on was served, so the \
+         check above proves nothing"
+    );
+}
+
+/// **Every pair of screens that do not share pixels can be served together**,
+/// and the picture is always the rectangle around them — while a pair that
+/// does share pixels is refused by name rather than producing a picture with
+/// one desktop in it twice.
+#[test]
+fn any_pair_of_separate_screens_can_be_served_together() {
+    let _display = exclusive();
+    let Some(mut cap) = open() else { return };
+    let monitors = cap.monitors().to_vec();
+    if monitors.len() < 2 {
+        println!("skipped: this display reports one monitor");
+        return;
+    }
+    for a in &monitors {
+        for b in &monitors {
+            if a.id == b.id {
+                continue;
+            }
+            if a.geometry.overlaps(&b.geometry) {
+                assert!(
+                    matches!(
+                        cap.serve(&[a.id, b.id]),
+                        Err(esper_capture::capturer::CaptureError::ScreensOverlap { .. })
+                    ),
+                    "{} and {} share pixels and should be refused",
+                    a.id,
+                    b.id
+                );
+                continue;
+            }
+            cap.serve(&[a.id, b.id])
+                .unwrap_or_else(|e| panic!("serving {} and {}: {e}", a.id, b.id));
+            assert_eq!(cap.serving(), [a.id, b.id]);
+            assert_eq!(cap.selected(), a.id);
+            let want = a.geometry.union(&b.geometry);
+            let f = first_frame(&mut cap);
+            assert_eq!(
+                (f.width(), f.height()),
+                (want.width, want.height),
+                "{} and {} should make a {}x{} picture",
+                a.id,
+                b.id,
+                want.width,
+                want.height
+            );
+        }
+    }
+}
