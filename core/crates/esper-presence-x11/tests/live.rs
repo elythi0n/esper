@@ -857,3 +857,138 @@ fn the_panic_key_arrives_under_a_fullscreen_modal_window() {
         "the panic key did not reach the host under a fullscreen modal window: {seen:?}"
     );
 }
+
+/// **A display whose outputs are all virtual**, or a skip that says why.
+///
+/// `may_disturb_the_display` means "you may draw on this and press keys at
+/// it". Turning somebody's monitor off is not that: if the restore fails they
+/// are looking at a dark screen with no way to see what they type. So this
+/// asks the outputs whether they are real — a monitor reports its millimetres
+/// from its EDID, and a virtual one reports `0mm x 0mm`.
+fn only_a_virtual_display() -> bool {
+    use x11rb::protocol::randr::ConnectionExt as _;
+    if !may_disturb_the_display() {
+        return false;
+    }
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return false;
+    };
+    let Some(root) = conn.setup().roots.get(screen_num).map(|s| s.root) else {
+        return false;
+    };
+    let Ok(resources) = conn
+        .randr_get_screen_resources_current(root)
+        .map_err(|e| e.to_string())
+        .and_then(|c| c.reply().map_err(|e| format!("{e:?}")))
+    else {
+        println!("skipped: this display has no RandR");
+        return false;
+    };
+    for output in &resources.outputs {
+        let Ok(info) = conn
+            .randr_get_output_info(*output, resources.config_timestamp)
+            .map_err(|e| e.to_string())
+            .and_then(|c| c.reply().map_err(|e| format!("{e:?}")))
+        else {
+            continue;
+        };
+        if info.mm_width != 0 || info.mm_height != 0 {
+            println!(
+                "skipped: {} reports {}mm x {}mm, so it is a real monitor and this test will \
+                 not turn it off",
+                String::from_utf8_lossy(&info.name),
+                info.mm_width,
+                info.mm_height
+            );
+            return false;
+        }
+    }
+    true
+}
+
+/// **The host's screen goes dark and the session does not.**
+///
+/// Which is the whole feature: a privacy screen that blanked the remote view
+/// as well is not a privacy screen, and the obvious implementation — a window
+/// over the screen — does exactly that, because X11 capture reads the root.
+/// Turning the output off instead leaves the framebuffer allocated, and this
+/// is that claim, measured through the same read-back the indicator uses.
+#[test]
+fn blanking_the_screen_leaves_the_framebuffer_readable() {
+    if !only_a_virtual_display() {
+        return;
+    }
+    let _display = exclusive();
+    let Some(mut p) = open() else { return };
+
+    // Something recognisable on the screen, so "still readable" is not
+    // satisfied by a screen that was black to begin with.
+    p.show(&watching(true)).expect("shown");
+    assert!(
+        p.verify().expect("a verdict").is_on_screen(),
+        "the frame has to be up first, so there is something to read back"
+    );
+
+    // **The plan comes first, and changes nothing.** That ordering is the
+    // whole safety story: the undo is registered with something that outlives
+    // this process before a single screen goes dark.
+    let plan = match p.blanking_plan() {
+        Ok(plan) => plan,
+        Err(e) => {
+            println!("skipped: this display would not blank ({e})");
+            return;
+        }
+    };
+    println!("plan: {} with {} undo(s)", plan.what, plan.undo.len());
+    assert!(
+        !plan.undo.is_empty(),
+        "a blanking with no undo is the thing that must never exist"
+    );
+    assert!(
+        p.verify().expect("a verdict").is_on_screen(),
+        "planning must change nothing at all"
+    );
+    p.blank(&plan).expect("blanked");
+
+    // **The session survives it.** The indicator is drawn into the same
+    // framebuffer the capture path reads, so confirming it is confirming that
+    // the picture is still there.
+    let while_blank = p.verify().expect("a verdict");
+    assert!(
+        while_blank.is_on_screen(),
+        "the framebuffer stopped being readable while the screen was blanked, which would \
+         make this a broken session rather than a privacy screen: {while_blank:?}"
+    );
+
+    p.unblank().expect("unblanked");
+    assert!(
+        p.verify().expect("a verdict").is_on_screen(),
+        "and it is still readable afterwards"
+    );
+    p.hide().expect("hidden");
+}
+
+/// Blanking twice is refused rather than losing the first undo.
+///
+/// The second call would otherwise record CRTCs that are *already off* as the
+/// state to return to — so putting it back would put back the blank, and the
+/// screen would never come on again.
+#[test]
+fn a_screen_that_is_already_blanked_is_not_blanked_again() {
+    if !only_a_virtual_display() {
+        return;
+    }
+    let _display = exclusive();
+    let Some(mut p) = open() else { return };
+    let Ok(plan) = p.blanking_plan() else {
+        println!("skipped: this display would not blank");
+        return;
+    };
+    p.blank(&plan).expect("blanked");
+    let again = p.blank(&plan);
+    p.unblank().expect("unblanked");
+    assert!(
+        again.is_err(),
+        "blanking an already blank screen would record the blank as the state to restore"
+    );
+}

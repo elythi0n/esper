@@ -318,7 +318,8 @@ cleanup_terminal() {
              "${clip_host:-}" "${clip_host2:-}" "${clip_viewer:-}" \
              "${clip_x1:-}" "${clip_x2:-}" "${cp_host:-}" "${cp_wire:-}" "${cp_along:-}" \
              "${multi_host:-}" "${idle_host:-}" "${tiled_host:-}" \
-             "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}" "${retain_pid:-}"; do
+             "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}" "${retain_pid:-}" \
+             "${priv_host:-}" "${priv_client:-}" "${priv_x:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1017,8 +1018,7 @@ except OSError:
       # not a decision.
       allow_home="$term_a/allow-no-indicator"
       mkdir -p "$allow_home"
-      cp "$term_a/devices.json" "$allow_home/" 2>/dev/null || true
-      cp -r "$term_a"/*.json "$term_a"/key* "$allow_home/" 2>/dev/null || true
+      cp "$term_a/devices.json" "$term_a/identity.key" "$allow_home/" 2>/dev/null || true
       printf 'host.serve_without_indicator = true\n' > "$allow_home/config.toml"
       out=$(DISPLAY=:99 ESPER_HOME="$allow_home" timeout 8 "$BIN/esper-engine" host \
         --listen 127.0.0.1:0 --no-mdns 2>&1 || true)
@@ -1030,6 +1030,129 @@ except OSError:
         fail=1
       fi
       rm -rf "$allow_home"
+
+      # **A host that is killed does not leave somebody's screen dark.**
+      #
+      # The whole reason the privacy screen was not built until now: turning a
+      # monitor off with RandR is state the *display server* keeps, so on a
+      # real X server it outlives the process that asked — which is why
+      # `xrandr --output eDP-1 --off` from a shell leaves the screen off after
+      # the shell exits. A host killed with its screens blanked would leave the
+      # person at that machine looking at nothing, with nothing running to
+      # bring it back.
+      #
+      # **What this checks is the keeper's own work, and not the screen.**
+      # Measured, because the obvious check was vacuous: on `Xvfb` the CRTC
+      # comes back by itself when the client that turned it off exits — a test
+      # was written that blanks and calls `exit` with no restore, and the next
+      # connection reports the screen on. So "the screen came back" passes here
+      # whether or not a keeper exists, and sabotaging the keeper out proved
+      # exactly that. What is real and checkable is that the keeper **ran, put
+      # the record back, and said so** after a `SIGKILL` — which runs no
+      # destructor, no signal handler and no cleanup path in the host.
+      if command -v Xvfb >/dev/null 2>&1; then
+        priv_d=""
+        for d in $(seq 71 99); do
+          [ -e "/tmp/.X${d}-lock" ] && continue
+          priv_d=$d; break
+        done
+      fi
+      if [ -n "${priv_d:-}" ]; then
+        Xvfb ":$priv_d" -screen 0 800x600x24 >/dev/null 2>&1 &
+        priv_x=$!
+        sleep 1
+        priv_home="$term_a/privacy"
+        mkdir -p "$priv_home"
+        # **The identity as well as the device list.** Copying only `*.json`
+        # gives the host a *new* identity, the controller does not know it, no
+        # session opens — and a check about what happens during a session
+        # passes vacuously or fails for the wrong reason. The key is called
+        # `identity.key`, which is what `key*` did not match.
+        cp "$term_a/devices.json" "$term_a/identity.key" "$priv_home/" 2>/dev/null || true
+        printf 'host.privacy_screen = true\n' > "$priv_home/config.toml"
+
+        DISPLAY=":$priv_d" ESPER_HOME="$priv_home" \
+          timeout 60 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          > "$priv_home/host.log" 2>&1 &
+        priv_host=$!
+        priv_addr=""
+        for _ in $(seq 1 100); do
+          priv_addr=$( { awk '/listening/{print $2}' "$priv_home/host.log" 2>/dev/null || true; } | head -1)
+          [ -n "$priv_addr" ] && break
+          sleep 0.1
+        done
+        # A session, so the privacy screen goes on: it is for the duration of
+        # one, not for the host's whole life.
+        ESPER_HOME="$term_b" timeout 30 "$BIN/esper-engine" connect "$priv_addr" \
+          --seconds 8 > "$term_b/privacy.log" 2>&1 &
+        priv_client=$!
+        blanked=""
+        for _ in $(seq 1 120); do
+          if grep -q 'privacy    .*dark for this session' "$priv_home/host.log" 2>/dev/null; then
+            blanked=yes
+            break
+          fi
+          sleep 0.1
+        done
+        if [ -n "$blanked" ]; then
+          printf '  ✓ a host blanks its own screen for a session, and says so\n'
+        else
+          printf '  ✗ the host never blanked its screen\n'
+          grep -iE 'privacy|indicator' "$priv_home/host.log" | sed 's/^/      /' | head -4
+          fail=1
+        fi
+
+        # And now the case the keeper exists for. The keeper's stderr is the
+        # host's, so what it says lands in the same log — and it says it after
+        # the host it was watching is already gone.
+        # **The engine, not the `timeout` wrapping it.** `$priv_host` is the
+        # wrapper's pid; killing that leaves the engine running and it then
+        # gets a polite `SIGTERM` from somewhere else, shuts down cleanly, puts
+        # its own screen back and cancels the keeper — so the check was reading
+        # a clean shutdown and calling it a kill. The same trap as the pause
+        # check, and the same fix.
+        priv_engine=$(pgrep -P "$priv_host" -x esper-engine | head -1)
+        if [ -z "$priv_engine" ]; then
+          printf '  ✗ could not find the engine under its timeout wrapper\n'
+          fail=1
+        fi
+        kill -9 "${priv_engine:-0}" 2>/dev/null || true
+        kill "$priv_host" 2>/dev/null || true
+        wait "$priv_host" 2>/dev/null || true
+        restored=""
+        for _ in $(seq 1 150); do
+          if grep -q 'put back .* after the host went away' "$priv_home/host.log" 2>/dev/null; then
+            restored=yes
+            break
+          fi
+          sleep 0.1
+        done
+        if [ -n "$restored" ]; then
+          printf '  ✓ and a keeper outlived a host killed with -9 and put its screen back\n'
+        else
+          printf '  ✗ nothing put the screen back after the host was killed\n'
+          tail -6 "$priv_home/host.log" 2>/dev/null | sed 's/^/      /'
+          fail=1
+        fi
+        # And the screen really is on — which on this display proves nothing by
+        # itself (see above) but would catch a keeper that restored something
+        # other than what was turned off.
+        if [ "$(DISPLAY=":$priv_d" xrandr 2>/dev/null | grep -c '^screen connected')" = "1" ]; then
+          printf '  ✓ and the display is left in one piece\n'
+        else
+          printf '  ✗ the display was left in a state nothing expects\n'
+          DISPLAY=":$priv_d" xrandr 2>/dev/null | sed 's/^/      /' | head -4
+          fail=1
+        fi
+        kill "$priv_client" 2>/dev/null || true
+        kill "$priv_x" 2>/dev/null || true
+        priv_x=""
+        priv_host=""
+        priv_client=""
+        rm -rf "$priv_home"
+      else
+        printf '  — skipped the privacy screen check: needs Xvfb and a free display\n'
+      fi
 
       # **Retention that actually deletes.** The policy existed for weeks with
       # no caller: `prune` was written, tested, and called by nothing, so

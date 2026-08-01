@@ -259,6 +259,23 @@ pub static SETTINGS: &[Setting] = &[
         about: "The longest edge to send, in pixels. None sends the screen's own size.",
     },
     Setting {
+        key: "host.privacy_screen",
+        kind: Kind::Flag,
+        // **Off, because a dark screen is alarming if nobody asked for it.**
+        // On, this machine's own monitors go dark for the duration of every
+        // session while the far end keeps its picture — for working on a
+        // machine in a shared room, which is the case it exists for.
+        //
+        // A standing preference rather than a per-session prompt: somebody
+        // whose machine is in a shared office wants this every time, and
+        // somebody whose machine is at home never does. It is undone when the
+        // session ends, when the panic key is pressed, and — by a second
+        // process that outlives this one — if the host dies while it is on.
+        default: Value::Flag(false),
+        about: "Blank this machine's own screens while a session is running. The session keeps \
+                its picture; somebody walking past this machine sees nothing.",
+    },
+    Setting {
         key: "host.serve_without_indicator",
         kind: Kind::Flag,
         // **Off, which is a refusal to serve.** Software that can watch a

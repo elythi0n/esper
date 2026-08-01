@@ -470,6 +470,54 @@ fn encoder_for(config: &EncoderConfig) -> Result<Box<dyn VideoEncoder>, EncodeEr
 /// A host with nothing paired is refused rather than started, because a
 /// listening endpoint that can accept nobody is a listening endpoint whose
 /// only possible outcome is a confusing failure at the far end.
+/// Undo what a host that is no longer running left in the display server.
+///
+/// Says what it did, because a screen coming back on by itself is otherwise
+/// unexplainable — and because the line is the only evidence a person has that
+/// the previous host died rather than exited.
+fn restore_what_a_dead_host_left() {
+    let Ok(home) = crate::paths::home() else {
+        return;
+    };
+    let journal = esper_keeper::journal_path(&home);
+    let left = match esper_keeper::read_journal(&journal) {
+        Ok(left) => left,
+        Err(e) => {
+            // Kept rather than deleted: it is the record of something that
+            // needs putting back, and a file this build cannot read may be
+            // readable by the next one.
+            eprintln!("  ⚠ there is a restore journal this build cannot read: {e}");
+            return;
+        }
+    };
+    if left.is_empty() {
+        return;
+    }
+    println!(
+        "  recovery   a previous host left {} thing(s) changed on this display",
+        left.len()
+    );
+    let mut done = 0usize;
+    for undo in &left {
+        #[cfg(target_os = "linux")]
+        let applied = esper_presence_x11::put_back(undo);
+        #[cfg(not(target_os = "linux"))]
+        let applied: Result<(), String> =
+            Err("no backend on this platform knows how to put that back".to_owned());
+        match applied {
+            Ok(()) => {
+                println!("             put back {}", undo.describe());
+                done = done.saturating_add(1);
+            }
+            Err(e) => println!("             could not put back {}: {e}", undo.describe()),
+        }
+    }
+    if done == left.len() {
+        let _ = esper_keeper::clear_journal(&journal);
+    }
+    println!();
+}
+
 pub(crate) fn paired() -> Result<(DeviceStore, Vec<[u8; 32]>), String> {
     let (store, dropped) = paths::devices()?;
     for note in &dropped {
@@ -506,6 +554,16 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     // because a host that runs for a month must not sit over its ceiling for
     // the rest of it.
     crate::trail::keep_only_what_the_policy_allows();
+
+    // **Anything a previous host left behind, put back before this one
+    // starts.**
+    //
+    // The keeper undoes a dead host's work as it dies, which covers every way
+    // a process can end except being killed itself. This is the other half: a
+    // journal on disk, applied here, so a machine whose keeper was killed too
+    // comes back to itself the next time somebody starts a host rather than
+    // staying dark until they think to reboot.
+    restore_what_a_dead_host_left();
     // Shared rather than cloned: `Identity` is deliberately not `Clone` — a
     // private key should not be duplicated by a stray `.clone()` — and the
     // task that waits at a broker needs to sign requests for as long as the
@@ -2141,6 +2199,37 @@ async fn serve_session(
         }
     }
 
+    // **The privacy screen, if this machine's owner asked for one.**
+    //
+    // The order is the whole safety story and it is not negotiable: ask what
+    // blanking would take, start something that will outlive this process,
+    // give it the undo, and only then turn anything off. Any other order
+    // leaves a window where a crash leaves somebody's monitor dark with
+    // nobody holding the way back.
+    let mut privacy: Option<crate::presence_task::Privacy> = None;
+    if crate::settings::flag("host.privacy_screen", false) {
+        match indicator {
+            Some(indicator) => match crate::presence_task::blank_for_the_session(indicator) {
+                Ok(held) => {
+                    println!(
+                        "      privacy    {} dark for this session, and a keeper is holding the \
+                         way back",
+                        held.what
+                    );
+                    privacy = Some(held);
+                }
+                Err(why) => {
+                    // **Not fatal.** A session that refused to start because
+                    // the host could not go dark would be a worse product than
+                    // one that says so: the far end still gets its picture,
+                    // and the person who set this can see the line.
+                    println!("      privacy    NOT blanked: {why}");
+                }
+            },
+            None => println!("      privacy    nothing on this machine can blank a screen"),
+        }
+    }
+
     // **The pointer, read on its own schedule.** A cursor sampled at the frame
     // rate is a cursor sampled at five hertz on a quiet desktop, which is why
     // this is not part of the sending loop.
@@ -2270,6 +2359,12 @@ async fn serve_session(
     // a capture running would be recording somebody's machine for nothing.
     drop(sound);
     drop(watch);
+    // **The screens come back before the indicator goes down**, so a person
+    // watching their own machine sees it light up rather than sitting dark for
+    // a moment with nothing on it saying why.
+    if let Some(held) = privacy.take() {
+        held.give_back();
+    }
     if let Some(indicator) = indicator {
         indicator.hide();
     }

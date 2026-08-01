@@ -26,6 +26,25 @@
 //! and a hotkey that works only sometimes is worse than one that does not
 //! exist, because the person will reach for it in an emergency.
 //!
+//! # Blanking the host's own screen
+//!
+//! A privacy screen — the far end keeps its picture, somebody walking past the
+//! host sees nothing — **cannot be a window**: X11 capture reads the root, and
+//! anything drawn on the root is part of what is captured, so a cover blanks
+//! the remote view too. That was measured and is why the obvious version was
+//! never built.
+//!
+//! What works is turning the **output** off with RandR, which stops the
+//! monitor scanning out and leaves the framebuffer allocated for capture to
+//! keep reading. Measured on a scratch display: the pixels stay readable with
+//! the CRTC off, and the CRTC comes back exactly as it was.
+//!
+//! Two things make it safe to ship. Every CRTC is registered with a **keeper**
+//! before it is touched, so a host that dies does not leave somebody's monitor
+//! dark; and after blanking, the screen is **read back** — the same trick the
+//! indicator uses — so a display where this breaks capture puts itself back
+//! and refuses rather than serving a session that shows nothing.
+//!
 //! # Reading it back
 //!
 //! Creating the windows is not the same as the screen showing them, so
@@ -53,9 +72,11 @@
 // another target still covers every member.
 #![cfg(target_os = "linux")]
 
-use esper_presence::{HostEvent, Missing, Presence, PresenceError, Verdict, Watching};
+use esper_keeper::Undo;
+use esper_presence::{Blanking, HostEvent, Missing, Presence, PresenceError, Verdict, Watching};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::Event;
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
 use x11rb::protocol::xproto::{
     ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, ImageFormat,
@@ -196,6 +217,10 @@ pub struct X11Presence {
     channels: u32,
     /// Bytes per pixel in a `GetImage` reply for the root's depth.
     pixel_bytes: usize,
+    /// The screens this process turned off, and how to put each one back.
+    blanked: Vec<(u32, Undo)>,
+    /// The RandR configuration timestamp the undo was taken against.
+    config_at: u32,
 }
 
 impl std::fmt::Debug for X11Presence {
@@ -291,6 +316,8 @@ impl X11Presence {
             showing: None,
             channels,
             pixel_bytes,
+            blanked: Vec::new(),
+            config_at: 0,
         };
         if channels == 0 || !(1..=4).contains(&pixel_bytes) {
             tracing::warn!(
@@ -475,6 +502,90 @@ impl X11Presence {
         Ok(windows)
     }
 
+    /// Turn one CRTC off, which stops its outputs scanning out.
+    fn turn_off(&self, crtc: u32, config_at: u32) -> Result<(), String> {
+        let reply = self
+            .conn
+            .randr_set_crtc_config(
+                crtc,
+                x11rb::CURRENT_TIME,
+                config_at,
+                0,
+                0,
+                0,
+                x11rb::protocol::randr::Rotation::ROTATE0,
+                &[],
+            )
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| format!("{e:?}"))?;
+        if reply.status == x11rb::protocol::randr::SetConfig::SUCCESS {
+            Ok(())
+        } else {
+            Err(format!("the server said {:?}", reply.status))
+        }
+    }
+
+    /// Put every screen in a list back the way it was.
+    ///
+    /// Best effort and **says so out loud on failure**, because somebody is
+    /// sitting in front of the thing that is still dark.
+    fn put_back(&self, blanked: &[(u32, Undo)], config_at: u32) {
+        for (crtc, undo) in blanked {
+            let Undo::Crtc {
+                x,
+                y,
+                mode,
+                rotation,
+                outputs,
+                what,
+                ..
+            } = undo;
+            let asked = self
+                .conn
+                .randr_set_crtc_config(
+                    *crtc,
+                    x11rb::CURRENT_TIME,
+                    config_at,
+                    *x,
+                    *y,
+                    *mode,
+                    x11rb::protocol::randr::Rotation::from(*rotation),
+                    outputs,
+                )
+                .map_err(|e| e.to_string())
+                .and_then(|c| c.reply().map_err(|e| format!("{e:?}")));
+            match asked {
+                Ok(reply) if reply.status == x11rb::protocol::randr::SetConfig::SUCCESS => {}
+                Ok(reply) => {
+                    tracing::error!(
+                        "{what} would not come back: the server said {:?}",
+                        reply.status
+                    );
+                }
+                Err(e) => tracing::error!("{what} would not come back: {e}"),
+            }
+        }
+        let _ = self.conn.flush();
+    }
+
+    /// A few pixels of the root, for telling "still capturable" from "gone".
+    ///
+    /// `None` when the screen cannot be read at all, which is the answer that
+    /// matters: it is the difference between a privacy screen and a session
+    /// that shows nothing.
+    fn screen_sample(&self) -> Option<Vec<u32>> {
+        let points = self.sample_points();
+        if points.is_empty() {
+            return None;
+        }
+        let mut seen = Vec::with_capacity(points.len());
+        for (x, y) in points {
+            seen.push(self.pixel_at(x, y)?);
+        }
+        Some(seen)
+    }
+
     /// Give up on the frame's windows, so the next `show` builds new ones.
     ///
     /// **Verifying is what discovers this**, and a verdict that did not act on
@@ -651,6 +762,114 @@ impl Presence for X11Presence {
         self.showing.is_some()
     }
 
+    fn blanking_plan(&mut self) -> Result<Blanking, PresenceError> {
+        let fail = |detail: String| PresenceError::Backend {
+            backend: BACKEND,
+            detail,
+        };
+        if !self.blanked.is_empty() {
+            return Err(fail("this screen is already blanked".to_owned()));
+        }
+        let resources = self
+            .conn
+            .randr_get_screen_resources_current(self.root)
+            .map_err(|e| fail(e.to_string()))?
+            .reply()
+            .map_err(|e| fail(format!("{e:?}")))?;
+
+        let mut plan: Vec<Undo> = Vec::new();
+        for crtc in &resources.crtcs {
+            let Ok(info) = self
+                .conn
+                .randr_get_crtc_info(*crtc, resources.config_timestamp)
+                .map_err(|e| fail(e.to_string()))?
+                .reply()
+            else {
+                continue;
+            };
+            // A CRTC with no mode is already off, and one driving no outputs
+            // is not a monitor anybody can read.
+            if info.mode == 0 || info.outputs.is_empty() {
+                continue;
+            }
+            plan.push(Undo::Crtc {
+                crtc: *crtc,
+                x: info.x,
+                y: info.y,
+                mode: info.mode,
+                rotation: u16::from(info.rotation),
+                outputs: info.outputs.clone(),
+                what: format!("a {}x{} screen", info.width, info.height),
+            });
+        }
+        if plan.is_empty() {
+            return Err(fail(
+                "this display has no screen that could be turned off".to_owned(),
+            ));
+        }
+        let what = if plan.len() == 1 {
+            plan.first()
+                .map_or_else(|| "a screen".to_owned(), Undo::describe)
+        } else {
+            format!("{} screens", plan.len())
+        };
+        self.config_at = resources.config_timestamp;
+        Ok(Blanking { what, undo: plan })
+    }
+
+    fn blank(&mut self, plan: &Blanking) -> Result<(), PresenceError> {
+        let fail = |detail: String| PresenceError::Backend {
+            backend: BACKEND,
+            detail,
+        };
+        if !self.blanked.is_empty() {
+            return Err(fail("this screen is already blanked".to_owned()));
+        }
+
+        // What the screen reads like before anything is touched, so the
+        // read-back afterwards has something to compare against.
+        let before = self.screen_sample();
+
+        let mut done: Vec<(u32, Undo)> = Vec::new();
+        for undo in &plan.undo {
+            let Undo::Crtc { crtc, .. } = undo;
+            if let Err(e) = self.turn_off(*crtc, self.config_at) {
+                // **Undo our own work before reporting.** A half-blanked
+                // screen whose caller got an error is exactly the situation
+                // nobody would be holding the undo for.
+                self.put_back(&done, self.config_at);
+                return Err(fail(format!("turning a screen off: {e}")));
+            }
+            done.push((*crtc, undo.clone()));
+        }
+
+        // **And read the screen back**, the same trick the indicator uses: a
+        // display where turning the outputs off also stops the framebuffer
+        // being readable would give a session that shows nothing, and that is
+        // worse than no privacy screen.
+        let after = self.screen_sample();
+        if after.is_none() || (before.is_some() && after != before) {
+            self.put_back(&done, self.config_at);
+            return Err(fail(
+                "the framebuffer stopped reading the same way once the screens were off, so \
+                 blanking them here would blank the session too"
+                    .to_owned(),
+            ));
+        }
+
+        self.blanked = done;
+        Ok(())
+    }
+
+    fn unblank(&mut self) -> Result<(), PresenceError> {
+        if self.blanked.is_empty() {
+            return Ok(());
+        }
+        let blanked = std::mem::take(&mut self.blanked);
+        self.put_back(&blanked, self.config_at);
+        Ok(())
+    }
+
     fn verify(&mut self) -> Result<Verdict, PresenceError> {
         let Some(watching) = self.showing.clone() else {
             return Ok(Verdict::Missing(Missing::NothingAsked));
@@ -734,5 +953,63 @@ impl Drop for X11Presence {
             }
             let _ = self.conn.flush();
         }
+    }
+}
+
+/// Put one thing back, from a process that did not change it.
+///
+/// **The keeper's half.** It runs after the host is gone, so it can ask the
+/// display server nothing about what the state *used to* be — by then it is
+/// not. Everything it needs is in the record, which is why [`Undo`] carries
+/// the arguments of the request rather than a description of the intent.
+///
+/// # Errors
+///
+/// If the display cannot be reached or the server refuses. The caller says so
+/// on stderr, because somebody is sitting in front of the screen that is still
+/// dark.
+pub fn put_back(undo: &Undo) -> Result<(), String> {
+    let Undo::Crtc {
+        crtc,
+        x,
+        y,
+        mode,
+        rotation,
+        outputs,
+        ..
+    } = undo;
+    let (conn, screen_num) = x11rb::connect(None).map_err(|e| e.to_string())?;
+    let root = conn
+        .setup()
+        .roots
+        .get(screen_num)
+        .ok_or_else(|| "the display has no screen".to_owned())?
+        .root;
+    // The configuration timestamp has to be the server's current one: the
+    // host's is stale by now, and RandR refuses a request made against an
+    // older configuration.
+    let resources = conn
+        .randr_get_screen_resources_current(root)
+        .map_err(|e| e.to_string())?
+        .reply()
+        .map_err(|e| format!("{e:?}"))?;
+    let reply = conn
+        .randr_set_crtc_config(
+            *crtc,
+            x11rb::CURRENT_TIME,
+            resources.config_timestamp,
+            *x,
+            *y,
+            *mode,
+            x11rb::protocol::randr::Rotation::from(*rotation),
+            outputs,
+        )
+        .map_err(|e| e.to_string())?
+        .reply()
+        .map_err(|e| format!("{e:?}"))?;
+    if reply.status == x11rb::protocol::randr::SetConfig::SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("the server said {:?}", reply.status))
     }
 }

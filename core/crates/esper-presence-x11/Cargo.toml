@@ -15,6 +15,7 @@ esper-input.workspace = true
 esper-presence.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+esper-keeper.workspace = true
 x11rb.workspace = true
 
 [dev-dependencies]

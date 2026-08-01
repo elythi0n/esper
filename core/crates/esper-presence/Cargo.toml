@@ -11,5 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Blanking a screen is a change that outlives this process, so what comes back
+# from it has to carry an undo another process can apply.
+esper-keeper.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

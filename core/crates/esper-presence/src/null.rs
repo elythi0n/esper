@@ -5,7 +5,7 @@
 //! when the session ends — and, most of all, that nothing a controller sends
 //! can make it come down early.
 
-use crate::{HostEvent, Missing, Presence, PresenceError, Verdict, Watching};
+use crate::{Blanking, HostEvent, Missing, Presence, PresenceError, Verdict, Watching};
 
 /// One thing the indicator was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +32,9 @@ pub struct NullPresence {
     pub screen_says: Option<Missing>,
     /// How many times the screen was asked.
     pub verified: usize,
+    /// Whether blanking should fail, for testing what a caller does about it.
+    pub blanking_fails: bool,
+    blanked: bool,
     showing: Option<Watching>,
 }
 
@@ -49,6 +52,12 @@ impl NullPresence {
     /// Pretend the person hit the pause key.
     pub fn pause_key(&mut self) {
         self.pending.push(HostEvent::Pause);
+    }
+
+    /// Whether the screen is pretending to be blank.
+    #[must_use]
+    pub const fn blanked(&self) -> bool {
+        self.blanked
     }
 
     /// Pretend something is drawn over the frame.
@@ -111,6 +120,37 @@ impl Presence for NullPresence {
 
     fn is_showing(&self) -> bool {
         self.showing.is_some()
+    }
+
+    fn blanking_plan(&mut self) -> Result<Blanking, PresenceError> {
+        Ok(Blanking {
+            what: "a screen that is not there".to_owned(),
+            undo: vec![esper_keeper::Undo::Crtc {
+                crtc: 1,
+                x: 0,
+                y: 0,
+                mode: 2,
+                rotation: 1,
+                outputs: vec![3],
+                what: "a screen that is not there".to_owned(),
+            }],
+        })
+    }
+
+    fn blank(&mut self, _plan: &Blanking) -> Result<(), PresenceError> {
+        if self.blanking_fails {
+            return Err(PresenceError::Backend {
+                backend: "null",
+                detail: "this screen refuses to blank".to_owned(),
+            });
+        }
+        self.blanked = true;
+        Ok(())
+    }
+
+    fn unblank(&mut self) -> Result<(), PresenceError> {
+        self.blanked = false;
+        Ok(())
     }
 
     fn verify(&mut self) -> Result<Verdict, PresenceError> {

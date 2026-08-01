@@ -29,6 +29,14 @@ use esper_presence::{HostEvent, Missing, Presence, Verdict, Watching};
 /// How often the indicator's connection is looked at.
 const TICK: Duration = Duration::from_millis(30);
 
+/// How long a session waits for the indicator's thread to answer a question.
+///
+/// Only the blanking questions wait at all — showing and hiding are told, not
+/// asked. Two seconds is a round trip to a display server on a loaded machine,
+/// and the alternative to a bound is a session that hangs for ever because a
+/// thread holding an X connection stopped answering.
+const ANSWER_PATIENCE: Duration = Duration::from_secs(2);
+
 /// How often the screen is asked whether the indicator is on it.
 ///
 /// **A second, which is a claim about how long a session may run with a hidden
@@ -61,6 +69,16 @@ pub type Sightings = tokio::sync::watch::Receiver<Sighting>;
 enum Command {
     Show(Watching),
     Hide,
+    /// Work out what blanking would take, and say so.
+    ///
+    /// A question rather than an order, because the undo has to be registered
+    /// with the keeper before anything goes dark — so the session asks, keeps
+    /// the answer, and only then sends [`Command::Blank`].
+    PlanBlanking(Sender<Result<esper_presence::Blanking, String>>),
+    /// Blank the screens, applying a plan the session has registered.
+    Blank(esper_presence::Blanking, Sender<Result<(), String>>),
+    /// Put the screens back.
+    Unblank(Sender<Result<(), String>>),
     Stop,
 }
 
@@ -104,6 +122,45 @@ impl Indicator {
     #[must_use]
     pub fn sightings(&self) -> Sightings {
         self.sightings.clone()
+    }
+
+    /// Ask what blanking this machine's screens would take.
+    ///
+    /// The answer carries the undo, which a caller registers with a keeper
+    /// **before** calling [`Self::blank`].
+    ///
+    /// # Errors
+    ///
+    /// If the indicator's thread is gone, or the display has no screen that
+    /// could be turned off.
+    pub fn blanking_plan(&self) -> Result<esper_presence::Blanking, String> {
+        self.ask(Command::PlanBlanking)?
+    }
+
+    /// Blank the screens, with a plan somebody is holding the undo for.
+    ///
+    /// # Errors
+    ///
+    /// If the screens cannot be blanked, or if blanking them would stop the
+    /// session having a picture — which the backend checks by reading its own
+    /// screen back, and undoes before saying so.
+    pub fn blank(&self, plan: &esper_presence::Blanking) -> Result<(), String> {
+        self.ask(|reply| Command::Blank(plan.clone(), reply))?
+    }
+
+    /// Ask the thread something and wait for its answer.
+    ///
+    /// **Bounded by a patience**, because the alternative is a session that
+    /// hangs for ever if the indicator's thread has died — and the thread
+    /// holds an X connection, which is a thing that can block.
+    fn ask<T>(&self, build: impl FnOnce(Sender<T>) -> Command) -> Result<T, String> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.to_thread
+            .send(build(reply))
+            .map_err(|_| "the indicator's thread is gone".to_owned())?;
+        answer
+            .recv_timeout(ANSWER_PATIENCE)
+            .map_err(|e| format!("the indicator's thread did not answer: {e}"))
     }
 
     /// Show that a session is happening.
@@ -231,6 +288,15 @@ fn run<P: Presence>(
                 asked = None;
                 let _ = seen.send_if_modified(|s| replace(s, Sighting::Down));
             }
+            Ok(Command::PlanBlanking(reply)) => {
+                let _ = reply.send(presence.blanking_plan().map_err(|e| e.to_string()));
+            }
+            Ok(Command::Blank(plan, reply)) => {
+                let _ = reply.send(presence.blank(&plan).map_err(|e| e.to_string()));
+            }
+            Ok(Command::Unblank(reply)) => {
+                let _ = reply.send(presence.unblank().map_err(|e| e.to_string()));
+            }
             Ok(Command::Stop) | Err(TryRecvError::Disconnected) => break,
             Err(TryRecvError::Empty) => {}
         }
@@ -247,6 +313,10 @@ fn run<P: Presence>(
         std::thread::sleep(TICK);
     }
     let _ = presence.hide();
+    // **And the screens come back.** This is the thread's own last act, which
+    // covers the ways a host ends that a session's own cleanup does not: the
+    // keeper is the cover for the ways *this* does not run.
+    let _ = presence.unblank();
 }
 
 /// Wait until the screen shows the indicator, or say why it does not.
@@ -329,6 +399,89 @@ fn replace(slot: &mut Sighting, now: Sighting) -> bool {
     }
     *slot = now;
     true
+}
+
+/// A blanked screen, and the keeper holding the way back.
+///
+/// **Handed back rather than dropped.** Putting screens back can fail, and a
+/// failure somebody has to be told about cannot be reported from a `Drop` — so
+/// [`Self::give_back`] is the way out, and the keeper is what covers every
+/// path that never reaches it.
+pub struct Privacy {
+    /// What went dark, for the line that says so.
+    pub what: String,
+    /// Held for as long as the screens are dark, and no longer.
+    keeper: esper_keeper::Keeper,
+    to_thread: Sender<Command>,
+}
+
+impl std::fmt::Debug for Privacy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Privacy").field("what", &self.what).finish()
+    }
+}
+
+impl Privacy {
+    /// Put the screens back, and let the keeper go.
+    ///
+    /// The order matters: the keeper is cancelled **after** the screens are
+    /// back, so a host that dies in between is still covered. Cancelling first
+    /// would open a gap of exactly the width of one restore.
+    pub fn give_back(mut self) {
+        let (reply, answer) = std::sync::mpsc::channel();
+        let asked = self
+            .to_thread
+            .send(Command::Unblank(reply))
+            .map_err(|_| "the indicator's thread is gone".to_owned())
+            .and_then(|()| {
+                answer
+                    .recv_timeout(ANSWER_PATIENCE)
+                    .map_err(|e| format!("the indicator's thread did not answer: {e}"))
+            });
+        match asked {
+            Ok(Ok(())) => println!("      privacy    {} is back", self.what),
+            Ok(Err(e)) | Err(e) => {
+                // **Said loudly, and the keeper is left holding it.** Somebody
+                // is sitting in front of a screen that is still dark, and the
+                // one thing that must not happen next is this process
+                // cancelling the only thing that would fix it.
+                eprintln!("      · {} would not come back: {e}", self.what);
+                eprintln!("        the keeper still has it; ending this host will restore it");
+                return;
+            }
+        }
+        self.keeper.cancel();
+    }
+}
+
+/// Blank this machine's screens for the duration of a session.
+///
+/// **The order here is the safety story**, and it is why this is one function
+/// rather than three calls at a call site: ask what blanking would take, start
+/// something that will outlive this process, give it the undo, and only then
+/// turn anything off. Any other order leaves a window where a crash leaves
+/// somebody's monitor dark with nobody holding the way back.
+///
+/// # Errors
+///
+/// If the display cannot be blanked, if a keeper cannot be started, or if the
+/// undo cannot be written down. **Every one of those refuses to blank
+/// anything**, which is the point: the screens go dark only once somebody
+/// other than this process can bring them back.
+pub fn blank_for_the_session(indicator: &Indicator) -> Result<Privacy, String> {
+    let plan = indicator.blanking_plan()?;
+    let home = crate::paths::home()?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut keeper = esper_keeper::Keeper::start(&exe, &home).map_err(|e| e.to_string())?;
+    for undo in &plan.undo {
+        keeper.keep(undo.clone()).map_err(|e| e.to_string())?;
+    }
+    indicator.blank(&plan)?;
+    Ok(Privacy {
+        what: plan.what,
+        keeper,
+        to_thread: indicator.to_thread.clone(),
+    })
 }
 
 #[cfg(test)]

@@ -126,6 +126,31 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // **Re-executed as the keeper.** It holds no session and decodes
+        // nothing: it waits for this process to die and puts the display
+        // server back if it does. Gated by the argument *and* the environment
+        // variable, like the decode workers, so a stray `keeper` on a command
+        // line does nothing.
+        Some(esper_keeper::KEEPER_ARG) if std::env::var_os(esper_keeper::KEEPER_ENV).is_some() => {
+            let home = crate::paths::home().unwrap_or_default();
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            #[cfg(target_os = "linux")]
+            let applied = esper_keeper::run_keeper(
+                stdin.lock(),
+                stdout.lock(),
+                &home,
+                esper_presence_x11::put_back,
+            );
+            #[cfg(not(target_os = "linux"))]
+            let applied = esper_keeper::run_keeper(stdin.lock(), stdout.lock(), &home, |_| {
+                Err("no backend on this platform knows how to put that back".to_owned())
+            });
+            // Nothing to put back is the ordinary ending, and it is not a
+            // failure: it means the host shut down properly.
+            let _ = applied;
+            ExitCode::SUCCESS
+        }
         Some(esper_decode::WORKER_ARG) if std::env::var_os(esper_decode::WORKER_ENV).is_some() => {
             match esper_decode::child::run_on_stdio(&esper_decode::decoder::DecoderConfig::default())
             {

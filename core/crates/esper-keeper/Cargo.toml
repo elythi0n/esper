@@ -1,0 +1,19 @@
+[package]
+name = "esper-keeper"
+description = "Putting the display server back the way it was when the host that changed it is gone."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The records travel down a pipe and into a file, and a person may have to read
+# the file to understand why their screen came back.
+serde.workspace = true
+serde_json = "1"
+thiserror.workspace = true
+tracing.workspace = true

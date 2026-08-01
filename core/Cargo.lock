@@ -515,6 +515,7 @@ dependencies = [
  "esper-input",
  "esper-input-x11",
  "esper-interfaces",
+ "esper-keeper",
  "esper-link",
  "esper-media",
  "esper-pipeline",
@@ -573,6 +574,16 @@ name = "esper-interfaces"
 version = "0.0.0"
 dependencies = [
  "if-addrs",
+ "tracing",
+]
+
+[[package]]
+name = "esper-keeper"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
  "tracing",
 ]
 
@@ -636,6 +647,7 @@ dependencies = [
 name = "esper-presence"
 version = "0.0.0"
 dependencies = [
+ "esper-keeper",
  "thiserror",
  "tracing",
 ]
@@ -646,6 +658,7 @@ version = "0.0.0"
 dependencies = [
  "esper-display-lock",
  "esper-input",
+ "esper-keeper",
  "esper-presence",
  "thiserror",
  "tracing",

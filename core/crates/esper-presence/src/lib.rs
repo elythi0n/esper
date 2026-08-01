@@ -168,6 +168,25 @@ impl Missing {
     }
 }
 
+/// What blanking the host's screen would turn off, and how to undo it.
+///
+/// **A plan, produced before anything changes.** The hazard of blanking a
+/// screen is that the change outlives the process that made it, so the undo
+/// has to be registered with something that will still be alive — and that
+/// cannot happen after the change without leaving a window where a crash
+/// leaves somebody's monitor dark and nobody holding the undo.
+///
+/// So the order is fixed: ask for a plan, register the plan, then apply it. A
+/// registered plan that is never applied costs nothing, because putting a
+/// screen back that was never turned off is a no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blanking {
+    /// What a person would call what will go dark.
+    pub what: String,
+    /// How to put it back, for whoever has to.
+    pub undo: Vec<esper_keeper::Undo>,
+}
+
 /// What the indicator is saying.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watching {
@@ -245,6 +264,45 @@ pub trait Presence: std::fmt::Debug {
     /// distinction [`Presence::verify`] exists for. Nothing that relies on the
     /// indicator being visible may rely on this.
     fn is_showing(&self) -> bool;
+
+    /// Work out what blanking this machine's screens would take.
+    ///
+    /// **Changes nothing.** It reads the display's current state and returns
+    /// the undo for it, so a caller can register that undo with something
+    /// that outlives this process *before* anything goes dark.
+    ///
+    /// # Errors
+    ///
+    /// If the display cannot be asked, or has no screen that could be turned
+    /// off.
+    fn blanking_plan(&mut self) -> Result<Blanking, PresenceError>;
+
+    /// Blank this machine's own screens, leaving the session running.
+    ///
+    /// **For working on a machine in a shared room**: the person at the far
+    /// end keeps their picture, and somebody walking past the host sees
+    /// nothing.
+    ///
+    /// Takes the plan rather than making one, so the undo a caller registered
+    /// is the undo that gets applied — and so this cannot be called without
+    /// somebody having had the chance to register it.
+    ///
+    /// # Errors
+    ///
+    /// If the screens cannot be blanked, or if blanking them would break the
+    /// session — which a backend checks by reading its own screen back. A
+    /// backend **must undo its own work** before returning an error: a
+    /// half-blanked screen whose caller got an error is the situation this
+    /// whole arrangement is designed around.
+    fn blank(&mut self, plan: &Blanking) -> Result<(), PresenceError>;
+
+    /// Put the screen back.
+    ///
+    /// # Errors
+    ///
+    /// If the screen cannot be restored — which a caller should treat as
+    /// serious and say out loud, because somebody is sitting in front of it.
+    fn unblank(&mut self) -> Result<(), PresenceError>;
 
     /// Ask the screen whether the indicator is on it.
     ///
