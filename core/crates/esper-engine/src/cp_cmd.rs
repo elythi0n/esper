@@ -309,15 +309,34 @@ pub fn run(o: &CopyOptions) -> Result<(), String> {
             fetch_one(&mut stream, o, &remote_path).await
         };
 
+        // **Recorded whether it worked or not**, the same rule the host's own
+        // side follows: a device repeatedly asking for paths it cannot have is
+        // a pattern, and only the refusals show it. The path is the remote one
+        // as this end named it, never a byte of what crossed.
+        crate::trail::went_out(
+            session.peer_key(),
+            esper_audit::Event::FileTransferred {
+                direction: if pushing { "out" } else { "in" }.to_owned(),
+                path: remote_path.clone(),
+                size: outcome.as_ref().copied().unwrap_or(0),
+                outcome: match &outcome {
+                    Ok(_) => "copied".to_owned(),
+                    Err(why) => format!("refused: {why}"),
+                },
+            },
+        );
+
         media.close(esper_proto::Reason::SESSION_COMPLETE);
         media.linger(std::time::Duration::from_millis(200)).await;
         drop(endpoint);
-        outcome
+        outcome.map(|_| ())
     })
 }
 
 /// Push a local file to the host.
-async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result<(), String> {
+/// Returns the file's size, so the trail records the real number rather than
+/// a plausible one.
+async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result<u64, String> {
     let Side::Here(at) = &o.from else {
         return Err("nothing local to send".to_owned());
     };
@@ -334,6 +353,9 @@ async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result
     let mut offer = sending.offer().to_wire();
     offer.path = destination.clone();
     offer.replace = o.force;
+    // Read before the offer is handed over, so the trail's number is the one
+    // that was actually sent.
+    let size = offer.bytes;
     eprintln!(
         "  sending    {} → {destination} ({} bytes)",
         at.display(),
@@ -359,7 +381,7 @@ async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result
     match stream.recv::<FileMessage>().await {
         Ok(FileMessage::Done(end)) if end.is_stored() => {
             eprintln!("  sent       {destination}");
-            Ok(())
+            Ok(size)
         }
         Ok(FileMessage::Done(end)) => Err(end.message().to_owned()),
         Ok(other) => Err(format!("the host answered with {}", other.name())),
@@ -368,7 +390,8 @@ async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result
 }
 
 /// Pull a file from the host to here.
-async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result<(), String> {
+/// Returns the file's size, for the same reason [`send_one`] does.
+async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result<u64, String> {
     let Side::Here(at) = &o.to else {
         return Err("nowhere local to put it".to_owned());
     };
@@ -438,7 +461,7 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
             "  fetched    {}",
             vault.shown().join(name.as_str()).display()
         );
-        return Ok(());
+        return Ok(offer.bytes);
     }
     Err(end.message().to_owned())
 }

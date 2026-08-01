@@ -47,6 +47,16 @@ pub struct Happening {
     /// The specifics, in one line. Rendered here because the vocabulary lives
     /// here.
     pub detail: String,
+    /// Which way it went: `in` for somebody who connected here, `out` for
+    /// something this machine did to somebody else.
+    ///
+    /// **Two characters on the line a person scans**, because "who was on this
+    /// machine" and "what did this machine reach" are different questions and a
+    /// list that mixed them without saying so would answer neither. Defaulted
+    /// so an engine and a control plane at different versions still agree about
+    /// the field they both have.
+    #[serde(default)]
+    pub direction: String,
 }
 
 /// What the control plane asks the engine to do.

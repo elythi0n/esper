@@ -254,6 +254,14 @@ pub fn run(o: &Options) -> Result<(), String> {
             );
         }
 
+        // **This machine's own record of where it opened a shell.** The host
+        // has recorded the other side of this since Phase 2; without this
+        // half, the trail on a laptop can say who came in and not where its
+        // owner went.
+        let far_end = *session.peer_key();
+        crate::trail::went_out(&far_end, esper_audit::Event::TerminalOpened);
+        let opened_at = std::time::Instant::now();
+
         let (cols, rows) = RawMode::window_size();
         let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_owned());
         let start = match o.resume {
@@ -298,6 +306,19 @@ pub fn run(o: &Options) -> Result<(), String> {
         println!();
 
         let outcome = pump(&mut control, session_id, &session).await;
+
+        // And how long it lasted, whichever way it ended. The trail records
+        // the shape of what happened, never a keystroke of it.
+        crate::trail::went_out(
+            &far_end,
+            esper_audit::Event::TerminalClosed {
+                duration_secs: opened_at.elapsed().as_secs(),
+                // The shell's status belongs to the host, which is where the
+                // shell ran; this end knows only that its session ended.
+                exit_code: None,
+                exit_signal: None,
+            },
+        );
 
         // **A close is a message, and a message has to be delivered.**
         // `finish` and `close` only *queue* their frames; a process that

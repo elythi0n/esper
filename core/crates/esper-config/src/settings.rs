@@ -282,6 +282,45 @@ pub static SETTINGS: &[Setting] = &[
                 for an hour is working, not idle.",
     },
     Setting {
+        key: "audit.retain",
+        kind: Kind::Time,
+        // **Ninety days, and not "for ever".**
+        //
+        // A trail is for answering questions weeks after the fact — "was
+        // anybody on this machine while I was away" — and three months covers
+        // that with room. Keeping it for ever sounds safer and is not: it is a
+        // growing list of every machine somebody connected to, on a laptop
+        // that can be stolen, answering a question nobody asked. The record
+        // exists to be *read*, and a record nobody will ever read is only a
+        // liability.
+        //
+        // `none` keeps everything, for somebody who has decided that is what
+        // they want. It is a choice rather than the default.
+        // **In seconds, because that is what a `Time` value *is*.** Written
+        // as `"90d"` this looked right and did nothing: a `Time` reads to a
+        // number of seconds, and a default left as text is a default the
+        // number-reader cannot see — so the shipped policy would have been "no
+        // age limit" while the setting said ninety days. Found by a smoke
+        // check that set the value explicitly and watched the default case do
+        // nothing.
+        default: Value::Whole(90 * 86_400),
+        about: "How long to keep the session trail. Older entries are deleted when the host                 starts and once a day while it runs. `none` keeps everything, which on a                 machine that can be lost is a decision rather than a default.",
+    },
+    Setting {
+        key: "audit.max_size",
+        kind: Kind::WholeOrNone {
+            least: 1,
+            most: 4096,
+        },
+        // **A ceiling as well as an age**, because the two fail differently.
+        // A machine with a hundred sessions a day fills a disk long before
+        // ninety days are up, and a retention policy that only understands
+        // time would let it. The oldest entries go first, which is the same
+        // rule the age applies, so the two cannot disagree about what to keep.
+        default: Value::Whole(64),
+        about: "Largest the session trail may grow, in megabytes. The oldest entries are                 deleted to stay inside it. `none` is no ceiling, which leaves the age above                 as the only limit.",
+    },
+    Setting {
         key: "forward.allow",
         kind: Kind::Text,
         // **Empty is loopback, never everything.** A forward can be granted

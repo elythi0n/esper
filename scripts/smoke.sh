@@ -318,7 +318,7 @@ cleanup_terminal() {
              "${clip_host:-}" "${clip_host2:-}" "${clip_viewer:-}" \
              "${clip_x1:-}" "${clip_x2:-}" "${cp_host:-}" "${cp_wire:-}" "${cp_along:-}" \
              "${multi_host:-}" "${idle_host:-}" "${tiled_host:-}" \
-             "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}"; do
+             "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}" "${retain_pid:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -987,6 +987,57 @@ except OSError:
         kill "$service_pid" 2>/dev/null || true
       fi
 
+      # **Retention that actually deletes.** The policy existed for weeks with
+      # no caller: `prune` was written, tested, and called by nothing, so
+      # `audit.retain` would have been a setting the product ignored. A host
+      # applies it when it starts and once a day while it runs.
+      #
+      # A scratch home, because this needs a log with something old in it and
+      # the suite's own log is what every other check reads.
+      echo "  — the trail's retention deletes what it says it will"
+      retain_home="$term_a/retention"
+      mkdir -p "$retain_home"
+      printf 'audit.retain = "1d"\n' > "$retain_home/config.toml"
+      # One entry from 1970 and one from now. Written by hand, because the
+      # point is what the host does to a file it did not write this run.
+      now_secs=$(date +%s)
+      {
+        printf '{"at":1,"peer":"old line","peer_key":"%s","event":"terminal_opened"}\n' \
+          "$(printf 'ab%.0s' $(seq 1 32))"
+        printf '{"at":%s,"peer":"new line","peer_key":"%s","event":"terminal_opened"}\n' \
+          "$now_secs" "$(printf 'cd%.0s' $(seq 1 32))"
+      } > "$retain_home/sessions.log"
+
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$retain_home" \
+        timeout 20 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$retain_home/host.log" 2>&1 &
+      retain_pid=$!
+      for _ in $(seq 1 100); do
+        grep -q 'listening' "$retain_home/host.log" 2>/dev/null && break
+        sleep 0.1
+      done
+      kill "$retain_pid" 2>/dev/null || true
+      wait "$retain_pid" 2>/dev/null || true
+
+      if ! grep -q '"at":1,' "$retain_home/sessions.log" 2>/dev/null &&
+        grep -q "\"at\":$now_secs," "$retain_home/sessions.log" 2>/dev/null; then
+        printf '  ✓ a host deleted what was past its retention and kept the rest\n'
+      else
+        printf '  ✗ retention did not delete the old entry\n'
+        sed 's/^/      /' "$retain_home/sessions.log" 2>/dev/null | head -3
+        fail=1
+      fi
+      # And said so, because a file that quietly shrinks is a file somebody
+      # will suspect of losing things.
+      if grep -q 'past its retention' "$retain_home/host.log" 2>/dev/null; then
+        printf '  ✓ and said what it had removed\n'
+      else
+        printf '  ✗ the host removed entries without saying so\n'
+        grep -iE 'trail|audit' "$retain_home/host.log" | sed 's/^/      /' | head -3
+        fail=1
+      fi
+      rm -rf "$retain_home"
+
       # **What has happened on this machine.** The audit log is a file of JSON
       # nobody reads with `jq`, and a record nobody reads is a record that is not
       # doing its job. This is the log rendered, over the same seam as `doctor`.
@@ -1000,6 +1051,41 @@ except OSError:
         printf '%s\n' "$out" | sed 's/^/      /'
         fail=1
       fi
+      # **Both halves of what this machine did.** The host has recorded who
+      # connected to it since Phase 2; the controller recorded nothing, so the
+      # trail on a laptop could say who came in and not where its owner went.
+      # `$term_b` is the controller in every session above, so its own trail
+      # should now hold outbound lines and no inbound ones.
+      outbound=$( { grep -c '"direction":"out"' "$term_b/sessions.log" 2>/dev/null || true; } | head -1)
+      if [ "${outbound:-0}" -gt 0 ]; then
+        printf '  ✓ the controller kept its own record: %s outbound line(s)\n' "$outbound"
+      else
+        printf '  ✗ the controller recorded nothing about what it connected to\n'
+        ls -l "$term_b" | sed 's/^/      /'
+        fail=1
+      fi
+      # And the host's lines are not marked outbound, because the field is what
+      # tells the two halves apart and a host that wrote it would erase the
+      # distinction.
+      if ! grep -q '"direction":"out"' "$term_a/sessions.log" 2>/dev/null; then
+        printf '  ✓ and the host'"'"'s own lines are still inbound\n'
+      else
+        printf '  ✗ the host marked its own sessions as outbound\n'
+        grep '"direction"' "$term_a/sessions.log" | head -3 | sed 's/^/      /'
+        fail=1
+      fi
+      # **The arrow is in the rendering**, because a person scanning a list
+      # needs to see which way a session went without reading the sentence.
+      outview=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        "$BIN/esper" sessions 2>/dev/null || true)
+      if printf '%s' "$outview" | grep -q '→'; then
+        printf '  ✓ and sessions shows which way each one went\n'
+      else
+        printf '  ✗ the rendered list does not say which way a session went\n'
+        printf '%s\n' "$outview" | head -6 | sed 's/^/      /'
+        fail=1
+      fi
+
       # It says which question it is answering. A list that quietly omitted a
       # session in progress would be worse than one that says it only has history.
       if printf '%s' "$out" | grep -q 'not what is happening now'; then
@@ -2058,8 +2144,20 @@ print(s.getsockname()[1]); s.close()')
           --rate 200 --queue 1000 > "$term_b/bloat.log" 2>&1 &
         bloat_pid=$!
         sleep 0.5
+        # **This session runs to completion**, because the second thing it is
+        # asked about — the ladder noticing the queue — is a summary line, and
+        # a session that is stopped early prints no summary. So the length is a
+        # duration, and it is chosen from a measurement rather than a guess:
+        # getting the first picture through this link means ratcheting 1280x720
+        # at thirty frames down to what a 200 kbit/s pipe carries, which was
+        # measured at about seven seconds on this machine and was *not* inside
+        # the ten seconds this check used to allow on a busy run.
+        #
+        # Twenty-five, so a machine two and a half times slower than this one
+        # still passes. And the session now says when its first picture arrived,
+        # which is what makes a failure here readable instead of "no pictures".
         out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
-          timeout 60 "$BIN/esper-engine" connect "127.0.0.1:$bloated" --seconds 10 2>&1 || true)
+          timeout 90 "$BIN/esper-engine" connect "127.0.0.1:$bloated" --seconds 25 2>&1 || true)
         shown=$(printf '%s' "$out" | awk '/^  pictures /{n=$2} END{print n}')
         kill "$bloat_pid" 2>/dev/null || true
         bloat_pid=""
@@ -2069,7 +2167,9 @@ print(s.getsockname()[1]); s.close()')
         # depends on the machine; that any arrive is the whole finding, and it
         # was zero for as long as the bug lasted.
         if [ -n "$shown" ] && [ "$shown" -gt 0 ]; then
-          printf '  ✓ %s pictures arrived through a 200 kbit/s link with a second of queue\n' "$shown"
+          printf '  ✓ %s pictures through a 200 kbit/s link with a second of queue, %s\n' \
+            "$shown" \
+            "$( { printf '%s' "$out" | grep -oE 'picture after [0-9]+ ms' || true; } | head -1)"
         else
           printf '  ✗ a slow, buffered link showed no pictures at all\n'
           printf '%s\n' "$out" | sed 's/^/      /'

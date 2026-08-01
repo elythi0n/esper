@@ -69,6 +69,21 @@ type Happening struct {
 	Device string `cbor:"device"`
 	Event  string `cbor:"event"`
 	Detail string `cbor:"detail"`
+	// Direction is "in" for somebody who connected here and "out" for
+	// something this machine did to somebody else. Two questions, one list,
+	// and an arrow on each line so a person scanning it can tell them apart.
+	Direction string `cbor:"direction,omitempty"`
+}
+
+// Arrow is the two characters that say which way a happening went.
+//
+// Inbound is the default for a line with no direction, which is every line
+// written before the field existed.
+func (h Happening) Arrow() string {
+	if h.Direction == "out" {
+		return "→"
+	}
+	return "←"
 }
 
 // Failure is the engine saying it could not carry a command out.

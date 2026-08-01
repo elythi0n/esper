@@ -164,9 +164,9 @@ fn pruning_removes_only_what_is_older_than_the_window() {
             .unwrap();
     }
 
-    let removed = log.prune(10_000, now).expect("prune");
+    let pruned = log.retain(Some(10_000), None, now).expect("prune");
     assert_eq!(
-        removed, 1,
+        pruned.too_old, 1,
         "only the 100_000s-old entry is past a 10_000s window"
     );
     let left = log.read().expect("read");
@@ -185,7 +185,12 @@ fn pruning_nothing_leaves_the_file_untouched() {
         .unwrap();
     let before = std::fs::read_to_string(&path).unwrap();
 
-    assert_eq!(log.prune(10_000, 1_000).expect("prune"), 0);
+    assert_eq!(
+        log.retain(Some(10_000), None, 1_000)
+            .expect("prune")
+            .removed(),
+        0
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -199,7 +204,7 @@ fn pruning_leaves_no_temporary_file() {
         .unwrap();
     log.append(&Entry::new(&key(1), Event::TerminalOpened, 999_999))
         .unwrap();
-    log.prune(10, 999_999).expect("prune");
+    log.retain(Some(10), None, 999_999).expect("prune");
 
     let strays: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -501,4 +506,245 @@ fn every_event_renders_a_line_a_person_can_read() {
             );
         }
     }
+}
+
+/// **Append-only in practice, checked by trying to write somewhere else.**
+///
+/// The crate opens the file with `O_APPEND` for every write, and this is what
+/// that buys: a writer that *seeks* to the start and writes still lands at the
+/// end. The kernel guarantees it, which is precisely why the guarantee is
+/// worth depending on rather than reimplementing — and worth pinning here, so
+/// that a change to how this crate opens the file fails a test instead of
+/// quietly making history editable.
+#[test]
+#[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+fn a_writer_that_seeks_to_the_start_still_appends() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let dir = tmpdir();
+    let path = dir.join("s.log");
+    let log = Log::at(&path);
+    log.append(&Entry::new(&key(1), Event::TerminalOpened, 100))
+        .unwrap();
+    log.append(&Entry::new(&key(2), Event::TerminalOpened, 200))
+        .unwrap();
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    // A determined writer, opening the log the way this crate does.
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    f.seek(SeekFrom::Start(0)).unwrap();
+    f.write_all(b"TAMPERED\n").unwrap();
+    f.flush().unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        after.starts_with(&before),
+        "the history before the write was altered:\n{after}"
+    );
+    assert!(
+        after.ends_with("TAMPERED\n"),
+        "the write should have landed at the end:\n{after}"
+    );
+    // And the entries that were there still read back, in order: a reader
+    // skips the line that is not JSON and loses nothing else.
+    let entries = log.read().unwrap();
+    assert_eq!(
+        entries.iter().map(|e| e.at).collect::<Vec<_>>(),
+        vec![100, 200]
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Truncating is not something this crate can be asked to do.**
+///
+/// There is no method that empties the log, and retention is the only path
+/// that replaces it — so this states the property the API's shape gives: after
+/// every public call that writes, the entries that were there are still there.
+#[test]
+#[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+fn nothing_in_the_api_shortens_the_log_except_retention() {
+    let dir = tmpdir();
+    let log = Log::at(dir.join("s.log"));
+    for at in [10u64, 20, 30] {
+        log.append(&Entry::new(&key(1), Event::TerminalOpened, at))
+            .unwrap();
+    }
+    // Every reader, and an append: none of them may lose an entry.
+    let _ = log.read().unwrap();
+    let _ = log.for_peer(&key(1)).unwrap();
+    log.append(&Entry::new(&key(1), Event::TerminalOpened, 40))
+        .unwrap();
+    assert_eq!(log.read().unwrap().len(), 4);
+
+    // Retention with no limits reads and writes nothing.
+    let pruned = log.retain(None, None, 1_000_000).unwrap();
+    assert_eq!(pruned.removed(), 0);
+    assert_eq!(log.read().unwrap().len(), 4);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **What retention keeps, it keeps byte for byte.**
+///
+/// The rewrite is the one path that does not append, so the thing to pin is
+/// that it cannot *alter* an entry — only drop whole ones from the front. An
+/// entry that came back subtly different would be a record that had been
+/// edited by the thing supposed to be preserving it.
+#[test]
+#[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+fn retaining_rewrites_nothing_it_keeps() {
+    let dir = tmpdir();
+    let path = dir.join("s.log");
+    let log = Log::at(&path);
+    let now = 1_000_000u64;
+    for age in [0u64, 10, 20, 500_000] {
+        log.append(&Entry::new(
+            &key(3),
+            Event::SessionOpened {
+                granted: vec![Permission::View, Permission::Control],
+                tier: "direct".to_owned(),
+            },
+            now - age,
+        ))
+        .unwrap();
+    }
+    let kept_lines: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.contains(&format!("{}", now - 500_000)))
+        .map(str::to_owned)
+        .collect();
+
+    let pruned = log.retain(Some(1_000), None, now).unwrap();
+    assert_eq!(pruned.too_old, 1);
+    let after: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        after, kept_lines,
+        "the lines that survived should be the same bytes they were"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **The size ceiling deletes the oldest and keeps the newest.**
+///
+/// The rule an age limit cannot cover: a machine with a hundred sessions a day
+/// fills a disk long before ninety days are up.
+#[test]
+#[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+fn the_size_ceiling_drops_the_oldest_until_it_fits() {
+    let dir = tmpdir();
+    let path = dir.join("s.log");
+    let log = Log::at(&path);
+    for at in 1..=50u64 {
+        log.append(&Entry::new(&key(4), Event::TerminalOpened, at))
+            .unwrap();
+    }
+    let whole = std::fs::metadata(&path).unwrap().len();
+    let half = whole / 2;
+
+    let pruned = log.retain(None, Some(half), 1_000_000).unwrap();
+    assert_eq!(pruned.too_old, 0, "no age limit was given");
+    assert!(pruned.over_size > 0, "the ceiling should have removed some");
+    let left = log.read().unwrap();
+    assert_eq!(left.len(), pruned.kept);
+    assert!(
+        std::fs::metadata(&path).unwrap().len() <= half,
+        "the file is still over the ceiling"
+    );
+    // The newest survived, and the oldest went.
+    assert_eq!(
+        left.last().map(|e| e.at),
+        Some(50),
+        "the most recent entry must be the one that is kept"
+    );
+    assert!(
+        left.first().map(|e| e.at).unwrap_or(0) > 1,
+        "the oldest should have gone first"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **Both rules at once, and the age is applied first.** Whichever bites, the
+/// oldest go — so the two cannot disagree about what to keep.
+#[test]
+#[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+fn an_age_and_a_ceiling_together_remove_the_oldest_by_both() {
+    let dir = tmpdir();
+    let path = dir.join("s.log");
+    let log = Log::at(&path);
+    let now = 100_000u64;
+    // Ten old, ten recent.
+    for i in 0..10u64 {
+        log.append(&Entry::new(&key(5), Event::TerminalOpened, 1_000 + i))
+            .unwrap();
+    }
+    for i in 0..10u64 {
+        log.append(&Entry::new(&key(5), Event::TerminalOpened, now - 100 + i))
+            .unwrap();
+    }
+    let line = std::fs::metadata(&path).unwrap().len() / 20;
+
+    // An age that drops the first ten, and a ceiling that fits about five.
+    let pruned = log.retain(Some(1_000), Some(line * 5), now).unwrap();
+    assert_eq!(pruned.too_old, 10, "the ten old ones are past the age");
+    assert!(
+        pruned.over_size >= 4,
+        "and the ceiling should trim the rest to about five, not {}",
+        pruned.over_size
+    );
+    let left = log.read().unwrap();
+    assert!(
+        left.iter().all(|e| e.at >= now - 100),
+        "everything left should be from the recent group"
+    );
+    assert_eq!(
+        left.last().map(|e| e.at),
+        Some(now - 100 + 9),
+        "and the newest is always kept"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A pass that did nothing says nothing, so a host pruning daily does not
+/// print a line a day about no change.
+#[test]
+fn a_pass_that_removed_nothing_has_nothing_to_say() {
+    let quiet = esper_audit::Pruned {
+        too_old: 0,
+        over_size: 0,
+        kept: 12,
+    };
+    assert_eq!(quiet.describe(), None);
+    assert_eq!(quiet.removed(), 0);
+
+    let aged = esper_audit::Pruned {
+        too_old: 3,
+        over_size: 0,
+        kept: 9,
+    };
+    assert!(aged.describe().is_some_and(|s| s.contains("retention")));
+    // One is "1 entry", because a line a person reads once should not read
+    // like a machine wrote it.
+    let one = esper_audit::Pruned {
+        too_old: 1,
+        over_size: 0,
+        kept: 0,
+    };
+    assert_eq!(
+        one.describe().as_deref(),
+        Some("1 entry past its retention")
+    );
+    let both = esper_audit::Pruned {
+        too_old: 3,
+        over_size: 2,
+        kept: 9,
+    };
+    assert_eq!(both.removed(), 5);
+    assert!(both.describe().is_some_and(|s| s.contains("size limit")));
 }

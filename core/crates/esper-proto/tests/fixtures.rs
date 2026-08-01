@@ -160,6 +160,7 @@ fn expected_sessions() -> esper_proto::Report {
             device: "laptop".to_owned(),
             event: "session_opened".to_owned(),
             detail: "session opened over direct, granted view, control".to_owned(),
+            direction: "in".to_owned(),
         },
         esper_proto::Happening {
             at: 1_756_700_042,
@@ -170,6 +171,10 @@ fn expected_sessions() -> esper_proto::Report {
             device: String::new(),
             event: "session_closed".to_owned(),
             detail: "session ended after 42 seconds, the session ended".to_owned(),
+            // **The other direction, on purpose.** A fixture with one value of
+            // a field checks half of it, and which half is not obvious to
+            // whoever reads the file next.
+            direction: "out".to_owned(),
         },
     ])
 }

@@ -340,7 +340,10 @@ func cmdSessions(args []string) int {
 		return 0
 	}
 	for _, h := range happenings {
-		fmt.Printf("  %s  %s  %s\n", when(h.At), who(h), h.Detail)
+		// The arrow first, because which way a session went is the thing a
+		// person scanning this list is deciding between: somebody came in
+		// here, or somebody here went out there.
+		fmt.Printf("  %s  %s %s  %s\n", when(h.At), h.Arrow(), who(h), h.Detail)
 	}
 	fmt.Println()
 	fmt.Println("  This is what was recorded, not what is happening now: a session in")

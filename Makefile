@@ -39,7 +39,7 @@ fi
 endef
 
 .PHONY: all
-all: check-isolation check-reached build test
+all: check-isolation check-reached check-trail build test
 
 ## Verify the repository references nothing outside itself
 .PHONY: check-isolation
@@ -65,6 +65,16 @@ flaky:
 .PHONY: check-reached
 check-reached:
 	@python3 ./scripts/check-reached.py
+
+## Verify the session trail cannot leave this machine
+##
+## Phase 15 asks for this in those words. A sentence in a document is not a
+## verification: this enumerates every reader of the trail, requires each to
+## record where what it reads goes, and refuses a network of any kind in the
+## crate that owns the file or in the one place that reads it.
+.PHONY: check-trail
+check-trail:
+	@python3 ./scripts/check-trail-stays.py
 
 ## Check the clock against Python's own timezone handling
 ##
@@ -335,7 +345,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached fmt-check lint test build smoke
+ci: check-isolation check-reached check-trail fmt-check lint test build smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

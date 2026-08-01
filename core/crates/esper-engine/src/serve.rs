@@ -100,6 +100,14 @@ fn sessions(most: u32) -> Report {
                 key: entry.peer_key.clone(),
                 event: entry.event.tag().to_owned(),
                 detail: entry.event.detail(),
+                // The word the log stores, not this crate's own spelling of
+                // it: one vocabulary, so a line somebody greps for and a
+                // field a program branches on are the same string.
+                direction: if entry.direction.is_inbound() {
+                    "in".to_owned()
+                } else {
+                    "out".to_owned()
+                },
                 device: store
                     .as_ref()
                     .and_then(|store| named(store, &entry.peer_key))

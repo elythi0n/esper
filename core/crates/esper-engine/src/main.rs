@@ -35,6 +35,7 @@ mod serve;
 mod session_cmd;
 mod settings;
 mod terminal_cmd;
+mod trail;
 
 use std::process::ExitCode;
 

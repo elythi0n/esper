@@ -221,6 +221,49 @@ pub enum Event {
     Refused { reason: String },
 }
 
+/// Which way a session went.
+///
+/// **The log holds both halves of what this machine did**, and they are
+/// different facts. "A device opened a session on me" is a statement about
+/// this machine's exposure; "I opened a session on that device" is a statement
+/// about what somebody sitting here did. A trail that recorded only the first
+/// cannot answer "what did this laptop connect to, and when" — which is the
+/// question asked about a shared machine, a stolen one, or an afternoon
+/// somebody cannot remember.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    /// Somebody connected **to** this machine.
+    ///
+    /// The default, and absent from the line when it is: every entry written
+    /// before this existed is one of these, and a log whose old lines all grew
+    /// a field would be a log somebody's tools stopped reading.
+    #[default]
+    In,
+    /// This machine connected **out** to somebody.
+    Out,
+}
+
+impl Direction {
+    /// Whether this is the default, for leaving it out of the line.
+    #[must_use]
+    pub const fn is_inbound(&self) -> bool {
+        matches!(self, Self::In)
+    }
+
+    /// The arrow a person reads.
+    ///
+    /// Two characters rather than a word, because it appears on every line of
+    /// a list somebody scans down.
+    #[must_use]
+    pub const fn arrow(&self) -> &'static str {
+        match self {
+            Self::In => "←",
+            Self::Out => "→",
+        }
+    }
+}
+
 /// One line in the record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
@@ -233,19 +276,26 @@ pub struct Entry {
     /// The peer's key as hex, so an entry can be matched to a store record
     /// exactly rather than by a fingerprint that is only 64 bits.
     pub peer_key: String,
+    /// Which way it went: somebody came in, or this machine went out.
+    ///
+    /// Left out of the line when it is inbound, which is both the default and
+    /// what every entry written before this field existed was.
+    #[serde(default, skip_serializing_if = "Direction::is_inbound")]
+    pub direction: Direction,
     /// What happened.
     #[serde(flatten)]
     pub event: Event,
 }
 
 impl Entry {
-    /// Build an entry for a peer.
+    /// Build an entry for a peer that connected here.
     #[must_use]
     pub fn new(peer_key: &[u8; KEY_LEN], event: Event, at: u64) -> Self {
         Self {
             at,
             peer: Fingerprint::of(peer_key).inline(),
             peer_key: peer_key.iter().map(|b| format!("{b:02x}")).collect(),
+            direction: Direction::In,
             event,
         }
     }
@@ -254,6 +304,19 @@ impl Entry {
     #[must_use]
     pub fn now(peer_key: &[u8; KEY_LEN], event: Event) -> Self {
         Self::new(peer_key, event, unix_now())
+    }
+
+    /// The same, for something **this machine** did to somebody else.
+    ///
+    /// A separate constructor rather than a flag on the two above, so that
+    /// recording the wrong direction takes a different call rather than a
+    /// forgotten argument.
+    #[must_use]
+    pub fn going_out(peer_key: &[u8; KEY_LEN], event: Event) -> Self {
+        Self {
+            direction: Direction::Out,
+            ..Self::new(peer_key, event, unix_now())
+        }
     }
 }
 
@@ -500,23 +563,76 @@ impl Log {
             .collect())
     }
 
-    /// Drop entries older than `keep_secs`, rewriting the file.
+    /// Apply the retention policy: an age, a size, or both.
     ///
-    /// Returns how many were removed. Retention is a real feature rather than
-    /// housekeeping: a log that grows without bound on a server nobody looks at
-    /// eventually fills the disk, and a retention policy the user set must
-    /// actually delete things or it is a lie.
-    pub fn prune(&self, keep_secs: u64, now: u64) -> Result<usize, AuditError> {
+    /// **One function for both rules**, because two would eventually disagree
+    /// about what to keep. They fail differently and both are needed: a
+    /// machine with a hundred sessions a day fills a disk long before an age
+    /// limit expires, and a size limit alone would silently forget a quiet
+    /// machine's whole history the week somebody needed it. Whichever rule
+    /// bites, the oldest entries go first.
+    ///
+    /// `None` for either is no limit of that kind. Both `None` reads the file
+    /// and writes nothing, which is what a person who set `none` asked for.
+    ///
+    /// # Errors
+    ///
+    /// If the log cannot be read, encoded or replaced.
+    pub fn retain(
+        &self,
+        keep_secs: Option<u64>,
+        max_bytes: Option<u64>,
+        now: u64,
+    ) -> Result<Pruned, AuditError> {
         let all = self.read()?;
-        let cutoff = now.saturating_sub(keep_secs);
-        let keep: Vec<&Entry> = all.iter().filter(|e| e.at >= cutoff).collect();
-        let removed = all.len().saturating_sub(keep.len());
+        let before = all.len();
+
+        // Age first. It is the rule somebody wrote down, and applying it
+        // before the ceiling means the ceiling only ever removes entries the
+        // age was willing to keep.
+        let mut keep: Vec<&Entry> = match keep_secs {
+            Some(secs) => {
+                let cutoff = now.saturating_sub(secs);
+                all.iter().filter(|e| e.at >= cutoff).collect()
+            }
+            None => all.iter().collect(),
+        };
+        let too_old = before.saturating_sub(keep.len());
+
+        // Then the ceiling, oldest first. Measured on the encoded lines
+        // rather than the entries, because bytes on a disk is what a ceiling
+        // in megabytes is about.
+        let mut over_size = 0usize;
+        if let Some(most) = max_bytes {
+            let mut lines: Vec<(usize, usize)> = Vec::with_capacity(keep.len());
+            for (i, e) in keep.iter().enumerate() {
+                let line =
+                    serde_json::to_string(e).map_err(|e| AuditError::Encode(e.to_string()))?;
+                lines.push((i, line.len().saturating_add(1)));
+            }
+            let mut total: u64 = lines.iter().map(|(_, n)| *n as u64).sum();
+            let mut drop_before = 0usize;
+            while total > most && drop_before < lines.len() {
+                total = total.saturating_sub(lines.get(drop_before).map_or(0, |(_, n)| *n as u64));
+                drop_before = drop_before.saturating_add(1);
+            }
+            if drop_before > 0 {
+                over_size = drop_before;
+                keep.drain(..drop_before);
+            }
+        }
+
+        let removed = too_old.saturating_add(over_size);
         if removed == 0 {
-            return Ok(0);
+            return Ok(Pruned {
+                too_old: 0,
+                over_size: 0,
+                kept: keep.len(),
+            });
         }
 
         let mut text = String::new();
-        for e in keep {
+        for e in &keep {
             let line = serde_json::to_string(e).map_err(|e| AuditError::Encode(e.to_string()))?;
             text.push_str(&line);
             text.push('\n');
@@ -524,6 +640,12 @@ impl Log {
 
         // Rewritten through a temporary file: a truncate-then-write would lose
         // the whole history if the process died between the two.
+        //
+        // **This is the only path in this crate that does not append**, and it
+        // is why the file's append-only-ness is a property of the writers
+        // rather than of the filesystem. What it may do is bounded: it can
+        // only ever write a prefix-free subset of what it read, and
+        // `retaining_rewrites_nothing_it_keeps` holds it to that.
         let tmp = self.path.with_extension("tmp");
         write_owner_only(&tmp, text.as_bytes()).map_err(|source| AuditError::Io {
             path: tmp.clone(),
@@ -536,7 +658,63 @@ impl Log {
                 source,
             }
         })?;
-        Ok(removed)
+        Ok(Pruned {
+            too_old,
+            over_size,
+            kept: keep.len(),
+        })
+    }
+}
+
+/// What a retention pass removed, and what is left.
+///
+/// The two causes are counted apart because they mean different things to
+/// whoever reads the line: an age limit doing its job is routine, and a size
+/// ceiling biting says the machine is busier than the policy expected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pruned {
+    /// Removed for being older than the age limit.
+    pub too_old: usize,
+    /// Removed to fit inside the size ceiling.
+    pub over_size: usize,
+    /// Still there afterwards.
+    pub kept: usize,
+}
+
+impl Pruned {
+    /// How many entries went.
+    #[must_use]
+    pub const fn removed(&self) -> usize {
+        self.too_old.saturating_add(self.over_size)
+    }
+
+    /// A line for somebody who asked, or nothing when nothing happened.
+    ///
+    /// `None` rather than an empty string, so a caller cannot print a blank
+    /// line about a pass that did nothing — which on a host that prunes daily
+    /// would be a line a day saying nothing.
+    #[must_use]
+    pub fn describe(&self) -> Option<String> {
+        let entries = |n: usize| {
+            if n == 1 {
+                "1 entry".to_owned()
+            } else {
+                format!("{n} entries")
+            }
+        };
+        match (self.too_old, self.over_size) {
+            (0, 0) => None,
+            (old, 0) => Some(format!("{} past its retention", entries(old))),
+            (0, big) => Some(format!(
+                "{} removed to stay inside the size limit",
+                entries(big)
+            )),
+            (old, big) => Some(format!(
+                "{} past its retention, and {} more to stay inside the size limit",
+                entries(old),
+                entries(big)
+            )),
+        }
     }
 }
 

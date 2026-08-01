@@ -169,12 +169,13 @@ func TestCommandIsAString(t *testing.T) {
 func expectedSessions() Report {
 	list := []Happening{
 		{
-			At:     1756700000,
-			Peer:   "giraffe tapestry geyser rifle jersey domain razor oboe",
-			Key:    "be41344cf00e55422005b232a03d3a0d192df96c55b0fe9ba39f4a0791376a4c",
-			Device: "laptop",
-			Event:  "session_opened",
-			Detail: "session opened over direct, granted view, control",
+			At:        1756700000,
+			Peer:      "giraffe tapestry geyser rifle jersey domain razor oboe",
+			Key:       "be41344cf00e55422005b232a03d3a0d192df96c55b0fe9ba39f4a0791376a4c",
+			Device:    "laptop",
+			Event:     "session_opened",
+			Detail:    "session opened over direct, granted view, control",
+			Direction: "in",
 		},
 		{
 			At:     1756700042,
@@ -183,6 +184,9 @@ func expectedSessions() Report {
 			Device: "",
 			Event:  "session_closed",
 			Detail: "session ended after 42 seconds, the session ended",
+			// The other direction, so the fixture covers both halves of a
+			// field whose whole job is telling them apart.
+			Direction: "out",
 		},
 	}
 	return Report{Sessions: &list}

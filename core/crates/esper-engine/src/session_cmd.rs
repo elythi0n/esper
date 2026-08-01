@@ -497,6 +497,15 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     for gone in crate::pairing::sweep(paths::now_secs()) {
         println!("  · the one-session pairing with {gone} is over, and is now removed");
     }
+    // **The retention policy, before anything can refuse to start.** A limit
+    // nobody applies is a setting that lies, and this one had no caller at all
+    // until today. It is about the *file*, not about serving: a host that
+    // cannot start because nothing is paired still has a trail that should
+    // obey the policy somebody set for it — which is exactly the host whose
+    // trail nobody is watching. Once here, and once a day in the accept loop,
+    // because a host that runs for a month must not sit over its ceiling for
+    // the rest of it.
+    crate::trail::keep_only_what_the_policy_allows();
     // Shared rather than cloned: `Identity` is deliberately not `Clone` — a
     // private key should not be duplicated by a stray `.clone()` — and the
     // task that waits at a broker needs to sign requests for as long as the
@@ -686,7 +695,20 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             permits.clone(),
         ));
 
+        // When the trail's retention was last applied. A host that runs for
+        // months applies it as it goes rather than only at the start.
+        let mut trail_pruned_at = Instant::now();
+
         let outcome = loop {
+            // The retention policy, again, if a day has passed. Checked here
+            // rather than on a timer of its own because this loop is already
+            // woken often enough and a task for one file read a day would be a
+            // task to reason about for nothing.
+            if trail_pruned_at.elapsed() >= crate::trail::RETENTION_INTERVAL {
+                trail_pruned_at = Instant::now();
+                crate::trail::keep_only_what_the_policy_allows();
+            }
+
             // Let go of a parked session nobody came back for, before waiting
             // for a connection that may never arrive. Otherwise a host that
             // sees no more traffic holds a capture backend open for as long as
@@ -3416,7 +3438,9 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let Reached {
             endpoint,
             mut session,
-            tier: _tier,
+            // Recorded in the trail, so "this was relayed" is visible
+            // afterwards rather than only in the moment it was printed.
+            tier,
         } = reach(
             &identity,
             &Reaching {
@@ -3493,6 +3517,19 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        // **Written down at this end too.** The host has recorded who
+        // connected to it since Phase 2; this is the other half of the same
+        // question — what this machine reached, and what it was allowed to do
+        // there. One line per session, and never a byte of what crossed.
+        let far_end = crate::trail::peer_of(&session);
+        crate::trail::went_out(
+            &far_end,
+            esper_audit::Event::SessionOpened {
+                granted: grant.granted.clone(),
+                tier: tier.describe().to_owned(),
+            },
+        );
+
         // Asked for and not given: said here rather than discovered later by
         // a keystroke that had no effect.
         if o.control && !grant.allows(Permission::Control) {
@@ -3860,6 +3897,19 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 match d {
                     Decoded::Picture { picture, .. } => {
                         pictures = pictures.saturating_add(1);
+                        // **The first one, said once.** On a good link this is
+                        // a few tens of milliseconds and nobody needs telling;
+                        // on a link that has to ratchet 1280x720 down to
+                        // something a 200 kbit/s pipe carries it is several
+                        // seconds, and the difference between "working" and
+                        // "hung" is exactly this line. It is also what a test
+                        // can wait for instead of guessing how long to allow.
+                        if pictures == 1 {
+                            println!(
+                                "  first      picture after {} ms",
+                                started.elapsed().as_millis()
+                            );
+                        }
                         if let Some(p) = presenter.as_mut() {
                             // The whole picture: the receiving side is not
                             // told which regions changed, because the damage
@@ -4179,9 +4229,9 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // reason code used to be a failure, so a session ending normally
         // looked like one; the 0xx class exists so "the person closed the
         // window" and "the host refused you" are different sentences.
-        match closed_by_peer {
+        match &closed_by_peer {
             Some((code, text)) => {
-                let described = code.describe().unwrap_or(&text);
+                let described = code.describe().unwrap_or(text);
                 if code.is_failure() {
                     println!("  · the host ended the session: {described} ({})", code.0);
                 } else {
@@ -4230,6 +4280,26 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let path = link.transport();
         let jitter = link.jitter();
         let seconds = started.elapsed().as_secs_f64().max(0.001);
+        // **The other end of the outbound line**, so the trail holds how long
+        // this machine was connected rather than only that it was. The reason
+        // is the sentence the far end or this one gave, which is what makes a
+        // line about a session that *ended badly* distinguishable afterwards.
+        crate::trail::went_out(
+            &far_end,
+            esper_audit::Event::SessionClosed {
+                duration_secs: started.elapsed().as_secs(),
+                reason: closed_by_peer.as_ref().map_or_else(
+                    || "closed at this end".to_owned(),
+                    |(code, text)| {
+                        if text.is_empty() {
+                            format!("the host closed it ({})", code.0)
+                        } else {
+                            format!("the host closed it: {text}")
+                        }
+                    },
+                ),
+            },
+        );
         println!("  pictures   {pictures} shown, {skipped} not shown");
         // **Said only when there was sound**, and said in the terms that
         // matter: how much was heard, how much was reconstructed because a

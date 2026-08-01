@@ -108,6 +108,18 @@ pub fn run(o: &ShotOptions) -> Result<(), String> {
             return Err("this device may not view that host's screen".to_owned());
         }
 
+        // **A screenshot is a session, and goes in the trail as one.** It is
+        // the shortest session this product has and the easiest to take
+        // without leaving a trace, which is precisely why it leaves one here.
+        let far_end = *session.peer_key();
+        crate::trail::went_out(
+            &far_end,
+            esper_audit::Event::SessionOpened {
+                granted: grant.granted.clone(),
+                tier: "one picture".to_owned(),
+            },
+        );
+
         let link = esper_link::ControllerLink::open(media, control)
             .await
             .map_err(|e| format!("opening the stream: {e}"))?;
