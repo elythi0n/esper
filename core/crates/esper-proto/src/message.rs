@@ -1212,6 +1212,60 @@ pub struct StreamConfig {
     /// The RTP synchronisation source for this stream, which is how a
     /// datagram is matched to a monitor.
     pub ssrc: u32,
+    /// What somebody standing at the host would see of this session.
+    ///
+    /// **The one field in this message that is not about the picture**, and it
+    /// is here because the person at the *other* end is party to whatever the
+    /// answer is. A host that cannot show its own indicator will not serve at
+    /// all by default; the owner of that machine can decide otherwise, and a
+    /// controller should be able to say so rather than let somebody find out
+    /// afterwards.
+    #[serde(default)]
+    pub seen: Seen,
+}
+
+/// What somebody at the host would see of a session.
+///
+/// **Three states rather than a flag**, because a machine with no screen and a
+/// machine whose screen shows nothing are opposite situations wearing the same
+/// answer: the first is every server this product was built for, and the
+/// second is the one thing the indicator exists to prevent. A single boolean
+/// forces a controller to warn about both or neither.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Seen {
+    /// An indicator is up, confirmed by reading the host's own screen.
+    ///
+    /// The default, for a peer built before this field existed: an old host is
+    /// not a host with a broken indicator, and warning about every one of them
+    /// is how a warning stops being read.
+    #[default]
+    Shown,
+    /// The host has no screen, so there is nobody there to show anything to.
+    NoScreen,
+    /// The host has a screen and cannot show an indicator on it.
+    ///
+    /// Only reachable where somebody set `host.serve_without_indicator`,
+    /// because that is the one case where this host serves anyway.
+    NotShown,
+}
+
+impl Seen {
+    /// What a controller should tell whoever is watching.
+    ///
+    /// `None` when there is nothing worth saying — the ordinary case, where
+    /// the host is showing what it should.
+    #[must_use]
+    pub const fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Shown => None,
+            Self::NoScreen => Some("this host has no screen, so nothing there shows a session"),
+            Self::NotShown => Some(
+                "THIS HOST CANNOT SHOW THAT IT IS BEING WATCHED: nobody sitting at it will see \
+                 an indicator",
+            ),
+        }
+    }
 }
 
 impl StreamConfig {
@@ -2540,6 +2594,7 @@ mod media_tests {
             max_fps: 30,
             clock_hz: 90_000,
             ssrc: 0xDEAD_BEEF,
+            seen: Seen::Shown,
         }
     }
 

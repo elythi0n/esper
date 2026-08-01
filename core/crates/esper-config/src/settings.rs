@@ -259,6 +259,25 @@ pub static SETTINGS: &[Setting] = &[
         about: "The longest edge to send, in pixels. None sends the screen's own size.",
     },
     Setting {
+        key: "host.serve_without_indicator",
+        kind: Kind::Flag,
+        // **Off, which is a refusal to serve.** Software that can watch a
+        // screen has to make being watched obvious, and a host that cannot
+        // show that has nothing to fall back on: the person in front of the
+        // machine gets no warning at all. Until this setting existed such a
+        // host printed a line about it and then served anyway, which is the
+        // documented version of a guarantee rather than the enforced one.
+        //
+        // It is a setting rather than an absent option because there is one
+        // real case for it — a display this product cannot draw on but
+        // somebody still wants to reach — and the alternative to a switch is
+        // that person having no product. Turning it on is a decision with a
+        // name, which is the point.
+        default: Value::Flag(false),
+        about: "Serve sessions even when this machine cannot show that it is being watched. \
+                Off refuses to serve on a display where the indicator cannot be confirmed.",
+    },
+    Setting {
         key: "host.pace_to_measured",
         kind: Kind::Flag,
         // **On, and switchable.** Six attempts at pacing a media session were

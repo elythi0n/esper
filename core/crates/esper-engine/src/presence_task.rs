@@ -22,12 +22,39 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use esper_presence::{HostEvent, Presence, Watching};
+use esper_presence::{HostEvent, Missing, Presence, Verdict, Watching};
 
 /// How often the indicator's connection is looked at.
 const TICK: Duration = Duration::from_millis(30);
+
+/// How often the screen is asked whether the indicator is on it.
+///
+/// **A second, which is a claim about how long a session may run with a hidden
+/// indicator.** Faster costs a round trip to the display server for nothing
+/// most of the time; slower is a second of somebody's screen being watched
+/// with nothing on it saying so, and this is the one guarantee where that
+/// interval *is* the guarantee.
+const VERIFY_EVERY: Duration = Duration::from_secs(1);
+
+/// What the screen last said about the indicator.
+///
+/// **Not a boolean**, because "it is not there" splits into cases a caller
+/// treats differently: one is rebuilt from here, one is not fixable from here
+/// at all, and one is a check that could not run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sighting {
+    /// Nothing is being shown, and nothing should be.
+    Down,
+    /// On the screen, confirmed by reading the screen.
+    OnScreen,
+    /// Asked for, and not on the screen.
+    Missing(Missing),
+}
+
+/// What the screen says, as it changes.
+pub type Sightings = tokio::sync::watch::Receiver<Sighting>;
 
 /// What the session wants the indicator to say.
 #[derive(Debug)]
@@ -41,6 +68,8 @@ enum Command {
 #[derive(Debug)]
 pub struct Indicator {
     to_thread: Sender<Command>,
+    /// What the screen says about the frame, kept current by the thread.
+    sightings: Sightings,
     backend: &'static str,
     /// Whether the panic key is actually held by us.
     armed: bool,
@@ -65,6 +94,16 @@ impl Indicator {
     #[must_use]
     pub const fn can_show(&self) -> bool {
         self.can_show
+    }
+
+    /// What the screen says about the indicator, as it changes.
+    ///
+    /// **The half that makes the indicator a guarantee rather than an
+    /// intention**: a session watches this and stops showing a picture when
+    /// the screen stops showing the frame.
+    #[must_use]
+    pub fn sightings(&self) -> Sightings {
+        self.sightings.clone()
     }
 
     /// Show that a session is happening.
@@ -117,10 +156,12 @@ pub fn start() -> Result<(Indicator, Presses), String> {
         // Four deep: a person hitting the key repeatedly should not have
         // presses dropped, and nobody presses it more than a handful of times.
         let (panic_tx, panic_rx) = tokio::sync::mpsc::channel(4);
-        std::thread::spawn(move || run(presence, commands, panic_tx));
+        let (seen_tx, sightings) = tokio::sync::watch::channel(Sighting::Down);
+        std::thread::spawn(move || run(presence, commands, panic_tx, seen_tx));
         Ok((
             Indicator {
                 to_thread,
+                sightings,
                 backend,
                 armed,
                 can_show,
@@ -134,12 +175,19 @@ pub fn start() -> Result<(Indicator, Presses), String> {
     }
 }
 
-/// The thread: show what it is told, and report the panic key.
+/// The thread: show what it is told, report the panic key, and keep asking the
+/// screen whether the indicator is really on it.
 fn run<P: Presence>(
     mut presence: P,
     commands: Receiver<Command>,
     presses: tokio::sync::mpsc::Sender<HostEvent>,
+    seen: tokio::sync::watch::Sender<Sighting>,
 ) {
+    // What the indicator was last asked to say, so the frame can be built
+    // again after something destroys it — which needs the words, not just the
+    // knowledge that something was showing.
+    let mut asked: Option<Watching> = None;
+    let mut checked_at = Instant::now();
     loop {
         // **Polled before the commands are read**, so a panic pressed at the
         // same moment the host is shutting down is still reported. Acting on
@@ -169,18 +217,118 @@ fn run<P: Presence>(
                 if let Err(e) = presence.show(&watching) {
                     tracing::error!("could not show the session indicator: {e}");
                 }
+                asked = Some(watching);
+                // **Verified here, not on the next tick.** A session waits for
+                // this answer before it sends a picture, so the wait is as long
+                // as this check takes rather than as long as the cadence is.
+                look(&mut presence, &seen, &asked);
+                checked_at = Instant::now();
             }
             Ok(Command::Hide) => {
                 if let Err(e) = presence.hide() {
                     tracing::error!("could not take the session indicator down: {e}");
                 }
+                asked = None;
+                let _ = seen.send_if_modified(|s| replace(s, Sighting::Down));
             }
             Ok(Command::Stop) | Err(TryRecvError::Disconnected) => break,
             Err(TryRecvError::Empty) => {}
         }
+
+        // **The watchdog.** Everything that hides the frame after it went up
+        // happens without this process being told: a compositor restarting
+        // destroys its windows, a program can be raised over it, and X11 has
+        // no event for "your window is no longer the top thing at this pixel".
+        // So the screen is asked, on a cadence, for as long as a session lasts.
+        if asked.is_some() && checked_at.elapsed() >= VERIFY_EVERY {
+            look(&mut presence, &seen, &asked);
+            checked_at = Instant::now();
+        }
         std::thread::sleep(TICK);
     }
     let _ = presence.hide();
+}
+
+/// Wait until the screen shows the indicator, or say why it does not.
+///
+/// **What "before a single frame goes out" costs.** A session asks for the
+/// frame and then waits here, so the picture starts a round trip to the
+/// display server later than it used to — measured in milliseconds on the
+/// machines this runs on, against a session that used to start streaming
+/// whether or not anybody could see it was being watched.
+///
+/// A patience rather than a single look, because `show` and the first
+/// verification happen on another thread: an answer that has not arrived yet
+/// is not an answer of "no".
+pub async fn confirmed(indicator: &Indicator, patience: Duration) -> Result<usize, String> {
+    let mut sightings = indicator.sightings();
+    let deadline = tokio::time::Instant::now() + patience;
+    let mut looks = 0usize;
+    loop {
+        looks = looks.saturating_add(1);
+        match &*sightings.borrow_and_update() {
+            Sighting::OnScreen => return Ok(looks),
+            Sighting::Missing(missing) => return Err(missing.describe()),
+            // Nothing has been reported yet: the thread has not got to it.
+            Sighting::Down => {}
+        }
+        if tokio::time::timeout_at(deadline, sightings.changed())
+            .await
+            .is_err()
+        {
+            return Err("the indicator's own thread did not answer in time".to_owned());
+        }
+    }
+}
+
+/// Ask the screen, put the frame back if that is what is wrong, and publish.
+///
+/// **One attempt at a rebuild, in here rather than in the caller.** A
+/// compositor restarting is the ordinary reason the windows are gone, it is
+/// recoverable, and it happens while somebody's screen is being watched — so
+/// waiting for a session loop to notice and ask would be a gap of exactly the
+/// kind this check exists to close.
+fn look<P: Presence>(
+    presence: &mut P,
+    seen: &tokio::sync::watch::Sender<Sighting>,
+    asked: &Option<Watching>,
+) {
+    let mut verdict = presence.verify();
+    if let Ok(Verdict::Missing(missing)) = &verdict
+        && missing.worth_rebuilding()
+        && let Some(watching) = asked
+    {
+        tracing::warn!(
+            "the session indicator is not on screen ({}), putting it back",
+            missing.describe()
+        );
+        if presence.show(watching).is_ok() {
+            verdict = presence.verify();
+        }
+    }
+    let now = match verdict {
+        Ok(Verdict::OnScreen { checked }) if checked > 0 => Sighting::OnScreen,
+        Ok(Verdict::OnScreen { .. }) => Sighting::Missing(Missing::Unreadable(
+            "the check looked at no part of the screen".to_owned(),
+        )),
+        Ok(Verdict::Missing(Missing::NothingAsked)) => Sighting::Down,
+        Ok(Verdict::Missing(missing)) => Sighting::Missing(missing),
+        // A backend that cannot answer is not a backend saying yes.
+        Err(e) => Sighting::Missing(Missing::Unreadable(e.to_string())),
+    };
+    let _ = seen.send_if_modified(|s| replace(s, now));
+}
+
+/// Set a watched value, saying whether it changed.
+///
+/// `send_if_modified` wants that answer: sending on every check would wake
+/// every session loop once a second to be told nothing had changed.
+fn replace(slot: &mut Sighting, now: Sighting) -> bool {
+    if *slot == now {
+        return false;
+    }
+    *slot = now;
+    true
 }
 
 #[cfg(test)]
@@ -216,7 +364,12 @@ mod tests {
         // Stopped after one turn, the way the tests above do it: the presses
         // are already queued, so there is nothing to wait for.
         to_thread.send(Command::Stop).expect("send");
-        run(presence, commands, tx);
+        run(
+            presence,
+            commands,
+            tx,
+            tokio::sync::watch::channel(Sighting::Down).0,
+        );
         let mut seen = Vec::new();
         while let Ok(event) = rx.try_recv() {
             seen.push(event);
@@ -243,13 +396,180 @@ mod tests {
 
         // Run it to completion on this thread: the commands are already
         // queued, so there is nothing to wait for.
-        run(presence, commands, panic_tx);
+        run(
+            presence,
+            commands,
+            panic_tx,
+            tokio::sync::watch::channel(Sighting::Down).0,
+        );
 
         assert_eq!(
             panic_rx.try_recv(),
             Ok(HostEvent::Panic),
             "the press must have been reported"
         );
+    }
+
+    /// **Showing is not the same as being on the screen**, and the thread
+    /// reports the difference.
+    ///
+    /// The whole point of the verifying half: `show` returning `Ok` was the
+    /// only thing the engine ever knew, and a frame that never reached the
+    /// screen looked exactly like one that did.
+    #[test]
+    fn the_thread_says_whether_the_screen_shows_the_frame() {
+        let presence = NullPresence::new();
+        let (to_thread, commands) = channel();
+        let (panic_tx, _panic_rx) = tokio::sync::mpsc::channel(4);
+        let (seen_tx, seen) = tokio::sync::watch::channel(Sighting::Down);
+
+        to_thread.send(Command::Show(watching(true))).expect("send");
+        to_thread.send(Command::Stop).expect("send");
+        run(presence, commands, panic_tx, seen_tx);
+
+        assert_eq!(
+            *seen.borrow(),
+            Sighting::OnScreen,
+            "the screen was asked and said the frame is there"
+        );
+    }
+
+    /// **Something drawn over the frame is reported, not smoothed over.**
+    ///
+    /// A cover cannot be rebuilt away, so the verdict has to survive the
+    /// thread's own recovery attempt: a session decides what to do about it,
+    /// and it can only do that if it is told.
+    #[test]
+    fn a_covered_frame_is_reported_as_missing() {
+        let mut presence = NullPresence::new();
+        presence.cover();
+        let (to_thread, commands) = channel();
+        let (panic_tx, _panic_rx) = tokio::sync::mpsc::channel(4);
+        let (seen_tx, seen) = tokio::sync::watch::channel(Sighting::Down);
+
+        to_thread
+            .send(Command::Show(watching(false)))
+            .expect("send");
+        to_thread.send(Command::Stop).expect("send");
+        run(presence, commands, panic_tx, seen_tx);
+
+        match &*seen.borrow() {
+            Sighting::Missing(Missing::Covered { .. }) => {}
+            other => panic!("a covered frame was reported as {other:?}"),
+        }
+    }
+
+    /// **Windows a compositor destroyed are put back, and the rebuild is what
+    /// this asserts.**
+    ///
+    /// Aimed at `look` rather than at the thread, because the first version of
+    /// this test proved nothing: it made the frame missing *before* asking for
+    /// it, and asking for it is itself the rebuild — so the recovery path
+    /// never ran, and removing it entirely left the test passing. Found by
+    /// sabotage, which is the only reason it was found at all.
+    #[test]
+    fn windows_that_are_gone_are_rebuilt_and_then_confirmed() {
+        let mut presence = NullPresence::new();
+        let asked = watching(false);
+        presence.show(&asked).expect("shown");
+        // Now the screen loses them, the way a compositor restarting does:
+        // after the frame was asked for, with nothing telling this process.
+        presence.destroy();
+        let (seen_tx, seen) = tokio::sync::watch::channel(Sighting::Down);
+
+        look(&mut presence, &seen_tx, &Some(asked));
+
+        assert_eq!(
+            *seen.borrow(),
+            Sighting::OnScreen,
+            "the frame should have been rebuilt and then confirmed"
+        );
+        assert_eq!(
+            presence.asked.len(),
+            2,
+            "and the rebuild is the second time it was asked for: {:?}",
+            presence.asked
+        );
+    }
+
+    /// **A frame with something over it is not rebuilt away.**
+    ///
+    /// Rebuilding would not fix it on a real display — the covering window is
+    /// still there and still on top — so a backend that reported success
+    /// after trying would be reporting the attempt rather than the screen.
+    #[test]
+    fn a_cover_is_not_something_a_rebuild_pretends_to_fix() {
+        let mut presence = NullPresence::new();
+        let asked = watching(true);
+        presence.show(&asked).expect("shown");
+        presence.cover();
+        let (seen_tx, seen) = tokio::sync::watch::channel(Sighting::Down);
+
+        look(&mut presence, &seen_tx, &Some(asked));
+
+        match &*seen.borrow() {
+            Sighting::Missing(Missing::Covered { .. }) => {}
+            other => panic!("a covered frame was smoothed over as {other:?}"),
+        }
+        assert_eq!(
+            presence.asked.len(),
+            1,
+            "and nothing tried to rebuild it: {:?}",
+            presence.asked
+        );
+    }
+
+    /// Hiding says the indicator is down, which is not a fault.
+    ///
+    /// A session that treated "down" as "missing" would refuse the next
+    /// session on a host that had simply finished the last one.
+    #[test]
+    fn hiding_reports_down_rather_than_a_fault() {
+        let presence = NullPresence::new();
+        let (to_thread, commands) = channel();
+        let (panic_tx, _panic_rx) = tokio::sync::mpsc::channel(4);
+        let (seen_tx, seen) = tokio::sync::watch::channel(Sighting::Down);
+
+        to_thread.send(Command::Show(watching(true))).expect("send");
+        to_thread.send(Command::Hide).expect("send");
+        to_thread.send(Command::Stop).expect("send");
+        run(presence, commands, panic_tx, seen_tx);
+
+        assert_eq!(*seen.borrow(), Sighting::Down);
+    }
+
+    /// **A session waits for the answer rather than assuming one.**
+    ///
+    /// `confirmed` is what stands between a controller and the first picture,
+    /// so a no has to come back with a *reason* — a session refused with no
+    /// explanation is a support call.
+    #[tokio::test]
+    async fn a_session_waits_for_the_screens_answer() {
+        let (to_thread, commands) = channel();
+        let (panic_tx, panic_rx) = tokio::sync::mpsc::channel(4);
+        let (seen_tx, sightings) = tokio::sync::watch::channel(Sighting::Down);
+        let indicator = Indicator {
+            to_thread,
+            sightings,
+            backend: "null",
+            armed: true,
+            can_show: true,
+        };
+        let mut presence = NullPresence::new();
+        presence.cover();
+        let handle = std::thread::spawn(move || run(presence, commands, panic_tx, seen_tx));
+
+        indicator.show(watching(true));
+        let answer = confirmed(&indicator, Duration::from_secs(2)).await;
+        let why = answer.expect_err("a covered frame is not a confirmation");
+        assert!(
+            why.contains("drawn over"),
+            "the refusal has to say what is wrong: {why}"
+        );
+
+        drop(indicator);
+        handle.join().expect("the thread ends when the handle goes");
+        drop(panic_rx);
     }
 
     /// **One press is one event.** The first version latched a flag, so every
@@ -262,7 +582,12 @@ mod tests {
         let (to_thread, commands) = channel();
         let (panic_tx, mut panic_rx) = tokio::sync::mpsc::channel(4);
         to_thread.send(Command::Stop).expect("send");
-        run(presence, commands, panic_tx);
+        run(
+            presence,
+            commands,
+            panic_tx,
+            tokio::sync::watch::channel(Sighting::Down).0,
+        );
 
         assert_eq!(
             panic_rx.try_recv(),
@@ -285,7 +610,12 @@ mod tests {
         let (to_thread, commands) = channel();
         let (panic_tx, mut panic_rx) = tokio::sync::mpsc::channel(4);
         to_thread.send(Command::Stop).expect("send");
-        run(presence, commands, panic_tx);
+        run(
+            presence,
+            commands,
+            panic_tx,
+            tokio::sync::watch::channel(Sighting::Down).0,
+        );
         assert_eq!(panic_rx.try_recv(), Ok(HostEvent::Panic));
         assert_eq!(panic_rx.try_recv(), Ok(HostEvent::Panic));
         assert!(panic_rx.try_recv().is_err());
@@ -301,7 +631,12 @@ mod tests {
         let (to_thread, commands) = channel();
         let (panic_tx, mut panic_rx) = tokio::sync::mpsc::channel(4);
         to_thread.send(Command::Stop).expect("send");
-        run(presence, commands, panic_tx);
+        run(
+            presence,
+            commands,
+            panic_tx,
+            tokio::sync::watch::channel(Sighting::Down).0,
+        );
         assert_eq!(panic_rx.try_recv(), Ok(HostEvent::Panic));
     }
 
@@ -317,7 +652,12 @@ mod tests {
             .expect("send");
         drop(to_thread);
         // A disconnected channel ends the thread, which hides on the way out.
-        run(presence, commands, panic_tx);
+        run(
+            presence,
+            commands,
+            panic_tx,
+            tokio::sync::watch::channel(Sighting::Down).0,
+        );
         // The recording presence is consumed by `run`, so what is checked here
         // is that it terminated at all rather than looping for ever — a
         // disconnected command channel is how the process going away looks

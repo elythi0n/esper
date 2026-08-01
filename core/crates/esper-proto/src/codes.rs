@@ -90,6 +90,16 @@ impl Reason {
     pub const NO_CAPTURE_BACKEND: Self = Self(401);
     pub const NO_DISPLAY: Self = Self(402);
     pub const NO_INPUT_BACKEND: Self = Self(403);
+    /// The host cannot confirm that its own session indicator is on screen.
+    ///
+    /// **A capability rather than a permission**, which is why it lives in
+    /// this class: the device is allowed, the host is willing, and the machine
+    /// cannot keep the promise that being watched is visible to whoever is
+    /// sitting at it. Its own code because there is nothing the controller can
+    /// do about it and nothing to retry — a person has to look at the host's
+    /// screen — and a device told "permission denied" would go asking for
+    /// permissions it already has.
+    pub const INDICATOR_UNCONFIRMED: Self = Self(404);
 
     // 5xx — transport
     pub const ALL_TIERS_EXHAUSTED: Self = Self(500);
@@ -158,6 +168,7 @@ impl Reason {
             Self::NO_CAPTURE_BACKEND => "no screen capture backend available",
             Self::NO_DISPLAY => "no display to capture",
             Self::NO_INPUT_BACKEND => "no input injection backend available",
+            Self::INDICATOR_UNCONFIRMED => "the host cannot show that it is being watched",
             Self::ALL_TIERS_EXHAUSTED => "every connection tier failed",
             Self::RELAY_FULL => "relay is at capacity",
             Self::MIGRATION_FAILED => "connection migration failed",
@@ -244,6 +255,7 @@ mod tests {
             Reason::NO_CAPTURE_BACKEND,
             Reason::NO_DISPLAY,
             Reason::NO_INPUT_BACKEND,
+            Reason::INDICATOR_UNCONFIRMED,
             Reason::ALL_TIERS_EXHAUSTED,
             Reason::RELAY_FULL,
             Reason::MIGRATION_FAILED,

@@ -133,7 +133,13 @@ async fn a_screen_arrives_over_a_real_connection() {
     let (host_media, host_control) = parts(&mut host_session).expect("host parts");
     let (ctrl_media, ctrl_control) = parts(&mut ctrl_session).expect("controller parts");
 
-    let mut host = HostLink::new(&host_media, host_control, pipeline(30)).expect("a host link");
+    let mut host = HostLink::new(
+        &host_media,
+        host_control,
+        pipeline(30),
+        esper_proto::Seen::Shown,
+    )
+    .expect("a host link");
     let announced = host.announce().await.expect("announced");
     assert!(announced.is_well_formed());
     assert_eq!((announced.width, announced.height), (W, H));
@@ -287,7 +293,8 @@ async fn the_path_mtu_comes_from_the_transport() {
         "loopback reported a {from_transport}-byte path"
     );
 
-    let host = HostLink::new(&media, control, pipeline(30)).expect("a host link");
+    let host = HostLink::new(&media, control, pipeline(30), esper_proto::Seen::Shown)
+        .expect("a host link");
     // Every datagram the packetizer produces has to fit what the transport
     // said, which is what the sink's zero refusals in the session test show.
     assert!(host.config().is_well_formed());
@@ -302,7 +309,13 @@ async fn a_hint_reaches_the_host_over_the_control_stream() {
     let (host_media, host_control) = parts(&mut host_session).expect("host parts");
     let (ctrl_media, ctrl_control) = parts(&mut ctrl_session).expect("controller parts");
 
-    let mut host = HostLink::new(&host_media, host_control, pipeline(60)).expect("a host link");
+    let mut host = HostLink::new(
+        &host_media,
+        host_control,
+        pipeline(60),
+        esper_proto::Seen::Shown,
+    )
+    .expect("a host link");
     host.announce().await.expect("announced");
     assert_eq!(host.stream().pipeline().requested_fps(), 60);
 
@@ -356,7 +369,13 @@ async fn the_controllers_opening_request_arrives_before_any_frame() {
     let (host_media, host_control) = parts(&mut host_session).expect("host parts");
     let (ctrl_media, ctrl_control) = parts(&mut ctrl_session).expect("controller parts");
 
-    let mut host = HostLink::new(&host_media, host_control, pipeline(30)).expect("a host link");
+    let mut host = HostLink::new(
+        &host_media,
+        host_control,
+        pipeline(30),
+        esper_proto::Seen::Shown,
+    )
+    .expect("a host link");
     host.announce().await.expect("announced");
 
     // Opening the controller is the only thing that happens. No frame is

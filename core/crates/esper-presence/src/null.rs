@@ -5,7 +5,7 @@
 //! when the session ends — and, most of all, that nothing a controller sends
 //! can make it come down early.
 
-use crate::{HostEvent, Presence, PresenceError, Watching};
+use crate::{HostEvent, Missing, Presence, PresenceError, Verdict, Watching};
 
 /// One thing the indicator was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,16 @@ pub struct NullPresence {
     /// Events to hand out on the next poll, for testing what a caller does
     /// with a panic.
     pub pending: Vec<HostEvent>,
+    /// What the next verification should find, when it should not find the
+    /// indicator.
+    ///
+    /// **The whole point of this backend for the verifying half**: a session
+    /// that stops because the indicator cannot be confirmed is the behaviour
+    /// worth testing, and it cannot be provoked on a real display without
+    /// something drawing over the screen.
+    pub screen_says: Option<Missing>,
+    /// How many times the screen was asked.
+    pub verified: usize,
     showing: Option<Watching>,
 }
 
@@ -41,6 +51,26 @@ impl NullPresence {
         self.pending.push(HostEvent::Pause);
     }
 
+    /// Pretend something is drawn over the frame.
+    pub fn cover(&mut self) {
+        self.screen_says = Some(Missing::Covered {
+            wrong: 3,
+            of: 12,
+            saw: [0, 0, 0],
+            at: (2, 2),
+        });
+    }
+
+    /// Pretend a compositor destroyed the frame's windows.
+    pub fn destroy(&mut self) {
+        self.screen_says = Some(Missing::Gone);
+    }
+
+    /// Pretend the screen is showing what it was asked to.
+    pub fn uncover(&mut self) {
+        self.screen_says = None;
+    }
+
     /// What the indicator currently says.
     #[must_use]
     pub const fn saying(&self) -> Option<&Watching> {
@@ -54,6 +84,16 @@ impl Presence for NullPresence {
     }
 
     fn show(&mut self, watching: &Watching) -> Result<(), PresenceError> {
+        // Showing again is what a caller does about windows that are gone, so
+        // it clears that — but not something drawn *over* the frame, which
+        // rebuilding does not fix on a real display either.
+        if self
+            .screen_says
+            .as_ref()
+            .is_some_and(Missing::worth_rebuilding)
+        {
+            self.screen_says = None;
+        }
         self.showing = Some(watching.clone());
         self.asked.push(Shown::Up(watching.clone()));
         Ok(())
@@ -71,5 +111,19 @@ impl Presence for NullPresence {
 
     fn is_showing(&self) -> bool {
         self.showing.is_some()
+    }
+
+    fn verify(&mut self) -> Result<Verdict, PresenceError> {
+        self.verified = self.verified.saturating_add(1);
+        if self.showing.is_none() {
+            return Ok(Verdict::Missing(Missing::NothingAsked));
+        }
+        // A rebuild is what a caller does about `Gone`, and this backend has
+        // to let one succeed or the caller's recovery path is untestable: the
+        // next `show` clears it, the same way building the windows again would.
+        match self.screen_says.clone() {
+            Some(missing) => Ok(Verdict::Missing(missing)),
+            None => Ok(Verdict::OnScreen { checked: 12 }),
+        }
     }
 }

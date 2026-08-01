@@ -584,3 +584,168 @@ fn the_pause_key_arrives_as_a_pause() {
         "the pause key ended the session — {seen:?}"
     );
 }
+
+/// **Asking the screen, not this process's own memory.**
+///
+/// `show` returning `Ok` means the requests were accepted, which is a fact
+/// about this connection. What a person relies on is the frame being *on the
+/// screen*, and the two came apart in every interesting case until `verify`
+/// existed. So: nothing asked for, then asked for and confirmed.
+#[test]
+fn the_screen_confirms_the_frame_when_it_is_there() {
+    if !may_disturb_the_display() {
+        return;
+    }
+    let _display = exclusive();
+    let Some(mut p) = open() else { return };
+    if !p.can_show() {
+        println!("skipped: this server has no SHAPE extension");
+        return;
+    }
+
+    let before = p.verify().expect("a verdict");
+    assert_eq!(
+        before,
+        esper_presence::Verdict::Missing(esper_presence::Missing::NothingAsked),
+        "nothing has been asked for yet, which is not a fault"
+    );
+
+    p.show(&watching(true)).expect("shown");
+    let verdict = p.verify().expect("a verdict");
+    match verdict {
+        esper_presence::Verdict::OnScreen { checked } => {
+            assert!(checked >= 12, "only {checked} places were looked at");
+        }
+        other => panic!("the frame is up and the screen says {other:?}"),
+    }
+
+    // And it is the right colour: a paused session says something different,
+    // and a check that accepted any colour would accept the wrong one.
+    p.show(&esper_presence::Watching {
+        peer: "somebody".to_owned(),
+        controlling: true,
+        paused: true,
+    })
+    .expect("shown paused");
+    assert!(
+        p.verify().expect("a verdict").is_on_screen(),
+        "the paused colour should confirm as itself"
+    );
+    p.hide().expect("hidden");
+}
+
+/// **Something drawn over the frame is the case nothing else can catch.**
+///
+/// The windows exist, they are mapped, this process asked for them and every
+/// answer it can give itself is "yes" — and the screen shows white. Only
+/// reading the pixels back finds it, which is why `verify` reads pixels.
+///
+/// Deliberately does not poll: a poll raises the frame again, which is the
+/// recovery this product already had. What is being tested is whether the
+/// state is *noticed*, because a session that carries on while the indicator
+/// is hidden is the failure this is about.
+#[test]
+fn the_screen_says_when_something_is_drawn_over_the_frame() {
+    if !may_disturb_the_display() {
+        return;
+    }
+    let _display = exclusive();
+    let Some(mut p) = open() else { return };
+    if !p.can_show() {
+        println!("skipped: this server has no SHAPE extension");
+        return;
+    }
+    p.show(&watching(true)).expect("shown");
+    assert!(p.verify().expect("a verdict").is_on_screen(), "up first");
+
+    let Some(intruder) = Intruder::cover_the_screen() else {
+        println!("skipped: could not create a covering window");
+        return;
+    };
+    let verdict = p.verify().expect("a verdict");
+    match verdict {
+        esper_presence::Verdict::Missing(esper_presence::Missing::Covered {
+            wrong,
+            of,
+            saw,
+            at,
+        }) => {
+            assert_eq!(wrong, of, "the whole screen is covered, at {at:?}");
+            assert!(
+                saw.iter().all(|c| *c > 200),
+                "the cover is white, and the message says {saw:?}"
+            );
+        }
+        other => panic!("the frame is covered and the screen says {other:?}"),
+    }
+    // The windows themselves are untouched, which is exactly why this needed
+    // pixels: everything this process can ask about itself still says fine.
+    assert!(p.is_showing(), "and this process still believes it is up");
+
+    // Uncovered and raised again, it confirms — so the verdict follows the
+    // screen rather than latching.
+    drop(intruder);
+    let _ = p.poll().expect("poll");
+    let mut back = false;
+    for _ in 0..30 {
+        if p.verify().expect("a verdict").is_on_screen() {
+            back = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        back,
+        "the frame should confirm again once nothing covers it"
+    );
+    p.hide().expect("hidden");
+}
+
+/// **A compositor restarting destroys override-redirect windows.**
+///
+/// Simulated the only way it can be from a test: another connection destroys
+/// them, which is what X11 allows anybody who knows the window id to do. The
+/// verdict has to be `Gone` rather than `Covered`, because the two mean
+/// different things to whoever acts on it — one can be rebuilt from here and
+/// the other cannot.
+#[test]
+fn windows_destroyed_by_something_else_are_reported_as_gone() {
+    if !may_disturb_the_display() {
+        return;
+    }
+    let _display = exclusive();
+    let Some(mut p) = open() else { return };
+    if !p.can_show() {
+        println!("skipped: this server has no SHAPE extension");
+        return;
+    }
+    p.show(&watching(false)).expect("shown");
+    assert!(p.verify().expect("a verdict").is_on_screen(), "up first");
+
+    let windows = p.windows();
+    assert_eq!(windows.len(), 4, "four edges");
+    let (conn, _) = x11rb::connect(None).expect("a second connection");
+    for window in windows {
+        let _ = conn.destroy_window(window);
+    }
+    conn.flush().expect("flushed");
+
+    let verdict = p.verify().expect("a verdict");
+    assert_eq!(
+        verdict,
+        esper_presence::Verdict::Missing(esper_presence::Missing::Gone),
+        "destroyed windows are gone, not covered"
+    );
+    assert!(
+        matches!(&verdict, esper_presence::Verdict::Missing(m) if m.worth_rebuilding()),
+        "and rebuilding them is worth trying"
+    );
+
+    // Which is what showing again does, and the screen confirms it.
+    p.show(&watching(false)).expect("shown again");
+    assert!(
+        p.verify().expect("a verdict").is_on_screen(),
+        "the frame should be back after being rebuilt"
+    );
+    p.hide().expect("hidden");
+}

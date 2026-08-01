@@ -25,19 +25,41 @@
 //! reaching for the panic key does not first check whether Num Lock is on —
 //! and a hotkey that works only sometimes is worse than one that does not
 //! exist, because the person will reach for it in an emergency.
+//!
+//! # Reading it back
+//!
+//! Creating the windows is not the same as the screen showing them, so
+//! [`Presence::verify`] asks the server for the **pixels** where the frame
+//! should be and compares them with the colour it painted. Three things make
+//! that worth doing rather than trusting the windows: a compositor restarting
+//! destroys override-redirect windows, a window can be restacked underneath
+//! something, and a local program can simply draw over the top — and this
+//! process's own state looks identical in all three cases.
+//!
+//! It reads the **root**, which is what the capture path reads, so what this
+//! confirms is what the far end is being sent and what the person in front of
+//! the machine is looking at. Twelve single-pixel reads, three along each
+//! edge, two pixels inside it: enough that something covering any one edge is
+//! caught, and small enough to run every second without being noticed.
+//!
+//! The one case it inherits from the capture path: on a display with a
+//! compositing manager the root's contents can lag or differ from what is
+//! composited to the monitor. This crate cannot do better than the capturer
+//! there, and it is the same picture either way — if the root says the frame
+//! is present, that is what the remote end receives.
 
 // The engine only uses the X11 backends on Linux. Elsewhere this crate
 // compiles to nothing rather than being absent, so a workspace build for
 // another target still covers every member.
 #![cfg(target_os = "linux")]
 
-use esper_presence::{HostEvent, Presence, PresenceError, Watching};
+use esper_presence::{HostEvent, Missing, Presence, PresenceError, Verdict, Watching};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::Event;
 use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
 use x11rb::protocol::xproto::{
-    ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, ModMask,
-    Rectangle, StackMode, Window, WindowClass,
+    ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, ImageFormat,
+    MapState, ModMask, Rectangle, StackMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -72,6 +94,46 @@ const CONTROLLING: u32 = 0x00FF_2020;
 /// say "nobody is connected", which is false and is the one lie this crate
 /// exists to prevent.
 const PAUSED: u32 = 0x0020_60FF;
+
+/// A pixel as three bytes, for a message a person reads.
+///
+/// **Only for the message.** The comparison happens under the channel mask,
+/// in the server's own terms; this is the part that turns "not the colour it
+/// should be" into something somebody can recognise on their screen. Each
+/// channel is taken from its own mask, so a server with an unusual byte order
+/// produces the colour a person would name rather than a shuffled one.
+fn as_rgb(pixel: u32, channels: u32) -> [u8; 3] {
+    // The masks are not carried separately, so they are recovered from the
+    // combined one: three whole bytes, in whichever order this visual has.
+    let mut out = [0u8; 3];
+    let mut seen = 0usize;
+    for shift in (0..32).step_by(8).rev() {
+        if channels & (0xFF << shift) != 0 && seen < out.len() {
+            if let Some(slot) = out.get_mut(seen) {
+                *slot = ((pixel >> shift) & 0xFF) as u8;
+            }
+            seen = seen.saturating_add(1);
+        }
+    }
+    out
+}
+
+/// Which colour the frame is, for what the indicator is saying.
+///
+/// One function rather than the choice being made where the windows are
+/// built, because the check that reads the screen back has to expect exactly
+/// what was painted: two copies of this would eventually disagree, and the
+/// symptom would be a session that stops because the indicator is the wrong
+/// shade of correct.
+const fn colour_of(watching: &Watching) -> u32 {
+    if watching.paused {
+        PAUSED
+    } else if watching.controlling {
+        CONTROLLING
+    } else {
+        WATCHING
+    }
+}
 
 /// The panic key's keycode, from the same table the injector uses.
 ///
@@ -125,6 +187,15 @@ pub struct X11Presence {
     /// Whether the pause key was had as well.
     paused_key: bool,
     showing: Option<Watching>,
+    /// The bits of a pixel that carry colour, from the root visual.
+    ///
+    /// Kept so a read-back compares in the server's own terms rather than
+    /// converting to RGB and back: whatever the byte order and however the
+    /// channels are arranged, the value painted and the value read are the
+    /// same integer under this mask.
+    channels: u32,
+    /// Bytes per pixel in a `GetImage` reply for the root's depth.
+    pixel_bytes: usize,
 }
 
 impl std::fmt::Debug for X11Presence {
@@ -191,6 +262,24 @@ impl X11Presence {
             let _ = cookie.check();
         }
 
+        // What a pixel of this screen looks like, for reading the frame back.
+        // Absent or unusable values mean the read-back cannot judge a colour,
+        // which it reports rather than guesses at.
+        let setup = conn.setup();
+        let channels = setup
+            .roots
+            .iter()
+            .flat_map(|s| s.allowed_depths.iter())
+            .flat_map(|d| d.visuals.iter())
+            .find(|v| v.visual_id == screen.root_visual)
+            .map_or(0, |v| v.red_mask | v.green_mask | v.blue_mask);
+        let pixel_bytes = setup
+            .pixmap_formats
+            .iter()
+            .find(|f| f.depth == screen.root_depth)
+            .map_or(0, |f| usize::from(f.bits_per_pixel) / 8);
+        let root_depth = screen.root_depth;
+
         let mut me = Self {
             conn,
             root,
@@ -200,7 +289,15 @@ impl X11Presence {
             grabbed: false,
             paused_key: false,
             showing: None,
+            channels,
+            pixel_bytes,
         };
+        if channels == 0 || !(1..=4).contains(&pixel_bytes) {
+            tracing::warn!(
+                "the root visual at depth {root_depth} is not a pixel this can read back, \
+                 so the indicator cannot be confirmed on screen"
+            );
+        }
         me.grab_panic_key();
         Ok(me)
     }
@@ -370,6 +467,77 @@ impl X11Presence {
         Ok(windows)
     }
 
+    /// Give up on the frame's windows, so the next `show` builds new ones.
+    ///
+    /// **Verifying is what discovers this**, and a verdict that did not act on
+    /// it would leave the backend holding window ids that no longer name
+    /// anything: `show` rebuilds only when it has none, so recovery would
+    /// quietly do nothing and every later verdict would say the same thing for
+    /// ever. Found by the test that has another connection destroy them.
+    fn forget(&mut self, missing: Missing) -> Verdict {
+        // Destroyed windows are already gone and the request would only earn
+        // an error; unmapped ones are real and worth removing properly, so a
+        // rebuild is not stacking windows behind the new ones.
+        if matches!(missing, Missing::Unmapped) {
+            self.destroy_edges();
+        } else {
+            self.edges = None;
+        }
+        Verdict::Missing(missing)
+    }
+
+    /// Where to look to see whether the frame is on screen.
+    ///
+    /// Three places along each edge, two pixels inside it. Three rather than
+    /// one because a program covering part of an edge — a notification, a
+    /// panel, a window placed at a corner — would be missed by a single
+    /// sample in the middle; two pixels in because the frame is four thick, so
+    /// that is inside it at any rounding.
+    fn sample_points(&self) -> Vec<(i16, i16)> {
+        let inset = i32::from(THICKNESS / 2);
+        let (w, h) = (i32::from(self.screen.0), i32::from(self.screen.1));
+        // A screen too small to hold the frame twice over is not something to
+        // sample: the edges would overlap and every point would be ambiguous.
+        if w < i32::from(THICKNESS) * 4 || h < i32::from(THICKNESS) * 4 {
+            return Vec::new();
+        }
+        let along = |len: i32| [len / 4, len / 2, len * 3 / 4];
+        let mut points = Vec::with_capacity(12);
+        for x in along(w) {
+            points.push((x, inset));
+            points.push((x, h - 1 - inset));
+        }
+        for y in along(h) {
+            points.push((inset, y));
+            points.push((w - 1 - inset, y));
+        }
+        points
+            .into_iter()
+            .filter_map(|(x, y)| Some((i16::try_from(x).ok()?, i16::try_from(y).ok()?)))
+            .collect()
+    }
+
+    /// One pixel of the screen, as the server's own integer.
+    ///
+    /// Compared under the visual's channel mask rather than converted to RGB:
+    /// the value painted and the value read are the same number whatever the
+    /// byte order is, and a conversion is a second place for the two to
+    /// disagree.
+    fn pixel_at(&self, x: i16, y: i16) -> Option<u32> {
+        let reply = self
+            .conn
+            .get_image(ImageFormat::Z_PIXMAP, self.root, x, y, 1, 1, !0)
+            .ok()?
+            .reply()
+            .ok()?;
+        let bytes = reply.data.get(..self.pixel_bytes)?;
+        let mut value = 0u32;
+        for (i, byte) in bytes.iter().enumerate() {
+            value |= u32::from(*byte) << (8 * i);
+        }
+        Some(value)
+    }
+
     /// Put the frame back on top, in case something came up over it.
     ///
     /// This itself produces `ConfigureNotify` on the root — the frame is being
@@ -415,13 +583,7 @@ impl Presence for X11Presence {
                     .to_owned(),
             });
         }
-        let colour = if watching.paused {
-            PAUSED
-        } else if watching.controlling {
-            CONTROLLING
-        } else {
-            WATCHING
-        };
+        let colour = colour_of(watching);
         // What it says has changed, so the windows are rebuilt in the new
         // colour rather than left saying the old thing.
         if self
@@ -479,6 +641,75 @@ impl Presence for X11Presence {
 
     fn is_showing(&self) -> bool {
         self.showing.is_some()
+    }
+
+    fn verify(&mut self) -> Result<Verdict, PresenceError> {
+        let Some(watching) = self.showing.clone() else {
+            return Ok(Verdict::Missing(Missing::NothingAsked));
+        };
+        let Some(edges) = self.edges else {
+            return Ok(Verdict::Missing(Missing::Gone));
+        };
+
+        // **The windows first, because their answers are more specific.**
+        // Pixels can only ever say "the screen is not that colour there";
+        // asking the server about the windows separates "something destroyed
+        // them" from "something is drawn over them", and those are different
+        // things to do about it.
+        for window in edges {
+            let Ok(cookie) = self.conn.get_window_attributes(window) else {
+                return Ok(self.forget(Missing::Gone));
+            };
+            match cookie.reply() {
+                Ok(attrs) if attrs.map_state == MapState::VIEWABLE => {}
+                Ok(_) => return Ok(self.forget(Missing::Unmapped)),
+                // A window that is gone answers with an error, which is the
+                // compositor-restart case rather than a fault of ours.
+                Err(_) => return Ok(self.forget(Missing::Gone)),
+            }
+        }
+
+        if self.channels == 0 || !(1..=4).contains(&self.pixel_bytes) {
+            return Ok(Verdict::Missing(Missing::Unreadable(
+                "this screen's pixels cannot be read back".to_owned(),
+            )));
+        }
+        let points = self.sample_points();
+        if points.is_empty() {
+            return Ok(Verdict::Missing(Missing::Unreadable(
+                "this screen is too small to sample".to_owned(),
+            )));
+        }
+
+        let want = colour_of(&watching) & self.channels;
+        let mut wrong = 0usize;
+        let mut first: Option<((i32, i32), u32)> = None;
+        for (x, y) in &points {
+            let Some(pixel) = self.pixel_at(*x, *y) else {
+                return Ok(Verdict::Missing(Missing::Unreadable(format!(
+                    "the server would not return the pixel at {x},{y}"
+                ))));
+            };
+            if pixel & self.channels != want {
+                wrong = wrong.saturating_add(1);
+                if first.is_none() {
+                    first = Some(((i32::from(*x), i32::from(*y)), pixel));
+                }
+            }
+        }
+
+        if wrong == 0 {
+            return Ok(Verdict::OnScreen {
+                checked: points.len(),
+            });
+        }
+        let ((x, y), pixel) = first.unwrap_or(((0, 0), 0));
+        Ok(Verdict::Missing(Missing::Covered {
+            wrong,
+            of: points.len(),
+            saw: as_rgb(pixel, self.channels),
+            at: (x, y),
+        }))
     }
 }
 

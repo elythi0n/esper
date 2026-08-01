@@ -73,6 +73,11 @@ const (
 	NoCaptureBackend Reason = 401
 	NoDisplay        Reason = 402
 	NoInputBackend   Reason = 403
+	// IndicatorUnconfirmed is a host that cannot confirm its own session
+	// indicator is on screen. A capability rather than a permission: the
+	// device is allowed and the machine cannot keep the promise that being
+	// watched is visible to whoever is sitting at it.
+	IndicatorUnconfirmed Reason = 404
 )
 
 // Transport.
@@ -159,6 +164,7 @@ var descriptions = map[Reason]string{
 	NoCaptureBackend:        "no screen capture backend available",
 	NoDisplay:               "no display to capture",
 	NoInputBackend:          "no input injection backend available",
+	IndicatorUnconfirmed:    "the host cannot show that it is being watched",
 	AllTiersExhausted:       "every connection tier failed",
 	RelayFull:               "relay is at capacity",
 	MigrationFailed:         "connection migration failed",

@@ -590,12 +590,59 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
         }
         Err(e) => {
             println!("  presence   ⚠ NONE ({e})");
-            println!("             This machine cannot show that it is being watched and has no");
-            println!("             panic key. Sessions will still be served.");
-            println!();
             (None, None)
         }
     };
+
+    // **A screen nobody can be warned about is a screen this host does not
+    // serve.**
+    //
+    // The rule is about whether there is somebody to warn, which is why it
+    // asks the machine rather than the error: a display this product cannot
+    // draw on has a person in front of it who would get no indication at all,
+    // and a machine with no display at all has nobody to indicate to. The
+    // second is the ordinary server case and has been served since Phase 2.
+    //
+    // Until this existed, the first case printed a line and served anyway —
+    // the documented version of a guarantee rather than the enforced one, and
+    // Phase 15 is where that distinction is the whole point.
+    let a_screen_is_attended =
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let can_indicate = indicator
+        .as_ref()
+        .is_some_and(crate::presence_task::Indicator::can_show);
+    // **What a controller will be told, decided here** — the one place that
+    // knows both whether there is a screen and whether anything can be drawn
+    // on it. A session that worked this out for itself from whether it holds
+    // an indicator would report a headless server and a broken display as the
+    // same thing, and those are opposite situations.
+    let seen = if can_indicate {
+        esper_proto::Seen::Shown
+    } else if a_screen_is_attended {
+        esper_proto::Seen::NotShown
+    } else {
+        esper_proto::Seen::NoScreen
+    };
+    if a_screen_is_attended && !can_indicate {
+        if crate::settings::flag("host.serve_without_indicator", false) {
+            println!("             ⚠ serving anyway: host.serve_without_indicator is on.");
+            println!("             Somebody at this machine will not be told it is watched.");
+            println!();
+        } else {
+            println!("             This machine has a display and cannot show that it is being");
+            println!("             watched, so it will not serve. Set");
+            println!("             `host.serve_without_indicator true` to serve anyway, or run");
+            println!("             the host where the indicator works.");
+            println!();
+            return Err(
+                "this display cannot show a session indicator, so no session was offered"
+                    .to_owned(),
+            );
+        }
+    } else if !a_screen_is_attended && indicator.is_none() {
+        println!("             No display, so nobody is here to be told: sessions are served.");
+        println!();
+    }
 
     // **The audit trail, opened before any session.** A host that recorded
     // nothing would be a host whose owner cannot answer "who was on this
@@ -806,6 +853,7 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                     permits: permits.clone(),
                     policy: &policy,
                     capacity,
+                    seen,
                 },
             )
             .await
@@ -874,6 +922,55 @@ async fn wait_for_usr1(signal: Option<&mut tokio::signal::unix::Signal>) {
     match signal {
         Some(s) => {
             s.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Whether the picture stops, given the two separate reasons it might.
+///
+/// **One function because both reasons are live at once**, and the first
+/// version had them fighting: the indicator coming back sent the *person's*
+/// pause state, and holding for a missing frame sent `true` — so a person who
+/// pressed pause during a compositor restart had their pause released by the
+/// frame returning, and a screen they had deliberately hidden came back
+/// without them touching anything.
+const fn picture_is_held(paused: bool, indicator_missing: bool) -> bool {
+    paused || indicator_missing
+}
+
+/// Wait until an indicator that is off the screen has been off it too long.
+///
+/// Pending while nothing is wrong, so the branch costs nothing in the
+/// ordinary case; and computed from *when* it went rather than reset on every
+/// pass through the loop, so a frame that flickers cannot keep a session alive
+/// for ever by renewing its own grace.
+async fn out_of_grace(since: Option<std::time::Instant>) {
+    match since {
+        Some(when) => {
+            let left = INDICATOR_GRACE.saturating_sub(when.elapsed());
+            tokio::time::sleep(left).await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Wait for the screen's opinion of the indicator to change.
+///
+/// **Never on a host with no indicator**, which is the headless case: a
+/// machine with no display shows nothing and has nobody to show it to, so this
+/// branch is a future that never completes rather than a session that stops
+/// waiting for an answer nobody can give.
+async fn wait_for_the_screen(sightings: Option<&mut crate::presence_task::Sightings>) {
+    match sightings {
+        Some(s) => {
+            // A changed channel whose sender is gone would otherwise make this
+            // branch fire continuously: the indicator's thread ending is not
+            // news about the screen, and the session has other ways to notice
+            // the process is going.
+            if s.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
         }
         None => std::future::pending().await,
     }
@@ -1204,6 +1301,26 @@ const fn config_codec_name() -> &'static str {
 /// enough that a controller which never closes costs one session's worth of
 /// waiting and not the host.
 const GOODBYE: Duration = Duration::from_secs(2);
+
+/// How long a session waits for the screen to confirm the indicator.
+///
+/// **A round trip to the display server, generously.** The frame is created
+/// and read back on the indicator's own thread, which is polling at
+/// thirty-millisecond intervals, so this is that plus room for a machine under
+/// load — and short enough that a session refused for this reason is refused
+/// while the person who started it is still watching it start.
+const INDICATOR_PATIENCE: Duration = Duration::from_secs(2);
+
+/// How long a running session tolerates an indicator that is not on screen.
+///
+/// **Held rather than ended, for as long as this.** A compositor restarting
+/// takes the frame away for a moment and putting it back is automatic, so
+/// ending the session over it would be a product that drops connections when
+/// somebody logs into their desktop. Something *drawn over* the frame is not
+/// recoverable from here, and streaming a screen nobody can see is being
+/// watched is the thing this must not do — so the picture stops at once and
+/// the session ends if the frame does not come back.
+const INDICATOR_GRACE: Duration = Duration::from_secs(10);
 
 /// How long the sending thread sleeps between looks while the picture is held.
 ///
@@ -1562,6 +1679,7 @@ async fn serve_session(
         permits,
         policy,
         capacity,
+        seen: machine_seen,
     } = machine;
     println!(
         "      peer {}  {}",
@@ -1789,7 +1907,7 @@ async fn serve_session(
         Some(p) if p.may_resume(&device) => {
             let (w, h) = p.encode_size();
             let waited = p.parked_for(Instant::now());
-            match HostLink::resume(&media, control, p, &device) {
+            match HostLink::resume(&media, control, p, &device, machine_seen) {
                 Ok(link) => {
                     println!("      resumed the {w}x{h} session, parked {waited:?}");
                     (link, None)
@@ -1803,7 +1921,7 @@ async fn serve_session(
                 }
             }
         }
-        other => match fresh(&media, control, o) {
+        other => match fresh(&media, control, o, machine_seen) {
             Ok(link) => (link, other),
             Err(e) => return Err((e, other)),
         },
@@ -1989,6 +2107,38 @@ async fn serve_session(
             controlling: may_control,
             paused: false,
         });
+
+        // **And the screen is asked whether it is really there, before a
+        // picture leaves.**
+        //
+        // Asking for the frame and having it are different facts, and until
+        // this the host only knew the first: a window that never mapped, one
+        // destroyed by a compositor restarting, or a program drawn over the
+        // top all looked exactly like success. So the session waits for the
+        // screen's own answer, and does not start without it.
+        match crate::presence_task::confirmed(indicator, INDICATOR_PATIENCE).await {
+            Ok(looks) => {
+                println!("      indicator  on screen, confirmed by reading it ({looks} look(s))");
+            }
+            Err(why) => {
+                println!("      indicator  NOT on screen: {why}");
+                println!("                 No picture is sent when this machine cannot show that");
+                println!("                 it is being watched.");
+                if let Err(w) = log.append(&Entry::now(
+                    &device,
+                    Event::Refused {
+                        reason: format!("the session indicator could not be confirmed: {why}"),
+                    },
+                )) {
+                    eprintln!("      · could not write the audit log: {w}");
+                }
+                media.close(esper_proto::Reason::INDICATOR_UNCONFIRMED);
+                return Ok((
+                    format!("the session indicator could not be confirmed: {why}"),
+                    parked,
+                ));
+            }
+        }
     }
 
     // **The pointer, read on its own schedule.** A cursor sampled at the frame
@@ -2152,6 +2302,7 @@ fn fresh(
     media: &esper_transport::MediaChannel,
     control: esper_transport::Control,
     o: &HostOptions,
+    seen: esper_proto::Seen,
 ) -> Result<HostLink, String> {
     let chosen = crate::backend::open(
         o.backend,
@@ -2174,7 +2325,7 @@ fn fresh(
     .map_err(|e| format!("building the pipeline: {e}"))?
     .with_ceiling(o.max_resolution.map_or_else(Ceiling::none, Ceiling::of));
 
-    HostLink::new(media, control, pipeline).map_err(|e| e.to_string())
+    HostLink::new(media, control, pipeline, seen).map_err(|e| e.to_string())
 }
 
 /// Serve the controller's input on a stream of its own.
@@ -2494,6 +2645,9 @@ struct Machine<'a> {
     /// `None` for a connection this endpoint did not accept — which does not
     /// happen for a host, and is not something to fail a session over.
     capacity: Option<esper_transport::Capacity>,
+    /// What somebody at this machine would see of a session, for the
+    /// controller to be told.
+    seen: esper_proto::Seen,
 }
 
 struct Attending<'a> {
@@ -2760,6 +2914,10 @@ async fn serve(
         Pressed(esper_presence::HostEvent),
         /// What this device may do changed while the session was running.
         Permissions,
+        /// The screen stopped showing the session indicator, or started again.
+        Indicator,
+        /// The indicator has been off the screen for too long.
+        IndicatorGaveUp,
     }
     // Which reason this side ended it with, if it did. A session the host
     // closed is not one to park — parking is for a controller that has not
@@ -2777,6 +2935,16 @@ async fn serve(
     // signal are two ways of asking it to change — which is why neither of
     // them carries a state.
     let mut paused = false;
+    // **What the screen says about the indicator, and since when.**
+    //
+    // Separate from `paused` because they are different reasons for the same
+    // effect and both can be true: a person can hold the picture during a
+    // compositor restart, and letting go must not start it again while the
+    // frame is still missing. The picture flows only when neither says stop.
+    let mut sightings = attending
+        .indicator
+        .map(crate::presence_task::Indicator::sightings);
+    let mut hidden_since: Option<std::time::Instant> = None;
     // One per session, dropped with it. `signal` may be called more than once
     // and every stream receives, so this does not have to be threaded down
     // from the host's own start.
@@ -2804,6 +2972,8 @@ async fn serve(
                 Turn::Pressed(esper_presence::HostEvent::Pause)
             }
             () = attending.live.changed() => Turn::Permissions,
+            () = wait_for_the_screen(sightings.as_mut()) => Turn::Indicator,
+            () = out_of_grace(hidden_since) => Turn::IndicatorGaveUp,
             incoming = control.recv::<MediaMessage>() => Turn::FromController(incoming),
             outgoing = from_pipeline.recv() => Turn::ToController(outgoing),
             cursor = wait_for_cursor(attending.pointer.as_mut()) => Turn::ToController(cursor),
@@ -2827,7 +2997,7 @@ async fn serve(
                 // is the thing being asked for; telling the controller is how
                 // it is explained. In the other order a frame captured between
                 // the two would arrive after the pause was announced.
-                let _ = hold.send(paused);
+                let _ = hold.send(picture_is_held(paused, hidden_since.is_some()));
                 if let Some(i) = attending.indicator {
                     i.show(esper_presence::Watching {
                         paused,
@@ -2846,6 +3016,88 @@ async fn serve(
                     break;
                 }
                 continue;
+            }
+            // **The picture stops when the screen stops showing that it is
+            // being watched.**
+            //
+            // Two rules, because the two failures are different: something
+            // that can be put back — a compositor restarting destroys
+            // override-redirect windows — is worth waiting a few seconds for,
+            // and something drawn *over* the frame cannot be fixed from here
+            // at all. Either way the picture stops **at once**; what differs
+            // is whether the session survives.
+            Turn::Indicator => {
+                let now = sightings
+                    .as_ref()
+                    .map_or(crate::presence_task::Sighting::OnScreen, |s| {
+                        s.borrow().clone()
+                    });
+                match &now {
+                    crate::presence_task::Sighting::OnScreen => {
+                        if hidden_since.take().is_some() {
+                            let still_held = picture_is_held(paused, false);
+                            println!(
+                                "      · the indicator is back on screen; the picture {}",
+                                if still_held { "stays held" } else { "resumes" }
+                            );
+                            let _ = hold.send(still_held);
+                            if control
+                                .send(&MediaMessage::Paused(esper_proto::Paused {
+                                    paused: still_held,
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    crate::presence_task::Sighting::Down => {}
+                    crate::presence_task::Sighting::Missing(missing) => {
+                        if hidden_since.is_none() {
+                            hidden_since = Some(std::time::Instant::now());
+                            println!("      · {}", missing.describe());
+                            println!("        the picture is held until it is back");
+                            let _ = hold.send(picture_is_held(paused, true));
+                            // The controller is told in the vocabulary it
+                            // already has for a picture that stopped, so a
+                            // viewer shows "held" rather than a frozen frame
+                            // it cannot explain.
+                            if control
+                                .send(&MediaMessage::Paused(esper_proto::Paused { paused: true }))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            // **A session whose indicator never came back does not go on.**
+            //
+            // The picture already stopped, so what this ends is a session
+            // sitting there holding a screen nobody can see is being watched —
+            // with a clipboard, a file transfer and an input dispatcher still
+            // live. The grace is for the recoverable case; this is the answer
+            // when recovery did not happen.
+            Turn::IndicatorGaveUp => {
+                let why = sightings
+                    .as_ref()
+                    .map(|s| s.borrow().clone())
+                    .and_then(|seen| match seen {
+                        crate::presence_task::Sighting::Missing(m) => Some(m.describe()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "the indicator is not on screen".to_owned());
+                println!("      · the indicator has not come back: {why}");
+                println!(
+                    "        ending the session, because a screen being watched has to say so"
+                );
+                media.close(esper_proto::Reason::INDICATOR_UNCONFIRMED);
+                ours = Some(esper_proto::Reason::INDICATOR_UNCONFIRMED);
+                break;
             }
             Turn::Pressed(esper_presence::HostEvent::Panic) => {
                 media.close(esper_proto::Reason::STOPPED_AT_HOST);
@@ -3553,6 +3805,18 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 String::new()
             }
         );
+        // **What somebody at the host can see of this**, said here because a
+        // person watching a screen is entitled to know whether the person
+        // whose screen it is has any way of knowing. The host refuses to serve
+        // when it has a display and cannot show an indicator, so `NotShown`
+        // only arrives from a host whose owner deliberately allowed it — and
+        // it is still the loudest line in this output.
+        if let Some(warning) = config.seen.warning() {
+            match config.seen {
+                esper_proto::Seen::NotShown => println!("  presence   ⚠ {warning}"),
+                _ => println!("  presence   {warning}"),
+            }
+        }
         for m in &config.monitors {
             println!(
                 "      {} {}  {}x{} at {},{}{}",
@@ -4445,6 +4709,30 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
 
+    /// **Two reasons to stop the picture, and neither cancels the other.**
+    ///
+    /// The case worth pinning is the third row: a person pressed pause while
+    /// the indicator was missing, and the indicator coming back must not
+    /// release a pause they chose. The first version sent the person's own
+    /// state on recovery and `true` on loss, which got that exactly backwards
+    /// — a screen somebody had deliberately hidden came back on its own.
+    #[test]
+    fn the_picture_flows_only_when_neither_reason_says_stop() {
+        assert!(!super::picture_is_held(false, false), "nothing is wrong");
+        assert!(
+            super::picture_is_held(true, false),
+            "the person pressed pause"
+        );
+        assert!(
+            super::picture_is_held(true, true),
+            "paused, and the indicator is missing: still held"
+        );
+        assert!(
+            super::picture_is_held(false, true),
+            "nobody paused, and nobody at the host can see this session"
+        );
+    }
+
     /// **The input surface is the picture, and nothing else.**
     ///
     /// A position naming a screen the session is not sending is refused by the
@@ -4476,6 +4764,7 @@ mod tests {
             max_fps: 30,
             clock_hz: 90_000,
             ssrc: 1,
+            seen: esper_proto::Seen::Shown,
         };
         let told: Vec<u32> = monitors_from(&config).iter().map(|m| m.id).collect();
         assert_eq!(

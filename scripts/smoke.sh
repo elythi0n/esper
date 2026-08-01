@@ -987,6 +987,50 @@ except OSError:
         kill "$service_pid" 2>/dev/null || true
       fi
 
+      # **A display it cannot draw on is a display this host does not serve.**
+      #
+      # The rule is about whether there is somebody to warn: a machine with a screen
+      # whose owner would get no indication at all does not serve, and a machine with
+      # no screen has nobody to indicate to and serves as it always has. Until this
+      # existed the first case printed a line and served anyway, which is the
+      # documented version of a guarantee rather than the enforced one.
+      #
+      # `:99` is a display that is not there, which is the closest a test can get to
+      # "a display this product cannot use" without breaking somebody's desktop.
+      echo "  — checking a host with a display it cannot use refuses to serve"
+      if out=$(DISPLAY=:99 ESPER_HOME="$term_a" timeout 20 "$BIN/esper-engine" host \
+        --listen 127.0.0.1:0 --no-mdns 2>&1); then
+        printf '  ✗ a host with an unusable display served anyway\n'
+        printf '%s\n' "$out" | tail -4 | sed 's/^/      /'
+        fail=1
+      else
+        if printf '%s' "$out" | grep -q 'serve_without_indicator'; then
+          printf '  ✓ it refuses, and names the setting that would override it\n'
+        else
+          printf '  ✗ it refused without saying what to do about it\n'
+          printf '%s\n' "$out" | tail -6 | sed 's/^/      /'
+          fail=1
+        fi
+      fi
+      # And the same host with the override on serves — because the person who owns
+      # the screen is the one who gets to decide, and a switch nobody can find is
+      # not a decision.
+      allow_home="$term_a/allow-no-indicator"
+      mkdir -p "$allow_home"
+      cp "$term_a/devices.json" "$allow_home/" 2>/dev/null || true
+      cp -r "$term_a"/*.json "$term_a"/key* "$allow_home/" 2>/dev/null || true
+      printf 'host.serve_without_indicator = true\n' > "$allow_home/config.toml"
+      out=$(DISPLAY=:99 ESPER_HOME="$allow_home" timeout 8 "$BIN/esper-engine" host \
+        --listen 127.0.0.1:0 --no-mdns 2>&1 || true)
+      if printf '%s' "$out" | grep -q 'serving anyway'; then
+        printf '  ✓ and serves when the machine'"'"'s owner has allowed it\n'
+      else
+        printf '  ✗ the override did not let it serve\n'
+        printf '%s\n' "$out" | tail -6 | sed 's/^/      /'
+        fail=1
+      fi
+      rm -rf "$allow_home"
+
       # **Retention that actually deletes.** The policy existed for weeks with
       # no caller: `prune` was written, tested, and called by nothing, so
       # `audit.retain` would have been a setting the product ignored. A host
@@ -1831,6 +1875,20 @@ print(s.getsockname()[1]); s.close()')
       else
         printf '  ✗ the host sent a different screen than it was told to\n'
         printf '%s\n' "$third" | grep -iE 'stream|monitor' | sed 's/^/      /'
+        fail=1
+      fi
+      # **What somebody at the host would see, said by the controller.**
+      #
+      # Every host in this suite is headless, so the honest answer is "there is
+      # nobody there to show" — and that is a different thing from a screen
+      # showing nothing, which is why the field on the wire has three states
+      # rather than being a flag. This is the field arriving through CBOR and
+      # being rendered, which no unit test covers.
+      if printf '%s' "$third" | grep -q 'presence   this host has no screen'; then
+        printf '  ✓ and the controller says what a person at that host would see\n'
+      else
+        printf '  ✗ the controller said nothing about the host'"'"'s indicator\n'
+        printf '%s\n' "$third" | grep -iE 'presence|stream' | sed 's/^/      /'
         fail=1
       fi
       sed -i '/host.monitor/d' "$term_a/config.toml"

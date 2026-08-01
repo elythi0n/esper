@@ -46,7 +46,7 @@ fn host(fps: u32) -> HostStream {
     )
     .expect("a pipeline")
     .with_ceiling(Ceiling::none());
-    HostStream::new(pipeline, MTU).expect("a host stream")
+    HostStream::new(pipeline, MTU, esper_proto::Seen::Shown).expect("a host stream")
 }
 
 /// A host whose **owner** set a resolution cap, as `--max-resolution` does.
@@ -63,7 +63,7 @@ fn host_capped(fps: u32, long_edge: u32) -> HostStream {
     )
     .expect("a pipeline")
     .with_ceiling(Ceiling::of(long_edge));
-    HostStream::new(pipeline, MTU).expect("a host stream")
+    HostStream::new(pipeline, MTU, esper_proto::Seen::Shown).expect("a host stream")
 }
 
 /// A host with two monitors of **different sizes**, so a switch is visible in
@@ -84,7 +84,7 @@ fn host_with_two_monitors(fps: u32) -> HostStream {
     )
     .expect("a pipeline")
     .with_ceiling(Ceiling::none());
-    HostStream::new(pipeline, MTU).expect("a host stream")
+    HostStream::new(pipeline, MTU, esper_proto::Seen::Shown).expect("a host stream")
 }
 
 fn controller(host: &HostStream) -> ControllerStream {
@@ -1382,7 +1382,7 @@ fn a_resumed_session_keeps_the_pipeline_and_sends_a_keyframe() {
 
     // And comes back.
     let mut resumed = parked
-        .resume(&OWNER, 1200)
+        .resume(&OWNER, 1200, esper_proto::Seen::Shown)
         .map_err(|(_, e)| e)
         .expect("the owner may resume");
 
@@ -1435,7 +1435,7 @@ fn another_device_cannot_resume_someone_elses_session() {
     assert!(!parked.may_resume(&STRANGER));
 
     let (parked, refused) = parked
-        .resume(&STRANGER, 1200)
+        .resume(&STRANGER, 1200, esper_proto::Seen::Shown)
         .map(|_| panic!("a stranger resumed somebody else's session"))
         .unwrap_err();
     assert_eq!(refused, ResumeRefused::NotYours);
@@ -1444,7 +1444,9 @@ fn another_device_cannot_resume_someone_elses_session() {
     // And it is still there for its owner, because a refused resume must not
     // destroy the session it was refusing to hand over.
     assert!(
-        parked.resume(&OWNER, 1200).is_ok(),
+        parked
+            .resume(&OWNER, 1200, esper_proto::Seen::Shown)
+            .is_ok(),
         "a refused resume destroyed the session"
     );
 }
@@ -1490,13 +1492,15 @@ fn a_resume_onto_an_unusable_path_keeps_the_session() {
     const OWNER: [u8; 32] = [3u8; 32];
     let parked = Parked::park(host(30), OWNER, Instant::now());
     let (parked, refused) = parked
-        .resume(&OWNER, 40)
+        .resume(&OWNER, 40, esper_proto::Seen::Shown)
         .map(|_| panic!("a 40-byte path was accepted"))
         .unwrap_err();
     assert!(matches!(refused, ResumeRefused::Stream(_)), "{refused:?}");
     assert_eq!(refused.reason(), esper_proto::Reason::MIGRATION_FAILED);
     assert!(
-        parked.resume(&OWNER, 1200).is_ok(),
+        parked
+            .resume(&OWNER, 1200, esper_proto::Seen::Shown)
+            .is_ok(),
         "a refused resume destroyed the session"
     );
 }

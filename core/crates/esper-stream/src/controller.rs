@@ -1502,6 +1502,7 @@ mod tests {
             max_fps,
             clock_hz: 90_000,
             ssrc: 1,
+            seen: esper_proto::Seen::Shown,
         }
     }
 

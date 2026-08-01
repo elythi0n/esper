@@ -49,7 +49,7 @@ fn host_around(capturer: SyntheticCapturer) -> HostStream {
     )
     .expect("a pipeline")
     .with_ceiling(Ceiling::none());
-    HostStream::new(pipeline, MTU).expect("a host stream")
+    HostStream::new(pipeline, MTU, esper_proto::Seen::Shown).expect("a host stream")
 }
 
 /// Two monitors of different sizes, so a switch shows up in the frame.

@@ -50,9 +50,10 @@ impl HostLink {
         media: &MediaChannel,
         control: Control,
         pipeline: Pipeline,
+        seen: esper_proto::Seen,
     ) -> Result<Self, LinkError> {
         let mtu = check_path(media.max_datagram_size())?;
-        let stream = HostStream::new(pipeline, mtu)?;
+        let stream = HostStream::new(pipeline, mtu, seen)?;
         Ok(Self {
             stream,
             sink: SessionSink::new(media.clone()),
@@ -72,12 +73,13 @@ impl HostLink {
         control: Control,
         parked: Parked,
         device: &[u8; 32],
+        seen: esper_proto::Seen,
     ) -> Result<Self, (Parked, LinkError)> {
         let mtu = match check_path(media.max_datagram_size()) {
             Ok(mtu) => mtu,
             Err(e) => return Err((parked, e)),
         };
-        match parked.resume(device, mtu) {
+        match parked.resume(device, mtu, seen) {
             Ok(stream) => Ok(Self {
                 stream,
                 sink: SessionSink::new(media.clone()),

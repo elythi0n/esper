@@ -171,6 +171,7 @@ impl Parked {
         self,
         device: &[u8; 32],
         mtu: usize,
+        seen: esper_proto::Seen,
     ) -> Result<HostStream, (Self, ResumeRefused)> {
         if !self.may_resume(device) {
             return Err((self, ResumeRefused::NotYours));
@@ -182,7 +183,7 @@ impl Parked {
             next_sequence,
         } = self;
         pipeline.request_keyframe();
-        match HostStream::resume(pipeline, mtu, next_sequence) {
+        match HostStream::resume(pipeline, mtu, next_sequence, seen) {
             Ok(stream) => Ok(stream),
             Err((pipeline, e)) => Err((
                 Self {

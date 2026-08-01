@@ -75,6 +75,14 @@ pub struct HostStream {
     bytes: u64,
     /// Reused, so a frame's datagrams are not a fresh allocation each time.
     scratch: Vec<Vec<u8>>,
+    /// What somebody at this machine would see of the session.
+    ///
+    /// Carried so it reaches the controller in the stream's own config, and a
+    /// **constructor parameter rather than a setter**: a field like this that
+    /// defaults to the reassuring answer and is set later is one somebody
+    /// forgets to set, and the failure is silent in the direction that
+    /// matters.
+    seen: esper_proto::Seen,
     /// The caps **this machine's owner** set, kept apart from the ones a
     /// controller asks for.
     ///
@@ -175,10 +183,15 @@ impl HostStream {
     ///
     /// `mtu` is the largest datagram the path will carry. The packetizer
     /// fragments to fit *including* its headers.
-    pub fn new(pipeline: Pipeline, mtu: usize) -> Result<Self, StreamError> {
+    pub fn new(
+        pipeline: Pipeline,
+        mtu: usize,
+        seen: esper_proto::Seen,
+    ) -> Result<Self, StreamError> {
         let monitor = pipeline.selected_monitor().0;
         let packetizer = Packetizer::new(ssrc_for(monitor), mtu)?;
         Ok(Self {
+            seen,
             owner_ceiling: pipeline.ceiling(),
             owner_fps: pipeline.requested_fps(),
             pipeline,
@@ -282,6 +295,7 @@ impl HostStream {
             max_fps: u16::try_from(self.pipeline.requested_fps()).unwrap_or(u16::MAX),
             clock_hz: VIDEO_CLOCK_HZ,
             ssrc: self.packetizer.ssrc(),
+            seen: self.seen,
         }
     }
 
@@ -346,12 +360,14 @@ impl HostStream {
         pipeline: Pipeline,
         mtu: usize,
         sequence: u16,
+        seen: esper_proto::Seen,
     ) -> Result<Self, (Pipeline, StreamError)> {
         let monitor = pipeline.selected_monitor().0;
         match Packetizer::new(ssrc_for(monitor), mtu) {
             Ok(mut packetizer) => {
                 packetizer.set_sequence(sequence);
                 Ok(Self {
+                    seen,
                     owner_ceiling: pipeline.ceiling(),
                     owner_fps: pipeline.requested_fps(),
                     pipeline,
