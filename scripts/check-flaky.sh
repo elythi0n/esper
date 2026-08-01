@@ -73,8 +73,14 @@ for round in $(seq 1 "$rounds"); do
       cd "$root/core" || exit 1
       # `ESPER_DISPLAY_TESTS` is inherited when the caller set it, and never
       # set here: see the note above about whose desktop that is.
-      cargo test --workspace 2>&1 |
-        grep -E '^---- .* stdout ----' > "$work/r${round}p${p}.txt"
+      # **The whole output, not only the names.** The first version kept the
+      # `---- name ----` lines and nothing else, so a flake it found could be
+      # named and not read — which is the exact complaint this script makes
+      # about flaky tests. The failing blocks are extracted below; the full log
+      # stays on disk for the run that needs it.
+      cargo test --workspace > "$work/r${round}p${p}.log" 2>&1
+      grep -E '^---- .* stdout ----' "$work/r${round}p${p}.log" \
+        > "$work/r${round}p${p}.txt" || true
     ) &
   done
   wait
@@ -96,10 +102,31 @@ if [ -z "$summary" ]; then
   exit 0
 fi
 
+# The logs are wanted from here on, so they stop being temporary.
+trap - EXIT
 printf '  ✗ these did not pass every run:\n\n'
 printf '%s\n' "$summary" | while read -r count name; do
   printf '      %s of %s runs failed: %s\n' "$count" "$total" "$name"
 done
+
+# **And why.** One failure's own output, from the first run that saw it: a name
+# says which test to look at and nothing about what to look for, and a flake
+# that has just been reproduced after twenty minutes should not have to be
+# reproduced again to be read.
+printf '\n  what one of those failures said:\n\n'
+printf '%s\n' "$summary" | head -1 | while read -r _count name; do
+  for log in "$work"/*.log; do
+    if grep -q "^---- $name stdout ----$" "$log" 2>/dev/null; then
+      awk -v want="---- $name stdout ----" '
+        $0 == want { on = 1 }
+        on && /^---- / && $0 != want { exit }
+        on { print "      " $0 }
+      ' "$log"
+      break
+    fi
+  done
+done
+printf '\n  the full logs of every run are kept in %s\n' "$work"
 printf '\n  A test that fails sometimes is a test nobody can read a failure from.\n'
 if [ -z "$display" ]; then
   printf '  And the display tests were not among them: see above.\n'

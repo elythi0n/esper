@@ -82,6 +82,58 @@ pub fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
     status.signal()
 }
 
+/// Close the master, and say which process group the terminal was giving its
+/// input to.
+///
+/// **One operation, because the order is the whole point.** Closing the master
+/// is what makes the kernel hang up the terminal; the foreground group can only
+/// be read while the terminal still exists. Two functions would be two chances
+/// to do them the wrong way round, and the wrong way round reads nothing.
+///
+/// That group is the only record of who the hangup was aimed at. With job
+/// control the shell puts each job in a group of its own and makes it the
+/// foreground one, so it is usually **not** the shell's group — and a caller
+/// that has to chase a survivor has nothing else to go on.
+///
+/// `None` when there is no foreground group, which is what a session that has
+/// already ended looks like, and when the two halves did not come from one
+/// terminal — impossible from inside this crate, and not worth a panic.
+pub fn close_master(read: ReadHalf, write: WriteHalf) -> Option<u32> {
+    let Ok(pty) = read.unsplit(write) else {
+        return None;
+    };
+    let group = rustix::termios::tcgetpgrp(&pty)
+        .ok()
+        .and_then(|pid| u32::try_from(pid.as_raw_nonzero().get()).ok());
+    // The hangup itself.
+    drop(pty);
+    group
+}
+
+/// Whether `pid` is still part of the session `leader` leads.
+///
+/// The check that keeps a last-resort `SIGKILL` aimed at our own session: a
+/// process group id is reused eventually, and a signal sent to a stranger's
+/// group on the strength of a number read minutes ago would be this product
+/// killing processes it has nothing to do with.
+///
+/// `false` when the process is gone, which is the ordinary case by the time
+/// anything asks.
+pub fn in_session(pid: u32, leader: u32) -> bool {
+    let Ok(raw) = i32::try_from(pid) else {
+        return false;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return false;
+    };
+    let Ok(sid) = rustix::process::getsid(Some(pid)) else {
+        return false;
+    };
+    // The shell was made a session leader by `pty-process`, so the session id
+    // is its pid.
+    u32::try_from(sid.as_raw_nonzero().get()).is_ok_and(|sid| sid == leader)
+}
+
 /// Signal an entire process group.
 ///
 /// Best-effort by design: the group may already be gone, which is the common

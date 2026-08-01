@@ -511,6 +511,62 @@ async fn teardown_kills_a_foreground_child() {
     );
 }
 
+/// **A foreground child that ignores the hangup is killed anyway.**
+///
+/// `SIGHUP` can be ignored, and the interesting case is not a stubborn program
+/// — it is inheritance. A disposition of "ignore" passes through `fork` *and*
+/// `exec`, so a host started under `nohup`, which is exactly how somebody runs
+/// a server, hands "ignore SIGHUP" to every shell it opens and to everything
+/// those shells run. Closing the terminal then reaches nobody.
+///
+/// Meanwhile job control has put the child in a process group of its own, so
+/// the `SIGKILL` this crate sends to the *shell's* group misses it: the shell
+/// dies and the child runs forever. Measured, with `nohup make ci`: the shell
+/// gone, the `sleep` still there six seconds later.
+///
+/// `trap "" HUP` before `exec` reproduces it exactly and needs nothing of the
+/// test process, because an ignored signal survives `exec`.
+#[tokio::test]
+#[cfg_attr(
+    miri,
+    ignore = "allocates a real pseudo-terminal; MIRI has no syscalls"
+)]
+#[cfg(target_os = "linux")]
+async fn teardown_kills_a_foreground_child_that_ignores_the_hangup() {
+    let t = Terminal::open(&request(80, 24)).expect("open");
+    let (mut read, mut write, child) = t.into_parts();
+    let shell_pid = child.id().expect("pid");
+
+    write
+        .write_all(b"sh -c 'trap \"\" HUP; echo FG\"=\"$$; exec sleep 3000'\n")
+        .await
+        .expect("write");
+    let seen = read_until(&mut read, "FG=").await;
+    let fg_pid: u32 = seen
+        .split("FG=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| panic!("could not read the pid from: {seen:?}"));
+    assert!(alive(fg_pid), "the foreground child should be running");
+
+    let _ = esper_pty::hang_up(child, read, write).await;
+
+    for _ in 0..120 {
+        if !alive(fg_pid) && !alive(shell_pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!(
+        "after teardown: shell {shell_pid} alive={}, child {fg_pid} alive={} — a child \
+         ignoring the hangup must still be killed, or a host under `nohup` leaks one per \
+         session",
+        alive(shell_pid),
+        alive(fg_pid)
+    );
+}
+
 /// The shell itself must never be left running. An orphaned shell on a server
 /// nobody looks at is the failure that accumulates silently.
 #[tokio::test]

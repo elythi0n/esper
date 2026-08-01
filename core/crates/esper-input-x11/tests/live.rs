@@ -24,7 +24,7 @@
 //! the focus** before sending a single event. If it does not, it skips. A test
 //! that typed into the desktop of whoever ran it would be worse than no test.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use esper_input::{InputSink, Point, hid};
 use esper_input_x11::X11Injector;
@@ -32,7 +32,7 @@ use esper_proto::{Button, KeyEvent, PointerButton, Scroll};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    ConnectionExt as _, CreateWindowAux, EventMask, InputFocus, WindowClass,
+    ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, InputFocus, WindowClass,
 };
 
 /// **A display has one keyboard focus and one pointer**, and every test that
@@ -352,6 +352,77 @@ impl Focused {
         }
         out
     }
+
+    /// What the display looks like right now, for a failure message.
+    ///
+    /// **A key that does not arrive has two plausible explanations and the
+    /// message has to tell them apart**: the focus moved to somebody else, or
+    /// another client holds an *active* keyboard grab, which takes every key
+    /// whatever has the focus. So this reports the focus and tries a grab of
+    /// its own — `AlreadyGrabbed` is the second explanation, in one word.
+    fn display_state(&self) -> String {
+        let focus = self
+            .conn
+            .get_input_focus()
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|r| r.focus);
+        let grab = match self.conn.grab_keyboard(
+            false,
+            self.window,
+            x11rb::CURRENT_TIME,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+        ) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(r) => {
+                    let _ = self.conn.ungrab_keyboard(x11rb::CURRENT_TIME);
+                    format!("{:?}", r.status)
+                }
+                Err(e) => format!("no reply ({e})"),
+            },
+            Err(e) => format!("could not ask ({e})"),
+        };
+        let viewable = self
+            .conn
+            .get_window_attributes(self.window)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|a| a.map_state);
+        format!(
+            "window {:#x}, focus {:?}, viewable {:?}, a keyboard grab here says {grab}",
+            self.window, focus, viewable
+        )
+    }
+
+    /// Everything that arrives until `enough` is satisfied, or until patience
+    /// runs out.
+    ///
+    /// **Not a sleep.** Every one of these tests injected an event, slept a
+    /// fixed sixty or eighty milliseconds and drained once — which is a
+    /// guess about how long a round trip to the X server takes, and on a
+    /// machine running twenty other tests it is sometimes wrong. That is a
+    /// test that fails once in nine runs and tells whoever reads it nothing:
+    /// found by the flakiness rig, one run in nine, on this exact test.
+    ///
+    /// Waiting for the thing to arrive is both faster in the ordinary case and
+    /// correct in the slow one. The patience is long because it only costs
+    /// anything when the assertion is going to fail anyway.
+    fn collect(&self, enough: impl Fn(&[Event]) -> bool) -> Vec<Event> {
+        const PATIENCE: Duration = Duration::from_secs(3);
+        let give_up = Instant::now().checked_add(PATIENCE);
+        let mut seen = Vec::new();
+        loop {
+            seen.extend(self.drain());
+            if enough(&seen) {
+                return seen;
+            }
+            if give_up.is_none_or(|d| Instant::now() >= d) {
+                return seen;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 impl Drop for Focused {
@@ -359,6 +430,28 @@ impl Drop for Focused {
         let _ = self.conn.destroy_window(self.window);
         let _ = self.conn.flush();
     }
+}
+
+/// The keycodes of every key press in `events`.
+fn presses(events: &[Event]) -> Vec<u8> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::KeyPress(k) => Some(k.detail),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The keycodes of every key release in `events`.
+fn releases(events: &[Event]) -> Vec<u8> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::KeyRelease(k) => Some(k.detail),
+            _ => None,
+        })
+        .collect()
 }
 
 /// **Injection reaches a window, as the key that was asked for.**
@@ -391,30 +484,20 @@ fn a_key_arrives_at_a_focused_window_as_the_key_it_was_sent_as() {
                 pressed: false,
             })
             .expect("release");
-        std::thread::sleep(Duration::from_millis(60));
-
-        let events = focused.drain();
-        let presses: Vec<u8> = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::KeyPress(k) => Some(k.detail),
-                _ => None,
-            })
-            .collect();
-        let releases: Vec<u8> = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::KeyRelease(k) => Some(k.detail),
-                _ => None,
-            })
-            .collect();
+        let events = focused.collect(|seen| {
+            presses(seen).contains(&expected) && releases(seen).contains(&expected)
+        });
         assert!(
-            presses.contains(&expected),
-            "{usage:#06x} should have arrived as keycode {expected}, got presses {presses:?}"
+            presses(&events).contains(&expected),
+            "{usage:#06x} should have arrived as keycode {expected}, got presses {:?} — {}",
+            presses(&events),
+            focused.display_state()
         );
         assert!(
-            releases.contains(&expected),
-            "{usage:#06x} was pressed and not released: releases {releases:?}"
+            releases(&events).contains(&expected),
+            "{usage:#06x} was pressed and not released: releases {:?} — {}",
+            releases(&events),
+            focused.display_state()
         );
     }
     assert!(
@@ -454,21 +537,33 @@ fn release_all_releases_what_was_left_down() {
         .expect("button down");
     assert_eq!(injector.held().count(), 3, "three things are held");
 
-    std::thread::sleep(Duration::from_millis(60));
-    let _ = focused.drain();
+    // The presses themselves, waited for and thrown away: draining before they
+    // have arrived leaves them in the queue, where the check below would read
+    // them as the releases it is looking for.
+    let codes: Vec<u8> = [0xE0u16, 0xE1]
+        .iter()
+        .map(|usage| {
+            u8::try_from(hid::evdev_for_usage(*usage).expect("in the table").0 + 8)
+                .expect("a keycode")
+        })
+        .collect();
+    let _ = focused.collect(|seen| {
+        codes.iter().all(|c| presses(seen).contains(c))
+            && seen
+                .iter()
+                .any(|e| matches!(e, Event::ButtonPress(b) if b.detail == 1))
+    });
 
     injector.release_all().expect("release everything");
     assert!(injector.held().is_empty(), "and now nothing is");
-    std::thread::sleep(Duration::from_millis(80));
 
-    let events = focused.drain();
-    let released: Vec<u8> = events
-        .iter()
-        .filter_map(|e| match e {
-            Event::KeyRelease(k) => Some(k.detail),
-            _ => None,
-        })
-        .collect();
+    let events = focused.collect(|seen| {
+        codes.iter().all(|c| releases(seen).contains(c))
+            && seen
+                .iter()
+                .any(|e| matches!(e, Event::ButtonRelease(b) if b.detail == 1))
+    });
+    let released = releases(&events);
     for usage in [0xE0u16, 0xE1] {
         let code = u8::try_from(hid::evdev_for_usage(usage).expect("in the table").0 + 8)
             .expect("a keycode");
@@ -535,9 +630,18 @@ fn a_scroll_arrives_as_one_wheel_click_per_notch() {
             dy_pixels: None,
         })
         .expect("scroll");
-    std::thread::sleep(Duration::from_millis(80));
 
-    let events = focused.drain();
+    let events = focused.collect(|seen| {
+        seen.iter()
+            .filter(|e| matches!(e, Event::ButtonPress(b) if b.detail == 5))
+            .count()
+            >= 3
+            && seen
+                .iter()
+                .filter(|e| matches!(e, Event::ButtonRelease(b) if b.detail == 5))
+                .count()
+                >= 3
+    });
     let clicks = events
         .iter()
         .filter(|e| matches!(e, Event::ButtonPress(b) if b.detail == 5))

@@ -2517,8 +2517,11 @@ async fn serve(
                     // longer exists.
                     Ok(Handled::Announce(config)) => {
                         println!(
-                            "      now sending monitor {}: {}x{}, ssrc {:#010x}",
-                            config.selected, config.width, config.height, config.ssrc
+                            "      now sending {}: {}x{}, ssrc {:#010x}",
+                            esper_stream::screens_named(&config.serving),
+                            config.width,
+                            config.height,
+                            config.ssrc
                         );
                         Some(config)
                     }
@@ -2553,9 +2556,7 @@ async fn serve(
                 // nothing, and the controller's monitor list is wrong for the
                 // rest of the session. A viewer offering a picker would list
                 // screens that are gone and not the one that arrived.
-                Ok(HostStep::Reconfigured {
-                    monitor, switched, ..
-                }) => {
+                Ok(HostStep::Reconfigured { switched, .. }) => {
                     let now = pump.config();
                     // **Only when it is news.** A monitor switch already
                     // announced itself from the `Select` handler, and the
@@ -2573,14 +2574,16 @@ async fn serve(
                         // becomes somewhere else, possibly at the same size —
                         // so it is said here and carried in the config.
                         println!(
-                            "      the monitor being watched went away; now sending monitor                              {monitor}: {}x{}",
-                            now.width, now.height
+                            "      the monitor being watched went away; now sending {}: {}x{}",
+                            esper_stream::screens_named(&now.serving),
+                            now.width,
+                            now.height
                         );
                     } else {
                         println!(
-                            "      the desktop changed: {} monitor(s), still sending monitor {}",
+                            "      the desktop changed: {} monitor(s), still sending {}",
                             now.monitors.len(),
-                            now.selected
+                            esper_stream::screens_named(&now.serving)
                         );
                     }
                     announced = Some(now.clone());

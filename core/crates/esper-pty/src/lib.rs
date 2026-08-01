@@ -262,23 +262,33 @@ pub const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(5
 /// Returns the shell's exit status where one is available. Safe to call on a
 /// session that has already ended.
 pub async fn hang_up(
-    mut child: tokio::process::Child,
+    child: tokio::process::Child,
     read: ReadHalf,
     write: WriteHalf,
 ) -> Option<TerminalExit> {
-    // Already gone? Report it and stop.
-    if let Ok(Some(status)) = child.try_wait() {
-        drop(read);
-        drop(write);
-        return Some(exit_status(&status));
-    }
+    let leader = child.id();
 
     // **Close the master.** The kernel hangs up the terminal, which reaches
     // the foreground process group — including jobs in their own groups,
     // which a process-group signal from here would miss.
-    drop(read);
-    drop(write);
+    //
+    // Which group that was comes back, because it can only be asked while the
+    // terminal still exists and it is the only thing to go on if something
+    // survives. See `chase_the_foreground_group`.
+    let foreground = sys::close_master(read, write);
+    let exit = end_the_shell(child).await;
+    if let Some(leader) = leader {
+        chase_the_foreground_group(foreground, leader);
+    }
+    exit
+}
 
+/// The escalation: hangup, then the shell's own group, then `SIGKILL`.
+async fn end_the_shell(mut child: tokio::process::Child) -> Option<TerminalExit> {
+    // Already gone? Report it and stop.
+    if let Ok(Some(status)) = child.try_wait() {
+        return Some(exit_status(&status));
+    }
     if let Ok(Ok(status)) = tokio::time::timeout(HANGUP_GRACE, child.wait()).await {
         return Some(exit_status(&status));
     }
@@ -304,6 +314,39 @@ pub async fn hang_up(
         Ok(Ok(status)) => Some(exit_status(&status)),
         _ => None,
     }
+}
+
+/// Kill whatever is left of the group the terminal was giving its input to.
+///
+/// **The shell exiting is not the session ending.** Everything in
+/// `end_the_shell` signals the shell and the shell's own group, which is right
+/// when its children are in it. Job control puts each job in a group of its
+/// own, so a foreground job is somewhere else — and when the hangup reaches it
+/// the group is already gone by the time this runs, which is the ordinary
+/// case and costs one refused signal.
+///
+/// What this is for is a hangup that reached nobody, and the reason is usually
+/// inheritance rather than stubbornness: `SIG_IGN` for `SIGHUP` passes through
+/// `fork` **and** `exec`, so a host started under `nohup` — which is exactly
+/// how somebody runs a server — hands "ignore the hangup" to every shell it
+/// opens and to everything those shells run. Measured before this existed: the
+/// shell gone, a `sleep` in its own group still running six seconds later. One
+/// per session, on the kind of machine nobody is looking at.
+///
+/// **Only if the group is still in the shell's session.** A process group id
+/// is reused eventually, and a `SIGKILL` aimed at a stranger's group would be
+/// this product killing processes it has nothing to do with. The shell is the
+/// session leader of its pseudo-terminal, so its pid *is* the session id, and
+/// a group that reports any other one is not ours to touch.
+fn chase_the_foreground_group(foreground: Option<u32>, leader: u32) {
+    let Some(group) = foreground.filter(|g| *g != leader) else {
+        return;
+    };
+    if !sys::in_session(group, leader) {
+        return;
+    }
+    tracing::debug!(leader, group, "killing the terminal's foreground group");
+    sys::signal_group(group, Signal::Kill);
 }
 
 /// Which signal to send.

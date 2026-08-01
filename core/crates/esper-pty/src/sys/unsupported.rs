@@ -96,3 +96,19 @@ pub fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
 /// Windows has job objects rather than process groups, so the ConPTY
 /// implementation will not reach for a process-group signal here either.
 pub fn signal_group(_leader_pid: u32, _signal: Signal) {}
+
+/// Nothing to close and no terminal to ask.
+///
+/// Windows has no controlling terminal and no foreground process group; a
+/// ConPTY implementation ends a session by closing the pseudo-console and
+/// terminating the job object.
+pub fn close_master(read: ReadHalf, write: WriteHalf) -> Option<u32> {
+    drop(read);
+    drop(write);
+    None
+}
+
+/// No sessions to be part of.
+pub fn in_session(_pid: u32, _leader: u32) -> bool {
+    false
+}

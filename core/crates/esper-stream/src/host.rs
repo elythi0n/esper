@@ -50,8 +50,6 @@ pub enum HostStep {
     Reconfigured {
         width: u32,
         height: u32,
-        /// Which monitor is being sent now.
-        monitor: u32,
         /// Whether that is a **different** monitor from the one before.
         ///
         /// True when the screen being watched went away and this end fell back
@@ -422,7 +420,6 @@ impl HostStream {
                 Ok(HostStep::Reconfigured {
                     width,
                     height,
-                    monitor: now,
                     switched,
                 })
             }
