@@ -66,6 +66,18 @@ flaky:
 check-reached:
 	@python3 ./scripts/check-reached.py
 
+## Check the clock against Python's own timezone handling
+##
+## `esper-clock` reads the machine's timezone database itself, and a parser
+## checked only against bytes it wrote is checked against its own
+## misunderstanding. This compares tens of thousands of instants across the
+## zones with the awkward shapes. Not in `ci`, because it needs Python's
+## `zoneinfo` and the database, and both are absent on some machines — it says
+## so rather than failing.
+.PHONY: check-clock
+check-clock:
+	@python3 ./scripts/check-clock.py
+
 ## Build both binaries → ./build
 .PHONY: build
 build: build-rust build-go

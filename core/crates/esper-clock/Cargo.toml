@@ -1,0 +1,20 @@
+[package]
+name = "esper-clock"
+description = "What time it is where the host is: the machine's own timezone data, read directly, so a schedule means the day somebody standing at it is having."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Serde only for `Schedule`, which is stored in a file a person edits — as the
+# text they wrote, so the file stays readable.
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json = "1"

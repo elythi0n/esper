@@ -128,6 +128,19 @@ pub struct Device {
     /// person and meant to keep.
     #[serde(default)]
     pub pairing: Pairing,
+    /// When `unattended` applies, if it is bounded.
+    ///
+    /// `None` means "whenever", which is what the permission meant before
+    /// schedules existed and is the right answer for a machine in a rack. A
+    /// schedule bounds **the permission, not the device**: outside its hours
+    /// the device is an ordinary paired one, and somebody at the host can
+    /// still say yes.
+    ///
+    /// Absent from a store written before this existed, and not written out
+    /// when absent — so a file from either version reads the same until
+    /// somebody sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattended_when: Option<esper_clock::Schedule>,
 }
 
 impl Device {
@@ -143,6 +156,7 @@ impl Device {
             last_address: None,
             overlay_address: None,
             pairing: Pairing::Kept,
+            unattended_when: None,
         }
     }
 

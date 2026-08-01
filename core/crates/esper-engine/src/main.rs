@@ -269,6 +269,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("schedule") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match devices_cmd::schedule(&rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{} schedule: {e}", net::me());
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("keep") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             match devices_cmd::keep(&rest) {
@@ -370,6 +380,7 @@ fn usage_for(command: &str) -> Option<String> {
         "cp" => Some(cp_cmd::usage()),
         "host" => Some(session_cmd::host_usage()),
         "screenshot" => Some(screenshot_cmd::usage()),
+        "schedule" => Some(devices_cmd::schedule_usage()),
         _ => None,
     }
 }
@@ -397,6 +408,7 @@ fn print_help() {
            grant      give a paired device a permission (--yes to confirm a\n  \
            \x20          dangerous one without being asked)\n  \
            revoke     take a permission away\n  \
+           schedule   when a device may connect unattended, in local time\n  \
            keep       make a one-session pairing last\n  \
            forget     unpair a device entirely\n  \
            invite     offer somebody a way in: one link, through your broker\n  \

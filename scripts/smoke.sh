@@ -318,7 +318,7 @@ cleanup_terminal() {
              "${clip_host:-}" "${clip_host2:-}" "${clip_viewer:-}" \
              "${clip_x1:-}" "${clip_x2:-}" "${cp_host:-}" "${cp_wire:-}" "${cp_along:-}" \
              "${multi_host:-}" "${idle_host:-}" "${tiled_host:-}" \
-             "${pace_host:-}" "${pace_wire:-}"; do
+             "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1876,11 +1876,28 @@ print(s.getsockname()[1]); s.close()')
         --rate 800 --queue 40 > "$term_b/pace-wire.log" 2>&1 &
       pace_wire=$!
       sleep 1
-      # Long enough for the estimate to form on a busy machine: it is the
-      # median of four frames over four kilobytes, and eight seconds was
-      # sometimes not enough of them.
+      # **Waited for, not timed.** The estimate is the median of four frames
+      # over four kilobytes, so how long it takes depends on how fast this
+      # machine can encode — and a fixed duration is a guess about that. Eight
+      # seconds was not enough on a busy machine; twenty was not either, once
+      # in three runs of the full suite. So the session runs until the line
+      # appears and is then stopped, which is quicker in the ordinary case and
+      # right in the slow one.
       ESPER_HOME="$term_b" timeout 120 "$BIN/esper-engine" connect "127.0.0.1:$pace_port" \
-        --seconds 20 > "$term_b/pace-view.log" 2>&1 || true
+        --seconds 90 > "$term_b/pace-view.log" 2>&1 &
+      pace_client=$!
+      for _ in $(seq 1 90); do
+        if grep -q 'measures this link at' "$term_a/pace.log" 2>/dev/null; then
+          break
+        fi
+        # Give up early if the session ended on its own, rather than waiting
+        # out the deadline for a log line that is no longer coming.
+        kill -0 "$pace_client" 2>/dev/null || break
+        sleep 1
+      done
+      kill "$pace_client" 2>/dev/null || true
+      wait "$pace_client" 2>/dev/null || true
+      pace_client=""
       kill "$pace_wire" 2>/dev/null || true
       pace_wire=""
       kill "$pace_host" 2>/dev/null || true
@@ -2219,6 +2236,65 @@ print(s.getsockname()[1]); s.close()')
       fi
       ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null
 
+      # **A schedule bounds the permission, at the host.** `unattended` on its
+      # own means "any time, for ever", which is right for a machine in a rack
+      # and wrong for a laptop. The schedule is the difference, and it is
+      # enforced here rather than trusted to the far end.
+      #
+      # Today and tomorrow, by name, so the check does not depend on what time
+      # the suite happens to run: a schedule naming today includes now, and one
+      # naming tomorrow cannot.
+      echo "  — a schedule that bounds when a device may walk in"
+      today=$(date +%a | tr '[:upper:]' '[:lower:]')
+      tomorrow=$(date -d tomorrow +%a 2>/dev/null | tr '[:upper:]' '[:lower:]')
+      if [ -z "$tomorrow" ]; then
+        tomorrow=$(date -v+1d +%a 2>/dev/null | tr '[:upper:]' '[:lower:]')
+      fi
+      ESPER_HOME="$term_a" "$BIN/esper-engine" schedule "$fp" "$today 00:00-24:00" >/dev/null
+      inside=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        timeout 30 "$BIN/esper-engine" connect "$host_addr" --seconds 2 2>&1 || true)
+      if printf '%s' "$inside" | grep -q '^  granted'; then
+        printf '  ✓ inside its hours, an unattended device is let straight in\n'
+      else
+        printf '  ✗ a device inside its schedule was refused\n'
+        printf '%s\n' "$inside" | grep -E 'granted|refus|schedule' | sed 's/^/      /'
+        fail=1
+      fi
+
+      ESPER_HOME="$term_a" "$BIN/esper-engine" schedule "$fp" "$tomorrow 00:00-24:00" >/dev/null
+      outside=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+        timeout 30 "$BIN/esper-engine" connect "$host_addr" --seconds 2 2>&1 || true)
+      if printf '%s' "$outside" | grep -qi 'may connect unattended'; then
+        printf '  ✓ outside them it is refused, and the refusal names the schedule\n'
+      else
+        printf '  ✗ a device outside its schedule was let in, or refused unhelpfully\n'
+        printf '%s\n' "$outside" | grep -E 'granted|refus|schedule|unattended' | sed 's/^/      /'
+        fail=1
+      fi
+      # **The reason is the schedule, not the permission.** A refusal telling
+      # somebody to grant a permission the device already holds sends them to
+      # the wrong place entirely.
+      if ! printf '%s' "$outside" | grep -q 'grant .* unattended'; then
+        printf '  ✓ and it does not tell anybody to grant what the device holds\n'
+      else
+        printf '  ✗ the refusal named the permission instead of the schedule\n'
+        printf '%s\n' "$outside" | grep -i 'unattended' | sed 's/^/      /'
+        fail=1
+      fi
+      # And the host says which timezone those hours are in, because a
+      # schedule read in the wrong one is a rule nobody wrote.
+      listed=$(ESPER_HOME="$term_a" "$BIN/esper-engine" devices 2>&1 || true)
+      if printf '%s' "$listed" | grep -q "when $tomorrow 00:00-24:00 (local time)" &&
+        printf '%s' "$listed" | grep -q "local time:"; then
+        printf '  ✓ and the devices list shows the hours and the zone they are in\n'
+      else
+        printf '  ✗ the devices list did not show the schedule or its timezone\n'
+        printf '%s\n' "$listed" | grep -E 'when|local' | sed 's/^/      /'
+        fail=1
+      fi
+      # Put it back, so what follows is the unbounded device it was written for.
+      ESPER_HOME="$term_a" "$BIN/esper-engine" schedule "$fp" clear >/dev/null
+
       # **And the ordinary case says nothing about waiting.** A device that may
       # connect unattended is answered inside a round trip, so a note about
       # waiting for somebody would be a note about nothing -- on every single
@@ -2276,8 +2352,6 @@ print(s.getsockname()[1]); s.close()')
       # Put it back, so what follows is not running against a narrower device
       # than it was written for.
       ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" control >/dev/null
-      flowing="${shown:-}"
-
       # **Holding the picture is not losing the session.** A pause stops the
       # screen going out and keeps everything else: the connection, the
       # permissions, the terminal, the clipboard. Both ends have to say so —
@@ -2306,9 +2380,11 @@ print(s.getsockname()[1]); s.close()')
       # how long it may run.
       engine_pid=$(pgrep -P "$host_pid" -x esper-engine 2>/dev/null | head -1)
       engine_pid="${engine_pid:-$host_pid}"
-      sleep 2
+      # **Held for almost all of it**, so what the count proves does not
+      # depend on how busy this machine is. See the assertion below.
+      sleep 1
       kill -USR1 "$engine_pid" 2>/dev/null || true
-      sleep 8
+      sleep 11
       kill -USR1 "$engine_pid" 2>/dev/null || true
       wait "$client" || true
       lasted=$(( $(date +%s) - began ))
@@ -2333,15 +2409,31 @@ print(s.getsockname()[1]); s.close()')
         grep -E 'the picture at the host' "$term_a/host.log" | sed 's/^/      /' || true
         fail=1
       fi
-      # Held for two thirds of the session, so a host that ignored the pause
-      # and went on encoding is caught by the count rather than by the words.
-      if [ -n "$flowing" ] && [ -n "${held_shown:-}" ] &&
-        [ "$held_shown" -lt $(( flowing / 2 )) ]; then
-        printf '  ✓ and the screen actually stopped: %s pictures held against %s flowing\n' \
-          "$held_shown" "$flowing"
+      # **A bound, not a comparison with another session.**
+      #
+      # The first version compared this count against a flowing session's,
+      # measured half a minute earlier — and failed one run in three, because
+      # the *baseline* halved under load: 173 pictures where 271 to 337 is
+      # ordinary. Two measurements taken at different times on a busy machine
+      # differ by more than the effect being measured, which is the trap this
+      # suite has fallen into before.
+      #
+      # So the bound comes from the session's own announced ceiling instead.
+      # Twelve of thirteen seconds are held, leaving about two seconds of
+      # pictures; at the 30 fps cap that is at most sixty, and ninety leaves
+      # half again for the burst around a keyframe. A host that ignored the
+      # pause would show what the runs above show — 170 to 340 — so the
+      # separation is several times the noise rather than inside it.
+      #
+      # The floor matters as much: a session that showed *nothing* would pass
+      # a ceiling on its own while being completely broken.
+      if [ -n "${held_shown:-}" ] && [ "$held_shown" -gt 0 ] &&
+        [ "$held_shown" -le 90 ]; then
+        printf '  ✓ and the screen actually stopped: %s pictures in the two seconds it ran\n' \
+          "$held_shown"
       else
-        printf '  ✗ a held session sent %s pictures against %s flowing — it did not stop\n' \
-          "${held_shown:-no}" "${flowing:-no}"
+        printf '  ✗ a held session sent %s pictures, where at most 90 fit the seconds it ran\n' \
+          "${held_shown:-no}"
         fail=1
       fi
 

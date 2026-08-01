@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+esper-clock.workspace = true
 esper-proto.workspace = true
 # The stable line, deliberately, and unified on one copy of every primitive.
 #

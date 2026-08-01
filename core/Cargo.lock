@@ -404,6 +404,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-clock"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "esper-color"
 version = "0.0.0"
 dependencies = [
@@ -424,6 +433,7 @@ name = "esper-crypto"
 version = "0.0.0"
 dependencies = [
  "ed25519-dalek",
+ "esper-clock",
  "esper-proto",
  "hex",
  "hkdf",
@@ -494,6 +504,7 @@ dependencies = [
  "esper-capture-x11",
  "esper-clipboard",
  "esper-clipboard-x11",
+ "esper-clock",
  "esper-color",
  "esper-config",
  "esper-crypto",

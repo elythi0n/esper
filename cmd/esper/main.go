@@ -80,6 +80,7 @@ var engineCommands = map[string]bool{
 	"devices":  true,
 	"grant":    true,
 	"revoke":   true,
+	"schedule": true,
 	"keep":     true,
 	"forget":   true,
 	"invite":   true,
@@ -415,6 +416,7 @@ Using a machine
 Deciding who may
   grant              give a paired device a permission
   revoke             take a permission away
+  schedule           when a device may connect unattended, in local time
   keep               make a one-session pairing last
   forget             unpair a device entirely
 

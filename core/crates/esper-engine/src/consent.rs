@@ -323,9 +323,50 @@ pub const fn describe(how: Allowed) -> &'static str {
     }
 }
 
+/// Where the host's idea of the local time comes from.
+///
+/// A trait so a test can pin the clock: a schedule that only opens on Tuesday
+/// morning is otherwise a test that passes once a week.
+pub trait LocalTime: Send + Sync + std::fmt::Debug {
+    /// The local time now, or why it could not be worked out.
+    fn now(&self) -> Result<esper_clock::Civil, String>;
+}
+
+/// The machine's own answer, from its own timezone database.
+#[derive(Debug, Default)]
+pub struct MachineTime;
+
+impl LocalTime for MachineTime {
+    /// **Read at every decision, not cached.** A laptop that flew somewhere
+    /// has a different local day, and a host that had to be restarted to
+    /// notice would enforce yesterday's timezone on today's schedule. It is a
+    /// two-kilobyte file read once per session, against a decision that
+    /// already involves a network handshake.
+    fn now(&self) -> Result<esper_clock::Civil, String> {
+        let zone = esper_clock::Zone::local().map_err(|e| e.to_string())?;
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "this machine's clock is set before 1970".to_owned())?
+            .as_secs();
+        let unix = i64::try_from(unix).map_err(|_| "this machine's clock is absurd".to_owned())?;
+        Ok(zone.civil_at(unix))
+    }
+}
+
+/// Whether the unattended permission applies right now, and why not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Bounded {
+    /// It applies: no schedule, or the schedule allows this moment.
+    Applies,
+    /// It does not, and this is what to tell the far end.
+    Outside(String),
+}
+
 /// Grants what the device holds, once somebody has agreed to it.
 pub struct AskAtTheHost {
     ask: Box<dyn Ask>,
+    /// Where the local time comes from, for reading a device's schedule.
+    clock: Box<dyn LocalTime>,
     within: Duration,
     grace: Duration,
     /// When each device was last accepted, and how the last session was
@@ -362,6 +403,27 @@ impl AskAtTheHost {
     pub fn asking(ask: Box<dyn Ask>) -> Self {
         Self {
             ask,
+            clock: Box::new(MachineTime),
+            within: ANSWER_WITHIN,
+            grace: GRACE,
+            recent: Mutex::new(Vec::new()),
+            last: Mutex::new(None),
+        }
+    }
+
+    /// The same, reading the time from somewhere else.
+    ///
+    /// For a test with a schedule in it, which otherwise passes on Tuesdays.
+    ///
+    /// `#[cfg(test)]` for the reason `asking_within` is: this is a binary
+    /// crate, so a constructor only the tests call would be dead code in the
+    /// shipped build rather than an API somebody might use.
+    #[cfg(test)]
+    #[must_use]
+    pub fn asking_at(ask: Box<dyn Ask>, clock: Box<dyn LocalTime>) -> Self {
+        Self {
+            ask,
+            clock,
             within: ANSWER_WITHIN,
             grace: GRACE,
             recent: Mutex::new(Vec::new()),
@@ -383,10 +445,43 @@ impl AskAtTheHost {
     pub fn asking_within(ask: Box<dyn Ask>, within: Duration, grace: Duration) -> Self {
         Self {
             ask,
+            clock: Box::new(MachineTime),
             within,
             grace,
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
+        }
+    }
+
+    /// Whether the unattended permission applies at this moment.
+    ///
+    /// [`Bounded::Applies`] for a device with no schedule, whatever the time —
+    /// so a host with no timezone database behaves exactly as it did before
+    /// schedules existed.
+    ///
+    /// **A schedule that cannot be evaluated does not apply.** If the
+    /// machine's timezone cannot be read, the hours somebody wrote cannot be
+    /// checked, and assuming they are satisfied would turn an unreadable file
+    /// into unbounded access. The session is not refused for it — the prompt
+    /// is still there — but the shortcut past the prompt is.
+    fn bounded(&self, device: &Device) -> Bounded {
+        let Some(schedule) = device.unattended_when.as_ref() else {
+            return Bounded::Applies;
+        };
+        match self.clock.now() {
+            Ok(now) if schedule.allows(&now) => Bounded::Applies,
+            Ok(now) => Bounded::Outside(format!(
+                "this device may connect unattended {}, and it is {:02}:{:02} on {} here",
+                schedule.spelled(),
+                now.hour,
+                now.minute,
+                weekday_name(now.weekday)
+            )),
+            Err(why) => Bounded::Outside(format!(
+                "this device may connect unattended {}, and this host cannot tell what \
+                 time it is locally ({why})",
+                schedule.spelled()
+            )),
         }
     }
 
@@ -452,7 +547,13 @@ impl Policy for AskAtTheHost {
             return Verdict::Grant(granted);
         }
 
-        if device.may(Permission::Unattended) {
+        // **The permission, and the hours it was granted for.** `unattended`
+        // with no schedule means whenever, which is what it has always meant.
+        // With one, it applies inside those hours and not outside — and
+        // outside them the device is an ordinary paired device rather than a
+        // locked-out one, so the prompt below is still its way in.
+        let bounded = self.bounded(device);
+        if device.may(Permission::Unattended) && bounded == Bounded::Applies {
             self.note(Allowed::Unattended);
             return Verdict::Grant(granted);
         }
@@ -485,6 +586,15 @@ impl Policy for AskAtTheHost {
         }
 
         if !self.ask.can_ask() {
+            // **The reason names the thing somebody can change.** A device
+            // with the permission, refused because it is half past three in
+            // the morning, is not a device that "may not connect unattended":
+            // saying so would send whoever reads it to grant a permission it
+            // already holds. So the schedule is the reason when the schedule
+            // is the cause.
+            if let Bounded::Outside(why) = bounded {
+                return Verdict::Deny(Reason::OUT_OF_SCHEDULE, why);
+            }
             return Verdict::Deny(
                 Reason::NOBODY_TO_ASK,
                 format!(
@@ -569,6 +679,208 @@ mod tests {
         let mut d = Device::new([7u8; 32], "laptop".to_owned(), 0);
         d.permissions = permissions.to_vec();
         d
+    }
+
+    /// A clock pinned to a moment, so a test about Tuesday morning does not
+    /// pass only on Tuesday morning.
+    #[derive(Debug)]
+    struct Pinned(esper_clock::Civil);
+
+    impl Pinned {
+        fn at(weekday: esper_clock::Weekday, hour: u8, minute: u8) -> Box<dyn LocalTime> {
+            Box::new(Self(esper_clock::Civil {
+                year: 2026,
+                month: 9,
+                day: 7,
+                hour,
+                minute,
+                second: 0,
+                weekday,
+            }))
+        }
+    }
+
+    impl LocalTime for Pinned {
+        fn now(&self) -> Result<esper_clock::Civil, String> {
+            Ok(self.0)
+        }
+    }
+
+    /// A clock that cannot say, which is a machine with no timezone data.
+    #[derive(Debug)]
+    struct NoIdea;
+
+    impl LocalTime for NoIdea {
+        fn now(&self) -> Result<esper_clock::Civil, String> {
+            Err("no /etc/localtime".to_owned())
+        }
+    }
+
+    /// A device with the permission and a schedule.
+    fn scheduled(spec: &str) -> Device {
+        let mut d = device(&[Permission::View, Permission::Unattended]);
+        d.unattended_when = Some(esper_clock::Schedule::parse(spec).expect("a schedule"));
+        d
+    }
+
+    /// **Inside its hours, an unattended device is not asked about.** Which is
+    /// the whole point: a schedule bounds when the permission applies, and
+    /// inside the window it applies exactly as it always did.
+    #[test]
+    fn inside_its_schedule_an_unattended_device_is_let_straight_in() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::No));
+        let policy = AskAtTheHost::asking_at(
+            Box::new(std::sync::Arc::clone(&ask)),
+            Pinned::at(esper_clock::Weekday::Tuesday, 9, 0),
+        );
+        let verdict = policy.decide(
+            &scheduled("weekdays 08:00-18:00"),
+            &wants(&[Permission::View]),
+        );
+        assert!(matches!(verdict, Verdict::Grant(_)), "{verdict:?}");
+        assert_eq!(
+            ask.asked.load(Ordering::Relaxed),
+            0,
+            "nobody should have been asked inside the schedule"
+        );
+        assert_eq!(
+            policy.how_the_last_one_was_allowed(),
+            Some(Allowed::Unattended)
+        );
+    }
+
+    /// **Outside its hours, it is asked about like any other device.** A
+    /// schedule bounds the permission, not the device — the machine most
+    /// likely to need help at 3am is the one somebody is sitting in front of
+    /// at 3am.
+    #[test]
+    fn outside_its_schedule_it_is_asked_about_like_anybody_else() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::Yes));
+        let policy = AskAtTheHost::asking_at(
+            Box::new(std::sync::Arc::clone(&ask)),
+            Pinned::at(esper_clock::Weekday::Tuesday, 3, 30),
+        );
+        let verdict = policy.decide(
+            &scheduled("weekdays 08:00-18:00"),
+            &wants(&[Permission::View]),
+        );
+        assert!(matches!(verdict, Verdict::Grant(_)), "{verdict:?}");
+        assert_eq!(
+            ask.asked.load(Ordering::Relaxed),
+            1,
+            "somebody should have been asked outside the schedule"
+        );
+        assert_eq!(
+            policy.how_the_last_one_was_allowed(),
+            Some(Allowed::Accepted)
+        );
+    }
+
+    /// And if they say no, it is refused — the prompt is a real question
+    /// outside the window rather than a formality.
+    #[test]
+    fn outside_its_schedule_a_no_is_a_refusal() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::No));
+        let policy = AskAtTheHost::asking_at(
+            Box::new(std::sync::Arc::clone(&ask)),
+            Pinned::at(esper_clock::Weekday::Saturday, 12, 0),
+        );
+        let verdict = policy.decide(
+            &scheduled("weekdays 08:00-18:00"),
+            &wants(&[Permission::View]),
+        );
+        assert!(
+            matches!(verdict, Verdict::Deny(Reason::PROMPT_REFUSED, _)),
+            "{verdict:?}"
+        );
+    }
+
+    /// **The refusal names the schedule, not the permission.** A device
+    /// refused at half past three in the morning holds the permission
+    /// already; telling somebody to grant it would send them to the wrong
+    /// place entirely.
+    #[test]
+    fn with_nobody_to_ask_the_reason_is_the_schedule_that_caused_it() {
+        let policy = AskAtTheHost::asking_at(
+            Box::new(std::sync::Arc::new(Scripted::nobody())),
+            Pinned::at(esper_clock::Weekday::Tuesday, 3, 30),
+        );
+        let verdict = policy.decide(
+            &scheduled("weekdays 08:00-18:00"),
+            &wants(&[Permission::View]),
+        );
+        let Verdict::Deny(reason, why) = verdict else {
+            panic!("expected a refusal, got {verdict:?}");
+        };
+        assert_eq!(reason, Reason::OUT_OF_SCHEDULE);
+        assert!(
+            why.contains("weekdays 08:00-18:00")
+                && why.contains("03:30")
+                && why.contains("Tuesday"),
+            "the refusal should say the schedule and the local time: {why:?}"
+        );
+        assert!(
+            !why.contains("grant"),
+            "it must not tell somebody to grant a permission the device holds: {why:?}"
+        );
+    }
+
+    /// A device with no schedule is unchanged: the permission means whenever,
+    /// which is what it meant before schedules existed and is right for a
+    /// machine in a rack.
+    #[test]
+    fn a_device_with_no_schedule_is_unbounded_as_it_always_was() {
+        let ask = std::sync::Arc::new(Scripted::nobody());
+        let policy = AskAtTheHost::asking_at(
+            Box::new(std::sync::Arc::clone(&ask)),
+            Pinned::at(esper_clock::Weekday::Sunday, 3, 0),
+        );
+        let device = device(&[Permission::View, Permission::Unattended]);
+        assert!(device.unattended_when.is_none());
+        let verdict = policy.decide(&device, &wants(&[Permission::View]));
+        assert!(matches!(verdict, Verdict::Grant(_)), "{verdict:?}");
+    }
+
+    /// **A schedule that cannot be evaluated does not apply.** If the machine
+    /// cannot tell what time it is locally, the hours somebody wrote cannot be
+    /// checked — and assuming they are satisfied would turn an unreadable file
+    /// into unbounded access.
+    #[test]
+    fn a_schedule_that_cannot_be_evaluated_does_not_let_anybody_in() {
+        let policy = AskAtTheHost::asking_at(
+            Box::new(std::sync::Arc::new(Scripted::nobody())),
+            Box::new(NoIdea),
+        );
+        let verdict = policy.decide(
+            &scheduled("weekdays 08:00-18:00"),
+            &wants(&[Permission::View]),
+        );
+        let Verdict::Deny(reason, why) = verdict else {
+            panic!("expected a refusal, got {verdict:?}");
+        };
+        assert_eq!(reason, Reason::OUT_OF_SCHEDULE);
+        assert!(
+            why.contains("cannot tell what time"),
+            "the refusal should say why it could not be checked: {why:?}"
+        );
+    }
+
+    /// A schedule on a device **without** the permission changes nothing: the
+    /// permission is what grants, and the schedule only bounds it.
+    #[test]
+    fn a_schedule_without_the_permission_grants_nothing_on_its_own() {
+        let ask = std::sync::Arc::new(Scripted::nobody());
+        let policy = AskAtTheHost::asking_at(
+            Box::new(std::sync::Arc::clone(&ask)),
+            Pinned::at(esper_clock::Weekday::Tuesday, 9, 0),
+        );
+        let mut device = device(&[Permission::View]);
+        device.unattended_when = Some(esper_clock::Schedule::parse("always").expect("a schedule"));
+        let verdict = policy.decide(&device, &wants(&[Permission::View]));
+        assert!(
+            matches!(verdict, Verdict::Deny(Reason::NOBODY_TO_ASK, _)),
+            "{verdict:?}"
+        );
     }
 
     fn wants(want: &[Permission]) -> SessionRequest {
@@ -858,5 +1170,21 @@ mod shown_tests {
     #[test]
     fn a_name_that_was_only_control_characters_still_reads_as_something() {
         assert_eq!(shown("\u{7}\u{7}"), "an unnamed device");
+    }
+}
+
+/// A day of the week as somebody would say it.
+///
+/// Spelled out rather than abbreviated, because this appears in a refusal a
+/// person reads once and has to understand immediately.
+const fn weekday_name(day: esper_clock::Weekday) -> &'static str {
+    match day {
+        esper_clock::Weekday::Monday => "Monday",
+        esper_clock::Weekday::Tuesday => "Tuesday",
+        esper_clock::Weekday::Wednesday => "Wednesday",
+        esper_clock::Weekday::Thursday => "Thursday",
+        esper_clock::Weekday::Friday => "Friday",
+        esper_clock::Weekday::Saturday => "Saturday",
+        esper_clock::Weekday::Sunday => "Sunday",
     }
 }

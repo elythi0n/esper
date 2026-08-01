@@ -49,12 +49,24 @@ pub fn list() -> Result<(), String> {
 
     let now = crate::paths::now_secs();
     let mut any_once = false;
+    let mut any_unattended = false;
     for device in store.iter() {
         println!("  {}  {}", device.fingerprint().hex(), device.name);
         println!("      may  {}", crate::net::permissions(device));
         if device.pairing.is_once() {
             any_once = true;
             println!("      for  {}", device.pairing.describe(now));
+        }
+        // **A device that can walk in unasked is never a quiet setting.** It
+        // is the most consequential thing in this list, so it says so on a
+        // line of its own — with the hours when it is bounded, and without
+        // them when it is not.
+        if device.may(Permission::Unattended) {
+            any_unattended = true;
+            match device.unattended_when.as_ref() {
+                Some(schedule) => println!("      when {} (local time)", schedule.spelled()),
+                None => println!("      when any time, day or night"),
+            }
         }
     }
     println!();
@@ -68,6 +80,17 @@ pub fn list() -> Result<(), String> {
             "  keep a one-session pairing:  {} keep <fingerprint>",
             crate::net::me()
         );
+    }
+    if any_unattended {
+        println!(
+            "  bound unattended access:     {} schedule <fingerprint> <when>",
+            crate::net::me()
+        );
+        // Which zone those hours are in, because a schedule read in the wrong
+        // timezone is a rule nobody wrote.
+        if let Ok(zone) = esper_clock::Zone::local() {
+            println!("  this host's local time:      {}", zone.name());
+        }
     }
     Ok(())
 }
@@ -212,6 +235,124 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
 /// unpair" — it is "people do not" — and the alternative to *this* is somebody
 /// who genuinely wants their helper to come back having to run the whole
 /// invitation again.
+/// Bound a device's unattended access to a schedule, or take the bound off.
+///
+/// **The permission is granted separately.** This says *when* it applies, and
+/// setting one on a device without the permission is allowed on purpose: the
+/// order somebody does two things in should not decide whether both took
+/// effect, and a schedule waiting for a permission is harmless where a
+/// refusal would be a puzzle.
+///
+/// # Errors
+///
+/// If the arguments are not a fingerprint and a schedule, the fingerprint
+/// names no device or more than one, the schedule cannot be read, or the store
+/// cannot be written.
+pub fn schedule(args: &[String]) -> Result<(), String> {
+    let [prefix, rest @ ..] = args else {
+        return Err(schedule_usage());
+    };
+    if rest.is_empty() {
+        return Err(schedule_usage());
+    }
+    // Joined, so `schedule <fp> weekdays 08:00-18:00` works without quoting.
+    // Somebody typing a schedule has enough to think about.
+    let spec = rest.join(" ");
+
+    let (mut store, dropped) = paths::devices()?;
+    for line in &dropped {
+        eprintln!("  · {line}");
+    }
+    let key = *find(&store, prefix)?;
+
+    let wanted = if matches!(
+        spec.trim().to_ascii_lowercase().as_str(),
+        "clear" | "none" | "off" | "any" | "anytime"
+    ) {
+        None
+    } else {
+        Some(esper_clock::Schedule::parse(&spec).map_err(|e| e.to_string())?)
+    };
+
+    let Some(device) = store.get_mut(&key) else {
+        return Err("the device disappeared between finding it and scheduling it".to_owned());
+    };
+    let name = device.name.clone();
+    let had_permission = device.may(esper_proto::Permission::Unattended);
+    let fingerprint = device.fingerprint().hex();
+    device.unattended_when = wanted.clone();
+    paths::save_devices(&store)?;
+
+    // **Recorded like every other change to what this machine trusts.**
+    // Narrowing or widening when a device may walk in unasked is exactly the
+    // kind of thing somebody should be able to find afterwards, and the audit
+    // trail is the only place it would be.
+    record(
+        &key,
+        Event::PermissionsChanged {
+            granted: store
+                .get(&key)
+                .map(|d| d.permissions.clone())
+                .unwrap_or_default(),
+        },
+    );
+
+    match wanted.as_ref() {
+        Some(schedule) => {
+            println!(
+                "  scheduled  {name} may connect unattended {}",
+                schedule.spelled()
+            );
+            // The zone, because a schedule is in local time and "local" is a
+            // decision the host makes — see `esper_clock`, which reads the
+            // machine's own answer and ignores `$TZ`.
+            match esper_clock::Zone::local() {
+                Ok(zone) => println!("  local      those hours are {} time", zone.name()),
+                Err(e) => println!(
+                    "  warning    this host cannot tell what time it is locally ({e}), so the \
+                     schedule will never allow anything until that is fixed"
+                ),
+            }
+        }
+        None => println!("  scheduled  {name} may connect unattended at any time"),
+    }
+    if !had_permission {
+        println!(
+            "  note      it does not hold `unattended` yet: {} grant {} unattended",
+            crate::net::me(),
+            fingerprint
+        );
+    }
+    Ok(())
+}
+
+/// How to use the schedule command.
+///
+/// Public because `--help` is answered centrally, on stdout and with a
+/// successful exit: asking how something works is not a failure. See the
+/// dispatch in `main`.
+#[must_use]
+pub fn schedule_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} schedule <fingerprint> <when>\n\
+         \n\
+         When a device may connect unattended — without anybody at the host\n\
+         being asked. Outside those hours it is an ordinary paired device and\n\
+         somebody at the host can still allow it.\n\
+         \n\
+         \x20 weekdays 08:00-18:00   Monday to Friday, working hours\n\
+         \x20 weekends 10:00-23:00   Saturday and Sunday\n\
+         \x20 daily 22:00-06:00      every night, across midnight\n\
+         \x20 mon,wed,fri 9-17       named days\n\
+         \x20 always                 every hour of every day\n\
+         \x20 clear                  take the schedule off, leaving `always`\n\
+         \n\
+         The hours are this host's own local time, from its own timezone data.\n\
+         Enforced here, at the host, and never by the far end."
+    )
+}
+
 pub fn keep(args: &[String]) -> Result<(), String> {
     let [prefix] = args else {
         return Err(format!("usage: {} keep <fingerprint>", crate::net::me()));

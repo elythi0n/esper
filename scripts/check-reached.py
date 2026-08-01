@@ -53,7 +53,6 @@ from pathlib import Path
 LEDGER = {
     # Features that are not built. Each is a tracked item, not an oversight.
     "Permission::Record": "recording is not built",
-    "Reason::OUT_OF_SCHEDULE": "schedules are not built; `unattended` is all-or-nothing today",
     "Reason::RELAY_FULL": "the relay is not built",
     # States this product cannot produce, which is a different thing from a
     # state it has not got round to producing.
