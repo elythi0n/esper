@@ -2345,6 +2345,118 @@ print(s.getsockname()[1]); s.close()')
         fail=1
       fi
 
+      # **Sound, end to end.**
+      #
+      # Off unless asked for, like the display tests and for the same reason:
+      # this loads a null sink into the machine's sound server and points the
+      # default sink at it for a few seconds, which on somebody's desktop
+      # would silence what they were listening to. CI sets the variable, where
+      # the server is one the workflow started for the purpose.
+      #
+      # A **null sink** rather than the speakers: nothing is audible, nothing
+      # real is recorded, and the capture is deterministic — a null sink has no
+      # hardware to resume and nobody else mixing into it.
+      if [ -n "${ESPER_AUDIO_TESTS:-}" ] && command -v pactl >/dev/null 2>&1 &&
+        command -v pacat >/dev/null 2>&1 && pactl info >/dev/null 2>&1; then
+        echo "  — sound, from the host's output to the controller's speaker"
+        audio_module=$(pactl load-module module-null-sink sink_name=esper_smoke 2>/dev/null || true)
+        was_default=$(pactl get-default-sink 2>/dev/null || true)
+        if [ -n "$audio_module" ]; then
+          pactl set-default-sink esper_smoke >/dev/null 2>&1 || true
+          ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" audio >/dev/null
+
+          # Something to hear: twelve seconds of a tone into the null sink, in the
+          # background, so the host's capture has sound rather than silence.
+          # A tone rather than noise, because the check below is a peak.
+          python3 - > "$term_a/tone.raw" <<'TONE'
+import struct, math, sys
+out = sys.stdout.buffer
+for i in range(48000 * 12):
+    v = int(math.sin(i * 2 * math.pi * 440 / 48000) * 10000)
+    out.write(struct.pack('<hh', v, v))
+TONE
+          (pacat --playback --device=esper_smoke --format=s16le --rate=48000 \
+            --channels=2 --raw < "$term_a/tone.raw" >/dev/null 2>&1 &)
+
+          heard=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$host_addr" --seconds 8 2>&1 || true)
+          played=$( { printf '%s' "$heard" | \
+            sed -n 's/^  sound      \([0-9]*\) frame(s) played.*/\1/p' || true; } | head -1)
+          # **Eight seconds, and the floor allows for three of them.**
+          #
+          # 20 ms frames are 50 a second, so eight seconds is 400. `parec`
+          # takes about a second to attach and a suspended sink about another
+          # to resume — measured, and one-off — so the first two or three
+          # seconds of a session are quiet. 150 is comfortably above what
+          # three lost seconds leaves and nowhere near the zero a broken path
+          # produces.
+          if [ -n "$played" ] && [ "$played" -gt 150 ]; then
+            printf '  ✓ the host'"'"'s sound arrived and was played: %s frames\n' "$played"
+          else
+            printf '  ✗ no sound arrived (%s frames)\n' "${played:-no}"
+            printf '%s\n' "$heard" | grep -iE 'sound|audio' | sed 's/^/      /' || true
+            grep -iE 'sound|audio' "$term_a/host.log" | tail -3 | sed 's/^/      host: /' || true
+            fail=1
+          fi
+
+          # **The decoder is in a jail.** A peer's packets reach a C library,
+          # and there is deliberately no path that decodes them in process.
+          if printf '%s' "$heard" | grep -q 'decoder sandboxed'; then
+            printf '  ✓ and its decoder was sandboxed, in a process of its own\n'
+          else
+            printf '  ✗ the sound was decoded without a sandbox\n'
+            printf '%s\n' "$heard" | grep -i sound | sed 's/^/      /' || true
+            fail=1
+          fi
+
+          # And the host said what it was doing, which is what makes an
+          # unexpectedly silent session diagnosable from the host's log.
+          if grep -q 'sending sound' "$term_a/host.log"; then
+            printf '  ✓ and the host said it was sending sound\n'
+          else
+            printf '  ✗ the host did not say it was sending sound\n'
+            fail=1
+          fi
+
+          # **A controller that does not want sound is not sent any.** The
+          # permission is the host's to grant, but a grant is the intersection
+          # with what the session asked for — so declining is free rather than
+          # merely quiet.
+          declined=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$host_addr" --seconds 2 --no-audio 2>&1 || true)
+          if printf '%s' "$declined" | grep -q 'not asked for' &&
+            ! printf '%s' "$declined" | grep -q 'frame(s) played'; then
+            printf '  ✓ and --no-audio means none is sent at all, not merely unplayed\n'
+          else
+            printf '  ✗ --no-audio did not stop the sound\n'
+            printf '%s\n' "$declined" | grep -i sound | sed 's/^/      /' || true
+            fail=1
+          fi
+
+          # **And a session without the permission gets no sound at all.**
+          # The permission is the gate, not the device.
+          ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" audio >/dev/null
+          silent=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$host_addr" --seconds 2 2>&1 || true)
+          if ! printf '%s' "$silent" | grep -q '^  sound'; then
+            printf '  ✓ and a session without the permission is sent none\n'
+          else
+            printf '  ✗ a session with no audio permission was sent sound\n'
+            printf '%s\n' "$silent" | grep -i sound | sed 's/^/      /' || true
+            fail=1
+          fi
+
+          [ -n "$was_default" ] && pactl set-default-sink "$was_default" >/dev/null 2>&1 || true
+          pactl unload-module "$audio_module" >/dev/null 2>&1 || true
+          rm -f "$term_a/tone.raw"
+        else
+          printf '  — skipped the sound checks: no null sink could be loaded\n'
+        fi
+      else
+        printf '  — skipped the sound checks: set ESPER_AUDIO_TESTS=1 with a sound server\n'
+        printf '    running. They load a null sink and point the default sink at it.\n'
+      fi
+
       echo "  — revoking a device that is connected right now"
       { printf 'echo holding\n'; sleep 15; } | \
         env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" TERM=dumb \

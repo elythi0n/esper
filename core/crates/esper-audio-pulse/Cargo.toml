@@ -1,0 +1,15 @@
+[package]
+name = "esper-audio-pulse"
+description = "Sound in and out through the PulseAudio protocol, which PipeWire also speaks. Captures a monitor of the output and never an input device."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-audio.workspace = true
+tracing.workspace = true

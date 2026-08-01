@@ -32,6 +32,53 @@ than an exemption because the code was actually read, and it is attributed
 plainly so anybody weighing it knows what it is.
 """
 
+[[audits.opus]]
+who = "Elythi0n <info@marcosraudkett.com>"
+criteria = "safe-to-deploy"
+version = "0.4.0"
+notes = """
+A thin safe wrapper over libopus. One file, 1339 lines, no build script.
+
+Read in full: the enums and their `from_raw` conversions, the `ffi!` and
+`ctl!` macros, `Encoder` (new, Drop, the `unsafe impl Send`, encode,
+encode_float, encode_vec), `Decoder` (new, decode, decode_float,
+get_nb_samples), the whole `packet` module, `check_len`, and the error type.
+Those are the paths this project uses, plus the packet parsers a peer's bytes
+would reach.
+
+Skimmed rather than read line by line: the repacketizer, the soft-clip helper
+and the multistream encoder and decoder. Nothing in this project constructs
+any of them.
+
+What the crate does: creates a codec state in `new`, destroys it in `Drop`,
+and passes slices to libopus with the lengths libopus expects — `len(output) /
+channels` for the sample capacity, which is the correct discipline for that
+API. Packet loss is a null pointer with a zero length, which is libopus's own
+convention. Every negative return code becomes an `Err`.
+
+The whole file contains no `std::fs`, no `std::net`, no `std::env`, no
+`Command`, no `include_bytes!` and no build script — checked by reading and by
+grep. It cannot reach the filesystem, the network or the environment.
+
+Two things a reader should know rather than discover:
+
+  - `check_len` **panics** on a slice longer than `c_int::MAX`. Reachable only
+    by handing it a 2 GiB buffer; this project's are 1920 samples and 1275
+    bytes.
+  - `version()` and `ErrorCode::description()` unwrap a UTF-8 conversion of
+    one of libopus's own static strings. Unreachable unless libopus itself is
+    compromised, which is a larger problem than a panic.
+
+The `unsafe impl Send` for both states is correct and is justified in a comment
+quoting libopus's own threading documentation: a state may be moved between
+threads, and must not be used from two at once, which `&mut self` enforces.
+
+Caveat on this record: the review was performed by an AI agent working on this
+repository rather than by a human. It is recorded as an audit rather than an
+exemption because the code was actually read, and anybody weighing it can see
+exactly what it is.
+"""
+
 [[trusted.aho-corasick]]
 criteria = "safe-to-deploy"
 user-id = 189 # Andrew Gallant (BurntSushi)

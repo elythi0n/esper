@@ -123,6 +123,15 @@ pub struct ConnectOptions {
     /// the refusal message: where they *sit* is the desk's business, not the
     /// controller's.
     pub monitors: Option<Vec<u32>>,
+    /// Do not ask for the host's sound.
+    ///
+    /// For a session on a machine whose speakers somebody else is listening
+    /// to, or a link too small to spend on sound. **It stops the sound being
+    /// sent**, not merely played: a grant is the intersection of what the
+    /// device holds and what the session asked for, so a session that does not
+    /// ask is a session the host sends nothing to — which is better than
+    /// declining, because nobody pays for it.
+    pub no_audio: bool,
     /// Ask for every screen the host has, whatever they turn out to be.
     ///
     /// Which screens exist is something only the host knows, so this cannot be
@@ -309,6 +318,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut control = false;
     let mut monitors: Option<Vec<u32>> = None;
     let mut all_monitors = false;
+    let mut no_audio = false;
     let mut via_addr: Option<SocketAddr> = None;
     let mut via_key: Option<[u8; 32]> = None;
     let mut named: Option<String> = None;
@@ -404,6 +414,10 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
                 all_monitors = true;
                 i += 1;
             }
+            "--no-audio" => {
+                no_audio = true;
+                i += 1;
+            }
             // **An address or a name.** An address says where without saying
             // which; a name says which without saying where. Both are
             // ordinary things to type, and the key check settles the identity
@@ -439,6 +453,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
         control,
         monitors,
         all_monitors,
+        no_audio,
         via,
         named,
         mdns,
@@ -1988,7 +2003,46 @@ async fn serve_session(
     // the complete set. It is **not** a revocation: the grant stands, the
     // device keeps it, and the next session gets it again on a machine where
     // the display may well have come back.
+    // **The sound, if this session may have it and this machine can produce
+    // it.** Started before the narrowing below, because whether it started is
+    // one of the things the narrowing has to say.
+    //
+    // A monitor of the output, never an input: see `esper-audio-pulse`. The
+    // permission is what a person granted; the device is what the machine has.
+    let sound = if granted.contains(&Permission::Audio) {
+        match crate::audio_task::start(&media) {
+            Ok(sending) => {
+                println!(
+                    "      sending sound: {} at {} Hz, {} channel(s), {} ms frames, ssrc {:#010x}",
+                    sending.backend(),
+                    sending.config().sample_rate_hz,
+                    sending.config().channels,
+                    sending.config().frame_ms,
+                    sending.config().ssrc
+                );
+                // Announced on the control stream, because a controller cannot
+                // build a decoder for a stream it was not told about — and the
+                // packets are already on their way.
+                if let Err(e) = link.announce_sound(sending.config()).await {
+                    println!("      · could not announce the sound ({e})");
+                }
+                Some(sending)
+            }
+            Err(e) => {
+                // Said once, and the session carries on. A host with no sound
+                // server is the ordinary case on a server.
+                println!("      no sound: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut deliverable = granted.clone();
+    if sound.is_none() {
+        deliverable.retain(|p| *p != Permission::Audio);
+    }
     if cannot_inject {
         deliverable.retain(|p| *p != Permission::Control);
     }
@@ -2039,6 +2093,10 @@ async fn serve_session(
         },
     )
     .await;
+    // **Dropped here, with the session.** The thread stops, the capture
+    // subprocess is killed and the sound stops — a session that ended and left
+    // a capture running would be recording somebody's machine for nothing.
+    drop(sound);
     drop(watch);
     if let Some(indicator) = indicator {
         indicator.hide();
@@ -3038,6 +3096,7 @@ pub fn connect_usage() -> String {
          \x20                      announced. Several arrive as one picture, in the\n\
          \x20                      arrangement the host's desktop has\n\
          \x20 --all-monitors       ask for every screen the host has\n\
+         \x20 --no-audio           do not ask for the host's sound, so none is sent\n\
          \x20 --profile <what>     text, balanced or motion: what you are doing,\n\
          \x20                      which decides what the host gives up first\n\
          \x20 --clipboard <what>   both, from-host, to-host or none. Nothing is ever\n\
@@ -3392,6 +3451,15 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 if o.control {
                     want.push(Permission::Control);
                 }
+                // **Asked for unless declined**, because the grant is the
+                // intersection of what the device holds and what the session
+                // asked for: a session that never asked would be granted no
+                // sound however the host is configured, and the person who
+                // granted the permission would be left wondering where their
+                // sound went.
+                if !o.no_audio {
+                    want.push(Permission::Audio);
+                }
                 want.extend(o.clipboard.wanted());
                 want
             },
@@ -3532,6 +3600,12 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             }
         }
 
+        if o.no_audio {
+            println!("  sound      not asked for (--no-audio), so none is sent");
+        }
+        // The speaker, once the host announces sound. `None` until then, and
+        // for the whole of most sessions.
+        let mut playing: Option<crate::playback_task::Playing> = None;
         let mut presenter = if o.present {
             match crate::loopback::open_window(config.width, config.height) {
                 Ok(p) => {
@@ -3943,6 +4017,57 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             // has just gone. It would be refused at the host either way -- the
             // enforcement is there, not here -- but sending it anyway would
             // mean this end knew and carried on.
+            // **The sound, once the host says there is any.** It is announced
+            // rather than assumed: audio is permissioned on its own, a host
+            // may have no sound device, and the announcement carries the SSRC
+            // that tells audio datagrams from the picture's.
+            //
+            // The decoder goes in a jail of its own — a peer's packets reach a
+            // C library, and a failure in it must not take the picture down —
+            // and the speaker goes on its own thread, because playing blocks.
+            //
+            // There is no "declined" branch here: `--no-audio` means the
+            // session never asked for the permission, so a host has nothing
+            // to announce — which is better than declining, because the sound
+            // is never sent and never paid for.
+            if let Some(announced) = link.take_audio() {
+                match crate::playback_task::start(esper_audio::Format::of(&announced)) {
+                    Ok(speaker) => match esper_decode::SandboxedAudio::spawn_self(&announced) {
+                        Ok(worker) => {
+                            let jail = worker.report().describe();
+                            match link.with_sound(&announced, Box::new(worker)) {
+                                Ok(()) => {
+                                    println!(
+                                        "  sound      {} Hz, {} channel(s) — decoder sandboxed \
+                                         ({jail}), playing through {}",
+                                        announced.sample_rate_hz,
+                                        announced.channels,
+                                        speaker.backend()
+                                    );
+                                    playing = Some(speaker);
+                                }
+                                Err(e) => println!("  sound      unavailable ({e})"),
+                            }
+                        }
+                        // **No fallback to decoding in process.** A fallback
+                        // is how a security property becomes a preference, and
+                        // the one time it would trigger is the one time it
+                        // matters.
+                        Err(e) => println!("  sound      refused: no sandbox for it ({e})"),
+                    },
+                    Err(e) => println!("  sound      nowhere to play it ({e})"),
+                }
+            }
+            // Handed to the speaker without waiting: see `playback_task`.
+            if let Some(speaker) = playing.as_mut() {
+                for frame in link.take_sound() {
+                    if !speaker.play(frame) {
+                        println!("  · the sound stopped");
+                        playing = None;
+                        break;
+                    }
+                }
+            }
             if let Some(now_granted) = link.take_permissions() {
                 let lost: Vec<&str> = held_permissions
                     .iter()
@@ -4106,6 +4231,23 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let jitter = link.jitter();
         let seconds = started.elapsed().as_secs_f64().max(0.001);
         println!("  pictures   {pictures} shown, {skipped} not shown");
+        // **Said only when there was sound**, and said in the terms that
+        // matter: how much was heard, how much was reconstructed because a
+        // packet was lost, and how much was thrown away because it arrived too
+        // late to play in order. The last number is the A/V policy, counted —
+        // sound is never delayed to line up with the picture.
+        if let Some(sound) = link.sound_stats() {
+            println!(
+                "  sound      {} frame(s) played, {} concealed, {} too late{}",
+                sound.frames,
+                sound.concealed,
+                sound.late,
+                match playing.as_ref().map(crate::playback_task::Playing::dropped) {
+                    Some(n) if n > 0 => format!(", {n} dropped at the speaker"),
+                    _ => String::new(),
+                }
+            );
+        }
         if cursor_shapes > 0 || cursor_moves > 0 {
             println!(
                 "  pointer    {cursor_shapes} shape(s), {cursor_moves} position(s) — out of \

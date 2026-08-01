@@ -255,8 +255,15 @@ impl VideoDecoder for SandboxedDecoder {
                 self.stats.undecodable = self.stats.undecodable.saturating_add(1);
                 Err(failed(why))
             }
-            Ok(FromDecoder::Ready { .. }) => {
-                let why = "the decoder worker reported ready twice".to_owned();
+            // **Both of these mean the child is not the child we spawned.**
+            // A second readiness, or a frame of sound from a worker asked for
+            // pictures, is a worker that has been replaced or subverted —
+            // there is no ordinary path that produces either. Poisoned, so the
+            // session stops using it rather than carrying on with something
+            // that is answering questions it was not asked.
+            Ok(FromDecoder::Ready { .. } | FromDecoder::Samples { .. }) => {
+                let why =
+                    "the decoder worker answered with something it was never asked for".to_owned();
                 self.poisoned = Some(why.clone());
                 Err(failed(why))
             }

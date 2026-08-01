@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+esper-audio-pulse.workspace = true
+esper-audio.workspace = true
 esper-pipeline.workspace = true
 esper-scale.workspace = true
 esper-present.workspace = true

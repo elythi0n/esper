@@ -118,6 +118,23 @@ impl HostLink {
         Ok(config)
     }
 
+    /// Tell the controller what the sound is.
+    ///
+    /// Sent when the sound starts, which is not when the session does: audio
+    /// is permissioned on its own, and the packets carry an SSRC a controller
+    /// has to be told about before it can tell them from the picture's.
+    ///
+    /// # Errors
+    ///
+    /// If the control stream has gone.
+    pub async fn announce_sound(
+        &mut self,
+        config: esper_proto::AudioConfig,
+    ) -> Result<(), LinkError> {
+        self.control.send(&MediaMessage::Audio(config)).await?;
+        Ok(())
+    }
+
     /// Tell the controller this session may do less than it was granted.
     ///
     /// **Not a revocation** — the grant stands, and the next session gets it

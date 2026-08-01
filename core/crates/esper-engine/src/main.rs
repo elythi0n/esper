@@ -8,6 +8,7 @@
 //! At this stage it reports its own identity and exits. Everything else is
 //! built on top of that.
 
+mod audio_task;
 mod backend;
 mod broker_cmd;
 mod clipboard_task;
@@ -27,6 +28,7 @@ mod net;
 mod pairing;
 mod paths;
 mod permits;
+mod playback_task;
 mod presence_task;
 mod screenshot_cmd;
 mod serve;
@@ -100,6 +102,29 @@ fn main() -> ExitCode {
         // Checked first, and by *both* the argument and the environment
         // variable, so an operator cannot reach it by accident and a stray
         // `decode-worker` on a command line does nothing.
+        // **And the sandboxed *audio* decoder**, which is its own process for
+        // the same reason plus one: a malformed packet of sound must not take
+        // the picture down. The shape it decodes arrives on the command line,
+        // because the child has to build its decoder before the jail goes on.
+        Some(esper_decode::AUDIO_WORKER_ARG)
+            if std::env::var_os(esper_decode::WORKER_ENV).is_some() =>
+        {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match audio_worker_config(&rest)
+                .ok_or_else(|| {
+                    "decode-audio-worker wants a rate, a channel count and a frame length"
+                        .to_owned()
+                })
+                .and_then(|config| {
+                    esper_decode::audio::run_on_stdio(&config).map_err(|e| e.to_string())
+                }) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("decode-audio-worker: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some(esper_decode::WORKER_ARG) if std::env::var_os(esper_decode::WORKER_ENV).is_some() => {
             match esper_decode::child::run_on_stdio(&esper_decode::decoder::DecoderConfig::default())
             {
@@ -389,4 +414,21 @@ fn print_help() {
          introduced through a broker you run. There is no default broker address\n\
          anywhere in Esper: without one, those tiers do not exist."
     );
+}
+
+/// The audio worker's shape, from its own command line.
+///
+/// Three integers and nothing else: a config a decoder cannot be built for is
+/// refused here rather than becoming a worker that starts and then fails on
+/// every packet.
+fn audio_worker_config(args: &[String]) -> Option<esper_proto::AudioConfig> {
+    let config = esper_proto::AudioConfig {
+        codec: esper_proto::AudioCodec::Opus,
+        sample_rate_hz: args.first()?.parse().ok()?,
+        channels: args.get(1)?.parse().ok()?,
+        frame_ms: args.get(2)?.parse().ok()?,
+        // The worker decodes; it never sends, so it has no stream identity.
+        ssrc: 0,
+    };
+    config.is_well_formed().then_some(config)
 }

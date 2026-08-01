@@ -22,6 +22,18 @@ const OBSERVE_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub struct ControllerLink {
     stream: ControllerStream,
+    /// The session's sound, once the host has announced it and a caller has
+    /// built a decoder for it.
+    ///
+    /// `None` until then, which is most sessions: sound needs a permission the
+    /// host granted, a device at both ends, and a viewer that wants it.
+    sound: Option<esper_stream::ControllerAudio>,
+    /// Frames decoded and waiting to be played.
+    ///
+    /// Held rather than played here, because playing blocks on a sound card
+    /// and this is the loop that reads the network. See the engine's playback
+    /// thread.
+    heard: Vec<esper_audio::Frame>,
     media: MediaChannel,
     control: Control,
     config: StreamConfig,
@@ -55,6 +67,8 @@ impl ControllerLink {
         let stream = ControllerStream::new(&config)?;
         let mut me = Self {
             stream,
+            sound: None,
+            heard: Vec::new(),
             media,
             control,
             config,
@@ -216,7 +230,7 @@ impl ControllerLink {
     /// frame interval to every recovery.
     pub async fn receive(&mut self, out: &mut Vec<Decoded>) -> Result<(), LinkError> {
         let datagram = self.media.recv().await?;
-        self.stream.receive(&datagram, out)?;
+        self.route(&datagram, out)?;
         self.flush_outbound().await
     }
 
@@ -242,11 +256,91 @@ impl ControllerLink {
             said = self.control.recv::<MediaMessage>() => Arrived::Said(said?),
         };
         match arrived {
-            Arrived::Datagram(datagram) => self.stream.receive(&datagram, out)?,
+            Arrived::Datagram(datagram) => self.route(&datagram, out)?,
             Arrived::Said(message) => self.handle(&message)?,
         }
         self.observe_link();
         self.flush_outbound().await
+    }
+
+    /// The sound the host has announced, once, if it has.
+    ///
+    /// See [`esper_stream::ControllerStream::take_audio`]: taken rather than
+    /// read, so a caller cannot build two decoders for one announcement.
+    #[must_use]
+    pub fn take_audio(&mut self) -> Option<esper_proto::AudioConfig> {
+        self.stream.take_audio()
+    }
+
+    /// Start receiving the sound the host announced.
+    ///
+    /// **The decoder is passed in** so that this crate does not decide where
+    /// it runs: a session must use the sandboxed one, and a loopback checking
+    /// its own output must not have to. See [`esper_audio::Decode`].
+    ///
+    /// # Errors
+    ///
+    /// If the announced shape and the decoder's disagree, or the shape is not
+    /// one a decoder can be built for.
+    pub fn with_sound(
+        &mut self,
+        config: &esper_proto::AudioConfig,
+        decoder: Box<dyn esper_audio::Decode>,
+    ) -> Result<(), LinkError> {
+        self.sound = Some(esper_stream::ControllerAudio::new(config, decoder)?);
+        Ok(())
+    }
+
+    /// Whether this session is receiving sound.
+    #[must_use]
+    pub const fn has_sound(&self) -> bool {
+        self.sound.is_some()
+    }
+
+    /// What has happened to the sound, if there is any.
+    #[must_use]
+    pub fn sound_stats(&self) -> Option<esper_stream::AudioStats> {
+        self.sound
+            .as_ref()
+            .map(esper_stream::ControllerAudio::stats)
+    }
+
+    /// Whether the sound is being decoded in a jail.
+    ///
+    /// A session says so in its summary, because "sandboxed" is a claim
+    /// somebody should be able to check rather than trust.
+    #[must_use]
+    pub fn sound_is_sandboxed(&self) -> bool {
+        self.sound
+            .as_ref()
+            .is_some_and(esper_stream::ControllerAudio::is_sandboxed)
+    }
+
+    /// The frames of sound decoded so far, taken.
+    ///
+    /// Taken rather than read, because each frame is played once.
+    #[must_use]
+    pub fn take_sound(&mut self) -> Vec<esper_audio::Frame> {
+        std::mem::take(&mut self.heard)
+    }
+
+    /// Give one datagram to whichever stream it belongs to.
+    ///
+    /// **The routing is here and not deeper**, because it is the only place
+    /// that knows about both streams. One media channel carries the picture
+    /// and the sound, told apart by SSRC and payload type — which is what RTP
+    /// is for, and is why a session needs no second channel for sound.
+    fn route(&mut self, datagram: &[u8], out: &mut Vec<Decoded>) -> Result<(), LinkError> {
+        if let Some(sound) = self.sound.as_mut()
+            && let Ok((header, _)) = esper_media::RtpHeader::parse(datagram)
+            && header.ssrc == sound.config().ssrc
+            && header.payload_type == esper_stream::PAYLOAD_TYPE_OPUS
+        {
+            self.heard.extend(sound.receive(datagram)?);
+            return Ok(());
+        }
+        self.stream.receive(datagram, out)?;
+        Ok(())
     }
 
     /// Send whatever the receiving half has asked for.

@@ -277,6 +277,13 @@ pub struct ControllerStream {
     /// taken: a viewer that missed a pause would show a frozen picture with
     /// nothing to explain it, which is what a dead link looks like.
     paused: Option<bool>,
+    /// The sound the host has announced, if it has.
+    ///
+    /// `None` once a caller has taken it, and taken rather than reported for
+    /// the same reason as the two above: opening a speaker is the caller's
+    /// business, and a viewer that missed the announcement would receive
+    /// packets for a stream it never built a decoder for.
+    audio: Option<esper_proto::AudioConfig>,
     /// The permission set the host last said this session holds.
     ///
     /// `None` once a caller has taken it. See
@@ -389,6 +396,7 @@ impl ControllerStream {
             asked_for: KeyframeReason::Joined,
             granted_now: None,
             paused: None,
+            audio: None,
             round_trip: UNKNOWN_ROUND_TRIP,
             frame_interval: frame_interval(config.max_fps),
             announced_fps: config.max_fps,
@@ -1381,6 +1389,15 @@ impl ControllerStream {
                 self.paused = Some(state.paused);
                 Ok(())
             }
+            // **Kept for the caller for the same reason.** What to do about
+            // sound starting is a viewer's decision — open a device, say so,
+            // ignore it because nobody asked for sound — and this layer has no
+            // speaker to send it to. A session's sound is its own stream with
+            // its own decoder, and `ControllerAudio` is where it is received.
+            MediaMessage::Audio(config) => {
+                self.audio = Some(*config);
+                Ok(())
+            }
             MediaMessage::Permissions(change) => {
                 // The last word wins. Two narrowings in a row are not a delta
                 // to accumulate -- each carries the complete set, which is
@@ -1410,6 +1427,16 @@ impl ControllerStream {
     #[must_use]
     pub fn take_permissions(&mut self) -> Option<Vec<esper_proto::Permission>> {
         self.granted_now.take()
+    }
+
+    /// The sound the host has announced, once, if it has.
+    ///
+    /// **Taken rather than read**, so a caller cannot build two decoders for
+    /// one announcement — and so a caller that is not interested in sound
+    /// simply never asks.
+    #[must_use]
+    pub fn take_audio(&mut self) -> Option<esper_proto::AudioConfig> {
+        self.audio.take()
     }
 
     /// Whether the host has said the picture is held, if it has said so.

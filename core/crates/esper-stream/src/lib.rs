@@ -23,15 +23,17 @@
 //! bytes leave the machine, and a crate that knows anyway is one that will
 //! eventually make a decision on the transport's behalf.
 
+pub mod audio;
 pub mod controller;
 pub mod cursor;
 pub mod host;
 pub mod jitter;
 pub mod resume;
 
+pub use audio::{AudioStats, ControllerAudio, HostAudio, PAYLOAD_TYPE_OPUS};
 pub use controller::{ControllerStats, ControllerStream, Decoded};
 pub use cursor::{CursorTracker, POSITION_INTERVAL};
-pub use host::{Handled, HostStep, HostStream, ssrc_for};
+pub use host::{Handled, HostStep, HostStream, audio_ssrc, ssrc_for};
 pub use jitter::{Jitter, JitterStats};
 pub use resume::{Expired, PARK_TIMEOUT, Parked, ResumeRefused};
 
@@ -101,7 +103,15 @@ pub enum StreamError {
     /// A peer sent a message whose contents are outside the protocol's bounds.
     #[error("{what} is outside the bounds the protocol allows")]
     Malformed { what: &'static str },
-    /// A monitor switch mid-session, which no capture backend can do yet.
+    /// Something about the sound went wrong.
+    ///
+    /// One variant rather than a family, because every caller does the same
+    /// thing with it: say so and carry on without sound. A session with a
+    /// picture and no sound is a session; one that ends because a sound card
+    /// disappeared is a bug.
+    #[error("audio: {0}")]
+    Audio(String),
+
     /// The switch was asked for and could not be done.
     ///
     /// Carries the backend's own reason, because the two a controller can act

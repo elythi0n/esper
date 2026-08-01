@@ -58,6 +58,13 @@ pub enum FromDecoder {
         /// Y, then U, then V, each tightly packed.
         planes: Vec<u8>,
     },
+    /// A frame of sound: interleaved 16-bit samples.
+    ///
+    /// **The audio worker's answer, and the video worker never sends it.**
+    /// One worker process decodes one kind of thing — see
+    /// [`crate::SandboxedAudio`] for why sound gets its own jail rather than
+    /// sharing the picture's.
+    Samples { values: Vec<i16> },
     /// The packet was consumed and completed no picture. Ordinary.
     NoPicture,
     /// The decoder refused or failed. Fatal to the stream.
@@ -74,7 +81,16 @@ mod tag {
     pub const PICTURE: u8 = 4;
     pub const NO_PICTURE: u8 = 5;
     pub const FAILED: u8 = 6;
+    pub const SAMPLES: u8 = 7;
 }
+
+/// The most samples one message may carry.
+///
+/// **The largest legal Opus frame, and not a byte more.** 60 ms at 48 kHz in
+/// stereo is 5760 values; a message claiming more than that is not a frame of
+/// sound, whatever it says. Bounded here because this is a length from a
+/// process that is assumed to be compromised.
+pub const MAX_SAMPLE_VALUES: usize = 5760;
 
 /// What went wrong on the wire.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -163,6 +179,13 @@ pub fn write_reply<W: std::io::Write>(
             body.extend_from_slice(&height.to_be_bytes());
             body.extend_from_slice(&(planes.len() as u64).to_be_bytes());
             body.extend_from_slice(planes);
+        }
+        FromDecoder::Samples { values } => {
+            body.push(tag::SAMPLES);
+            body.extend_from_slice(&(values.len() as u64).to_be_bytes());
+            for v in values {
+                body.extend_from_slice(&v.to_le_bytes());
+            }
         }
         FromDecoder::NoPicture => body.push(tag::NO_PICTURE),
         FromDecoder::Failed(detail) => {
@@ -334,6 +357,33 @@ pub fn parse_reply(body: &[u8]) -> Result<FromDecoder, ProtocolError> {
                 height,
                 planes: planes.to_vec(),
             })
+        }
+        tag::SAMPLES => {
+            let count = read_u64(body, 1)? as usize;
+            if count > MAX_SAMPLE_VALUES {
+                return Err(ProtocolError::TooLarge { len: count as u64 });
+            }
+            let from = 9usize;
+            let bytes = count
+                .checked_mul(2)
+                .ok_or(ProtocolError::TooLarge { len: count as u64 })?;
+            let raw = body
+                .get(
+                    from..from
+                        .checked_add(bytes)
+                        .ok_or(ProtocolError::TooLarge { len: bytes as u64 })?,
+                )
+                .ok_or(ProtocolError::Truncated {
+                    wanted: from.saturating_add(bytes),
+                    got: body.len(),
+                })?;
+            let values = raw
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| i16::from_le_bytes(*pair))
+                .collect();
+            Ok(FromDecoder::Samples { values })
         }
         tag::NO_PICTURE => Ok(FromDecoder::NoPicture),
         tag::FAILED => {

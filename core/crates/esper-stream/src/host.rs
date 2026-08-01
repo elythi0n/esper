@@ -134,6 +134,19 @@ pub enum Handled {
     },
 }
 
+/// The SSRC for a session's sound.
+///
+/// **Fixed, and distinct from any monitor's.** Derived through the same mixer
+/// as a monitor's, from a value no monitor id can be, so a session's sound has
+/// one identity for its whole life — which is what makes it the same stream
+/// after a reconnect. A receiver checks the payload type as well, so even an
+/// improbable collision with a monitor's SSRC could not make a picture arrive
+/// at a decoder for sound.
+#[must_use]
+pub fn audio_ssrc() -> u32 {
+    ssrc_for(0xA0D1_0000)
+}
+
 /// The SSRC for a monitor.
 ///
 /// Derived rather than random so that a reconnect to the same monitor is the
@@ -589,6 +602,13 @@ impl HostStream {
             // could pause the host would be deciding for the person sitting
             // at it, which is the opposite of what pausing is for.
             MediaMessage::Paused(_) => Err(StreamError::WrongDirection {
+                role: Role::Controller,
+                what: message.name(),
+            }),
+            // Whose sound it is decides who describes it — and v1 has no
+            // microphone path at all, so a controller announcing audio is
+            // announcing something this protocol does not carry.
+            MediaMessage::Audio(_) => Err(StreamError::WrongDirection {
                 role: Role::Controller,
                 what: message.name(),
             }),

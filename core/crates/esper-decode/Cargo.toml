@@ -1,6 +1,6 @@
 [package]
 name = "esper-decode"
-description = "Software H.264 decoding. The one place a peer's bytes reach a large C parser."
+description = "Software decoding in a jail: H.264 for the picture, Opus for the sound, one sandboxed process each. The one place a peer's bytes reach a large C parser."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+esper-audio.workspace = true
+esper-proto.workspace = true
 esper-color.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

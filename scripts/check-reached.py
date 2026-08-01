@@ -52,7 +52,6 @@ from pathlib import Path
 # name -> why it has no producer. Every entry is a claim somebody can check.
 LEDGER = {
     # Features that are not built. Each is a tracked item, not an oversight.
-    "Permission::Audio": "audio is not built; nothing can grant what nothing serves",
     "Permission::Record": "recording is not built",
     "Reason::OUT_OF_SCHEDULE": "schedules are not built; `unattended` is all-or-nothing today",
     "Reason::RELAY_FULL": "the relay is not built",

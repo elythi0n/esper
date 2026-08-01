@@ -114,6 +114,33 @@ jobs:
           # looking at, so they run.
           echo "ESPER_DISPLAY_TESTS=1" >> "$GITHUB_ENV"
 
+      # Sound needs a sound server, and a CI runner has none. PulseAudio with
+      # a **null sink** provides one: no hardware to resume, nobody else mixing
+      # into it, and nothing audible anywhere — so the audio tests run here
+      # rather than skipping, and what they capture is exactly what they
+      # played.
+      #
+      # `parec` and `pacat` are what the backend drives; `--exit-idle-time=-1`
+      # stops the server going away between tests.
+      - name: Start PulseAudio with a null sink (audio tests)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y pulseaudio pulseaudio-utils
+          pulseaudio --start --exit-idle-time=-1
+          for _ in $(seq 1 50); do
+            if pactl info >/dev/null 2>&1; then break; fi
+            sleep 0.2
+          done
+          pactl load-module module-null-sink sink_name=esper_ci
+          pactl set-default-sink esper_ci
+          pactl info | grep -i "server name"
+          pactl list short sinks
+          # Tests that touch the sound server are off unless asked for, for the
+          # same reason the display ones are: on somebody's machine they would
+          # load a module and repoint the default sink. Here the server is one
+          # this job started.
+          echo "ESPER_AUDIO_TESTS=1" >> "$GITHUB_ENV"
+
       # The mDNS wire format is checked against `dnspython`, an independent
       # implementation of the same documents — because a format tested only
       # against its own reader is tested against its own misunderstandings.

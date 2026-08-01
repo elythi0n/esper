@@ -706,6 +706,92 @@ pub struct Paused {
     pub paused: bool,
 }
 
+/// A codec for sound.
+///
+/// One variant, and it is still an enum: a receiver has to check what it is
+/// being sent rather than assume, and a field that can only hold one value
+/// today is how the second one arrives without a wire break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioCodec {
+    /// Opus. Every browser decodes it, it is the only codec in the WebRTC
+    /// mandatory set for speech *and* music, and it is good at both.
+    Opus,
+}
+
+impl AudioCodec {
+    /// The name a person reads.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Opus => "opus",
+        }
+    }
+}
+
+/// What the host will send as sound, announced when the sound starts.
+///
+/// **Its own message, not part of [`StreamConfig`].** Audio is permissioned
+/// separately, starts and stops separately, and a session can be all of one
+/// and none of the other: a terminal session with sound is nonsense, and a
+/// screen with no sound is the ordinary case. Bundling the two would mean
+/// re-announcing the picture to say something about the sound.
+///
+/// A host that cannot deliver sound at all does not send this and narrows the
+/// session instead — see [`PermissionChange`] — because "the sound will not be
+/// coming" is a statement about what the session may do, and there is already
+/// one message for that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioConfig {
+    pub codec: AudioCodec,
+    /// Samples per second, per channel.
+    pub sample_rate_hz: u32,
+    /// 1 for mono, 2 for stereo.
+    pub channels: u8,
+    /// How much sound is in one packet, in milliseconds.
+    ///
+    /// **The receiver's whole buffering plan comes from this**, so it is on
+    /// the wire rather than assumed: at 20 ms a lost packet is 20 ms of
+    /// silence, and a buffer sized for 20 ms packets fed 60 ms ones stutters
+    /// three times a second.
+    pub frame_ms: u8,
+    /// The stream's identity, so audio and video can be told apart in one
+    /// media channel — and in a packet capture.
+    pub ssrc: u32,
+}
+
+impl AudioConfig {
+    /// The rates Opus itself accepts. Anything else is a config a decoder
+    /// cannot be built for.
+    const RATES: [u32; 5] = [8_000, 12_000, 16_000, 24_000, 48_000];
+
+    /// The frame lengths Opus itself accepts, in milliseconds.
+    ///
+    /// Opus also has 2.5 and 5 ms frames, which are not whole numbers of
+    /// milliseconds in the 2.5 case and are for latency budgets no remote
+    /// desktop has. A whole-millisecond field cannot express 2.5, which is
+    /// the honest reason to leave it out rather than round it.
+    const FRAMES_MS: [u8; 4] = [10, 20, 40, 60];
+
+    /// Whether this describes sound a receiver can be built for.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        Self::RATES.contains(&self.sample_rate_hz)
+            && (self.channels == 1 || self.channels == 2)
+            && Self::FRAMES_MS.contains(&self.frame_ms)
+    }
+
+    /// How many samples per channel are in one packet.
+    ///
+    /// The number a decoder's output buffer has to hold, and the number a
+    /// capture has to gather before it can encode. Derived in one place
+    /// because the two ends must agree exactly: a buffer one sample short is
+    /// a decode that fails every packet.
+    #[must_use]
+    pub const fn samples_per_frame(&self) -> usize {
+        (self.sample_rate_hz as usize).saturating_mul(self.frame_ms as usize) / 1000
+    }
+}
+
 /// The host narrowing or widening a live session.
 ///
 /// Sent whenever policy changes mid-session — a human revoking control, a
@@ -2025,6 +2111,12 @@ pub enum MediaMessage {
     /// indistinguishable from a link that died — and the person watching would
     /// reconnect, which is precisely what pausing exists to avoid.
     Paused(Paused),
+    /// What the host will send as sound. Host to controller.
+    ///
+    /// Sent when the sound starts, which is not when the session does: audio
+    /// is permissioned on its own and a session can gain it later. See
+    /// [`AudioConfig`].
+    Audio(AudioConfig),
     /// What this session may now do. Host to controller.
     ///
     /// **On this stream because it is the only one the host can push on.**
@@ -2051,6 +2143,10 @@ impl MediaMessage {
             // not: it asks for a session with no picture, which is a close
             // rather than a selection.
             Self::Select(s) => s.is_well_formed(),
+            // A receiver sizes every buffer in its playback path from this, so
+            // a config it cannot build a decoder for has to be refused rather
+            // than approximated.
+            Self::Audio(a) => a.is_well_formed(),
             Self::Keyframe(_) => true,
             Self::Hint(h) => h.is_well_formed(),
             Self::Cursor(c) => c.is_well_formed(),
@@ -2085,6 +2181,7 @@ impl MediaMessage {
             Self::Report(_) => "a link report",
             Self::Permissions(_) => "a permission change",
             Self::Paused(_) => "a pause",
+            Self::Audio(_) => "an audio config",
         }
     }
 
@@ -2104,9 +2201,11 @@ impl MediaMessage {
             // A controller that could pause the host's own screen would be
             // deciding for the person at it, which is the opposite of what
             // this is for.
-            Self::Config(_) | Self::Cursor(_) | Self::Permissions(_) | Self::Paused(_) => {
-                matches!(role, Role::Host)
-            }
+            Self::Config(_)
+            | Self::Cursor(_)
+            | Self::Permissions(_)
+            | Self::Paused(_)
+            | Self::Audio(_) => matches!(role, Role::Host),
             Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) | Self::Report(_) => {
                 matches!(role, Role::Controller)
             }
@@ -2145,6 +2244,97 @@ mod tests {
                 "a withdrawal a receiver refuses is a withdrawal that did not \
                  happen: {m:?}"
             );
+        }
+    }
+
+    /// **Sound is host to controller only.** A controller that could announce
+    /// an audio config would be telling the host what its own microphone is —
+    /// and v1 deliberately has no microphone path at all.
+    #[test]
+    fn only_a_host_may_say_what_the_sound_is() {
+        use super::{AudioCodec, AudioConfig, MediaMessage};
+        let m = MediaMessage::Audio(AudioConfig {
+            codec: AudioCodec::Opus,
+            sample_rate_hz: 48_000,
+            channels: 2,
+            frame_ms: 20,
+            ssrc: 7,
+        });
+        assert!(m.may_be_sent_by(super::Role::Host));
+        assert!(!m.may_be_sent_by(super::Role::Controller));
+        assert!(m.is_well_formed());
+    }
+
+    /// **A config a decoder cannot be built for is refused, not rounded.**
+    ///
+    /// The receiver sizes its playback buffers from these three numbers, and
+    /// Opus accepts only certain ones: a rate it does not have is a decoder
+    /// that cannot be constructed, and a frame length it does not have is a
+    /// decode that fails on every packet.
+    #[test]
+    fn an_audio_config_outside_what_opus_accepts_is_refused() {
+        use super::{AudioCodec, AudioConfig};
+        let good = AudioConfig {
+            codec: AudioCodec::Opus,
+            sample_rate_hz: 48_000,
+            channels: 2,
+            frame_ms: 20,
+            ssrc: 1,
+        };
+        assert!(good.is_well_formed());
+        assert_eq!(good.samples_per_frame(), 960);
+
+        for bad in [
+            AudioConfig {
+                sample_rate_hz: 44_100,
+                ..good
+            },
+            AudioConfig {
+                sample_rate_hz: 0,
+                ..good
+            },
+            AudioConfig {
+                channels: 0,
+                ..good
+            },
+            AudioConfig {
+                channels: 6,
+                ..good
+            },
+            AudioConfig {
+                frame_ms: 0,
+                ..good
+            },
+            AudioConfig {
+                frame_ms: 33,
+                ..good
+            },
+        ] {
+            assert!(!bad.is_well_formed(), "{bad:?} should be refused");
+        }
+    }
+
+    /// The sample count is what both ends size a buffer from, so it is
+    /// checked at every rate rather than at the one we send.
+    #[test]
+    fn samples_per_frame_is_the_same_arithmetic_at_every_rate() {
+        use super::{AudioCodec, AudioConfig};
+        for (rate, frame_ms, want) in [
+            (48_000u32, 20u8, 960usize),
+            (48_000, 10, 480),
+            (48_000, 60, 2880),
+            (24_000, 20, 480),
+            (8_000, 10, 80),
+        ] {
+            let c = AudioConfig {
+                codec: AudioCodec::Opus,
+                sample_rate_hz: rate,
+                channels: 2,
+                frame_ms,
+                ssrc: 1,
+            };
+            assert!(c.is_well_formed(), "{c:?}");
+            assert_eq!(c.samples_per_frame(), want, "{c:?}");
         }
     }
 

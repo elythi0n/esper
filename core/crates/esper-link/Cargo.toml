@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+esper-audio.workspace = true
 esper-decode.workspace = true
 esper-media.workspace = true
 esper-pipeline.workspace = true

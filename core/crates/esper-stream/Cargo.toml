@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+esper-audio.workspace = true
 esper-capture.workspace = true
 esper-color.workspace = true
 esper-decode.workspace = true
