@@ -358,8 +358,16 @@ impl X11Presence {
         for lock in LOCKS {
             let modifiers = ModMask::from(PANIC_MODS | lock);
             match self.conn.grab_key(
-                // Not `owner_events`: the key must come to this connection
-                // whatever has the focus.
+                // **A passive grab on the root is what makes this work
+                // whatever has the focus**, not this flag — measured, because
+                // the comment here used to claim otherwise and flipping it
+                // changes nothing about whether the key arrives.
+                //
+                // `false` is still the right value: with `owner_events` the
+                // server reports an event normally if it would go to a window
+                // of *this* client, and this client owns the indicator's frame
+                // windows, which select no events at all. A key that happened
+                // to be routed at one of them would be delivered nowhere.
                 false,
                 self.root,
                 modifiers,

@@ -18,8 +18,8 @@ use esper_presence::{HostEvent, Presence, Watching};
 use esper_presence_x11::X11Presence;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, GrabMode, InputFocus, StackMode,
-    Window, WindowClass,
+    ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, InputFocus,
+    StackMode, Window, WindowClass,
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
 
@@ -748,4 +748,112 @@ fn windows_destroyed_by_something_else_are_reported_as_gone() {
         "the frame should be back after being rebuilt"
     );
     p.hide().expect("hidden");
+}
+
+/// **The panic key reaches the host under a fullscreen, modal application.**
+///
+/// Phase 15 asks for it in those words, and it is the case somebody actually
+/// hits: a video player, a game or a presentation covering the screen, or a
+/// dialog that has taken the pointer so nothing else can be clicked. All of
+/// those change what has the *focus* and what is on top; none of them changes
+/// who the server hands a passively grabbed key to.
+///
+/// The one arrangement that does take the key is an active **keyboard** grab —
+/// what a menu holds while it is open — and that is recorded by the test above
+/// rather than fixed, because on X11 it cannot be.
+///
+/// **What this guards is an assumption about the platform, not a branch in
+/// this crate.** Nothing here looks at the focus, so no sabotage of this code
+/// makes it fail; what would make it fail is an X server that stops handing
+/// passively grabbed keys to the grabbing client when something owns the
+/// screen. That is worth a test precisely because it is the sort of thing
+/// nobody would notice had changed.
+#[test]
+fn the_panic_key_arrives_under_a_fullscreen_modal_window() {
+    if !may_disturb_the_display() {
+        return;
+    }
+    let _display = exclusive();
+    let Some(mut p) = open() else { return };
+    if !p.panic_key_grabbed() {
+        println!("skipped: something else on this display already holds the panic key");
+        return;
+    }
+    let _ = p.poll();
+
+    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let screen = conn.setup().roots.get(screen_num).expect("a screen");
+    let (root, depth, visual) = (screen.root, screen.root_depth, screen.root_visual);
+    let (w, h) = (screen.width_in_pixels, screen.height_in_pixels);
+    let black = screen.black_pixel;
+
+    // Fullscreen, override-redirect, raised and focused: the most a program can
+    // do to own the screen without asking a window manager for permission.
+    let window = conn.generate_id().expect("an id");
+    conn.create_window(
+        depth,
+        window,
+        root,
+        0,
+        0,
+        w,
+        h,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        visual,
+        &CreateWindowAux::new()
+            .background_pixel(black)
+            .override_redirect(1)
+            .event_mask(EventMask::KEY_PRESS | EventMask::KEY_RELEASE),
+    )
+    .expect("create")
+    .check()
+    .expect("created");
+    conn.map_window(window)
+        .expect("map")
+        .check()
+        .expect("mapped");
+    conn.configure_window(
+        window,
+        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+    )
+    .expect("raise")
+    .check()
+    .expect("raised");
+    conn.set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)
+        .expect("focus")
+        .check()
+        .expect("focused");
+    // And modal: it holds the pointer, which is what a dialog does. Pointer,
+    // not keyboard — a program that grabs the keyboard takes the key, and that
+    // is the recorded limitation rather than this case.
+    let pointer = conn
+        .grab_pointer(
+            false,
+            window,
+            EventMask::BUTTON_PRESS,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+            x11rb::NONE,
+            x11rb::NONE,
+            x11rb::CURRENT_TIME,
+        )
+        .expect("ask for the pointer")
+        .reply()
+        .expect("a reply");
+    println!("pointer grab status: {:?}", pointer.status);
+    conn.flush().expect("flush");
+    std::thread::sleep(Duration::from_millis(100));
+
+    hotkey(&conn, root, 0x29);
+    let seen = presses(&mut p);
+
+    let _ = conn.ungrab_pointer(x11rb::CURRENT_TIME);
+    let _ = conn.destroy_window(window);
+    let _ = conn.flush();
+
+    assert!(
+        seen.contains(&HostEvent::Panic),
+        "the panic key did not reach the host under a fullscreen modal window: {seen:?}"
+    );
 }
