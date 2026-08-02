@@ -63,6 +63,15 @@ pub enum HostStep {
     Finished,
 }
 
+/// How many keyframe requests without one being sent mean they are not
+/// landing.
+///
+/// **Two.** One request is an ordinary loss of sync, and the keyframe that
+/// answers it usually arrives. A second, before this side has sent one, is
+/// evidence that the answer itself is not getting through — which is the only
+/// situation where sending nothing is better than sending something.
+const ASKS_THAT_MEAN_NOT_LANDING: u32 = 2;
+
 /// The sending half of a media session.
 pub struct HostStream {
     pipeline: Pipeline,
@@ -75,6 +84,23 @@ pub struct HostStream {
     bytes: u64,
     /// Reused, so a frame's datagrams are not a fresh allocation each time.
     scratch: Vec<Vec<u8>>,
+    /// Delta frames not sent because the far end had no reference for them.
+    starved_of_reference: u64,
+    /// Keyframe requests that have arrived since this side last sent one.
+    ///
+    /// **Two or more means the keyframes are not landing**, and while that is
+    /// true every delta frame is waste: the far end has no reference picture,
+    /// so it throws them away on arrival — and on a link whose queue holds two
+    /// datagrams, those thrown-away deltas are exactly what leaves no room for
+    /// the keyframe that would fix it.
+    asks_since_keyframe: u32,
+    /// Frames this side chose not to send because the transport had no room
+    /// for the whole of one.
+    ///
+    /// **Counted and reported**, because a session that is dropping frames
+    /// before they leave the machine looks from the far end exactly like a
+    /// link that is losing them, and the two want opposite responses.
+    dropped_whole: u64,
     /// What somebody at this machine would see of the session.
     ///
     /// Carried so it reaches the controller in the stream's own config, and a
@@ -201,6 +227,9 @@ impl HostStream {
             datagrams: 0,
             bytes: 0,
             scratch: Vec::new(),
+            starved_of_reference: 0,
+            asks_since_keyframe: 0,
+            dropped_whole: 0,
             asked_ceiling: None,
             asked_fps: None,
             asked_fidelity: None,
@@ -311,6 +340,18 @@ impl HostStream {
         (self.datagrams, self.bytes)
     }
 
+    /// Frames this side did not send because the transport had no room for
+    /// the whole of one.
+    ///
+    /// **Worth reporting on its own**, because from the far end this is
+    /// indistinguishable from a link that lost them, and the two want
+    /// opposite responses: a link losing frames wants smaller ones, and a
+    /// transport with no room wants *fewer*.
+    #[must_use]
+    pub const fn dropped_whole_frames(&self) -> u64 {
+        self.dropped_whole
+    }
+
     /// The pipeline, for the stats a session reports.
     #[must_use]
     pub const fn pipeline(&self) -> &Pipeline {
@@ -377,6 +418,9 @@ impl HostStream {
                     datagrams: 0,
                     bytes: 0,
                     scratch: Vec::new(),
+                    starved_of_reference: 0,
+                    asks_since_keyframe: 0,
+                    dropped_whole: 0,
                     // A resumed session is a new agreement about what the
                     // controller wants: it asks again if it still wants
                     // something, and until then this machine's own caps apply.
@@ -411,10 +455,62 @@ impl HostStream {
                 let timestamp = self.rtp_timestamp();
                 self.packetizer
                     .packetize(&bitstream, timestamp, &mut self.scratch)?;
+                // **While the far end has no reference, a delta is waste.**
+                //
+                // One keyframe request means it lost sync and the next
+                // keyframe will fix it. A *second* request before this side
+                // has sent one means the last keyframe never arrived — and
+                // until one does, every delta frame is discarded on arrival
+                // for want of a reference picture. Measured at 200 kbit/s with
+                // 100 ms of buffer: about eight such deltas between requests,
+                // filling a queue that holds two datagrams, so the three-
+                // datagram keyframe never fitted and the session showed
+                // nothing for as long as it ran.
+                //
+                // Sending nothing in their place is what lets the queue drain
+                // far enough for the keyframe to get through. It costs nothing
+                // on a link where keyframes land, because there the second
+                // request never happens.
+                if !keyframe && self.asks_since_keyframe >= ASKS_THAT_MEAN_NOT_LANDING {
+                    self.starved_of_reference = self.starved_of_reference.saturating_add(1);
+                    return Ok(HostStep::Skipped);
+                }
+
+                // **A frame goes whole, or it does not go.**
+                //
+                // Handing the transport a datagram it has no room for does not
+                // fail: quinn discards the oldest *unsent* datagrams to make
+                // space and reports success. Those are the leading datagrams
+                // of this very frame, so the frame arrives with a hole at the
+                // front — which costs the frame *and* every frame that
+                // referenced it, and the far end answers by asking for a
+                // keyframe, which is bigger and fares worse.
+                //
+                // Measured at 200 kbit/s with 100 ms of buffer: 56 keyframe
+                // requests in 15 seconds, 0 pictures, and the delta frames
+                // arriving perfectly well and being thrown away for want of a
+                // reference. Skipping the frame instead costs one frame and
+                // keeps the chain intact.
+                let whole_frame = self.scratch.iter().map(Vec::len).sum::<usize>();
+                if let Some(room) = sink.room_for_datagrams()
+                    && room < whole_frame
+                {
+                    self.dropped_whole = self.dropped_whole.saturating_add(1);
+                    // **A keyframe that was not sent is still owed.** Without
+                    // this the far end waits for a picture that was encoded,
+                    // counted and thrown away, and the session never starts.
+                    if keyframe {
+                        self.pipeline.request_keyframe();
+                    }
+                    return Ok(HostStep::Skipped);
+                }
                 let mut bytes = 0usize;
                 for datagram in &self.scratch {
                     sink.send(datagram)?;
                     bytes = bytes.saturating_add(datagram.len());
+                }
+                if keyframe {
+                    self.asks_since_keyframe = 0;
                 }
                 let datagrams = self.scratch.len();
                 self.datagrams = self.datagrams.saturating_add(datagrams as u64);
@@ -536,6 +632,7 @@ impl HostStream {
         match message {
             MediaMessage::Keyframe(_) => {
                 self.pipeline.request_keyframe();
+                self.asks_since_keyframe = self.asks_since_keyframe.saturating_add(1);
                 Ok(Handled::Nothing)
             }
             // **Nothing here, because the session already dealt with it.** A

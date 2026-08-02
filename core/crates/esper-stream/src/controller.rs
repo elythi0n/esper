@@ -87,6 +87,29 @@ const BURSTS_REMEMBERED: usize = 16;
 /// on this until it is worth acting on.
 const ENOUGH_BURSTS_TO_JUDGE: usize = 4;
 
+/// How many losing windows at one size mean that size does not work here.
+///
+/// **Two.** One is a bad moment; two at the same size, with a step down and a
+/// climb back in between, is the link saying the same thing twice.
+const FAILURES_THAT_CLOSE_A_RUNG: u8 = 2;
+
+/// How long the arrival-rate estimator averages over.
+///
+/// **A second, matching the loss window**, so the two signals a starved
+/// session produces are about the same stretch of time.
+const ARRIVAL_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long with no frame completing before what *arrived* is the only
+/// evidence about the link.
+///
+/// **Two seconds is several frames at any rate this matters at.** Below that a
+/// session that simply has nothing to send — an idle screen sends almost
+/// nothing — would be read as a starved one, and the host would be paced down
+/// to the trickle it was already sending. That is the failure mode this
+/// estimator has to avoid, and the reason it is gated on frames *failing*
+/// rather than on capacity being unknown.
+const STARVED_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How long a window of loss is judged over.
 const WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -300,6 +323,48 @@ pub struct ControllerStream {
     /// `None` once a caller has taken it. See
     /// [`ControllerStream::take_permissions`].
     granted_now: Option<Vec<esper_proto::Permission>>,
+    /// How many times each resolution rung has lost frames.
+    ///
+    /// **The ladder's memory, and what stops it oscillating.** Down fast and
+    /// up slow is not enough on a link whose buffer cannot hold one frame: the
+    /// size sequence there reads `480 → 320 → 480 → 320`, and every climb
+    /// floods the link again, so the queue never drains and no keyframe ever
+    /// arrives whole. Measured: **no picture at all in fifteen seconds**.
+    ///
+    /// A rung that has cost frames twice is not asked for again. That cannot
+    /// affect a session which is not losing frames — a fast link never touches
+    /// this — and it is what lets a thin link settle instead of thrashing.
+    failures: [u8; RUNGS.len()],
+    /// The largest size the ladder may still ask for, as an index into
+    /// [`RUNGS`]. Grows only downwards in size, never back up.
+    floor: usize,
+    /// How much of the quality lever the link ladder has spent.
+    ///
+    /// **The middle rung of the degradation order**, which the link ladder
+    /// could reach and never used: the order this product states is framerate,
+    /// then quality, then resolution, and the link's loss arm went straight to
+    /// resolution — the most damaging lever — on every kind of loss.
+    ///
+    /// `None` until loss has been seen. See [`Self::spend_quality`].
+    softened: Option<Sharpness>,
+    /// Bytes that arrived in the current averaging window, and when it began.
+    ///
+    /// **The estimator that cannot be starved.** Everything else this side
+    /// knows about the link is measured from frames that *completed*, and a
+    /// link whose buffer cannot hold one frame completes none — so the
+    /// capacity stays unknown, the host is never told to pace, it keeps
+    /// bursting whole frames at a queue that cannot hold them, and nothing
+    /// completes. The measurement requires the thing that is failing.
+    ///
+    /// What arrived is not that: the bytes are on this side whether or not
+    /// they add up to a picture.
+    arrived_bytes: u64,
+    arrived_since: Option<std::time::Instant>,
+    /// The last rate a full window measured, in kbit/s.
+    arrival_rate: Option<f64>,
+    /// When a frame last completed, for telling a starved session from a quiet
+    /// one.
+    last_whole_frame: Option<std::time::Instant>,
     /// Encoded frames held for a recording, when one is being made.
     ///
     /// **Off unless asked for**, so a session that is not being recorded
@@ -411,6 +476,13 @@ impl ControllerStream {
             decoder: None,
             expected: (config.width, config.height),
             awaiting_keyframe: true,
+            failures: [0; RUNGS.len()],
+            floor: 0,
+            softened: None,
+            arrived_bytes: 0,
+            arrived_since: None,
+            arrival_rate: None,
+            last_whole_frame: None,
             kept: Vec::new(),
             keeping: false,
             asked_for: KeyframeReason::Joined,
@@ -733,6 +805,45 @@ impl ControllerStream {
     /// that are not the link — this side being descheduled, a frame arriving
     /// while another is decoding — and nothing can make one arrive faster
     /// than the link carried it.
+    /// Count a datagram, and close the averaging window when it is full.
+    ///
+    /// **Bytes on the wire, not bytes in a picture.** This is deliberately the
+    /// crudest measurement in the file: it cannot tell a frame from a
+    /// fragment, and that is the point — it keeps working in the one situation
+    /// where every other measurement here has nothing to work with.
+    fn note_arrival(&mut self, bytes: u64, now: std::time::Instant) {
+        let since = *self.arrived_since.get_or_insert(now);
+        self.arrived_bytes = self.arrived_bytes.saturating_add(bytes);
+        let elapsed = now.saturating_duration_since(since);
+        if elapsed >= ARRIVAL_WINDOW {
+            let seconds = elapsed.as_secs_f64();
+            if seconds > 0.0 {
+                self.arrival_rate = Some(self.arrived_bytes as f64 * 8.0 / 1000.0 / seconds);
+            }
+            self.arrived_bytes = 0;
+            self.arrived_since = Some(now);
+        }
+    }
+
+    /// Whether frames are arriving in pieces rather than not at all.
+    ///
+    /// The distinction the fallback rests on: a session with **nothing to
+    /// send** and a session whose frames **cannot fit** look the same to a
+    /// capacity estimator that only counts bytes. This one asks whether bytes
+    /// are arriving *and* no frame has completed for a while, which only the
+    /// second can be.
+    fn starved(&self, now: std::time::Instant) -> bool {
+        if self.arrival_rate.unwrap_or(0.0) <= 0.0 {
+            return false;
+        }
+        match self.last_whole_frame {
+            Some(when) => now.saturating_duration_since(when) >= STARVED_AFTER,
+            // Nothing has ever completed. The session has been running for at
+            // least one averaging window by the time there is a rate at all.
+            None => true,
+        }
+    }
+
     fn note_burst(&mut self, bytes: u64, spread: std::time::Duration) {
         // **Only frames big enough to have occupied the link.**
         //
@@ -767,12 +878,35 @@ impl ControllerStream {
     /// ran 763 to 886 while the maximum over all of them was 5.7 Gbit/s.
     #[must_use]
     pub fn link_capacity(&self) -> Option<f64> {
+        self.capacity_at(std::time::Instant::now())
+    }
+
+    /// The same, at a stated instant, so a test can say when it is asking.
+    #[must_use]
+    pub fn capacity_at(&self, now: std::time::Instant) -> Option<f64> {
         let mut seen: Vec<f64> = self.burst.iter().flatten().copied().collect();
-        if seen.len() < ENOUGH_BURSTS_TO_JUDGE {
-            return None;
+        if seen.len() >= ENOUGH_BURSTS_TO_JUDGE {
+            seen.sort_by(f64::total_cmp);
+            return seen.get(seen.len() / 2).copied();
         }
-        seen.sort_by(f64::total_cmp);
-        seen.get(seen.len() / 2).copied()
+        // **The fallback, and only while frames are failing.**
+        //
+        // The measurement above needs frames that *completed*, and the one
+        // link regime that matters most completes none: a buffer too short to
+        // hold one frame drops the tail of every burst, so nothing is ever
+        // timed, the host is never told to pace, and it goes on bursting. The
+        // measurement requires the thing that is failing.
+        //
+        // What arrived is a lower bound on what the link carries, and a lower
+        // bound is exactly what a pacer wants. It is **not** used when frames
+        // are completing: an idle screen sends almost nothing, and reporting
+        // "the link carries what I received" for a session with nothing to
+        // send would pace the host down to the trickle it was already
+        // sending — the opposite mistake, and a worse one.
+        if self.starved(now) {
+            return self.arrival_rate;
+        }
+        None
     }
 
     /// Move the link ladder if a window has closed.
@@ -786,6 +920,71 @@ impl ControllerStream {
     /// whether loss is survivable — frame size. Down after a window that lost
     /// frames, up after several that did not, and never above what the host
     /// announced it was sending.
+    /// Remember that the size in force lost frames, and stop climbing back to
+    /// it once it has done so twice.
+    ///
+    /// Twice rather than once: a single window of loss can be one bad moment
+    /// on an otherwise fine link, and a ladder that gave up a rung for that
+    /// would spend a good session creeping downwards.
+    fn note_failure(&mut self) {
+        let at = self.rung.unwrap_or(0);
+        if let Some(count) = self.failures.get_mut(at) {
+            *count = count.saturating_add(1);
+            if *count >= FAILURES_THAT_CLOSE_A_RUNG && self.floor < at {
+                self.floor = at;
+            }
+        }
+    }
+
+    /// Whether the round trip says the link's queue is *not* filling up.
+    ///
+    /// `false` when there is no baseline yet: without one there is nothing to
+    /// compare against, and guessing "flat" would spend the quality lever on
+    /// an overload, which is measured to be the wrong answer.
+    ///
+    /// The threshold is [`BLOAT`], the same queueing delay the bloat ladder
+    /// steps on — used here for the opposite purpose, to establish that the
+    /// queue is *not* what went wrong, which is what makes the loss mean
+    /// something else.
+    fn queue_is_flat(&self) -> bool {
+        let Some(floor) = self.baseline_round_trip() else {
+            return false;
+        };
+        self.round_trip.saturating_sub(floor) < BLOAT
+    }
+
+    /// Ask for a coarser picture, one rung, saying whether there was one left.
+    ///
+    /// Coarser means **fewer bytes in every frame**, which is what a link that
+    /// cannot carry one frame needs. It is capped at `Soft`: below that is not
+    /// a rung this protocol has, and a request may only ever coarsen what the
+    /// host chose — see [`Self::want_sharpness`].
+    fn spend_quality(&mut self) -> bool {
+        let next = match self.softened {
+            None => Sharpness::Soft,
+            // Already as soft as the protocol can ask for.
+            Some(Sharpness::Soft) => return false,
+            Some(_) => Sharpness::Soft,
+        };
+        self.softened = Some(next);
+        self.wanted_sharpness = Some(next);
+        self.say_what_we_want();
+        true
+    }
+
+    /// Give back a rung of quality, saying whether there was one to give.
+    fn return_quality(&mut self) -> bool {
+        if self.softened.take().is_none() {
+            return false;
+        }
+        // Back to no request at all rather than to `Balanced`: a hint may only
+        // coarsen, so asking for balanced and asking for nothing are the same
+        // ask, and the second says what is meant.
+        self.wanted_sharpness = None;
+        self.say_what_we_want();
+        true
+    }
+
     fn step_ladder(&mut self, now: std::time::Instant) {
         let Some(ends) = self.window_ends else {
             self.window_ends = Some(now + WINDOW);
@@ -804,6 +1003,78 @@ impl ControllerStream {
 
         if lost >= LOSSES_TO_STEP_DOWN {
             self.clean_windows = 0;
+            self.note_failure();
+            // **Which lever, decided by whether the queue is growing.**
+            //
+            // Two link failures arrive here looking the same in the loss
+            // count, and they want opposite things:
+            //
+            // - A **queue filling up** is an overload. Frames have to get
+            //   smaller quickly, and the measurement below is unambiguous
+            //   about that: making resolution wait cost a session everything
+            //   it had (26-36 pictures to none) under a five-times overload,
+            //   because one rung a window is not a policy for that size.
+            // - A **buffer too short to hold one frame** is not an overload at
+            //   all. The round trip never moves, resolution cannot fix it —
+            //   the session says so in as many words at the end — and what
+            //   *does* fix it is fewer bytes in the frame. Measured: at
+            //   320x180 the coarsest quantiser takes a keyframe from 5 449
+            //   bytes to 3 291 and a delta from 264 to 127.
+            //
+            // The round trip against its own floor is what tells them apart,
+            // and this side has both numbers. So: a flat round trip spends
+            // **quality** first, which is the order this product states; a
+            // growing one keeps spending resolution, which is what the
+            // measurement says that case needs.
+            if self.queue_is_flat() && self.spend_quality() {
+                self.step_bloat_ladder();
+                return;
+            }
+            // **The first descent is a collapse, not a step.**
+            //
+            // Walking down one rung a window is a policy for a link that is
+            // slightly too slow. It is not one for a link that cannot carry
+            // the size a session *opens* at: measured on a link with 100 ms of
+            // buffer at 200 kbit/s the walk took four seconds, and by the time
+            // it reached the bottom the queue was so far behind that no
+            // keyframe ever arrived whole — **no picture at all in fifteen
+            // seconds**, while the same link pinned at the bottom rung
+            // delivered 362.
+            //
+            // So the first losing window goes straight to the smallest rung,
+            // and the ordinary "up slow" climb brings it back as the link
+            // proves itself. A session that never loses a frame never comes
+            // here at all, which is what makes this cost nothing on a good
+            // link — unlike capping what a session *opens* at, which was tried
+            // and charged every session on every link three seconds of soft
+            // picture for the benefit of the few that need it.
+            if self.rung.is_none() {
+                self.rung = Some(RUNGS.len().saturating_sub(1));
+                self.say_what_we_want();
+                self.step_bloat_ladder();
+                return;
+            }
+            // **The first descent is a collapse, not a step.**
+            //
+            // Walking down one rung a window is a policy for a link that is
+            // slightly too slow. It is not one for a link that cannot carry
+            // the size a session *opens* at: measured on a link with 100 ms of
+            // buffer at 200 kbit/s, the walk took four seconds, and by the
+            // time it reached the bottom the queue was so far behind that no
+            // keyframe ever arrived whole — no picture at all in fifteen
+            // seconds, while the same link *pinned* at the bottom rung
+            // delivered 362.
+            //
+            // So the first losing window goes straight to the smallest rung,
+            // and the ordinary "up slow" climb brings it back. A session that
+            // never loses a frame never comes here at all, which is what makes
+            // this free on a good link.
+            if self.rung.is_none() {
+                self.rung = Some(RUNGS.len().saturating_sub(1));
+                self.say_what_we_want();
+                self.step_bloat_ladder();
+                return;
+            }
             // **And it takes frame size even when the queue is what filled,
             // which is not what the degradation order asks for — see the note
             // on [`order_for`].**
@@ -828,7 +1099,16 @@ impl ControllerStream {
             self.clean_windows = self.clean_windows.saturating_add(1);
             if self.clean_windows >= CLEAN_WINDOWS_TO_STEP_UP {
                 self.clean_windows = 0;
-                self.step(false);
+                // **Resolution comes back first, then sharpness.** The
+                // opposite order of spending them, and deliberately: a bigger
+                // soft picture is worth more to somebody reading a screen than
+                // a small sharp one, and it is also the cheaper of the two to
+                // give back — the quantiser's saving is proportional to every
+                // frame, so returning it last keeps the link's headroom for
+                // longest.
+                if !self.step(false) {
+                    self.return_quality();
+                }
             }
         }
 
@@ -937,7 +1217,11 @@ impl ControllerStream {
             // Nothing has been asked for, so there is nothing to relax.
             return false;
         } else {
-            current.saturating_sub(1)
+            // **Never back above a rung that has already failed twice.** See
+            // `failures`: without this the ladder climbs into the size that
+            // just cost it every frame, floods the link and comes back down,
+            // for as long as the session lasts.
+            current.saturating_sub(1).max(self.floor)
         };
         if Some(next) == self.rung {
             return false;
@@ -1167,6 +1451,7 @@ impl ControllerStream {
     ) -> Result<(), StreamError> {
         self.stats.datagrams = self.stats.datagrams.saturating_add(1);
         self.stats.bytes = self.stats.bytes.saturating_add(datagram.len() as u64);
+        self.note_arrival(datagram.len() as u64, now);
 
         // Whether a frame was already being assembled *before* this datagram,
         // which is what makes this one "not the first of its frame".
@@ -1216,6 +1501,7 @@ impl ControllerStream {
         // counted.
         let starts_the_next = self.depacketizer.is_assembling();
         if produced_frame {
+            self.last_whole_frame = Some(now);
             if opened_before && !starts_the_next {
                 self.burst_bytes = self.burst_bytes.saturating_add(datagram.len() as u64);
             }
@@ -1515,6 +1801,151 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// **The first losing window collapses the size; later ones step.**
+    ///
+    /// Measured on a link with 100 ms of buffer at 200 kbit/s: walking down a
+    /// rung a window took four seconds to reach the bottom, and by then no
+    /// keyframe could arrive whole — **no picture at all in fifteen seconds**,
+    /// where the same link pinned at the bottom rung delivered 362. A session
+    /// that loses no frames never reaches this code, which is what makes it
+    /// free on a good link.
+    #[test]
+    fn the_first_losing_window_goes_straight_to_the_bottom() {
+        let mut stream = ControllerStream::new(&announced(30)).expect("a config");
+        // A round trip with a queue in it, so the quality lever is not the one
+        // spent — this test is about the resolution collapse.
+        stream.set_round_trip(Duration::from_millis(40));
+        stream.step_bloat_ladder();
+        stream.set_round_trip(Duration::from_millis(400));
+
+        let now = std::time::Instant::now();
+        stream.step_ladder(now);
+        stream.stats.frames_lost = LOSSES_TO_STEP_DOWN;
+        stream.step_ladder(now + WINDOW + Duration::from_millis(1));
+
+        assert_eq!(
+            stream.link_ceiling(),
+            RUNGS.last().copied(),
+            "the first descent has to be a collapse, not a step"
+        );
+
+        // And the way back is the ordinary climb, one rung at a time.
+        assert!(stream.step(false));
+        assert_ne!(
+            stream.link_ceiling(),
+            RUNGS.last().copied(),
+            "coming back up is still one rung at a time"
+        );
+    }
+
+    /// **A capacity estimate that does not need the thing that is failing.**
+    ///
+    /// The burst estimator times frames that *completed*, and the one link
+    /// regime that matters most completes none — so the capacity stayed
+    /// unknown, the host was never told to pace, and it went on bursting. This
+    /// is the fallback, and the important half of it is when it declines to
+    /// answer: a session with nothing to send must not be read as a starved
+    /// one, or the host is paced down to the trickle it was already sending.
+    #[test]
+    fn what_arrived_is_a_capacity_only_while_frames_are_failing() {
+        let mut stream = ControllerStream::new(&announced(30)).expect("a config");
+        let start = std::time::Instant::now();
+
+        // Datagrams arriving, no frame ever completing: after a window there
+        // is a rate, and it is the capacity.
+        for i in 0..40u32 {
+            stream.note_arrival(1_200, start + Duration::from_millis(u64::from(i) * 50));
+        }
+        let later = start + Duration::from_secs(3);
+        assert!(
+            stream.capacity_at(later).is_some(),
+            "a starved session has to produce a number, or nothing paces the host"
+        );
+
+        // The same bytes, with frames completing: not starved, so the crude
+        // estimate is withheld and the accurate one is allowed to be absent.
+        stream.last_whole_frame = Some(later);
+        assert_eq!(
+            stream.capacity_at(later),
+            None,
+            "a session whose frames arrive must not be paced from what it happened to receive"
+        );
+    }
+
+    /// **The degradation order, which the link ladder did not follow.**
+    ///
+    /// This product states it: framerate, then quality, then resolution. The
+    /// link's loss arm went straight to resolution — the most damaging lever —
+    /// on every kind of loss. Measured on a link whose buffer is shorter than
+    /// one frame, spending quality first took a session from **8 pictures to
+    /// 162**.
+    #[test]
+    fn a_flat_round_trip_spends_quality_before_resolution() {
+        let mut stream = ControllerStream::new(&announced(30)).expect("a config");
+        // A baseline is made of the smallest round trip in a window that has
+        // *closed*, so the window is closed the way a session closes it.
+        stream.set_round_trip(Duration::from_millis(38));
+        stream.step_bloat_ladder();
+        stream.set_round_trip(Duration::from_millis(40));
+        assert!(
+            stream.queue_is_flat(),
+            "40 ms against a floor of 38 is not a queue"
+        );
+
+        assert!(stream.spend_quality(), "there is a rung to spend");
+        assert_eq!(stream.wanted_sharpness, Some(Sharpness::Soft));
+        assert_eq!(stream.link_ceiling(), None, "and resolution is untouched");
+
+        assert!(!stream.spend_quality(), "and only one rung exists to spend");
+    }
+
+    /// **A growing queue keeps spending resolution**, because that was
+    /// measured to be what an overload needs: making resolution wait cost a
+    /// session everything it had (26-36 pictures to none) under a five-times
+    /// overload.
+    #[test]
+    fn a_growing_queue_is_not_a_reason_to_spend_quality() {
+        let mut stream = ControllerStream::new(&announced(30)).expect("a config");
+        stream.set_round_trip(Duration::from_millis(40));
+        stream.step_bloat_ladder();
+        stream.set_round_trip(Duration::from_millis(400));
+        assert!(
+            !stream.queue_is_flat(),
+            "a round trip ten times its floor is a queue, not a short buffer"
+        );
+    }
+
+    /// Coming back, resolution is returned before sharpness — the opposite
+    /// order of spending them, and deliberately: a bigger soft picture is
+    /// worth more than a small sharp one to somebody reading a screen.
+    #[test]
+    fn quality_is_the_last_thing_given_back() {
+        let mut stream = ControllerStream::new(&announced(30)).expect("a config");
+        stream.set_round_trip(Duration::from_millis(38));
+        stream.step_bloat_ladder();
+        stream.set_round_trip(Duration::from_millis(40));
+        assert!(stream.spend_quality());
+        assert!(stream.step(true), "and then a resolution rung");
+
+        // Resolution comes back first, and for as long as there is any of it
+        // to come back — the sharpness is untouched throughout.
+        let mut returned = 0;
+        while stream.step(false) {
+            returned += 1;
+            assert_eq!(
+                stream.wanted_sharpness,
+                Some(Sharpness::Soft),
+                "sharpness must not be given back while resolution is still short"
+            );
+        }
+        assert!(returned > 0, "there was a resolution rung to give back");
+
+        // And then quality, once there is no resolution left to give.
+        assert!(stream.return_quality());
+        assert_eq!(stream.wanted_sharpness, None, "back to asking for nothing");
+        assert!(!stream.return_quality(), "and there is nothing left twice");
+    }
 
     /// **The pace has to be derived from the framerate, not from a floor.**
     ///

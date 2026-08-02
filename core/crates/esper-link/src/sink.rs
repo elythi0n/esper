@@ -87,4 +87,8 @@ impl DatagramSink for SessionSink {
     fn max_datagram_size(&self) -> Option<usize> {
         self.media.max_datagram_size()
     }
+
+    fn room_for_datagrams(&self) -> Option<usize> {
+        Some(self.media.room_for_datagrams())
+    }
 }

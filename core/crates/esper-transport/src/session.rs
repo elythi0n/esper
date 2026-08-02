@@ -720,6 +720,34 @@ impl MediaChannel {
             .map_err(|e| SessionError::Stream(e.to_string()))
     }
 
+    /// How many bytes of datagram the transport will take right now.
+    ///
+    /// # Why a caller has to ask
+    ///
+    /// [`Self::send`] does **not** fail when there is no room. quinn's own
+    /// documentation is explicit: *"previously queued datagrams which are
+    /// still unsent may be discarded to make space for this datagram, in order
+    /// of oldest to newest"* — and it returns success while doing it. So a
+    /// sender that keeps handing over datagrams gets `Ok` for every one and
+    /// loses the earliest of them, which are the *leading* datagrams of
+    /// whatever frame is being assembled.
+    ///
+    /// That is the worst possible loss pattern for video. A frame that is
+    /// never sent costs one frame; a frame that arrives with its first
+    /// datagram missing costs the frame **and** the reference chain behind it,
+    /// which is what turns a slow link into a keyframe storm: measured at 200
+    /// kbit/s with 100 ms of buffer, fifty-six keyframe requests in fifteen
+    /// seconds and not one picture, while the delta frames — one datagram
+    /// each — arrived perfectly well and were discarded for want of a
+    /// reference.
+    ///
+    /// So a sender asks first, and sends a frame only if the whole of it
+    /// fits.
+    #[must_use]
+    pub fn room_for_datagrams(&self) -> usize {
+        self.conn.datagram_send_buffer_space()
+    }
+
     /// Receive one datagram.
     pub async fn recv(&self) -> Result<bytes::Bytes, SessionError> {
         self.conn.read_datagram().await.map_err(SessionError::from)

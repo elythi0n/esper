@@ -54,6 +54,22 @@ pub trait DatagramSink {
     fn max_datagram_size(&self) -> Option<usize> {
         None
     }
+
+    /// How many bytes of datagram this sink will take right now.
+    ///
+    /// **`None` means "as many as you like"**, which is what a test sink and a
+    /// loopback are: the default keeps every existing caller behaving exactly
+    /// as it did.
+    ///
+    /// A real transport says a number, and the number matters more than it
+    /// looks. Handing over a datagram that does not fit does **not** fail —
+    /// quinn discards the oldest *unsent* datagrams to make room and reports
+    /// success — so a sender that ignores this loses the leading datagrams of
+    /// the frame it is in the middle of, which is the one loss pattern that
+    /// poisons the reference chain rather than costing a single frame.
+    fn room_for_datagrams(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Why a datagram could not be sent.

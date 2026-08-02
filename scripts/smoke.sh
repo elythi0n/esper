@@ -2341,10 +2341,30 @@ print(s.getsockname()[1]); s.close()')
           printf '%s\n' "$out" | sed 's/^/      /'
           fail=1
         fi
-        if printf '%s' "$out" | grep -q "^  buffer "; then
-          printf '  ✓ a link whose buffer is too short for one frame is named as that\n'
+        # **Either it copes, or it says why.**
+        #
+        # This used to assert the diagnosis alone, and the diagnosis alone was
+        # all this session could do about a short buffer. It can do more now —
+        # the loss arm spends quality before resolution, and the first losing
+        # window collapses the size instead of stepping — and on *this* link
+        # that is enough to cope, which takes the loss below the quarter the
+        # diagnosis fires on. So the message correctly stops appearing, and a
+        # check that demanded it would be demanding an explanation for a
+        # session that went well.
+        #
+        # The promise worth asserting is the pair: a link whose buffer cannot
+        # hold a frame must not produce a session that shows nothing and says
+        # nothing. On a tighter version of this link — 200 kbit/s with 100 ms —
+        # the diagnosis does still appear, because there the session is still
+        # working hard.
+        shown_short=$(printf '%s' "$out" | awk '/^  pictures /{print $2}')
+        named=$(printf '%s' "$out" | grep -c "^  buffer " || true)
+        if { [ -n "$shown_short" ] && [ "$shown_short" -gt 0 ]; } || [ "$named" -gt 0 ]; then
+          printf '  ✓ a link whose buffer is too short for one frame either works or says why'
+          printf ' (%s pictures, diagnosis %s)\n' "${shown_short:-0}" \
+            "$( [ "$named" -gt 0 ] && echo shown || echo 'not needed')"
         else
-          printf '  ✗ a short buffer was not recognised, so it reads as a lossy link\n'
+          printf '  ✗ a short-buffer link showed nothing and explained nothing\n'
           printf '%s\n' "$out" | sed 's/^/      /'
           fail=1
         fi
