@@ -30,6 +30,7 @@ mod paths;
 mod permits;
 mod playback_task;
 mod presence_task;
+mod record_task;
 mod screenshot_cmd;
 mod serve;
 mod session_cmd;

@@ -480,6 +480,9 @@ dependencies = [
 [[package]]
 name = "esper-display-lock"
 version = "0.0.0"
+dependencies = [
+ "x11rb",
+]
 
 [[package]]
 name = "esper-encode"
@@ -518,6 +521,7 @@ dependencies = [
  "esper-keeper",
  "esper-link",
  "esper-media",
+ "esper-mkv",
  "esper-pipeline",
  "esper-png",
  "esper-presence",
@@ -620,6 +624,17 @@ dependencies = [
  "esper-encode",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "esper-mkv"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-color",
+ "esper-encode",
+ "esper-media",
+ "thiserror",
 ]
 
 [[package]]

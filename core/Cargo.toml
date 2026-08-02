@@ -18,6 +18,7 @@ esper-transport = { path = "crates/esper-transport" }
 esper-rendezvous = { path = "crates/esper-rendezvous" }
 esper-clock = { path = "crates/esper-clock" }
 esper-keeper = { path = "crates/esper-keeper" }
+esper-mkv = { path = "crates/esper-mkv" }
 esper-config = { path = "crates/esper-config" }
 esper-png = { path = "crates/esper-png" }
 esper-pty = { path = "crates/esper-pty" }

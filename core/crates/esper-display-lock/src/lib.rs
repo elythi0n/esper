@@ -122,6 +122,48 @@ impl Drop for DisplayLock {
         }
     }
 }
+/// How many times a connection is attempted before giving up.
+///
+/// **Measured, not chosen.** A display server under a burst of test processes
+/// resets new connections: `cargo test` runs the suites in parallel and each
+/// test opens its own, so several dozen arrive at once. It surfaced three
+/// separate times as three different "bugs" — a presence test that skipped
+/// itself, an input test that failed on `expect("a connection")`, and a
+/// keeper that could not put a screen back — before it was recognised as one
+/// thing.
+const TRIES: usize = 8;
+
+/// How long between attempts. Eight of these is about a second.
+const BETWEEN: Duration = Duration::from_millis(120);
+
+/// Connect to the display, tolerating a server that is momentarily busy.
+///
+/// **This is the test rig's connect, and it should not be the product's.** A
+/// program that a person is running wants to hear immediately that the display
+/// is gone; a test suite competing with seven other suites for one `Xvfb`
+/// wants to wait a moment and try again. The distinction matters: retrying in
+/// the product would hide a real failure behind a second of silence.
+///
+/// # Errors
+///
+/// The last error, when every attempt failed. A caller should treat that as a
+/// broken rig rather than a reason to skip: somebody asked for these tests to
+/// run.
+pub fn connect() -> Result<(x11rb::rust_connection::RustConnection, usize), String> {
+    let mut last = String::new();
+    for attempt in 1..=TRIES {
+        match x11rb::connect(None) {
+            Ok((conn, screen)) => return Ok((conn, screen)),
+            Err(e) => {
+                last = e.to_string();
+                if attempt < TRIES {
+                    std::thread::sleep(BETWEEN);
+                }
+            }
+        }
+    }
+    Err(format!("{last}, after {TRIES} attempts"))
+}
 
 #[cfg(test)]
 mod tests {

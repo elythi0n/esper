@@ -706,6 +706,23 @@ pub struct Paused {
     pub paused: bool,
 }
 
+/// The controller saying whether it is recording the session to a file.
+///
+/// **Sent by the side doing it, which is the only side that knows.** A
+/// recording is a copy of somebody else's screen that outlives the session,
+/// and the person whose screen it is has a right to know it is being made.
+///
+/// What this cannot do is *enforce* that: a modified controller can record
+/// without saying so, and no message can prevent that any more than a message
+/// could stop somebody pointing a camera at the screen. What it does is make
+/// an honest client honest by construction — this product always sends it, and
+/// the host shows it for as long as it lasts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recording {
+    /// Whether a recording is being written right now.
+    pub recording: bool,
+}
+
 /// A codec for sound.
 ///
 /// One variant, and it is still an enum: a receiver has to check what it is
@@ -2165,6 +2182,7 @@ pub enum MediaMessage {
     /// indistinguishable from a link that died — and the person watching would
     /// reconnect, which is precisely what pausing exists to avoid.
     Paused(Paused),
+    Recording(Recording),
     /// What the host will send as sound. Host to controller.
     ///
     /// Sent when the sound starts, which is not when the session does: audio
@@ -2217,6 +2235,7 @@ impl MediaMessage {
             Self::Permissions(_) => true,
             // A boolean is within bounds by being one.
             Self::Paused(_) => true,
+            Self::Recording(_) => true,
         }
     }
 
@@ -2235,6 +2254,7 @@ impl MediaMessage {
             Self::Report(_) => "a link report",
             Self::Permissions(_) => "a permission change",
             Self::Paused(_) => "a pause",
+            Self::Recording(_) => "a recording notice",
             Self::Audio(_) => "an audio config",
         }
     }
@@ -2259,6 +2279,7 @@ impl MediaMessage {
             | Self::Cursor(_)
             | Self::Permissions(_)
             | Self::Paused(_)
+            | Self::Recording(_)
             | Self::Audio(_) => matches!(role, Role::Host),
             Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) | Self::Report(_) => {
                 matches!(role, Role::Controller)

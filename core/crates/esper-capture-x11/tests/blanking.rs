@@ -41,7 +41,7 @@ fn scratch_display() -> Option<(x11rb::rust_connection::RustConnection, u32)> {
         println!("skipped: set ESPER_DISPLAY_TESTS=1 to allow changing this display's outputs");
         return None;
     }
-    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let (conn, screen_num) = esper_display_lock::connect().ok()?;
     let root = conn.setup().roots.get(screen_num)?.root;
     let resources = conn
         .randr_get_screen_resources_current(root)

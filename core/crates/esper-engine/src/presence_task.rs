@@ -496,6 +496,7 @@ mod tests {
         Watching {
             peer: "somebody".to_owned(),
             controlling,
+            recording: false,
             paused: false,
         }
     }

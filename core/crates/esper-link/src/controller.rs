@@ -28,6 +28,10 @@ pub struct ControllerLink {
     /// `None` until then, which is most sessions: sound needs a permission the
     /// host granted, a device at both ends, and a viewer that wants it.
     sound: Option<esper_stream::ControllerAudio>,
+    /// The shape of that sound, kept for anything that has to describe it —
+    /// a recording's header names the audio track before the first packet
+    /// goes into it.
+    sound_shape: Option<(u32, u8)>,
     /// Frames decoded and waiting to be played.
     ///
     /// Held rather than played here, because playing blocks on a sound card
@@ -68,6 +72,7 @@ impl ControllerLink {
         let mut me = Self {
             stream,
             sound: None,
+            sound_shape: None,
             heard: Vec::new(),
             media,
             control,
@@ -288,6 +293,7 @@ impl ControllerLink {
         decoder: Box<dyn esper_audio::Decode>,
     ) -> Result<(), LinkError> {
         self.sound = Some(esper_stream::ControllerAudio::new(config, decoder)?);
+        self.sound_shape = Some((config.sample_rate_hz, config.channels));
         Ok(())
     }
 
@@ -295,6 +301,82 @@ impl ControllerLink {
     #[must_use]
     pub const fn has_sound(&self) -> bool {
         self.sound.is_some()
+    }
+
+    /// Keep the encoded frames and sound packets, for a recording.
+    ///
+    /// **One switch for both**, because a recording of the picture without the
+    /// sound is not what anybody asked for — and two switches would be two
+    /// things to forget.
+    pub fn keep_for_recording(&mut self, keeping: bool) {
+        self.stream.keep_encoded(keeping);
+        if let Some(sound) = self.sound.as_mut() {
+            sound.keep_packets(keeping);
+        }
+    }
+
+    /// Ask the host for a keyframe now.
+    ///
+    /// **For a recording that starts mid-session**, which cannot begin until
+    /// one arrives: the container's header is built from the parameter sets a
+    /// keyframe carries. A session that has just opened already has one on the
+    /// way, so this is about the later case.
+    ///
+    /// # Errors
+    ///
+    /// If the control stream will not carry the request.
+    pub async fn ask_for_keyframe(&mut self) -> Result<(), LinkError> {
+        self.control
+            .send(&MediaMessage::Keyframe(esper_proto::KeyframeRequest {
+                reason: esper_proto::KeyframeReason::Joined,
+            }))
+            .await?;
+        Ok(())
+    }
+
+    /// Tell the host whether this side is recording the session.
+    ///
+    /// **Sent rather than queued**, unlike every other thing this side says:
+    /// a recording notice that waited for the next flush would be a notice
+    /// that arrives after the first frames are already in the file, and the
+    /// whole point of it is that the person being recorded knows *while* it
+    /// happens.
+    ///
+    /// # Errors
+    ///
+    /// If the control stream will not carry it. A caller decides what to do —
+    /// the honest answer is to say so and let whoever asked for the recording
+    /// choose, because a host that cannot be told is a host that will not show
+    /// it.
+    pub async fn announce_recording(&mut self, recording: bool) -> Result<(), LinkError> {
+        self.control
+            .send(&MediaMessage::Recording(esper_proto::Recording {
+                recording,
+            }))
+            .await?;
+        Ok(())
+    }
+
+    /// The shape of the sound this session is carrying, if any.
+    ///
+    /// For a recording's header, which has to describe the audio track before
+    /// the first packet goes in it.
+    #[must_use]
+    pub const fn sound_shape(&self) -> Option<(u32, u8)> {
+        self.sound_shape
+    }
+
+    /// Take the encoded frames kept since the last call.
+    pub fn take_encoded(&mut self) -> Vec<esper_stream::Encoded> {
+        self.stream.take_encoded()
+    }
+
+    /// Take the sound packets kept since the last call.
+    pub fn take_audio_packets(&mut self) -> Vec<Vec<u8>> {
+        self.sound
+            .as_mut()
+            .map(esper_stream::ControllerAudio::take_packets)
+            .unwrap_or_default()
     }
 
     /// What has happened to the sound, if there is any.

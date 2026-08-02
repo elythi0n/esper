@@ -35,6 +35,7 @@ esper-input.workspace = true
 esper-clipboard.workspace = true
 esper-files.workspace = true
 esper-keeper.workspace = true
+esper-mkv.workspace = true
 esper-presence.workspace = true
 esper-png.workspace = true
 esper-pty.workspace = true

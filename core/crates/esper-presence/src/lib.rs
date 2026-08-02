@@ -203,6 +203,19 @@ pub struct Watching {
     /// an indicator that stayed amber until the first one would be a
     /// reassurance that expires without warning.
     pub controlling: bool,
+    /// Whether the far end is writing this session to a file.
+    ///
+    /// **The fact that matters most, so it takes the colour.** A border can
+    /// only say one thing at a time, and "somebody is keeping a copy of this"
+    /// outranks "somebody can type" — a recording outlives the session, the
+    /// room and the reason it was made. Which permissions are in force is
+    /// still said in full on the host's own output and in its log; what the
+    /// border is for is the thing a person has to notice without reading.
+    ///
+    /// It is the controller's own claim. Nothing can make that claim true — a
+    /// modified client can record without saying so, exactly as somebody can
+    /// point a camera at the screen — and this product always sends it.
+    pub recording: bool,
     /// Whether the picture is being held right now.
     ///
     /// **A third thing to say, not the absence of the other two.** Taking the

@@ -174,7 +174,14 @@ fi
 echo "  — scanning binaries for anything connectable"
 
 # Hosts that exist only to be read by a person, never dialled by the program.
-doc_hosts='docs\.rs|doc\.rust-lang\.org|rust-lang\.github\.io|www\.w3\.org|(www\.)?rfc-editor\.org|datatracker\.ietf\.org|tools\.ietf\.org'
+#
+# `go.dev` arrived with a Go toolchain upgrade rather than with any code of
+# ours: the runtime's own GODEBUG diagnostic carries
+# "...in environment (https://go.dev/doc/godebug#go-1...)", which a person
+# reads when a compatibility setting is wrong. Nothing dials it, and it is in
+# every Go binary built with go1.27 or later — including one with no
+# dependencies at all.
+doc_hosts='docs\.rs|doc\.rust-lang\.org|rust-lang\.github\.io|www\.w3\.org|(www\.)?rfc-editor\.org|datatracker\.ietf\.org|tools\.ietf\.org|go\.dev'
 
 # Loopback, link-local, multicast, broadcast, unspecified, and the RFC 5737
 # documentation ranges are not endpoints anyone can phone home to.
@@ -987,6 +994,57 @@ except OSError:
         fi
         kill "$service_pid" 2>/dev/null || true
       fi
+
+      # **A session written to a file, and the host saying so.**
+      #
+      # A recording is a copy of somebody else's screen that outlives the
+      # session, so two things have to be true at once: the file has to be a
+      # file anything can play, and the machine being recorded has to have said
+      # so on its own output while it happened. Checked through the built
+      # binaries because that is what somebody runs.
+      echo "  — recording a session to a file, with the host told"
+      rec="$term_b/session.mkv"
+      out=$(ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$host_addr" \
+        --seconds 6 --record "$rec" 2>&1 || true)
+      if printf '%s' "$out" | grep -q 'recording .*started at the first keyframe'; then
+        printf '  ✓ a controller records the session it is watching\n'
+      else
+        printf '  ✗ nothing was recorded\n'
+        printf '%s\n' "$out" | grep -iE 'record|keyframe' | sed 's/^/      /' | head -4
+        fail=1
+      fi
+      # **The host said it**, which is the half that is about the person whose
+      # screen it is rather than the person keeping a copy.
+      if grep -q 'IS RECORDING THIS SESSION' "$term_a/host.log" 2>/dev/null; then
+        printf '  ✓ and the host said so on its own output\n'
+      else
+        printf '  ✗ the host was never told about the recording\n'
+        grep -iE 'record' "$term_a/host.log" | sed 's/^/      /' | head -3
+        fail=1
+      fi
+      # And wrote it down, because a recording outlives the session and the
+      # trail is what remains of it.
+      if grep -q '"event":"recording"' "$term_a/sessions.log" 2>/dev/null; then
+        printf '  ✓ and wrote it in its trail\n'
+      else
+        printf '  ✗ the recording is not in the host'"'"'s trail\n'
+        fail=1
+      fi
+      # **And the file plays.** `ffprobe` is the check that matters: agreement
+      # with the thing people actually open files with.
+      if command -v ffprobe >/dev/null 2>&1; then
+        probed=$(ffprobe -v error -show_entries stream=codec_name -of csv=p=0 "$rec" 2>&1 || true)
+        if printf '%s' "$probed" | grep -q 'h264'; then
+          size=$(wc -c < "$rec" 2>/dev/null || echo 0)
+          printf '  ✓ and ffprobe plays it: %s bytes of h264\n' "$size"
+        else
+          printf '  ✗ ffprobe would not read the recording: %s\n' "$probed"
+          fail=1
+        fi
+      else
+        printf '  — skipped reading the recording back: no ffprobe\n'
+      fi
+      rm -f "$rec"
 
       # **A display it cannot draw on is a display this host does not serve.**
       #

@@ -176,7 +176,7 @@ fn every_known_key_maps_to_the_symbol_that_physical_key_produces() {
     if open().is_none() {
         return;
     }
-    let (conn, _) = x11rb::connect(None).expect("a connection");
+    let (conn, _) = esper_display_lock::connect().expect("a connection");
     let mut checked = 0usize;
     let mut wrong: Vec<String> = Vec::new();
 
@@ -283,7 +283,7 @@ impl Focused {
     /// `None` when the focus could not be taken, which is a skip rather than a
     /// failure: a window manager is entitled to refuse.
     fn take() -> Option<Self> {
-        let (conn, screen_num) = x11rb::connect(None).ok()?;
+        let (conn, screen_num) = esper_display_lock::connect().ok()?;
         let screen = conn.setup().roots.get(screen_num)?;
         let (root, depth, visual) = (screen.root, screen.root_depth, screen.root_visual);
         let window = conn.generate_id().ok()?;
@@ -662,7 +662,7 @@ fn the_pointer_moves_to_an_absolute_position() {
         return;
     }
     let Some(mut injector) = open() else { return };
-    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let (conn, screen_num) = esper_display_lock::connect().expect("a connection");
     let screen = conn.setup().roots.get(screen_num).expect("a screen");
     let root = screen.root;
     let (w, h) = (screen.width_in_pixels, screen.height_in_pixels);

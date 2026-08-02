@@ -109,7 +109,7 @@ impl Patch {
     /// `size` by `size` of solid `pixel` at desktop position `x`, `y`, on
     /// screen by the time this returns.
     fn map(x: i32, y: i32, size: u16, pixel: u32) -> Self {
-        let (conn, screen_num) = x11rb::connect(None).expect("a second connection");
+        let (conn, screen_num) = esper_display_lock::connect().expect("a second connection");
         let screen = conn.setup().roots.get(screen_num).expect("a screen");
         let (root, depth, visual) = (screen.root, screen.root_depth, screen.root_visual);
         let window = conn.generate_id().expect("an id");
@@ -407,7 +407,7 @@ fn the_cursor_is_available_separately_and_so_is_not_in_the_frame() {
         println!("skipped: no DISPLAY");
         return;
     }
-    let Ok((conn, _)) = x11rb::connect(None) else {
+    let Ok((conn, _)) = esper_display_lock::connect() else {
         println!("skipped: DISPLAY is set but unusable");
         return;
     };
@@ -723,7 +723,7 @@ fn a_transparent_cursor_reads_as_hidden() {
         }
     };
 
-    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let (conn, screen_num) = esper_display_lock::connect().expect("a connection");
     let root = conn.setup().roots.get(screen_num).expect("a screen").root;
     let before = conn
         .get_window_attributes(root)

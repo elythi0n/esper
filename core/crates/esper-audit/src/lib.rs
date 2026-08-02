@@ -66,6 +66,16 @@ pub enum AuditError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event")]
 pub enum Event {
+    /// The controller said it started or stopped recording the session.
+    ///
+    /// **Recorded because a recording outlives the session.** Everything else
+    /// in this log is about access that ended when the session did; a file on
+    /// somebody else's disk does not end, and the one moment it can be written
+    /// down is when it was announced.
+    ///
+    /// It is the far end's own claim, which the log says nothing about the
+    /// truth of — the same standing as the name a device gives itself.
+    Recording { on: bool },
     /// A device was paired.
     Paired {
         /// What the device was called at pairing. Peer-supplied.
@@ -329,6 +339,7 @@ impl Event {
     #[must_use]
     pub const fn tag(&self) -> &'static str {
         match self {
+            Self::Recording { .. } => "recording",
             Self::Paired { .. } => "paired",
             Self::Unpaired { .. } => "unpaired",
             Self::Revoked { .. } => "revoked",
@@ -356,6 +367,13 @@ impl Event {
     #[must_use]
     pub fn detail(&self) -> String {
         match self {
+            Self::Recording { on } => {
+                if *on {
+                    "the controller said it started recording this session".to_owned()
+                } else {
+                    "the controller said it stopped recording".to_owned()
+                }
+            }
             Self::Paired { name } => format!("paired with {name}"),
             Self::Unpaired { name } => format!("unpaired {name}"),
             Self::Revoked { sessions_closed } => match sessions_closed {

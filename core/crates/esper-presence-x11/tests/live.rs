@@ -99,10 +99,23 @@ fn open() -> Option<X11Presence> {
     }
     match X11Presence::open() {
         Ok(p) => Some(p),
-        Err(e) => {
-            println!("skipped: DISPLAY is set but presence is unavailable ({e})");
-            None
-        }
+        // **A display that will not open is a broken rig, not a skip.**
+        //
+        // Somebody who set `ESPER_DISPLAY_TESTS` asked for these to run, so
+        // quietly not running them is the worst of the three outcomes: it
+        // reads as a pass. Found the hard way — a whole file of these
+        // reported "17 passed" against a display that had been shut down, and
+        // the number said nothing at all.
+        //
+        // A *momentarily* busy server is a different thing and is not a
+        // failure: `esper_display_lock::connect` waits it out, which is why
+        // the tests below reach the server through that rather than through
+        // `x11rb::connect` directly.
+        Err(e) => panic!(
+            "ESPER_DISPLAY_TESTS is set and DISPLAY={} cannot be opened ({e}). \
+             Start an X server for it, or unset the variable to skip these.",
+            std::env::var("DISPLAY").unwrap_or_default()
+        ),
     }
 }
 
@@ -110,6 +123,7 @@ fn watching(controlling: bool) -> Watching {
     Watching {
         peer: "a test".to_owned(),
         controlling,
+        recording: false,
         paused: false,
     }
 }
@@ -124,7 +138,7 @@ impl Intruder {
     /// A window covering the whole screen, override-redirect and raised — the
     /// most a program on the host can do to hide something.
     fn cover_the_screen() -> Option<Self> {
-        let (conn, screen_num) = x11rb::connect(None).ok()?;
+        let (conn, screen_num) = esper_display_lock::connect().ok()?;
         let screen = conn.setup().roots.get(screen_num)?;
         let (root, depth, visual) = (screen.root, screen.root_depth, screen.root_visual);
         let (w, h) = (screen.width_in_pixels, screen.height_in_pixels);
@@ -170,7 +184,7 @@ impl Drop for Intruder {
 /// The colour at a point on the screen, read from the root.
 fn pixel_at(x: i16, y: i16) -> Option<(u8, u8, u8)> {
     use x11rb::protocol::xproto::ImageFormat;
-    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let (conn, screen_num) = esper_display_lock::connect().ok()?;
     let root = conn.setup().roots.get(screen_num)?.root;
     let image = conn
         .get_image(ImageFormat::Z_PIXMAP, root, x, y, 1, 1, !0)
@@ -246,7 +260,7 @@ fn the_frame_is_visible_and_says_what_the_session_is() {
     // what gets asserted.
     let frame = p.windows();
     p.hide().expect("hidden");
-    let (conn, _) = x11rb::connect(None).expect("a connection");
+    let (conn, _) = esper_display_lock::connect().expect("a connection");
     for window in frame {
         assert!(
             conn.get_geometry(window).expect("request").reply().is_err(),
@@ -277,7 +291,7 @@ fn the_frame_is_not_clickable() {
     p.show(&watching(true)).expect("shown");
     std::thread::sleep(Duration::from_millis(120));
 
-    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let (conn, screen_num) = esper_display_lock::connect().expect("a connection");
     let root = conn.setup().roots.get(screen_num).expect("a screen").root;
     // The pointer on the very first pixel, which is inside the frame.
     conn.xtest_fake_input(6, 0, 0, root, 0, 0, 0)
@@ -362,7 +376,7 @@ fn the_panic_key_arrives_even_when_another_window_has_the_focus() {
     }
     let _ = p.poll();
 
-    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let (conn, screen_num) = esper_display_lock::connect().expect("a connection");
     let screen = conn.setup().roots.get(screen_num).expect("a screen");
     let root = screen.root;
     // A window that takes the focus and asks for every key it can.
@@ -440,7 +454,7 @@ fn an_active_keyboard_grab_takes_the_panic_key_and_that_is_x11() {
     }
     let _ = p.poll();
 
-    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let (conn, screen_num) = esper_display_lock::connect().expect("a connection");
     let root = conn.setup().roots.get(screen_num).expect("a screen").root;
     let grabbed = conn
         .grab_keyboard(
@@ -568,7 +582,7 @@ fn the_pause_key_arrives_as_a_pause() {
     }
     let _ = p.poll();
 
-    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let (conn, screen_num) = esper_display_lock::connect().expect("a connection");
     let root = conn.setup().roots.get(screen_num).expect("a screen").root;
 
     // Ctrl+Alt+Shift+P.
@@ -624,6 +638,7 @@ fn the_screen_confirms_the_frame_when_it_is_there() {
     p.show(&esper_presence::Watching {
         peer: "somebody".to_owned(),
         controlling: true,
+        recording: false,
         paused: true,
     })
     .expect("shown paused");
@@ -724,7 +739,7 @@ fn windows_destroyed_by_something_else_are_reported_as_gone() {
 
     let windows = p.windows();
     assert_eq!(windows.len(), 4, "four edges");
-    let (conn, _) = x11rb::connect(None).expect("a second connection");
+    let (conn, _) = esper_display_lock::connect().expect("a second connection");
     for window in windows {
         let _ = conn.destroy_window(window);
     }
@@ -781,7 +796,7 @@ fn the_panic_key_arrives_under_a_fullscreen_modal_window() {
     }
     let _ = p.poll();
 
-    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let (conn, screen_num) = esper_display_lock::connect().expect("a connection");
     let screen = conn.setup().roots.get(screen_num).expect("a screen");
     let (root, depth, visual) = (screen.root, screen.root_depth, screen.root_visual);
     let (w, h) = (screen.width_in_pixels, screen.height_in_pixels);
@@ -870,7 +885,7 @@ fn only_a_virtual_display() -> bool {
     if !may_disturb_the_display() {
         return false;
     }
-    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+    let Ok((conn, screen_num)) = esper_display_lock::connect() else {
         return false;
     };
     let Some(root) = conn.setup().roots.get(screen_num).map(|s| s.root) else {
@@ -991,4 +1006,63 @@ fn a_screen_that_is_already_blanked_is_not_blanked_again() {
         again.is_err(),
         "blanking an already blank screen would record the blank as the state to restore"
     );
+}
+
+/// **A recorded session looks different from a watched one, on the screen.**
+///
+/// The colour is the whole mechanism: a person glancing at their own machine
+/// has to be able to tell "somebody is watching" from "somebody is keeping a
+/// copy", without reading anything. And it takes precedence over the other
+/// three, because by the time somebody learns their screen was recorded the
+/// choice about it has already been made for them.
+#[test]
+fn a_recorded_session_shows_a_colour_of_its_own() {
+    if !may_disturb_the_display() {
+        return;
+    }
+    let _display = exclusive();
+    let Some(mut p) = open() else { return };
+    if !p.can_show() {
+        println!("skipped: this server has no SHAPE extension");
+        return;
+    }
+
+    p.show(&watching(true)).expect("shown");
+    let controlled = pixel_at(1, 1).expect("a pixel");
+    p.show(&esper_presence::Watching {
+        peer: "somebody".to_owned(),
+        controlling: true,
+        recording: true,
+        paused: false,
+    })
+    .expect("shown recording");
+    let recorded = pixel_at(1, 1).expect("a pixel");
+
+    assert_ne!(
+        controlled, recorded,
+        "a recorded session has to look different from a controlled one"
+    );
+    // And the screen agrees it is up in the new colour, which is the check
+    // that the frame was actually rebuilt rather than left saying the old
+    // thing.
+    assert!(
+        p.verify().expect("a verdict").is_on_screen(),
+        "the recording colour has to confirm as itself"
+    );
+
+    // Recording outranks a pause: a held session that is being recorded is
+    // still being recorded.
+    p.show(&esper_presence::Watching {
+        peer: "somebody".to_owned(),
+        controlling: true,
+        recording: true,
+        paused: true,
+    })
+    .expect("shown paused and recording");
+    assert_eq!(
+        pixel_at(1, 1).expect("a pixel"),
+        recorded,
+        "a pause must not hide that a recording is being made"
+    );
+    p.hide().expect("hidden");
 }

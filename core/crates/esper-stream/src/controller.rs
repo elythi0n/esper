@@ -261,6 +261,17 @@ const ASK_AGAIN_INTO_SILENCE: std::time::Duration = std::time::Duration::from_mi
 /// reporting the noise.
 const REPORT_WHEN_OFF_BY: u64 = 10;
 
+/// One encoded frame, kept for a recording.
+///
+/// **The bytes that arrived, not the picture that came out of them.** A
+/// recording made from decoded pictures would have to encode them again —
+/// slower, larger and worse-looking than the stream it already has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encoded {
+    pub bitstream: Vec<u8>,
+    pub keyframe: bool,
+}
+
 pub struct ControllerStream {
     depacketizer: Depacketizer,
     decoder: Option<Box<dyn VideoDecoder>>,
@@ -289,6 +300,13 @@ pub struct ControllerStream {
     /// `None` once a caller has taken it. See
     /// [`ControllerStream::take_permissions`].
     granted_now: Option<Vec<esper_proto::Permission>>,
+    /// Encoded frames held for a recording, when one is being made.
+    ///
+    /// **Off unless asked for**, so a session that is not being recorded
+    /// carries no cost at all: the bytes are moved into this only when
+    /// [`ControllerStream::keep_encoded`] has been called.
+    kept: Vec<Encoded>,
+    keeping: bool,
     /// What the outstanding ask gave as its reason.
     ///
     /// Kept so that asking again into silence repeats the original reason
@@ -393,6 +411,8 @@ impl ControllerStream {
             decoder: None,
             expected: (config.width, config.height),
             awaiting_keyframe: true,
+            kept: Vec::new(),
+            keeping: false,
             asked_for: KeyframeReason::Joined,
             granted_now: None,
             paused: None,
@@ -571,6 +591,22 @@ impl ControllerStream {
         self.outbound.push(MediaMessage::Report(report));
     }
 
+    /// Keep the encoded frames, for a recording.
+    ///
+    /// Off by default: a session nobody is recording pays nothing for this.
+    pub const fn keep_encoded(&mut self, keeping: bool) {
+        self.keeping = keeping;
+    }
+
+    /// Take the encoded frames kept since the last call.
+    ///
+    /// **Drained rather than read**, so a caller that stops draining cannot
+    /// grow this without bound: the frames are gone from here once they are
+    /// somebody else's problem, and a recording that stopped being written is
+    /// one that stops holding memory.
+    pub fn take_encoded(&mut self) -> Vec<Encoded> {
+        std::mem::take(&mut self.kept)
+    }
     /// What the arrivals have looked like.
     #[must_use]
     pub fn jitter(&self) -> JitterStats {
@@ -1227,6 +1263,18 @@ impl ControllerStream {
                 timestamp,
                 keyframe,
             } => {
+                // **Kept before anything can decide not to decode it.** A
+                // recording is of what the host *sent*, not of what this
+                // machine managed to show: a frame skipped because the CPU was
+                // busy still belongs in the file, and a recording with holes
+                // where the viewer stuttered would be a worse record of the
+                // session than the session was.
+                if self.keeping {
+                    self.kept.push(Encoded {
+                        bitstream: bitstream.clone(),
+                        keyframe,
+                    });
+                }
                 if keyframe {
                     self.awaiting_keyframe = false;
                 } else if self.awaiting_keyframe {
@@ -1358,6 +1406,14 @@ impl ControllerStream {
         }
         match message {
             MediaMessage::Config(config) => self.reconfigure(config),
+            // **Refused, because this direction is meaningless.** A recording
+            // is made by the controller and announced to the host; a host
+            // sending one has either been modified or is confused, and
+            // accepting it would mean a viewer could be told it is recording
+            // when it is not.
+            MediaMessage::Recording(_) => Err(StreamError::Malformed {
+                what: "a recording notice from a host",
+            }),
             // **Kept for the caller rather than acted on here.** What to do
             // with a pointer is a viewer's decision — wear it, draw it, ignore
             // it — and this layer has no window to put it in.

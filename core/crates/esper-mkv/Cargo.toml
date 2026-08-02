@@ -1,0 +1,23 @@
+[package]
+name = "esper-mkv"
+description = "Writing Matroska: a container for a recorded session, with per-frame timing and no dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The `ffprobe` test needs a *real* bitstream: a container whose payload is
+# nonsense proves nothing about the container, and the complaints hide whether
+# the file itself is well formed.
+esper-capture.workspace = true
+esper-color.workspace = true
+esper-encode.workspace = true
+
+[dependencies]
+esper-media.workspace = true
+thiserror.workspace = true

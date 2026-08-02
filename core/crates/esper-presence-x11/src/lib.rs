@@ -103,6 +103,18 @@ const WATCHING: u32 = 0x00FF_B000;
 /// would train a person to ignore the one that matters.
 const CONTROLLING: u32 = 0x00FF_2020;
 
+/// The colour while the far end is recording: magenta.
+///
+/// **It takes precedence over the others**, because a border says one thing at
+/// a time and this is the thing that outlives the session. Somebody who can
+/// see their screen is being watched can decide what to do about it now;
+/// somebody whose screen is being *kept* has already lost that choice by the
+/// time they find out, so it is the fact that gets the colour.
+///
+/// Magenta because the other three are taken and because nothing else on a
+/// desktop is this colour by accident.
+const RECORDING: u32 = 0x00FF_00E0;
+
 /// The colour while the picture is held: blue.
 ///
 /// **Deliberately not amber or red.** Those two mean "somebody is watching"
@@ -147,7 +159,9 @@ fn as_rgb(pixel: u32, channels: u32) -> [u8; 3] {
 /// symptom would be a session that stops because the indicator is the wrong
 /// shade of correct.
 const fn colour_of(watching: &Watching) -> u32 {
-    if watching.paused {
+    if watching.recording {
+        RECORDING
+    } else if watching.paused {
         PAUSED
     } else if watching.controlling {
         CONTROLLING
@@ -708,7 +722,7 @@ impl Presence for X11Presence {
         if self
             .showing
             .as_ref()
-            .is_some_and(|s| s.controlling != watching.controlling || s.paused != watching.paused)
+            .is_some_and(|s| colour_of(s) != colour_of(watching))
         {
             self.destroy_edges();
         }

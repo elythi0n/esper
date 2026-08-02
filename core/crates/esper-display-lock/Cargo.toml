@@ -9,3 +9,9 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# For the shared connect helper: a display server under a burst of test
+# processes refuses connections sometimes, and every suite in this workspace
+# was learning that separately.
+x11rb.workspace = true

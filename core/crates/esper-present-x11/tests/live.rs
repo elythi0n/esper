@@ -72,7 +72,7 @@ fn open(w: u32, h: u32) -> Option<X11Presenter> {
 /// presenter's own bookkeeping.
 fn window_size(window: u32) -> Option<(u32, u32)> {
     use x11rb::protocol::xproto::ConnectionExt as _;
-    let (conn, _) = x11rb::connect(None).ok()?;
+    let (conn, _) = esper_display_lock::connect().ok()?;
     let g = conn.get_geometry(window).ok()?.reply().ok()?;
     Some((u32::from(g.width), u32::from(g.height)))
 }
@@ -111,7 +111,7 @@ fn flat(w: u32, h: u32, y: u8, u: u8, v: u8) -> I420 {
 /// put it. A test that passes because of where a window happened to land is
 /// not testing the picture.
 fn read_back(window: u32, w: u32, h: u32) -> Option<(Vec<u8>, (usize, usize, usize))> {
-    let (conn, n) = x11rb::connect(None).ok()?;
+    let (conn, n) = esper_display_lock::connect().ok()?;
     let screen = conn.setup().roots.get(n)?.clone();
     let img = conn
         .get_image(
@@ -369,7 +369,7 @@ fn the_pointer_the_server_draws_is_the_one_it_was_given() {
         return;
     }
     let Some(mut p) = open(64, 64) else { return };
-    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let (conn, screen_num) = esper_display_lock::connect().expect("a connection");
     if conn.xfixes_query_version(5, 0).map(|c| c.reply()).is_err() {
         println!("skipped: no XFIXES on this server");
         return;
@@ -449,7 +449,7 @@ fn a_hidden_pointer_is_transparent_to_the_server() {
         return;
     }
     let Some(mut p) = open(64, 64) else { return };
-    let (conn, screen_num) = x11rb::connect(None).expect("a connection");
+    let (conn, screen_num) = esper_display_lock::connect().expect("a connection");
     if conn.xfixes_query_version(5, 0).map(|c| c.reply()).is_err() {
         println!("skipped: no XFIXES on this server");
         return;
@@ -641,7 +641,7 @@ fn drawing_the_pointer_stops_the_window_wearing_it() {
         return;
     }
     let Some(mut p) = open(64, 48) else { return };
-    let (conn, _) = x11rb::connect(None).expect("a connection");
+    let (conn, _) = esper_display_lock::connect().expect("a connection");
     if conn.xfixes_query_version(5, 0).map(|c| c.reply()).is_err() {
         println!("skipped: no XFIXES on this server");
         return;

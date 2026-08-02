@@ -137,6 +137,14 @@ pub struct ConnectOptions {
     /// Which screens exist is something only the host knows, so this cannot be
     /// a list at connect time: it becomes one when the config arrives.
     pub all_monitors: bool,
+    /// Where to write a recording of the session, if one was asked for.
+    ///
+    /// **Opt-in, controller-side, and the host is told.** A recording is a
+    /// copy of somebody else's screen that outlives the session, which is a
+    /// different thing from watching it — so it is never on by default, and
+    /// the machine being recorded says so on its own screen for as long as it
+    /// lasts.
+    pub record: Option<std::path::PathBuf>,
     /// A broker to be introduced through, when nothing direct works.
     pub via: Option<esper_rendezvous::Via>,
     /// Which paired host, by name or fingerprint prefix.
@@ -319,6 +327,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut monitors: Option<Vec<u32>> = None;
     let mut all_monitors = false;
     let mut no_audio = false;
+    let mut record: Option<std::path::PathBuf> = None;
     let mut via_addr: Option<SocketAddr> = None;
     let mut via_key: Option<[u8; 32]> = None;
     let mut named: Option<String> = None;
@@ -418,6 +427,13 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
                 no_audio = true;
                 i += 1;
             }
+            "--record" => {
+                let Some(path) = args.get(i + 1) else {
+                    return Err("--record wants a file to write, like session.mkv".to_owned());
+                };
+                record = Some(std::path::PathBuf::from(path));
+                i += 2;
+            }
             // **An address or a name.** An address says where without saying
             // which; a name says which without saying where. Both are
             // ordinary things to type, and the key check settles the identity
@@ -446,6 +462,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
         None => crate::settings::broker()?,
     };
     Ok(ConnectOptions {
+        record,
         addr,
         seconds,
         profile,
@@ -2163,6 +2180,7 @@ async fn serve_session(
         indicator.show(esper_presence::Watching {
             peer: session.peer_hello().name.clone(),
             controlling: may_control,
+            recording: false,
             paused: false,
         });
 
@@ -2344,6 +2362,7 @@ async fn serve_session(
             watch: watch.as_ref(),
             live: live.clone(),
             watching: esper_presence::Watching {
+                recording: false,
                 peer: session.peer_hello().name.clone(),
                 controlling: may_control,
                 paused: false,
@@ -3030,6 +3049,10 @@ async fn serve(
     // signal are two ways of asking it to change — which is why neither of
     // them carries a state.
     let mut paused = false;
+    // **What the far end says it is doing with this session**, so one notice
+    // produces one line and one log entry: a controller that repeated itself
+    // would otherwise fill the trail with the same fact.
+    let mut recording = false;
     // **What the screen says about the indicator, and since when.**
     //
     // Separate from `paused` because they are different reasons for the same
@@ -3273,6 +3296,39 @@ async fn serve(
                 // and the transport is here rather than on the pipeline's
                 // thread. It is forwarded as well, so the session can say what
                 // it was told.
+                // **And the other: what the far end says it is doing with
+                // this session.** A recording outlives the session, so the
+                // person whose screen it is has to be told while it is
+                // happening — which means a screen and a log, and both are
+                // here rather than on the pipeline's thread.
+                if let MediaMessage::Recording(notice) = &message
+                    && notice.recording != recording
+                {
+                    {
+                        recording = notice.recording;
+                        if let Some(i) = attending.indicator {
+                            i.show(esper_presence::Watching {
+                                recording,
+                                paused,
+                                ..attending.watching.clone()
+                            });
+                        }
+                        if recording {
+                            println!(
+                                "      · THE CONTROLLER SAYS IT IS RECORDING THIS SESSION TO A \
+                                 FILE"
+                            );
+                        } else {
+                            println!("      · the controller says it stopped recording");
+                        }
+                        if let Err(e) = attending
+                            .log
+                            .append(&Entry::now(&device, Event::Recording { on: recording }))
+                        {
+                            eprintln!("      · could not write the audit log: {e}");
+                        }
+                    }
+                }
                 if let MediaMessage::Report(report) = &message
                     && let Some(cell) = attending.capacity.as_ref()
                     && crate::settings::flag("host.pace_to_measured", true)
@@ -3466,6 +3522,8 @@ pub fn connect_usage() -> String {
          \x20                      arrangement the host's desktop has\n\
          \x20 --all-monitors       ask for every screen the host has\n\
          \x20 --no-audio           do not ask for the host's sound, so none is sent\n\
+         \x20 --record <file.mkv>  write the session to a file. The host says so on its\n\
+         \x20                      own screen for as long as it lasts\n\
          \x20 --profile <what>     text, balanced or motion: what you are doing,\n\
          \x20                      which decides what the host gives up first\n\
          \x20 --clipboard <what>   both, from-host, to-host or none. Nothing is ever\n\
@@ -4082,6 +4140,41 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         let deadline =
             (o.seconds > 0).then(|| tokio::time::Instant::now() + Duration::from_secs(o.seconds));
         let started = std::time::Instant::now();
+        // **The recording, if one was asked for.**
+        //
+        // Set up before the first frame can arrive, and the host is told
+        // *before* anything is written: the person whose screen it is should
+        // learn about a recording as it starts, not after it has some of their
+        // screen in it. A host that never hears it is a host whose controller
+        // is not this program.
+        let mut recorder = o.record.as_deref().map(|path| {
+            let audio = link.sound_shape().map(|(rate, channels)| esper_mkv::Audio {
+                sample_rate: rate,
+                channels,
+            });
+            crate::record_task::Recorder::waiting(path, (config.width, config.height), audio)
+        });
+        if recorder.is_some() {
+            link.keep_for_recording(true);
+            match link.announce_recording(true).await {
+                Ok(()) => println!("  recording  the host has been told, and will show it"),
+                // **Not fatal, and said.** A host that cannot be told is a
+                // host whose screen is about to be recorded without it saying
+                // so — which the person running this should know about, and
+                // which is their decision rather than this program's.
+                Err(e) => {
+                    eprintln!("  · the host could not be told about the recording: {e}");
+                    eprintln!("    it will not show one. Recording anyway, because you asked.");
+                }
+            }
+            // A keyframe now rather than at the host's own pace, because the
+            // file cannot begin without one — a session opens with one, so
+            // this matters for a recording started later rather than at
+            // connect time.
+            if let Err(e) = link.ask_for_keyframe().await {
+                eprintln!("  · could not ask for a keyframe to start the recording: {e}");
+            }
+        }
         let mut closed_by_peer: Option<(esper_proto::Reason, String)> = None;
         let mut pictures = 0u64;
         let mut skipped = 0u64;
@@ -4251,6 +4344,14 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                         break;
                     }
                 }
+            }
+            // **The recording, before anything is shown.** What goes in the
+            // file is what the host *sent*, taken from the stream before this
+            // machine decides whether it managed to decode or draw it: a
+            // recording with holes where the viewer stuttered would be a worse
+            // record of the session than the session was.
+            if let Some(writing) = recorder.as_mut() {
+                writing.take_from(&mut link, started.elapsed());
             }
             for d in out.drain(..) {
                 match d {
@@ -4659,6 +4760,18 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 ),
             },
         );
+        // **The recording is closed before the summary**, so its own line —
+        // how many frames, how long, how big — sits with the rest of what the
+        // session came to rather than after it.
+        if let Some(recorder) = recorder.take() {
+            // Told first, because the host's screen should stop saying
+            // "recording" as soon as it stops being true, and a file that
+            // takes a moment to close is not a moment of recording.
+            if let Err(e) = link.announce_recording(false).await {
+                eprintln!("  · the host could not be told the recording stopped: {e}");
+            }
+            recorder.finish();
+        }
         println!("  pictures   {pictures} shown, {skipped} not shown");
         // **Said only when there was sound**, and said in the terms that
         // matter: how much was heard, how much was reconstructed because a

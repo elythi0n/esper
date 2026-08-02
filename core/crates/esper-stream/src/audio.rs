@@ -150,6 +150,12 @@ pub struct AudioStats {
 
 /// The receiving half of a session's sound.
 pub struct ControllerAudio {
+    /// Opus packets held for a recording, when one is being made.
+    ///
+    /// Off unless asked for, like the video's: a session nobody is recording
+    /// pays nothing.
+    kept: Vec<Vec<u8>>,
+    keeping: bool,
     decoder: Box<dyn Decode>,
     config: AudioConfig,
     /// The sequence number of the last packet played, once one has been.
@@ -200,6 +206,8 @@ impl ControllerAudio {
             )));
         }
         Ok(Self {
+            kept: Vec::new(),
+            keeping: false,
             decoder,
             config: *config,
             played: None,
@@ -212,6 +220,19 @@ impl ControllerAudio {
     #[must_use]
     pub const fn config(&self) -> AudioConfig {
         self.config
+    }
+
+    /// Keep the Opus packets, for a recording.
+    pub const fn keep_packets(&mut self, keeping: bool) {
+        self.keeping = keeping;
+    }
+
+    /// Take the packets kept since the last call.
+    ///
+    /// Drained rather than read, for the reason the video's is: a caller that
+    /// stops draining must not be able to grow this without bound.
+    pub fn take_packets(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.kept)
     }
 
     /// Whether the decoder in use is confined.
@@ -254,6 +275,13 @@ impl ControllerAudio {
             // ask for that by sending nothing.
             self.stats.rejected = self.stats.rejected.saturating_add(1);
             return Ok(Vec::new());
+        }
+
+        // **Kept before the jitter and concealment logic**, because what
+        // belongs in a recording is the packet the host sent, not this
+        // machine's reconstruction of a stream with gaps in it.
+        if self.keeping {
+            self.kept.push(packet.to_vec());
         }
 
         let mut out = Vec::new();

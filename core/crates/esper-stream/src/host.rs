@@ -538,6 +538,13 @@ impl HostStream {
                 self.pipeline.request_keyframe();
                 Ok(Handled::Nothing)
             }
+            // **Nothing here, because the session already dealt with it.** A
+            // recording notice has to reach a screen and a log, and neither is
+            // in this layer — so the session's own loop acts on it before it
+            // is forwarded, and this arm exists because the union is matched
+            // exhaustively on purpose: a variant nobody handles fails to
+            // compile rather than being quietly dropped.
+            MediaMessage::Recording(_) => Ok(Handled::Nothing),
             // **Kept for the caller rather than acted on here.** What to do
             // with a capacity is the transport's — its congestion controller
             // is the only place that can pace without putting a second

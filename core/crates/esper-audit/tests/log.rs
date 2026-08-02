@@ -264,7 +264,8 @@ fn exhaustive_witness(e: &Event) {
     // If you are here because you added a variant to `Event`: add it to
     // `variants()` below too, and make sure it carries no session content.
     match e {
-        Event::Paired { .. }
+        Event::Recording { .. }
+        | Event::Paired { .. }
         | Event::Unpaired { .. }
         | Event::Revoked { .. }
         | Event::SessionNarrowed { .. }
@@ -284,8 +285,27 @@ fn exhaustive_witness(e: &Event) {
 }
 
 /// Every variant, for screening. Kept in step with `exhaustive_witness`.
+/// **Starting and stopping a recording read as different sentences.**
+///
+/// One line saying "recording" with a boolean in it would make a person read
+/// the JSON to find out which happened, and the whole point of `detail` is
+/// that they should not have to.
+#[test]
+fn a_recording_that_started_and_one_that_stopped_do_not_read_the_same() {
+    let started = Event::Recording { on: true }.detail();
+    let stopped = Event::Recording { on: false }.detail();
+    assert!(started.contains("started"), "{started}");
+    assert!(stopped.contains("stopped"), "{stopped}");
+    assert_eq!(
+        Event::Recording { on: true }.tag(),
+        Event::Recording { on: false }.tag(),
+        "and both are the same kind of thing, so they grep alike"
+    );
+}
+
 fn variants() -> Vec<Event> {
     vec![
+        Event::Recording { on: true },
         Event::Paired {
             name: "laptop".to_owned(),
         },

@@ -74,7 +74,7 @@ struct Rig {
 
 impl Rig {
     fn open() -> Option<Self> {
-        let (conn, screen_num) = x11rb::connect(None).ok()?;
+        let (conn, screen_num) = esper_display_lock::connect().ok()?;
         let screen = &conn.setup().roots[screen_num];
         let (root, depth, visual) = (screen.root, screen.root_depth, screen.root_visual);
         let white = screen.white_pixel;
