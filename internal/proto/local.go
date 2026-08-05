@@ -28,10 +28,10 @@ const CommandStatus Command = "status"
 type Capability struct {
 	// Available says whether it works now, established by trying it where
 	// trying is cheap.
-	Available bool `cbor:"available"`
+	Available bool `cbor:"available" json:"available"`
 	// Detail is what was found, or why nothing was. Shown to a person; never
 	// parsed.
-	Detail string `cbor:"detail"`
+	Detail string `cbor:"detail" json:"detail"`
 }
 
 // Status is everything `esper doctor` needs to say what this machine can do.
@@ -40,17 +40,22 @@ type Capability struct {
 // that it is being watched means starting the indicator, which puts a window
 // on somebody's screen and takes a global hotkey. A diagnostic must not
 // disturb the machine it is diagnosing.
+// The `json` tags mirror the `cbor` ones on purpose: these names are what the
+// local API answers with, so a dashboard, an MCP adapter and a packet capture
+// of the seam all read the same words. Without them Go serves its *field*
+// names — `{"At":…,"Peer":…}` — which makes an internal detail into a public
+// contract, and a rename into a breaking change nobody meant to make.
 type Status struct {
-	Engine   string     `cbor:"engine"`
-	Capture  Capability `cbor:"capture"`
-	Encoder  Capability `cbor:"encoder"`
-	Input    Capability `cbor:"input"`
-	Overlays []string   `cbor:"overlays"`
-	MDNS     bool       `cbor:"mdns"`
+	Engine   string     `cbor:"engine" json:"engine"`
+	Capture  Capability `cbor:"capture" json:"capture"`
+	Encoder  Capability `cbor:"encoder" json:"encoder"`
+	Input    Capability `cbor:"input" json:"input"`
+	Overlays []string   `cbor:"overlays" json:"overlays"`
+	MDNS     bool       `cbor:"mdns" json:"mdns"`
 	// Broker is the broker this machine would use, if one is configured. No
 	// default exists anywhere in Esper, so nil is the ordinary answer.
-	Broker *string `cbor:"broker"`
-	Paired uint32  `cbor:"paired"`
+	Broker *string `cbor:"broker" json:"broker"`
+	Paired uint32  `cbor:"paired" json:"paired"`
 }
 
 // Happening is one line of what has happened on this machine.
@@ -59,20 +64,20 @@ type Status struct {
 // the engine's and it grows, and mirroring the whole of it here would be two
 // enums to keep in step for the sake of one screen.
 type Happening struct {
-	At   uint64 `cbor:"at"`
-	Peer string `cbor:"peer"`
-	Key  string `cbor:"key"`
+	At   uint64 `cbor:"at" json:"at"`
+	Peer string `cbor:"peer" json:"peer"`
+	Key  string `cbor:"key" json:"key"`
 	// Device is what that device is called now, or empty if it is not paired
 	// any more — looked up when the line is read, so a device somebody
 	// unpaired reads as one rather than as a name that no longer means
 	// anything.
-	Device string `cbor:"device"`
-	Event  string `cbor:"event"`
-	Detail string `cbor:"detail"`
+	Device string `cbor:"device" json:"device"`
+	Event  string `cbor:"event" json:"event"`
+	Detail string `cbor:"detail" json:"detail"`
 	// Direction is "in" for somebody who connected here and "out" for
 	// something this machine did to somebody else. Two questions, one list,
 	// and an arrow on each line so a person scanning it can tell them apart.
-	Direction string `cbor:"direction,omitempty"`
+	Direction string `cbor:"direction,omitempty" json:"direction,omitempty"`
 }
 
 // Arrow is the two characters that say which way a happening went.
@@ -91,7 +96,7 @@ func (h Happening) Arrow() string {
 // A sentence rather than a code: these are read by a person running
 // `esper doctor`, and nothing on this side branches on them.
 type Failure struct {
-	Detail string `cbor:"detail"`
+	Detail string `cbor:"detail" json:"detail"`
 }
 
 // Report is what the engine says back.
@@ -100,9 +105,9 @@ type Failure struct {
 // struct of pointers with omitempty and exactly one of them set. Treating it
 // as a map[string]any would decode anything and tell the caller nothing.
 type Report struct {
-	Status   *Status      `cbor:"status,omitempty"`
-	Sessions *[]Happening `cbor:"sessions,omitempty"`
-	Failed   *Failure     `cbor:"failed,omitempty"`
+	Status   *Status      `cbor:"status,omitempty" json:"status,omitempty"`
+	Sessions *[]Happening `cbor:"sessions,omitempty" json:"sessions,omitempty"`
+	Failed   *Failure     `cbor:"failed,omitempty" json:"failed,omitempty"`
 }
 
 // Which reports the engine actually sent, for a caller that must not treat an
@@ -117,8 +122,8 @@ func (r Report) IsEmpty() bool {
 // tagged enum represents as a one-key map — the same shape as Report.
 type SessionsCommand struct {
 	Sessions struct {
-		Most uint32 `cbor:"most"`
-	} `cbor:"sessions"`
+		Most uint32 `cbor:"most" json:"most"`
+	} `cbor:"sessions" json:"sessions"`
 }
 
 // AskForSessions builds the command asking for the last `most` lines.

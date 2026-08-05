@@ -11,13 +11,16 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/elythi0n/esper/internal/engine"
 	"github.com/elythi0n/esper/internal/proto"
+	"github.com/elythi0n/esper/internal/server"
 )
 
 // version and buildTime are stamped at link time via
@@ -47,6 +50,8 @@ func run(args []string) int {
 		return cmdDoctor(args[1:])
 	case "sessions":
 		return cmdSessions(args[1:])
+	case "api":
+		return cmdAPI(args[1:])
 	case "broker":
 		return handOff("esper-broker", args[1:])
 	case "host":
@@ -301,6 +306,116 @@ func cmdHost(args []string) int {
 // own process today and nothing here can see inside it, and a list that
 // silently omitted a session in progress would be worse than one that says
 // which question it is answering.
+// cmdAPI serves the local API until interrupted.
+//
+// **What a window and an adapter both need**, and the one command in this
+// product that opens a listener on the machine it runs on — which is why the
+// output says, every time, what is reachable and by whom.
+func cmdAPI(args []string) int {
+	addr := server.DefaultAddr
+	exposed := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--listen":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "esper api: --listen wants an address, like 127.0.0.1:8687")
+				return 1
+			}
+			addr = args[i+1]
+			i++
+		case "--exposed":
+			exposed = true
+		case "--help", "-h":
+			fmt.Print(apiUsage())
+			return 0
+		default:
+			fmt.Fprintf(os.Stderr, "esper api: %q is not an option\n\n%s", args[i], apiUsage())
+			return 1
+		}
+	}
+
+	home, err := esperHome()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
+		return 1
+	}
+	token, err := server.LoadOrCreateToken(home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
+		return 1
+	}
+
+	sup, err := engine.New(engine.Options{Log: logToStderr})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
+		return 1
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := sup.Start(ctx, proto.NewHello(proto.RoleController, nil, hostname(), version)); err != nil {
+		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
+		return 1
+	}
+	defer func() { _ = sup.Stop() }()
+
+	api, err := server.New(server.Options{Addr: addr, Token: token, Engine: sup, Exposed: exposed})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
+		return 1
+	}
+
+	fmt.Println("🔌 esper api")
+	fmt.Println()
+	fmt.Printf("  listening  %s\n", addr)
+	fmt.Printf("  token      %s/%s (mode 0600)\n", home, server.TokenFile)
+	fmt.Println("  answers    what this machine can do, which devices are paired,")
+	fmt.Println("             and what has happened on it")
+	if exposed {
+		// **Said loudly, every time.** Somebody who exposed this deliberately
+		// still deserves to see what they exposed, and somebody reading a log
+		// six months later needs to know it was a decision.
+		fmt.Println()
+		fmt.Println("  ⚠ NOT LOOPBACK. Anything that can reach this address and read the")
+		fmt.Println("    token file can ask this machine those questions. The token is the")
+		fmt.Println("    only thing between them and the answers.")
+	} else {
+		fmt.Println("  reachable  from this machine only, by whatever can read the token")
+	}
+	fmt.Println()
+
+	if err := api.Serve(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
+		return 1
+	}
+	fmt.Println("  · stopped")
+	return 0
+}
+
+// esperHome is where this machine's Esper state lives.
+//
+// The same rule the engine uses — `$ESPER_HOME`, else `$HOME/.esper` — because
+// two answers to "where is the token" is one too many. It is not created here:
+// a token belongs beside a device store that pairing made, and a home that
+// does not exist yet is a machine that has not been paired.
+func esperHome() (string, error) {
+	if set := os.Getenv("ESPER_HOME"); set != "" {
+		return set, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("finding your home directory: %w", err)
+	}
+	return filepath.Join(home, ".esper"), nil
+}
+
+func apiUsage() string {
+	return "usage: esper api [--listen <addr>] [--exposed]\n\n" +
+		"  --listen <addr>   where to listen. Default " + server.DefaultAddr + ",\n" +
+		"                    which only this machine can reach\n" +
+		"  --exposed         required to bind anywhere but loopback, and says\n" +
+		"                    you know what that exposes\n"
+}
+
 func cmdSessions(args []string) int {
 	most := uint32(20)
 	if len(args) > 0 {

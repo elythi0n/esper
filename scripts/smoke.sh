@@ -156,7 +156,7 @@ fi
 # it could phone home to. This check is that claim's proof, and the reason the
 # claim is checkable rather than merely stated.
 #
-# What counts as an endpoint is deliberately narrow, and has been narrowed twice
+# What counts as an endpoint is deliberately narrow, and has been narrowed
 # after false positives — because a check that cries wolf gets switched off,
 # which is worse than not having one:
 #
@@ -167,6 +167,9 @@ fi
 #      "Node.js ES modules are not directly supported, see https://docs.rs/..."
 #      — a pointer for a human reading a diagnostic, not an address the program
 #      dials.
+#   3. A fragment of a longer run does not count. `strings` reads the string
+#      table, where the compiler glues unrelated constants together, so a match
+#      is only believed when it is the whole run — see each pattern below.
 #
 # What does count: a scheme-prefixed URL to a host that could serve data, and
 # any routable IP literal. Every allowlist entry below names why it is there;
@@ -187,13 +190,41 @@ doc_hosts='docs\.rs|doc\.rust-lang\.org|rust-lang\.github\.io|www\.w3\.org|(www\
 # documentation ranges are not endpoints anyone can phone home to.
 harmless_ip='^(0\.|127\.|169\.254\.|22[4-9]\.|23[0-9]\.|24[0-9]\.|25[0-5]\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|255\.255\.255\.255)'
 
+# A URL needs a dotted host. Go's net/http stores "http://" as a constant of
+# its own, so without that requirement the next constant in the table reads as
+# the host: a binary whose whole source is `http.NewServeMux()` reports
+# "http://UpgradechunkedCreatedIM".
+urls_in() {
+  strings "$1" \
+    | grep -oEi '(https?|wss?|quic|ftp)://[a-z0-9-]+(\.[a-z0-9-]+)+' \
+    | grep -vEi "://($doc_hosts)" | sort -u || true
+}
+
+# An IP must be the entire run of digits and dots, and closure names are cut out
+# first. Two things in a Go binary are shaped like an address and are not one:
+#
+#   crypto/x509 keeps its object identifiers as text, so "2.5.4.6" and "2.5.4.7"
+#   sit next to each other in the string table as "2.5.4.62.5.4.7" — reading the
+#   whole run rather than any part of it is what rejects that.
+#
+#   Go names each closure after the function holding it, `marshal.func1.1.1.1`,
+#   and those names are in the linker's function table rather than in program
+#   data. The `.func` suffix is cut so the tail is not read as an address.
+#
+# The cost is that a real address glued directly to another number, or sitting
+# right after `.func`, would be missed. The sabotage below is what keeps that
+# from being a free pass.
+ips_in() {
+  strings "$1" \
+    | sed 's/\.func[0-9.]*//g' \
+    | grep -oE '[0-9.]+' \
+    | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' \
+    | grep -vE "$harmless_ip" | sort -u || true
+}
+
 for b in esper esper-engine esper-broker; do
-  urls=$(strings "$BIN/$b" \
-         | grep -oEi '(https?|wss?|quic|ftp)://[a-z0-9.-]+' \
-         | grep -vEi "://($doc_hosts)" | sort -u || true)
-  ips=$(strings "$BIN/$b" \
-        | grep -oE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' \
-        | grep -vE "$harmless_ip" | sort -u || true)
+  urls=$(urls_in "$BIN/$b")
+  ips=$(ips_in "$BIN/$b")
 
   if [ -n "$urls" ] || [ -n "$ips" ]; then
     printf '  ✗ %s contains something connectable:\n' "$b"
@@ -208,6 +239,38 @@ for b in esper esper-engine esper-broker; do
     printf '  ✓ %s has no URL and no routable IP literal\n' "$b"
   fi
 done
+
+# The scan above believes only whole runs, which is a narrowing, and a narrowing
+# can quietly become a blindfold. So the same two patterns are pointed at a
+# binary that does carry an endpoint, and have to find it.
+planted=$(mktemp -d)
+cat > "$planted/main.go" <<'GO'
+package main
+
+import "net/http"
+
+const home = "https://collector.example.net/v1"
+const fallback = "198.19.7.4"
+
+func main() {
+	_, _ = http.Get(home)
+	println(fallback)
+}
+GO
+printf 'module planted
+
+go 1.24
+' > "$planted/go.mod"
+if (cd "$planted" && go build -o planted . 2>/dev/null); then
+  found_url=$(urls_in "$planted/planted")
+  found_ip=$(ips_in "$planted/planted")
+  check "the same patterns find an endpoint that is really there" \
+    "$([ -n "$found_url" ] && echo url)$([ -n "$found_ip" ] && echo +ip)" "url+ip"
+else
+  printf '  ✗ could not build the binary that proves the scan still bites\n'
+  fail=1
+fi
+rm -rf "$planted"
 
 # Terminal mode's whole claim is that it works on a machine with no screen.
 # Checked rather than assumed: a dependency that pulled in a display library
@@ -326,7 +389,7 @@ cleanup_terminal() {
              "${clip_x1:-}" "${clip_x2:-}" "${cp_host:-}" "${cp_wire:-}" "${cp_along:-}" \
              "${multi_host:-}" "${idle_host:-}" "${tiled_host:-}" \
              "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}" "${retain_pid:-}" \
-             "${priv_host:-}" "${priv_client:-}" "${priv_x:-}"; do
+             "${priv_host:-}" "${priv_client:-}" "${priv_x:-}" "${api_pid:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -1266,6 +1329,83 @@ except OSError:
       # **What has happened on this machine.** The audit log is a file of JSON
       # nobody reads with `jq`, and a record nobody reads is a record that is not
       # doing its job. This is the log rendered, over the same seam as `doctor`.
+      # **The local API, which is the one listener this product opens.**
+      #
+      # A dashboard cannot shell out for every frame of its own state and an
+      # MCP adapter needs a stable surface, so there is an HTTP API — and a
+      # listener on somebody's own machine is not a small thing. Three
+      # properties are checked here through the real binary, because they are
+      # the whole of what stands between the answers and anything that can
+      # reach the socket.
+      echo "  — the local API answers only with the token, and only on loopback"
+      api_port=$((28000 + (RANDOM % 2000)))
+      ESPER_HOME="$term_a" timeout 30 "$BIN/esper" api --listen "127.0.0.1:$api_port" \
+        > "$term_a/api.log" 2>&1 &
+      api_pid=$!
+      api_up=""
+      for _ in $(seq 1 100); do
+        grep -q "listening" "$term_a/api.log" 2>/dev/null && api_up=yes && break
+        sleep 0.1
+      done
+      api_token=$( { cat "$term_a/api.token" 2>/dev/null || true; } | tr -d '\n')
+      if [ -z "$api_up" ] || [ -z "$api_token" ]; then
+        printf '  ✗ the local API did not start\n'
+        sed 's/^/      /' "$term_a/api.log" 2>/dev/null | head -6
+        fail=1
+      else
+        # Without a token: refused.
+        code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$api_port/status" || true)
+        if [ "$code" = "401" ]; then
+          printf '  ✓ a request with no token is refused\n'
+        else
+          printf '  ✗ a request with no token answered %s\n' "$code"
+          fail=1
+        fi
+        # With it: answered, and with the names a dashboard expects rather than
+        # Go's field names.
+        body=$(curl -s -H "Authorization: Bearer $api_token" \
+          "http://127.0.0.1:$api_port/status" || true)
+        if printf '%s' "$body" | grep -q '"engine"'; then
+          printf '  ✓ and with the token it answers, in the names the seam uses\n'
+        else
+          printf '  ✗ the answer is not what a caller expects: %s\n' "$(printf '%s' "$body" | head -c 120)"
+          fail=1
+        fi
+        # Under a *name* rather than the address it bound: refused, because DNS
+        # rebinding is how a page in a browser reaches a loopback listener.
+        rebound=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: esper.example.com" \
+          -H "Authorization: Bearer $api_token" "http://127.0.0.1:$api_port/status" || true)
+        if [ "$rebound" = "404" ]; then
+          printf '  ✓ and a request addressed to a hostname is refused, token or not\n'
+        else
+          printf '  ✗ a rebinding-shaped request answered %s\n' "$rebound"
+          fail=1
+        fi
+        # And the mode of the token file, which is the whole of who can ask.
+        mode=$(stat -c '%a' "$term_a/api.token" 2>/dev/null || echo "?")
+        if [ "$mode" = "600" ]; then
+          printf '  ✓ and the token is readable only by its owner\n'
+        else
+          printf '  ✗ the token file is mode %s\n' "$mode"
+          fail=1
+        fi
+      fi
+      kill "$api_pid" 2>/dev/null || true
+      api_pid=""
+      # **Binding off loopback takes saying so.** A mistyped address must not
+      # put what happened on this machine on somebody's office network.
+      if out=$(ESPER_HOME="$term_a" timeout 10 "$BIN/esper" api --listen "0.0.0.0:$api_port" 2>&1); then
+        printf '  ✗ the API bound 0.0.0.0 without being told to\n'
+        fail=1
+      else
+        if printf '%s' "$out" | grep -q -- "--exposed"; then
+          printf '  ✓ and binding off loopback is refused, naming the flag that allows it\n'
+        else
+          printf '  ✗ the refusal does not say what to do: %s\n' "$(printf '%s' "$out" | head -c 160)"
+          fail=1
+        fi
+      fi
+
       echo "  — asking what has happened on this machine"
       out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
         "$BIN/esper" sessions 2>/dev/null || true)

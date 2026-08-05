@@ -84,6 +84,109 @@ def sources(crate: Path):
     return sorted((crate / "src").rglob("*.rs"))
 
 
+# The Go packages allowed to serve the trail over a socket, and what each must
+# prove about itself.
+#
+# **This list is the honest version of the claim.** Before the local API the
+# claim was "the log never leaves the machine, and there is no code path by
+# which it could", and it was true. A local API changes it: a dashboard and an
+# MCP adapter both need what happened on this machine, and both are local. The
+# claim is now narrower and still mechanical — the log leaves this *process*
+# only through a listener that is loopback by default, demands a token, and
+# refuses to expose itself silently — and each of those three is checked below
+# rather than asserted in a comment.
+SERVERS = {
+    "internal/server": {
+        "why": (
+            "the local API: what a dashboard, a desktop app or an MCP adapter "
+            "asks this machine about itself"
+        ),
+        # Each entry: a pattern that must appear, and what its absence would mean.
+        "must": [
+            (
+                r'DefaultAddr\s*=\s*"127\.0\.0\.1:',
+                "bind loopback by default — a listener that defaults anywhere else "
+                "exposes the trail to a network by omission",
+            ),
+            (
+                r"subtle\.ConstantTimeCompare",
+                "compare its token in constant time — every process on this machine "
+                "can reach loopback, so the token is the whole of the access control, "
+                "and a compare that returns early leaks it",
+            ),
+            (
+                r"--exposed",
+                "refuse to bind off loopback without an explicit flag, and name it in "
+                "the refusal, so nobody exposes the trail by mistyping an address",
+            ),
+        ],
+    },
+}
+
+
+def go_side(problems: list[str]) -> int:
+    """The Go control plane: it may render the trail, and serve it only so far.
+
+    What this cannot check is what a *caller* does with the answer. A program on
+    this machine that can read the token file can already read the log itself,
+    which is the argument that makes the API's existence acceptable — not the
+    absence of one.
+    """
+    checked = 0
+    go_root = ROOT / "internal"
+    for path in sorted(go_root.rglob("*.go")):
+        if path.name.endswith("_test.go"):
+            continue
+        package = str(path.parent.relative_to(ROOT))
+        text = path.read_text()
+        if not re.search(r'"net/http"|"net"|net\.Listen', text):
+            continue
+        checked += 1
+        if package not in SERVERS:
+            problems.append(
+                f"{path.relative_to(ROOT)} can open a socket and is not in this "
+                f"check's list of packages allowed to serve the trail. Add it with "
+                f"what it is for and what it proves about itself — and if it cannot "
+                f"prove loopback, a token and an explicit opt-out, it must not have "
+                f"the trail"
+            )
+    for package, rules in SERVERS.items():
+        source = "\n".join(
+            p.read_text()
+            for p in sorted((ROOT / package).glob("*.go"))
+            if not p.name.endswith("_test.go")
+        )
+        if not source:
+            problems.append(
+                f"{package} is in this check's list and has no source: a stale list "
+                f"is how a check stops being read"
+            )
+            continue
+        checked += 1
+        for pattern, must in rules["must"]:
+            if not re.search(pattern, source):
+                problems.append(f"{package} does not {must}")
+
+    # The front door itself must not listen: it renders the trail, and a second
+    # listener in the same binary would be one nobody had reasoned about.
+    front = ROOT / "cmd" / "esper" / "main.go"
+    if front.is_file():
+        checked += 1
+        go = front.read_text()
+        if re.search(r"net\.Listen|http\.ListenAndServe|http\.Serve\b", go):
+            problems.append(
+                "cmd/esper/main.go opens a listener of its own: the one place that "
+                "may serve the trail is in the list above, where what it has to "
+                "prove is written down"
+            )
+        if re.search(r"http\.(Post|Get|Client)", go):
+            problems.append(
+                "cmd/esper/main.go makes an HTTP request: the command that prints "
+                "the trail must not be able to send it anywhere"
+            )
+    return checked
+
+
 def main() -> int:
     problems = []
     checked = 0
@@ -143,24 +246,13 @@ def main() -> int:
                 f"stale ledger is how a check stops being read"
             )
 
-    # And the front door, which is what a person runs. It prints the trail; it
-    # must not post it anywhere.
-    front = ROOT / "cmd" / "esper" / "main.go"
-    if front.is_file():
-        checked += 1
-        go = front.read_text()
-        for pattern, what in [
-            (r'"net/http"', "net/http"),
-            (r'"net"\n', "net"),
-            (r"http\.(Post|Get|Client)", "an HTTP call"),
-        ]:
-            if re.search(pattern, go):
-                problems.append(
-                    f"cmd/esper/main.go mentions {what}: the command that prints the "
-                    f"trail must not be able to send it"
-                )
+    # And the Go control plane, which is where the trail is *rendered* — and,
+    # since the local API, where it can also be served.
+    checked += go_side(problems)
 
     print(f"  {checked} file(s) checked, {len(readers_found)} reader(s) of the trail")
+    for package, rules in sorted(SERVERS.items()):
+        print(f"    {package} — {rules['why']}")
     for rel, why in sorted(READERS.items()):
         if rel in readers_found:
             print(f"    {rel} — {why}")
@@ -170,7 +262,10 @@ def main() -> int:
             print(f"  ✗ {p}")
         print(f"\n  {len(problems)} problem(s). See the header of this script for why.")
         return 1
-    print("  ✓ the trail is read in one place, and that place has no way off this machine")
+    print(
+        "  ✓ the trail is read in one place, and leaves this process only through a "
+        "loopback listener that demands a token"
+    )
     return 0
 
 
