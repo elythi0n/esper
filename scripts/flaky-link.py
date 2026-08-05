@@ -64,6 +64,18 @@ def main():
         default=1000.0,
         help="ms of queueing the link will hold before dropping the tail",
     )
+    p.add_argument(
+        "--loss-from",
+        type=float,
+        default=None,
+        help="seconds after start when loss begins (default: from the start)",
+    )
+    p.add_argument(
+        "--loss-for",
+        type=float,
+        default=None,
+        help="seconds the loss lasts, then the link is clean again",
+    )
     p.add_argument("--seed", type=int, default=None, help="for a repeatable run")
     p.add_argument("--report", type=float, default=0.0, help="seconds between counts")
     args = p.parse_args()
@@ -179,11 +191,32 @@ def main():
         """
         return max(busy_until.get(direction, 0.0) - now, 0.0) * 1000.0
 
+    started = time.monotonic()
+
+    def losing(now):
+        """Whether the link is dropping right now.
+
+        **A transient is a different question from a lossy link**, and until
+        this existed the harness could only ask the second. What a session does
+        about one bad second on an otherwise fine link is the whole of how fast
+        it comes back, and that cannot be measured with loss that never stops.
+        """
+        if args.loss <= 0.0:
+            return False
+        since = now - started
+        if args.loss_from is not None and since < args.loss_from:
+            return False
+        if args.loss_for is not None:
+            begins = args.loss_from or 0.0
+            if since > begins + args.loss_for:
+                return False
+        return True
+
     def forward(sock, payload, where, direction):
         now = time.monotonic()
         with lock:
             c = counts[direction]
-            if rng.random() * 100.0 < args.loss:
+            if losing(now) and rng.random() * 100.0 < args.loss:
                 c["dropped"] += 1
                 return
             # **The rate ceiling is applied before the delay**, so `--delay`

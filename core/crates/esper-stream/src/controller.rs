@@ -338,6 +338,30 @@ pub struct ControllerStream {
     /// The largest size the ladder may still ask for, as an index into
     /// [`RUNGS`]. Grows only downwards in size, never back up.
     floor: usize,
+    /// Which rung was in force when the window being judged began.
+    ///
+    /// **Not the one in force now.** The first version blamed the current
+    /// rung, and after a collapse that is the *bottom* one — which then took
+    /// the blame for losses still arriving from the flood that caused the
+    /// collapse. Two such windows and the bottom rung was marked as failing,
+    /// the floor pinned there, and the session could never climb again:
+    /// measured, three runs in three, a session that lost frames for one
+    /// second stayed at 320x180 for the remaining forty.
+    rung_when_window_began: Option<usize>,
+    /// The rung the session was at before its first collapse, so the climb has
+    /// something to aim at rather than walking.
+    before_the_collapse: Option<usize>,
+    /// The rung the last upward probe asked for, if it has not yet proved
+    /// itself.
+    ///
+    /// **A probe that fails is closed at once**, rather than after the second
+    /// failure an ordinary rung gets. A probe only happens after five clean
+    /// windows, so one that immediately loses frames is the link answering
+    /// the question the probe asked — and each further attempt costs another
+    /// flood. Measured: probing without this took a link with 100 ms of
+    /// buffer from 155 pictures to 84, because it kept climbing back into a
+    /// size that could not work.
+    probing: Option<usize>,
     /// How much of the quality lever the link ladder has spent.
     ///
     /// **The middle rung of the degradation order**, which the link ladder
@@ -362,6 +386,22 @@ pub struct ControllerStream {
     arrived_since: Option<std::time::Instant>,
     /// The last rate a full window measured, in kbit/s.
     arrival_rate: Option<f64>,
+    /// The last arrival rate measured while the link was demonstrably full.
+    ///
+    /// **Remembered rather than recomputed.** The first version asked whether
+    /// the link was full *at the moment somebody read the estimate*, and the
+    /// moment that matters most is the end of a session — where the last
+    /// window is as likely as not to have been a clean one, so the estimate
+    /// declined to answer and the session reported no capacity at all. It
+    /// failed the check that asserts an 800 kbit/s link reads as about 800,
+    /// one run in three, which is what a condition evaluated at the wrong
+    /// instant looks like.
+    full_link_rate: Option<f64>,
+    /// Frames lost in the window the ladder last judged.
+    ///
+    /// Kept so the capacity estimate can tell a link that is *full* from one
+    /// that simply has little to carry — see [`Self::starved`].
+    lost_last_window: u64,
     /// When a frame last completed, for telling a starved session from a quiet
     /// one.
     last_whole_frame: Option<std::time::Instant>,
@@ -478,10 +518,15 @@ impl ControllerStream {
             awaiting_keyframe: true,
             failures: [0; RUNGS.len()],
             floor: 0,
+            rung_when_window_began: None,
+            before_the_collapse: None,
+            probing: None,
             softened: None,
             arrived_bytes: 0,
             arrived_since: None,
             arrival_rate: None,
+            full_link_rate: None,
+            lost_last_window: 0,
             last_whole_frame: None,
             kept: Vec::new(),
             keeping: false,
@@ -836,6 +881,21 @@ impl ControllerStream {
         if self.arrival_rate.unwrap_or(0.0) <= 0.0 {
             return false;
         }
+        // **Frames being lost is the same evidence.** The guard on this
+        // estimate is that the link must be *full* — otherwise what arrived is
+        // demand, not capacity, and reporting it would pace the host down to
+        // whatever it happened to send. Nothing completing proves the link is
+        // full; so does losing frames, and the second is what a session looks
+        // like once it has collapsed to small frames.
+        //
+        // Which it now does: the ladder's first losing window drops to the
+        // smallest rung, and there every frame is under the four kilobytes a
+        // burst has to be to be worth timing — so the accurate estimator has
+        // nothing to work with and the link went unmeasured. Caught by the
+        // check that asserts an 800 kbit/s link reads as about 800.
+        if self.lost_last_window >= LOSSES_TO_STEP_DOWN {
+            return true;
+        }
         match self.last_whole_frame {
             Some(when) => now.saturating_duration_since(when) >= STARVED_AFTER,
             // Nothing has ever completed. The session has been running for at
@@ -906,7 +966,9 @@ impl ControllerStream {
         if self.starved(now) {
             return self.arrival_rate;
         }
-        None
+        // And otherwise what was measured while the link *was* full, which is
+        // the answer a session reports once it has finished struggling.
+        self.full_link_rate
     }
 
     /// Move the link ladder if a window has closed.
@@ -920,18 +982,66 @@ impl ControllerStream {
     /// whether loss is survivable — frame size. Down after a window that lost
     /// frames, up after several that did not, and never above what the host
     /// announced it was sending.
+    /// Come back up, halving the distance to where the session fell from.
+    ///
+    /// # Why not one rung at a time
+    ///
+    /// Because the fall is not one rung. The first losing window collapses
+    /// straight to the smallest size, and walking back from there takes a rung
+    /// every five clean windows — twenty seconds to undo one bad second, on a
+    /// link that was fine again after the first of them. Measured before this:
+    /// a session that lost frames for one second never regained its full size
+    /// in the forty that followed.
+    ///
+    /// So the climb aims at the rung the session fell from and covers half the
+    /// remaining distance each time: from the bottom of five rungs that is
+    /// two steps rather than four, and each step is still gated on the same
+    /// clean windows, so a link that cannot carry the larger size says so
+    /// before the next one.
+    ///
+    /// A rung that has already failed twice is never asked for again — see
+    /// [`Self::note_failure`] — which is what stops this becoming the
+    /// oscillation the collapse exists to prevent.
+    fn probe_upward(&mut self) -> bool {
+        let Some(current) = self.rung else {
+            return false;
+        };
+        let aim = self.before_the_collapse.unwrap_or(0).max(self.floor);
+        if current <= aim {
+            return false;
+        }
+        // Halfway, rounded towards the aim so the last step always arrives.
+        let next = current - (current - aim).div_ceil(2);
+        if next == current {
+            return false;
+        }
+        self.rung = Some(next);
+        self.probing = Some(next);
+        self.say_what_we_want();
+        true
+    }
+
     /// Remember that the size in force lost frames, and stop climbing back to
     /// it once it has done so twice.
     ///
     /// Twice rather than once: a single window of loss can be one bad moment
     /// on an otherwise fine link, and a ladder that gave up a rung for that
     /// would spend a good session creeping downwards.
-    fn note_failure(&mut self) {
-        let at = self.rung.unwrap_or(0);
+    fn note_failure(&mut self, judged: Option<usize>) {
+        let at = judged.unwrap_or(0);
+        // **Never close the smallest rung.** There is nothing below it, so a
+        // floor there means the session can never come back up — which is
+        // exactly what happened, and what this argument now prevents.
+        if at >= RUNGS.len().saturating_sub(1) {
+            return;
+        }
+        // A rung the session was probing is closed on its first failure: see
+        // `probing`.
+        let closes_now = self.probing == Some(at);
         if let Some(count) = self.failures.get_mut(at) {
             *count = count.saturating_add(1);
-            if *count >= FAILURES_THAT_CLOSE_A_RUNG && self.floor < at {
-                self.floor = at;
+            if (closes_now || *count >= FAILURES_THAT_CLOSE_A_RUNG) && self.floor < at {
+                self.floor = at.saturating_add(1).min(RUNGS.len().saturating_sub(1));
             }
         }
     }
@@ -998,12 +1108,24 @@ impl ControllerStream {
             .stats
             .frames_lost
             .saturating_sub(self.lost_when_window_began);
+        let judged = self.rung_when_window_began;
+        self.lost_last_window = lost;
+        // **Remembered here, while the evidence is present.** A window that
+        // lost frames is a window in which the link was full, so what arrived
+        // during it is what the link carries.
+        if lost >= LOSSES_TO_STEP_DOWN
+            && let Some(rate) = self.arrival_rate
+            && rate > 0.0
+        {
+            self.full_link_rate = Some(rate);
+        }
         self.window_ends = Some(now + WINDOW);
         self.lost_when_window_began = self.stats.frames_lost;
+        self.rung_when_window_began = self.rung;
 
         if lost >= LOSSES_TO_STEP_DOWN {
             self.clean_windows = 0;
-            self.note_failure();
+            self.note_failure(judged);
             // **Which lever, decided by whether the queue is growing.**
             //
             // Two link failures arrive here looking the same in the loss
@@ -1049,6 +1171,7 @@ impl ControllerStream {
             // and charged every session on every link three seconds of soft
             // picture for the benefit of the few that need it.
             if self.rung.is_none() {
+                self.before_the_collapse = Some(0);
                 self.rung = Some(RUNGS.len().saturating_sub(1));
                 self.say_what_we_want();
                 self.step_bloat_ladder();
@@ -1070,6 +1193,7 @@ impl ControllerStream {
             // never loses a frame never comes here at all, which is what makes
             // this free on a good link.
             if self.rung.is_none() {
+                self.before_the_collapse = Some(0);
                 self.rung = Some(RUNGS.len().saturating_sub(1));
                 self.say_what_we_want();
                 self.step_bloat_ladder();
@@ -1096,6 +1220,9 @@ impl ControllerStream {
             // for what that needs.
             self.step(true);
         } else if lost == 0 {
+            // The probe has proved itself: a clean window at the size it asked
+            // for is the answer it was looking for.
+            self.probing = None;
             self.clean_windows = self.clean_windows.saturating_add(1);
             if self.clean_windows >= CLEAN_WINDOWS_TO_STEP_UP {
                 self.clean_windows = 0;
@@ -1106,7 +1233,7 @@ impl ControllerStream {
                 // give back — the quantiser's saving is proportional to every
                 // frame, so returning it last keeps the link's headroom for
                 // longest.
-                if !self.step(false) {
+                if !self.probe_upward() {
                     self.return_quality();
                 }
             }
@@ -1801,6 +1928,84 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// **The smallest rung is never closed**, or a session can never come back.
+    ///
+    /// The bug this pins: a failure was recorded against the rung *in force*,
+    /// and after a collapse that is the bottom one — which then took the blame
+    /// for losses still arriving from the flood that caused the collapse. Two
+    /// such windows pinned the floor at the bottom, and a session that lost
+    /// frames for one second stayed at 320x180 for the forty that followed.
+    /// Measured, three runs in three.
+    #[test]
+    fn the_smallest_rung_cannot_be_closed() {
+        let mut stream = ControllerStream::new(&announced(30)).expect("a config");
+        let bottom = RUNGS.len().saturating_sub(1);
+        stream.rung = Some(bottom);
+        for _ in 0..5 {
+            stream.note_failure(Some(bottom));
+        }
+        assert_eq!(
+            stream.floor, 0,
+            "closing the smallest rung leaves a session no way back up"
+        );
+    }
+
+    /// **Coming back halves the distance rather than walking it.**
+    ///
+    /// The fall is not one rung — the first losing window goes straight to the
+    /// bottom — so a climb of one rung per five clean windows takes twenty
+    /// seconds to undo one bad second. Measured before this: a session never
+    /// regained its full size at all in the forty seconds after the glitch.
+    #[test]
+    fn the_climb_halves_the_distance_it_fell() {
+        let mut stream = ControllerStream::new(&announced(30)).expect("a config");
+        let bottom = RUNGS.len().saturating_sub(1);
+        stream.rung = Some(bottom);
+        stream.before_the_collapse = Some(0);
+
+        let mut steps = 0;
+        while stream.probe_upward() {
+            steps += 1;
+            assert!(steps <= RUNGS.len(), "the climb has to terminate");
+        }
+        assert_eq!(stream.rung, Some(0), "and it arrives at the top");
+        assert!(
+            steps < bottom,
+            "halving should take fewer steps than walking: {steps} for {bottom} rungs"
+        );
+    }
+
+    /// **A probe that loses frames is closed at once.**
+    ///
+    /// A probe only happens after five clean windows, so one that immediately
+    /// loses frames is the link answering the question it asked — and every
+    /// further attempt costs another flood. Measured: probing without this took
+    /// a link with 100 ms of buffer from 155 pictures to 84.
+    #[test]
+    fn a_probe_that_fails_is_not_tried_again() {
+        let mut stream = ControllerStream::new(&announced(30)).expect("a config");
+        let bottom = RUNGS.len().saturating_sub(1);
+        stream.rung = Some(bottom);
+        stream.before_the_collapse = Some(0);
+
+        assert!(stream.probe_upward(), "there is somewhere to probe");
+        let probed = stream.rung.expect("a rung");
+        stream.note_failure(Some(probed));
+
+        assert!(
+            stream.floor > probed,
+            "a failed probe has to close the size it asked for: floor {} against {probed}",
+            stream.floor
+        );
+        // And the ladder will not ask for it again.
+        stream.rung = Some(bottom);
+        while stream.probe_upward() {}
+        assert!(
+            stream.rung.is_some_and(|r| r > probed),
+            "the ladder came back to a size that had already failed"
+        );
+    }
 
     /// **The first losing window collapses the size; later ones step.**
     ///
