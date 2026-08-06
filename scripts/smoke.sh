@@ -1468,15 +1468,68 @@ except OSError:
       # Killed hard, because that is what a crash looks like. A `SIGTERM` is
       # somebody asking it to stop, and starting it again over the top of a
       # shutdown would be the bug.
+      # **A flag that does nothing is worse than no flag.** If the engine
+      # accepted `--watched-by` and quietly ignored it, every check below
+      # would go on passing while the supervisor watched nothing — so the
+      # engine is pointed at a socket that is not there and has to say so.
+      refused=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 20 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        --watched-by "$term_a/not-a-socket.sock" 2>&1 || true)
+      if printf '%s' "$refused" | grep -q 'not-a-socket.sock'; then
+        printf '  ✓ a host told to answer at a socket that is not there says so\n'
+      else
+        printf '  ✗ --watched-by was accepted and ignored\n'
+        printf '%s\n' "$refused" | head -6 | sed 's/^/      /'
+        fail=1
+      fi
+
       echo "  — killing the engine under a supervised host"
       env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
         timeout 60 "$BIN/esper" host --listen 127.0.0.1:0 --no-mdns \
         > "$term_a/supervised.log" 2>&1 &
       supervised=$!
-      for _ in $(seq 1 100); do
-        [ "$( { grep -c listening "$term_a/supervised.log" 2>/dev/null || true; } )" -ge 1 ] && break
+      # Waited for the *last* of the three facts below rather than the first.
+      # The engine prints its address before it connects to its supervisor, so
+      # waiting for "listening" and then asking about the channel would be a
+      # race that failed on a loaded machine and passed everywhere else.
+      for _ in $(seq 1 150); do
+        [ "$( { grep -c 'the engine answered' "$term_a/supervised.log" 2>/dev/null || true; } )" -ge 1 ] && break
         sleep 0.1
       done
+      # **A supervisor that can see more than a pid.** Until this channel
+      # existed the only thing observable was whether the process was still
+      # there, and a host wedged holding a session it cannot end looks exactly
+      # like one serving happily — which is the failure that matters, because
+      # a crash comes back on its own and a wedge does not.
+      #
+      # Three separate facts, from both ends: the engine says it is watched,
+      # the supervisor says which engine it is watching, and the engine
+      # answered a question about itself. The last one is the only one that
+      # cannot be true by accident.
+      if grep -q 'watched  *by whatever started this host' "$term_a/supervised.log"; then
+        printf '  ✓ the host says it is being watched\n'
+      else
+        printf '  ✗ the host did not open a channel to its supervisor\n'
+        sed 's/^/      /' "$term_a/supervised.log"
+        fail=1
+      fi
+      if grep -q 'watching engine' "$term_a/supervised.log"; then
+        printf '  ✓ and the supervisor says which engine it is watching\n'
+      else
+        printf '  ✗ the supervisor is not watching anything\n'
+        sed 's/^/      /' "$term_a/supervised.log"
+        fail=1
+      fi
+      # The address comes back over the channel rather than out of the report,
+      # so this is the engine answering rather than the engine printing.
+      if grep -q 'the engine answered: listening on 127.0.0.1:' "$term_a/supervised.log"; then
+        printf '  ✓ and the engine answered a question about itself\n'
+      else
+        printf '  ✗ the engine never answered its supervisor\n'
+        sed 's/^/      /' "$term_a/supervised.log"
+        fail=1
+      fi
+
       # The engine is found by walking down from this supervisor rather than
       # by name: other hosts are running by now, and killing the wrong one
       # would make this pass for the wrong reason.
@@ -1508,6 +1561,24 @@ except OSError:
         done
         if [ -n "$came_back" ]; then
           printf '  ✓ a crashed engine is started again, and says why\n'
+          # **And the new one is watched too.** The channel is made per run —
+          # a supervisor that reused the old socket, or held the dead engine's
+          # connection, would restart a host and then be blind to it.
+          watched_again=""
+          for _ in $(seq 1 100); do
+            if [ "$( { grep -c 'the engine answered' "$term_a/supervised.log" 2>/dev/null || true; } )" -ge 2 ]; then
+              watched_again=yes
+              break
+            fi
+            sleep 0.1
+          done
+          if [ -n "$watched_again" ]; then
+            printf '  ✓ and the engine that replaced it answers too\n'
+          else
+            printf '  ✗ the restarted engine was never watched\n'
+            sed 's/^/      /' "$term_a/supervised.log"
+            fail=1
+          fi
         else
           printf '  ✗ the engine did not come back after being killed\n'
           sed 's/^/      /' "$term_a/supervised.log"
@@ -1524,6 +1595,17 @@ except OSError:
         fail=1
       else
         printf '  ✓ and asking the supervisor to stop stops both\n'
+      fi
+      # **Asked, not killed.** The teardown closes sessions with a reason and
+      # puts the screen back, and only the engine knows how to do that — so a
+      # supervisor that reached for the kill would be taking it away from the
+      # one process that can.
+      if grep -q 'being killed' "$term_a/supervised.log"; then
+        printf '  ✗ the engine was killed rather than asked to stop\n'
+        grep 'being killed' "$term_a/supervised.log" | sed 's/^/      /'
+        fail=1
+      else
+        printf '  ✓ and it was asked to stop rather than killed\n'
       fi
       supervised=""
 
@@ -3047,6 +3129,71 @@ TONE
         printf '  — skipped the sound checks: set ESPER_AUDIO_TESTS=1 with a sound server\n'
         printf '    running. They load a null sink and point the default sink at it.\n'
       fi
+
+      # **Graceful shutdown, from the far end.** A host asked to stop has to
+      # close what it is serving with the reason rather than letting the
+      # connection go quiet: a controller told "the host is shutting down"
+      # knows to wait for it to come back, and one that saw silence reconnects
+      # into nothing. The supervisor's part is not killing it before it can.
+      #
+      # Its own host, in a copy of the paired home: this check stops the host
+      # it starts, and everything after here needs the shared one alive.
+      echo "  — a host asked to stop tells the session why"
+      bye=$(mktemp -d)
+      cp -a "$term_a/." "$bye/" 2>/dev/null || true
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$bye" \
+        timeout 60 "$BIN/esper" host --listen 127.0.0.1:0 --no-mdns \
+        > "$bye/host.log" 2>&1 &
+      bye_pid=$!
+      bye_addr=""
+      for _ in $(seq 1 150); do
+        bye_addr=$( { awk '/^  listening/{print $2}' "$bye/host.log" 2>/dev/null || true; } | head -1)
+        [ -n "$bye_addr" ] && break
+        sleep 0.1
+      done
+      if [ -z "$bye_addr" ]; then
+        printf '  ✗ the host for the shutdown check never started\n'
+        sed 's/^/      /' "$bye/host.log"
+        fail=1
+      else
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 60 "$BIN/esper-engine" connect "$bye_addr" --seconds 25 \
+          > "$bye/client.log" 2>&1 &
+        bye_client=$!
+        # Waited for pictures rather than for a clock: a session asked to stop
+        # before it started would end for the right reason by accident.
+        for _ in $(seq 1 150); do
+          [ "$( { grep -c 'pictures' "$bye/client.log" 2>/dev/null || true; } )" -ge 1 ] && break
+          sleep 0.1
+        done
+        sleep 1
+        # The signal goes to the front door, which is what a service manager
+        # sends it to — so this exercises the supervisor's own teardown as well
+        # as the engine's. Resolved through `timeout`'s child rather than
+        # signalled at the wrapper: `timeout` does forward a `SIGTERM`, and
+        # relying on that has cost this suite two afternoons with other
+        # signals it does not.
+        bye_front=$( { pgrep -P "$bye_pid" -x esper 2>/dev/null || true; } | head -1)
+        kill "${bye_front:-$bye_pid}" 2>/dev/null || true
+        wait "$bye_client" 2>/dev/null || true
+        wait "$bye_pid" 2>/dev/null || true
+        if grep -q 'the host ended the session: the host is shutting down' "$bye/client.log"; then
+          printf '  ✓ the controller was told the host was shutting down\n'
+        else
+          printf '  ✗ the session ended without the reason reaching the controller\n'
+          tail -12 "$bye/client.log" | sed 's/^/      /'
+          fail=1
+        fi
+        # And the supervisor did not take the teardown away from it.
+        if grep -q 'being killed' "$bye/host.log"; then
+          printf '  ✗ the supervisor killed a host that was shutting down\n'
+          grep 'being killed' "$bye/host.log" | sed 's/^/      /'
+          fail=1
+        else
+          printf '  ✓ and the supervisor let it finish rather than killing it\n'
+        fi
+      fi
+      rm -rf "$bye"
 
       echo "  — revoking a device that is connected right now"
       { printf 'echo holding\n'; sleep 15; } | \

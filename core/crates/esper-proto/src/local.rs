@@ -84,6 +84,14 @@ pub enum Command {
         /// year of log into memory.
         most: u32,
     },
+    /// Are you working?
+    ///
+    /// Answered with [`Report::Alive`]. **Not [`Command::Status`]**, which
+    /// probes the encoder and the capture backend: asking that on a timer
+    /// would start and stop an encoder every few seconds for as long as the
+    /// machine runs, so a supervisor watching a host for weeks needs a
+    /// question that costs nothing to answer.
+    Alive,
 }
 
 /// What the engine says back.
@@ -94,12 +102,43 @@ pub enum Report {
     Status(Status),
     /// The answer to [`Command::Sessions`], most recent last.
     Sessions(Vec<Happening>),
+    /// The answer to [`Command::Alive`].
+    Alive(Alive),
     /// The command could not be carried out, and why.
     ///
     /// A sentence rather than a code: these are read by a person running
     /// `esper doctor`, and there is nothing on the other side that branches
     /// on them.
     Failed { detail: String },
+}
+
+/// What a host is doing right now.
+///
+/// # What this proves and what it does not
+///
+/// An answer proves the engine's runtime is scheduling work and that its state
+/// is readable — which is the difference a supervisor cannot otherwise see,
+/// because a process that is wedged and a process that is working look
+/// identical from the outside. It does **not** prove the screen is being
+/// captured or that a session is healthy: that is the session's own business,
+/// and claiming otherwise here would be a health check that lies.
+///
+/// `served` is what makes silence readable in the other direction. A host
+/// answering with the same count for a week is idle; one whose count climbs is
+/// being used; and the two are worth telling apart on a screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alive {
+    /// Unix seconds when this host started listening.
+    pub since: u64,
+    /// The address it is listening on, as it was resolved — a host asked for
+    /// port 0 is listening somewhere, and this is where.
+    pub listening: String,
+    /// Who it is serving right now, in the word form a person can compare
+    /// against what a device list shows them, or empty when nobody is
+    /// connected.
+    pub serving: String,
+    /// How many sessions it has served since it started.
+    pub served: u32,
 }
 
 /// What one thing on this machine can do.

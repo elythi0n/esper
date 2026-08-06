@@ -212,3 +212,47 @@ fn write_sessions_fixture() {
     std::fs::write(&path, &out).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
     println!("wrote {} bytes to {}", out.len(), path.display());
 }
+
+/// The `Alive` report: what a supervisor asks a running host on a timer.
+fn expected_alive() -> esper_proto::Report {
+    esper_proto::Report::Alive(esper_proto::Alive {
+        since: 1_756_700_000,
+        listening: "0.0.0.0:7645".to_owned(),
+        serving: "giraffe tapestry geyser rifle jersey domain razor oboe".to_owned(),
+        served: 3,
+    })
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "reads fixture files; MIRI has no filesystem")]
+fn alive_report_decodes_to_the_expected_value() {
+    let bytes = fixture("alive_report.cbor");
+    let got: esper_proto::Report =
+        read_frame(&mut bytes.as_slice()).expect("the fixture must decode");
+    assert_eq!(got, expected_alive());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "reads fixture files; MIRI has no filesystem")]
+fn alive_report_re_encodes_byte_identically() {
+    let bytes = fixture("alive_report.cbor");
+    let decoded: esper_proto::Report =
+        read_frame(&mut bytes.as_slice()).expect("the fixture must decode");
+    let mut out = Vec::new();
+    write_frame(&mut out, &decoded).expect("re-encode");
+    assert_eq!(out, bytes, "the encoders have drifted");
+}
+
+#[test]
+#[ignore = "writes a fixture; run deliberately with --ignored"]
+fn write_alive_fixture() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("crate is at <root>/core/crates/<name>")
+        .join("testdata/fixtures/alive_report.cbor");
+    let mut out = Vec::new();
+    write_frame(&mut out, &expected_alive()).expect("encode");
+    std::fs::write(&path, &out).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+    println!("wrote {} bytes to {}", out.len(), path.display());
+}

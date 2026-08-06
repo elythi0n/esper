@@ -243,6 +243,12 @@ def message_unions() -> list[tuple[str, str, Path, str, str]]:
     So a union added later is covered without anybody remembering to add it
     here — which is the failure this whole script is about.
 
+    `Command` and `Report` are in this net as well as the wire messages. They
+    are the control plane's channel to the engine rather than anything that
+    leaves the machine, and they were the one protocol family nothing checked:
+    a command declared on one side and answered nowhere is the same bug in the
+    same shape, and it arrives the same way.
+
     # What this catches, and what it does not
 
     It counts *references*, and does not tell a construction from a match arm.
@@ -259,7 +265,7 @@ def message_unions() -> list[tuple[str, str, Path, str, str]]:
     """
     out = []
     for f in sorted((CRATES / "esper-proto/src").rglob("*.rs")):
-        for m in re.finditer(r"pub enum (\w*(?:Message|Refusal|Reply))\s*\{", f.read_text()):
+        for m in re.finditer(r"pub enum (\w*(?:Message|Refusal|Reply|Command|Report))\s*\{", f.read_text()):
             name = m.group(1)
             out.append((
                 f"{name} variants",

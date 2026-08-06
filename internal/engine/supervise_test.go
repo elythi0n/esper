@@ -30,19 +30,47 @@ func script(t *testing.T, body string) string {
 	return path
 }
 
-func supervisorFor(t *testing.T, path string) (*Supervisor, *[]string) {
+// logged is what a supervisor said.
+//
+// **Behind a mutex both ways.** The heartbeat logs from a goroutine of its
+// own, so a test that read the slice directly would be racing it — and the
+// race detector is right about that even when the writer has already
+// finished, because nothing orders the two.
+type logged struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logged) add(line string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, line)
+}
+
+func (l *logged) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+// joined is everything said, for an assertion about one line among many.
+func (l *logged) joined() string { return strings.Join(l.all(), "\n") }
+
+func (l *logged) count() int { return len(l.all()) }
+
+// collect returns a log function writing into l.
+func (l *logged) collect() func(string, ...any) {
+	return func(format string, args ...any) { l.add(fmt.Sprintf(format, args...)) }
+}
+
+func supervisorFor(t *testing.T, path string) (*Supervisor, *logged) {
 	t.Helper()
-	var mu sync.Mutex
-	var lines []string
-	s, err := New(Options{Path: path, Log: func(format string, args ...any) {
-		mu.Lock()
-		defer mu.Unlock()
-		lines = append(lines, fmt.Sprintf(format, args...))
-	}})
+	said := &logged{}
+	s, err := New(Options{Path: path, Log: said.collect()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return s, &lines
+	return s, said
 }
 
 // A program that exits cleanly has finished, not failed.
@@ -88,8 +116,8 @@ func TestAProgramThatKeepsFailingIsGivenUpOn(t *testing.T) {
 		t.Errorf("the program ran %d times, want 4", runs)
 	}
 	// And it said so each time rather than failing silently.
-	if len(*lines) < 3 {
-		t.Errorf("logged %d lines about the failures: %v", len(*lines), *lines)
+	if lines.count() < 3 {
+		t.Errorf("logged %d lines about the failures: %v", lines.count(), lines.all())
 	}
 }
 

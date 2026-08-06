@@ -24,6 +24,32 @@ type Command string
 // that is compiled in and cannot start is the failure this exists to find.
 const CommandStatus Command = "status"
 
+// CommandAlive asks a running host whether it is working.
+//
+// Deliberately not CommandStatus, which probes the encoder and the capture
+// backend: asked on a timer that would start and stop an encoder every few
+// seconds for as long as the machine runs. A supervisor watching a host for
+// weeks needs a question that costs nothing to answer.
+const CommandAlive Command = "alive"
+
+// Alive is what a host is doing right now.
+//
+// An answer proves the engine's runtime is scheduling work and its state is
+// readable — the difference a supervisor cannot otherwise see, because a
+// wedged process and a working one look identical from outside. It does not
+// prove the screen is being captured; see the Rust doc comment for why
+// claiming that here would be a health check that lies.
+type Alive struct {
+	Since     uint64 `cbor:"since" json:"since"`
+	Listening string `cbor:"listening" json:"listening"`
+	// Serving is who is connected right now, in the word form a person can
+	// compare against a device list, or empty when nobody is.
+	Serving string `cbor:"serving" json:"serving"`
+	// Served is how many sessions this host has served since it started. A
+	// count that never moves is an idle host; one that climbs is a used one.
+	Served uint32 `cbor:"served" json:"served"`
+}
+
 // Capability is what one thing on this machine can do.
 type Capability struct {
 	// Available says whether it works now, established by trying it where
@@ -107,13 +133,14 @@ type Failure struct {
 type Report struct {
 	Status   *Status      `cbor:"status,omitempty" json:"status,omitempty"`
 	Sessions *[]Happening `cbor:"sessions,omitempty" json:"sessions,omitempty"`
+	Alive    *Alive       `cbor:"alive,omitempty" json:"alive,omitempty"`
 	Failed   *Failure     `cbor:"failed,omitempty" json:"failed,omitempty"`
 }
 
 // Which reports the engine actually sent, for a caller that must not treat an
 // empty report as an answer.
 func (r Report) IsEmpty() bool {
-	return r.Status == nil && r.Sessions == nil && r.Failed == nil
+	return r.Status == nil && r.Sessions == nil && r.Alive == nil && r.Failed == nil
 }
 
 // SessionsCommand asks for the last `most` things that happened here.

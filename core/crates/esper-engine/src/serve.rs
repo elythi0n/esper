@@ -55,6 +55,16 @@ fn answer(command: &Command) -> Report {
     match command {
         Command::Status => Report::Status(status()),
         Command::Sessions { most } => sessions(*most),
+        // **A `serve` engine is not hosting anything**, so there is nothing
+        // for it to be alive *about*: it has no listening address, no session
+        // and no count. Answering with zeroes would put a healthy-looking
+        // report on a supervisor's screen for a process that is not the one
+        // being watched. The question belongs to `host`, over the channel in
+        // `crate::supervised`.
+        Command::Alive => Report::Failed {
+            detail: "this engine is answering a command channel rather than hosting, so it                      has nothing to report being alive about — ask the host that is serving"
+                .to_owned(),
+        },
     }
 }
 

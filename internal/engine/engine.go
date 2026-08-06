@@ -48,8 +48,9 @@ const binaryName = "esper-engine"
 //
 // The zero value is not usable; construct with New.
 type Supervisor struct {
-	path string
-	log  func(string, ...any)
+	path  string
+	log   func(string, ...any)
+	grace time.Duration
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -68,6 +69,13 @@ type Options struct {
 
 	// Log receives supervision events. Nil discards them.
 	Log func(string, ...any)
+
+	// Grace is how long a stopping engine gets to end on its own before it is
+	// killed. Zero means DefaultGrace.
+	//
+	// A field rather than a constant because a test that had to wait the real
+	// answer out is a test nobody runs.
+	Grace time.Duration
 }
 
 // New locates the engine binary and returns a Supervisor for it. It does not
@@ -81,7 +89,11 @@ func New(opts Options) (*Supervisor, error) {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
-	return &Supervisor{path: path, log: log}, nil
+	grace := opts.Grace
+	if grace <= 0 {
+		grace = DefaultGrace
+	}
+	return &Supervisor{path: path, log: log, grace: grace}, nil
 }
 
 // Path returns the resolved engine binary path.
@@ -324,6 +336,13 @@ func (s *Supervisor) Stop() error {
 	return s.stopLocked()
 }
 
+// stopLocked ends the engine, asking before insisting.
+//
+// **Closing the channel is the ask.** The engine's command loop treats a
+// closed pipe as the ordinary way to end — it is the only clean exit that loop
+// has — and until this waited for it, the next line killed the process before
+// it could take it. That made a documented clean shutdown unreachable, and
+// left every command that was in flight abandoned halfway.
 func (s *Supervisor) stopLocked() error {
 	if !s.running {
 		return nil
@@ -333,8 +352,16 @@ func (s *Supervisor) stopLocked() error {
 		_ = s.stdin.Close()
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-		_ = s.cmd.Wait()
+		cmd := s.cmd
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(s.grace):
+			s.log("the engine did not end when its channel closed, so it is being killed")
+			_ = cmd.Process.Kill()
+			<-done
+		}
 	}
 	s.cmd, s.stdin, s.stdout, s.hello = nil, nil, nil, nil
 	s.log("engine stopped")

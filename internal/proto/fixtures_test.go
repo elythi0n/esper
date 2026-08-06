@@ -243,3 +243,50 @@ func TestSessionsCommandIsAMap(t *testing.T) {
 			hex.EncodeToString(body))
 	}
 }
+
+// expectedAlive mirrors the Rust side's `expected_alive` in
+// core/crates/esper-proto/tests/fixtures.rs. Both read the same file.
+func expectedAlive() Alive {
+	return Alive{
+		Since:     1_756_700_000,
+		Listening: "0.0.0.0:7645",
+		Serving:   "giraffe tapestry geyser rifle jersey domain razor oboe",
+		Served:    3,
+	}
+}
+
+func TestFixtureAliveDecodesToExpectedValue(t *testing.T) {
+	var got Report
+	if err := ReadFrame(bytes.NewReader(fixture(t, "alive_report.cbor")), &got); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if got.Alive == nil {
+		t.Fatalf("decoded %+v, want an alive report", got)
+	}
+	if *got.Alive != expectedAlive() {
+		t.Fatalf("alive decoded to %+v, want %+v", *got.Alive, expectedAlive())
+	}
+	// The same bytes must not also read as anything else: a report is one
+	// answer, and a decoder that filled two fields would let a caller branch
+	// on whichever it looked at first.
+	if got.Status != nil || got.Sessions != nil || got.Failed != nil {
+		t.Fatalf("an alive report decoded as something else as well: %+v", got)
+	}
+}
+
+func TestFixtureAliveReEncodesByteIdentically(t *testing.T) {
+	want := fixture(t, "alive_report.cbor")
+
+	var decoded Report
+	if err := ReadFrame(bytes.NewReader(want), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var out bytes.Buffer
+	if err := WriteFrame(&out, decoded); err != nil {
+		t.Fatalf("re-encode: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Fatalf("the encoders have drifted\n got: %s\nwant: %s",
+			hex.EncodeToString(out.Bytes()), hex.EncodeToString(want))
+	}
+}

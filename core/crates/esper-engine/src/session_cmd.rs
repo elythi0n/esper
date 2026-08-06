@@ -65,6 +65,13 @@ pub struct HostOptions {
     pub forward: esper_transport::forward::Allowlist,
     /// How many forwarded connections one session may hold at once.
     pub forwards_at_once: usize,
+    /// A supervisor's socket to connect back to, so it can ask this host
+    /// whether it is working rather than only whether it exists.
+    ///
+    /// Passed by `esper host`, which is what supervises this process. Nothing
+    /// is lost when it is absent: a host started by hand is watched by the
+    /// person who started it.
+    pub watched_by: Option<std::path::PathBuf>,
 }
 
 impl HostOptions {
@@ -88,6 +95,7 @@ impl HostOptions {
             max_resolution: crate::settings::whole("host.max_resolution")
                 .and_then(|n| u32::try_from(n).ok()),
             once: false,
+            watched_by: None,
             mdns: crate::settings::flag("discovery.mdns", true),
             via: crate::settings::broker()?,
             // **Checked when the host starts, not when a forward asks.** A
@@ -243,6 +251,10 @@ pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
             }
             "--broker-key" => {
                 via_key = Some(crate::broker_cmd::parse_key(&value("--broker-key")?)?);
+                i += 2;
+            }
+            "--watched-by" => {
+                o.watched_by = Some(std::path::PathBuf::from(value("--watched-by")?));
                 i += 2;
             }
             other => {
@@ -639,6 +651,26 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     }
     println!();
 
+    // **A supervisor that can see more than whether this process exists.**
+    //
+    // `esper host` is supervised rather than handed over, and until this
+    // channel existed the only thing the supervisor could observe was whether
+    // the pid was still there — so a host wedged holding a session it could
+    // not end looked exactly like one serving happily. What gets reported is
+    // kept in a watch channel because this loop is inside a session for hours
+    // at a time, and the question has to be answerable *during* one.
+    let (doing, watching) = tokio::sync::watch::channel(crate::supervised::Doing {
+        since: paths::now_secs(),
+        listening: bound.to_string(),
+        serving: String::new(),
+        served: 0,
+    });
+    if let Some(socket) = &o.watched_by {
+        crate::supervised::watch_from(socket, watching, stopping.clone())?;
+        println!("  watched    by whatever started this host");
+        println!();
+    }
+
     // **The indicator and the panic key, before any session.** Not a setting
     // and not a feature: software that can watch a screen has to make being
     // watched obvious, and software that can drive a keyboard has to leave the
@@ -915,6 +947,9 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             };
             let from = session.remote_address();
             println!("  · {from} connected");
+            // Who this host is serving, for anybody watching it. Taken here
+            // because the session is about to be moved into `serve_one`.
+            doing.send_modify(|d| d.serving = session.peer_fingerprint().inline());
             match serve_one(
                 session,
                 o,
@@ -942,6 +977,10 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                     parked = still;
                 }
             }
+            doing.send_modify(|d| {
+                d.serving.clear();
+                d.served = d.served.saturating_add(1);
+            });
             // **However it ended**, including badly: a session that dropped
             // because the network went away left the screen exactly as
             // readable as one that closed politely.
@@ -3556,6 +3595,7 @@ pub fn host_usage() -> String {
          \x20 --via <broker>           be reachable through a broker\n\
          \x20 --broker-key <key>       the broker's key, when it is not remembered\n\
          \x20 --no-mdns                do not advertise on the local network\n\
+         \x20 --watched-by <socket>    answer a supervisor's questions here\n\
          \n\
          for example: {me} host --listen 7645 --max-resolution 1280"
     )

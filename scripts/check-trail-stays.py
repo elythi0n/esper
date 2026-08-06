@@ -18,10 +18,12 @@ The claim has three parts, and each is checked here:
    until somebody writes down where it sends what it read — which is exactly
    the moment to notice that it sends it anywhere.
 
-3. **Each reader is itself local.** The one product reader answers `esper
-   sessions` over this process's *stdout*, which is a pipe held by the control
-   plane that spawned it. So the file it writes to is a pipe on this machine,
-   and the check is that the reader has no socket of its own.
+3. **Each reader is itself local, and says how it knows.** The Rust reader
+   answers `esper sessions` over this process's *stdout*, which is a pipe held
+   by the control plane that spawned it — so the check there is that it has no
+   socket of its own. The Go packages that do open a socket are listed in
+   `SERVERS` below, and each has to contain the mechanisms it claims to be
+   protected by; the list says what absence would mean.
 
 What this cannot check is the kernel, the filesystem, or a person with a copy of
 the file. It checks the code, which is the part that could change without
@@ -90,11 +92,18 @@ def sources(crate: Path):
 # **This list is the honest version of the claim.** Before the local API the
 # claim was "the log never leaves the machine, and there is no code path by
 # which it could", and it was true. A local API changes it: a dashboard and an
-# MCP adapter both need what happened on this machine, and both are local. The
-# claim is now narrower and still mechanical — the log leaves this *process*
-# only through a listener that is loopback by default, demands a token, and
-# refuses to expose itself silently — and each of those three is checked below
-# rather than asserted in a comment.
+# MCP adapter both need what happened on this machine, and both are local. So
+# does a supervisor watching the host it started. The claim is now narrower and
+# still mechanical — the log leaves this *process* only where something below
+# says what it demands of whoever asks, and every one of those demands is a
+# pattern that has to be in the source rather than a sentence in a comment.
+#
+# The two are guarded differently because they are reached differently. The API
+# is a port, so it is loopback by default and gated by a token compared in
+# constant time. The supervision channel is a unix socket in a directory nobody
+# else can enter, and the kernel is asked which process connected — a stronger
+# answer than a token, and available only because the asker is a child of the
+# process that made the socket.
 SERVERS = {
     "internal/server": {
         "why": (
@@ -118,6 +127,35 @@ SERVERS = {
                 r"--exposed",
                 "refuse to bind off loopback without an explicit flag, and name it in "
                 "the refusal, so nobody exposes the trail by mistyping an address",
+            ),
+        ],
+    },
+    "internal/engine": {
+        "why": (
+            "the channel a supervised host answers on — it carries whether the "
+            "host is working and nothing from the trail, and is listed here "
+            "because a socket in this tree has to say what guards it"
+        ),
+        "must": [
+            (
+                r'net\.Listen\("unix"',
+                "listen on a unix socket rather than a port — an address family "
+                "that cannot leave this machine is a stronger statement than "
+                "binding loopback, and this channel has no reason to be "
+                "reachable at all",
+            ),
+            (
+                r"MkdirTemp",
+                "put that socket in a directory of its own, created 0700, so the "
+                "filesystem is the first thing keeping other people out",
+            ),
+            (
+                r"SO_PEERCRED",
+                "ask the kernel which process connected and refuse anything but "
+                "the child it started — every process belonging to the same "
+                "person can reach that socket, so without this check another "
+                "program could answer a health check and hand back an extract "
+                "of the trail on the engine's behalf",
             ),
         ],
     },
@@ -187,6 +225,19 @@ def go_side(problems: list[str]) -> int:
     return checked
 
 
+def enclosing_fn(lines: list[str], at: int) -> tuple[str, str]:
+    """The function a line is inside: its visibility and its name.
+
+    Nearest preceding `fn`, which is enough here because these files have no
+    nested functions around the log.
+    """
+    for i in range(at, -1, -1):
+        m = re.match(r"\s*(pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)", lines[i])
+        if m:
+            return (m.group(1) or "").strip(), m.group(2)
+    return "", ""
+
+
 def main() -> int:
     problems = []
     checked = 0
@@ -238,6 +289,27 @@ def main() -> int:
                     f"answers over stdout; a socket in the same file is a path this "
                     f"check cannot rule out"
                 )
+        # **And the reading has to stay in the file.** Checking one file for
+        # sockets only means anything while nothing else can call the function
+        # that reads: a `pub fn` here lets any module in the crate route the
+        # trail wherever it likes, and this check follows no call graph.
+        #
+        # Found the hard way. The supervision channel wanted to answer the
+        # same question as `esper sessions`, so this function was made `pub`
+        # and called from a file holding a unix socket — and every part of
+        # this check went on passing.
+        lines = code.splitlines()
+        for i, line in enumerate(lines):
+            if not log_at.search(line):
+                continue
+            visibility, name = enclosing_fn(lines, i)
+            if visibility:
+                problems.append(
+                    f"{rel} reads the trail inside `{visibility} fn {name}`. It has to "
+                    f"be private: this check reads one file for sockets, which proves "
+                    f"nothing if anything in the crate can call the reader and send "
+                    f"the answer somewhere else"
+                )
 
     for rel in READERS:
         if rel not in readers_found:
@@ -263,8 +335,8 @@ def main() -> int:
         print(f"\n  {len(problems)} problem(s). See the header of this script for why.")
         return 1
     print(
-        "  ✓ the trail is read in one place, and leaves this process only through a "
-        "loopback listener that demands a token"
+        "  ✓ the trail is read in one place, and leaves this process only where "
+        "something above says what it demands of whoever asks"
     )
     return 0
 
