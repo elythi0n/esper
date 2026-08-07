@@ -311,6 +311,39 @@ fn record_as(public_key: [u8; 32], name: &str, invited: bool) -> Result<Device, 
     } else {
         Device::new(public_key, shown, now)
     };
+    // **A key change is a new device, and the old one's grants do not follow
+    // it here.** That is the property somebody wants: a machine that was
+    // reinstalled, or whose key was rotated, pairs afresh and starts with the
+    // defaults — so `unattended` has to be granted again by somebody at this
+    // host rather than inherited by whatever now holds that name.
+    //
+    // What does *not* happen on its own is the other half. The old record is
+    // still there, still holding whatever it was granted, and this host cannot
+    // link the two: a key is the only stable identifier a device has, so a
+    // changed key is indistinguishable from an unknown one. A name is a label
+    // a peer chose and two machines may share it.
+    //
+    // So it is said rather than guessed at. Removing the old record would be
+    // this host deciding that two devices calling themselves `laptop` are the
+    // same machine, and the case where that is wrong is the case where it
+    // matters.
+    for older in also_called(&store, &device.name, &public_key) {
+        eprintln!(
+            "  · a device called {:?} is already paired, with a different key: {}",
+            device.name,
+            older.fingerprint().hex()
+        );
+        eprintln!(
+            "    If that is this machine, the old record still holds {} — remove it with:",
+            granted_by(older)
+        );
+        eprintln!(
+            "      {} forget {}",
+            crate::net::me(),
+            older.fingerprint().hex()
+        );
+    }
+
     store
         .insert(device.clone())
         .map_err(|e| format!("recording the device: {e}"))?;
@@ -369,6 +402,35 @@ fn short(device: &Device) -> String {
     device.fingerprint().hex().chars().take(12).collect()
 }
 
+/// Records with this name and a different key.
+///
+/// The one hint a host has that a device was re-paired rather than newly
+/// paired, and it is only a hint: the name is peer-supplied and two machines
+/// may share one. So it is used to *say something*, never to remove anything.
+fn also_called<'a>(
+    store: &'a esper_crypto::DeviceStore,
+    name: &str,
+    key: &[u8; 32],
+) -> Vec<&'a esper_crypto::Device> {
+    store
+        .iter()
+        .filter(|d| d.name == name && &d.public_key != key)
+        .collect()
+}
+
+/// What a device is allowed to do, for a sentence about it.
+fn granted_by(device: &esper_crypto::Device) -> String {
+    if device.permissions.is_empty() {
+        return "nothing".to_owned();
+    }
+    device
+        .permissions
+        .iter()
+        .map(|p| p.name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -419,5 +481,95 @@ mod tests {
         store.insert(device_named("laptop")).unwrap();
         assert!(sweep_store(&mut store, u64::MAX).is_empty());
         assert_eq!(store.iter().count(), 1);
+    }
+
+    /// A real key, because the store refuses one that is not a curve point —
+    /// which is the right refusal and means a test cannot use `[3u8; 32]`.
+    fn a_key() -> [u8; 32] {
+        esper_crypto::Identity::generate()
+            .expect("a key")
+            .public_key()
+    }
+
+    /// **A key change does not carry the grants over, because it is a new
+    /// device.**
+    ///
+    /// The property the tracker asks for, and it holds by construction rather
+    /// than by a check: the store is keyed by the public key, so a device that
+    /// pairs with a different one gets a fresh record with the defaults. What
+    /// this test is for is that "by construction" stays true — a store keyed
+    /// by anything else, or a pairing that copied an existing record, would
+    /// hand `unattended` to whatever now holds that name.
+    #[test]
+    fn a_device_that_pairs_with_a_new_key_starts_from_the_defaults() {
+        let (old, new) = (a_key(), a_key());
+        let mut store = esper_crypto::DeviceStore::default();
+        let mut before = esper_crypto::Device::new(old, "laptop".to_owned(), 0);
+        before.permissions.push(esper_proto::Permission::Unattended);
+        store.insert(before).expect("a usable key");
+
+        // The same machine, reinstalled: same name, different key.
+        store
+            .insert(esper_crypto::Device::new(new, "laptop".to_owned(), 1))
+            .expect("a usable key");
+
+        let now = store.get(&new).expect("the new record");
+        assert!(
+            !now.may(esper_proto::Permission::Unattended),
+            "a re-paired device inherited unattended: {:?}",
+            now.permissions
+        );
+        assert!(
+            now.may(esper_proto::Permission::View),
+            "{:?}",
+            now.permissions
+        );
+    }
+
+    /// And the old record is still there, still granted, which is the half a
+    /// host cannot fix on its own.
+    ///
+    /// A key is the only stable identifier a device has, so a changed key is
+    /// indistinguishable from an unknown one — see the ledger entry for
+    /// `Reason::PEER_KEY_CHANGED`. If the old private key survives anywhere, a
+    /// backup or a cloned disk, it still walks in. So the name collision is
+    /// *said*, with the fingerprint and the command that removes it.
+    #[test]
+    fn the_record_for_the_old_key_is_found_and_named() {
+        let (old, new, other) = (a_key(), a_key(), a_key());
+        let mut store = esper_crypto::DeviceStore::default();
+        let mut before = esper_crypto::Device::new(old, "laptop".to_owned(), 0);
+        before.permissions.push(esper_proto::Permission::Unattended);
+        store.insert(before).expect("a usable key");
+        store
+            .insert(esper_crypto::Device::new(other, "desktop".to_owned(), 0))
+            .expect("a usable key");
+
+        let older = also_called(&store, "laptop", &new);
+        assert_eq!(older.len(), 1, "the old record was not found");
+        let found = older.first().expect("one");
+        assert_eq!(found.public_key, old);
+        assert!(
+            granted_by(found).contains("unattended"),
+            "{}",
+            granted_by(found)
+        );
+
+        // The device that is pairing is not itself a collision, or every
+        // pairing would warn about the record it is replacing.
+        assert!(
+            also_called(&store, "laptop", &old).is_empty(),
+            "a device collided with its own record"
+        );
+        // And a different name is not a collision.
+        assert!(also_called(&store, "phone", &new).is_empty());
+    }
+
+    /// A record granted nothing says "nothing" rather than an empty sentence.
+    #[test]
+    fn a_record_with_no_permissions_reads_as_nothing() {
+        let mut bare = esper_crypto::Device::new(a_key(), "bare".to_owned(), 0);
+        bare.permissions.clear();
+        assert_eq!(granted_by(&bare), "nothing");
     }
 }
