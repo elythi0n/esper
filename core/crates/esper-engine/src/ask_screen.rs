@@ -30,6 +30,11 @@ use crate::consent::{Answer, Ask, AskAtTheHost, Asked, Console};
 pub fn wherever_somebody_is() -> AskAtTheHost {
     let within = crate::settings::whole("consent.answer_within")
         .map_or(crate::consent::ANSWER_WITHIN, Duration::from_secs);
+    bound(chosen(within))
+}
+
+/// Which asker, for this machine.
+fn chosen(within: Duration) -> AskAtTheHost {
     let console = Console::open();
     if console.can_ask() {
         return AskAtTheHost::asking_for(Box::new(console), within);
@@ -41,6 +46,38 @@ pub fn wherever_somebody_is() -> AskAtTheHost {
     // Nothing to ask at. The console reports that for itself, and the host's
     // own output already has words for it.
     AskAtTheHost::asking_for(Box::new(console), within)
+}
+
+/// Apply the bound on `unattended`, if somebody asked for one.
+///
+/// Separate from choosing the asker because it is a different question: where
+/// a person would be asked, against whether a device may skip the asking.
+fn bound(policy: AskAtTheHost) -> AskAtTheHost {
+    if !crate::settings::flag("policy.deny_when_locked", false) {
+        return policy;
+    }
+    policy.not_while_locked(Box::new(TheScreenHere))
+}
+
+/// The lock state of the screen this machine has.
+#[derive(Debug)]
+struct TheScreenHere;
+
+impl crate::consent::LockState for TheScreenHere {
+    fn locked(&self) -> esper_presence::locked::Locked {
+        #[cfg(target_os = "linux")]
+        {
+            esper_presence_x11::screen_is_locked()
+        }
+        // Every platform has a session manager and none of them agree on how
+        // to ask. Until the one for this platform is written, the answer is
+        // that it cannot be established — which the policy treats as locked
+        // and the host says out loud when it starts.
+        #[cfg(not(target_os = "linux"))]
+        {
+            esper_presence::locked::by_logind(None)
+        }
+    }
 }
 
 /// A question drawn on the screen in front of the machine.

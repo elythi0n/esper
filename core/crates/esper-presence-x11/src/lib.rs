@@ -73,14 +73,18 @@
 #![cfg(target_os = "linux")]
 
 use esper_keeper::Undo;
+use esper_presence::locked::Locked;
 use esper_presence::{Blanking, HostEvent, Missing, Presence, PresenceError, Verdict, Watching};
-use x11rb::connection::Connection as _;
+use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::randr::ConnectionExt as _;
+use x11rb::protocol::screensaver::{
+    ConnectionExt as _, Kind as ScreenSaverKind, State as ScreenSaverState,
+};
 use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
 use x11rb::protocol::xproto::{
-    ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, ImageFormat,
-    MapState, ModMask, Rectangle, StackMode, Window, WindowClass,
+    ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, GrabStatus,
+    ImageFormat, MapState, ModMask, Rectangle, StackMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -168,6 +172,212 @@ const fn colour_of(watching: &Watching) -> u32 {
     } else {
         WATCHING
     }
+}
+
+/// Whether the screensaver extension says an external saver is running.
+///
+/// **The one probe that disturbs nothing.** It is a query: no grab, no window,
+/// and no keystroke goes anywhere it would not have gone. A locker that
+/// registers itself as a screensaver — `xscreensaver`, and anything driven
+/// through `xdg-screensaver` — shows up as an *external* saver with the state
+/// on.
+///
+/// `Blanked` and `Internal` are **not** locked: those are the server's own
+/// blanking, which is a dark screen and nothing more. Reading a blanked screen
+/// as a locked one would refuse a device because a monitor went to sleep.
+fn saver_says<C: Connection>(conn: &C, root: Window) -> Locked {
+    let Ok(cookie) = conn.screensaver_query_info(root) else {
+        return Locked::CannotTell;
+    };
+    let Ok(info) = cookie.reply() else {
+        return Locked::CannotTell;
+    };
+    if info.kind != ScreenSaverKind::EXTERNAL {
+        // Nothing is claiming to be a screen locker. That is not evidence
+        // either way — the locker may simply not use this extension — so the
+        // next probe gets a turn.
+        return Locked::CannotTell;
+    }
+    if ScreenSaverState::from(info.state) == ScreenSaverState::ON {
+        Locked::Yes(esper_presence::locked::SCREENSAVER)
+    } else {
+        Locked::No(esper_presence::locked::SCREENSAVER)
+    }
+}
+
+/// How much of the screen a window has to cover to be covering it.
+///
+/// Nine tenths, which is a locker and is not a maximised application window:
+/// a window manager leaves a panel or a title bar, and a locker leaves
+/// nothing. Not the whole screen, because a locker on a multi-monitor desktop
+/// may cover the monitors and not the gap between them.
+const COVERED: u64 = 90;
+
+/// Whether a screen locker is holding this display.
+///
+/// # Two things, because either alone is wrong
+///
+/// X11 has no "is the screen locked" question and no "who holds the grab"
+/// query. What a locker does is hold the keyboard **and** cover the screen,
+/// and each half on its own has a common false positive:
+///
+/// - A **grab** is held by any open menu, for as long as it is open. A policy
+///   that read that as a locked screen would refuse a device because somebody
+///   left a dropdown open.
+/// - A **full-screen window** is a video player, a slideshow or a game. None
+///   of them means nobody is at the machine; most of them mean somebody is.
+///
+/// Together they are specific: `i3lock` and `swaylock` do both for as long as
+/// the screen is locked, and nothing else on a desktop does both at once.
+///
+/// # Why this probe is last
+///
+/// The only way to learn that somebody holds the keyboard is to ask for it and
+/// be told `AlreadyGrabbed` — so this takes the keyboard for one round trip
+/// and gives it straight back. That is a real cost, which is why it runs only
+/// when the free probes could not answer: on a machine with `logind`, or with
+/// a locker that registers as a screensaver, it never runs at all.
+fn a_grab_says<C: Connection>(conn: &C, root: Window) -> Locked {
+    let Ok(cookie) = conn.grab_keyboard(
+        false,
+        root,
+        x11rb::CURRENT_TIME,
+        GrabMode::ASYNC,
+        GrabMode::ASYNC,
+    ) else {
+        return Locked::CannotTell;
+    };
+    let Ok(reply) = cookie.reply() else {
+        return Locked::CannotTell;
+    };
+    match reply.status {
+        GrabStatus::SUCCESS => {
+            // Given straight back. Holding it would make this probe the thing
+            // that stopped somebody typing.
+            let _ = conn.ungrab_keyboard(x11rb::CURRENT_TIME);
+            let _ = conn.flush();
+            Locked::No(esper_presence::locked::A_GRAB)
+        }
+        GrabStatus::ALREADY_GRABBED | GrabStatus::FROZEN => {
+            if something_covers_the_screen(conn, root) {
+                Locked::Yes(esper_presence::locked::A_GRAB)
+            } else {
+                // The keyboard is held by something that is not covering the
+                // screen, which is a menu rather than a locker. Not an answer
+                // either way: somebody may well be at this machine, and
+                // saying "not locked" on this evidence would be as wrong as
+                // saying "locked".
+                Locked::CannotTell
+            }
+        }
+        // `NotViewable` and `InvalidTime` say something about the request
+        // rather than about the screen.
+        _ => Locked::CannotTell,
+    }
+}
+
+/// Whether some window is covering nearly all of the screen.
+///
+/// Mapped windows only, and the root's own children: a locker's window is a
+/// child of the root, and an unmapped one covers nothing.
+fn something_covers_the_screen<C: Connection>(conn: &C, root: Window) -> bool {
+    let Some(screen) = conn
+        .get_geometry(root)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map(|g| u64::from(g.width) * u64::from(g.height))
+        .filter(|area| *area > 0)
+    else {
+        return false;
+    };
+    let Ok(children) = conn
+        .query_tree(root)
+        .ok()
+        .map_or(Err(()), |c| c.reply().map_err(|_| ()))
+    else {
+        return false;
+    };
+    for window in children.children {
+        let Some(attributes) = conn
+            .get_window_attributes(window)
+            .ok()
+            .and_then(|c| c.reply().ok())
+        else {
+            continue;
+        };
+        if attributes.map_state != MapState::VIEWABLE {
+            continue;
+        }
+        let Some(geometry) = conn.get_geometry(window).ok().and_then(|c| c.reply().ok()) else {
+            continue;
+        };
+        let area = u64::from(geometry.width) * u64::from(geometry.height);
+        if area.saturating_mul(100) >= screen.saturating_mul(COVERED) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the display this process is pointed at is locked.
+///
+/// **The display, not the login session** — the distinction `Locks` makes for
+/// the same reason. A host serving a second X server, another seat or a
+/// scratch display is not serving the person's login session, and a probe that
+/// asked the session manager would answer about a screen this host is not
+/// showing.
+///
+/// Opens a connection of its own and closes it again: this is asked once per
+/// connection attempt by a device that would otherwise walk straight in, and
+/// keeping a display connection for the life of the host to answer it would be
+/// a resource held for something that happens rarely.
+#[must_use]
+pub fn on_this_display() -> Locked {
+    let Ok((conn, num)) = x11rb::connect(None) else {
+        return Locked::CannotTell;
+    };
+    let Some(root) = conn.setup().roots.get(num).map(|s| s.root) else {
+        return Locked::CannotTell;
+    };
+    match saver_says(&conn, root) {
+        Locked::CannotTell => a_grab_says(&conn, root),
+        answered => answered,
+    }
+}
+
+/// Whether the screen somebody would be sitting at is locked.
+///
+/// # The order, and why it is not "most authoritative first"
+///
+/// 1. **The screensaver extension**, on the display this host serves. Free, and
+///    it is about the screen actually being shown.
+/// 2. **`logind`**, which knows about the *login session*. Authoritative where
+///    it answers, and about the right screen on every ordinary desktop — where
+///    the display the host serves and the session's display are the same one.
+/// 3. **A grab**, on the display this host serves. Specific and correct, and
+///    the only one that costs anything: it takes the keyboard for a round trip
+///    to find out whether it can. So it goes last, and on a machine where
+///    either of the first two answers it never runs.
+#[must_use]
+pub fn screen_is_locked() -> Locked {
+    // Which display this is, so `logind`'s answer can be checked against the
+    // screen it is about rather than assumed to be about ours.
+    let ours = std::env::var("DISPLAY").ok();
+    let Ok((conn, num)) = x11rb::connect(None) else {
+        return esper_presence::locked::by_logind(ours.as_deref());
+    };
+    let Some(root) = conn.setup().roots.get(num).map(|s| s.root) else {
+        return esper_presence::locked::by_logind(ours.as_deref());
+    };
+    match saver_says(&conn, root) {
+        Locked::CannotTell => {}
+        answered => return answered,
+    }
+    match esper_presence::locked::by_logind(ours.as_deref()) {
+        Locked::CannotTell => {}
+        answered => return answered,
+    }
+    a_grab_says(&conn, root)
 }
 
 /// The panic key's keycode, from the same table the injector uses.

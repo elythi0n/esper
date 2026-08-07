@@ -39,6 +39,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use esper_crypto::Device;
+use esper_presence::locked::Locked;
 use esper_proto::{Permission, Reason, SessionRequest};
 use esper_transport::{Policy, Verdict};
 
@@ -56,6 +57,24 @@ pub const ANSWER_WITHIN: Duration = Duration::from_secs(45);
 /// came back to find a session open would still recognise it as the one they
 /// allowed.
 pub const GRACE: Duration = Duration::from_secs(120);
+
+/// Whether the screen at this machine is locked.
+///
+/// A trait so the policy can be tested against every answer — including the
+/// one that matters most, which is *no answer at all*. A machine whose lock
+/// state cannot be established is the case a real deployment meets, and it is
+/// the case a test would otherwise never reach.
+pub trait LockState: Send + Sync + std::fmt::Debug {
+    /// Ask now. Called once per connection attempt by a device that would
+    /// otherwise walk straight in, so it may cost a round trip and must not
+    /// cost a subscription.
+    ///
+    /// There is no "nobody asked" implementation of this: a policy with the
+    /// bound off holds no probe at all, because the question costs a process
+    /// and a display connection and a host nobody switched this on for should
+    /// pay for neither.
+    fn locked(&self) -> Locked;
+}
 
 /// Somebody at the host, and what they said.
 pub trait Ask: Send + Sync + 'static {
@@ -389,6 +408,12 @@ pub struct AskAtTheHost {
     ask: Box<dyn Ask>,
     /// Where the local time comes from, for reading a device's schedule.
     clock: Box<dyn LocalTime>,
+    /// How to find out whether the screen is locked, and whether to care.
+    ///
+    /// `None` is the policy switched off, which is also the answer that costs
+    /// nothing: the probe shells out and opens a display connection, and a
+    /// host nobody set this on should not pay for either.
+    lock: Option<Box<dyn LockState>>,
     within: Duration,
     grace: Duration,
     /// When each device was last accepted, and how the last session was
@@ -420,6 +445,29 @@ impl AskAtTheHost {
         self.ask.asked_at()
     }
 
+    /// Also refuse `unattended` while the screen is locked.
+    ///
+    /// Off unless a caller says so, and the caller is a setting — see
+    /// `policy.deny_when_locked`. What this bounds is the one permission that
+    /// removes the question: a device without `unattended` is already asked
+    /// about, and a locked screen answers that by nobody being there.
+    #[must_use]
+    pub fn not_while_locked(mut self, lock: Box<dyn LockState>) -> Self {
+        self.lock = Some(lock);
+        self
+    }
+
+    /// What the lock policy would say right now, or `None` when it is off.
+    ///
+    /// **For the host to print when it starts.** A policy that fails closed
+    /// has to fail visibly: somebody who switched this on and whose machine
+    /// cannot be asked deserves to read that on the line above the audit path
+    /// rather than to discover it from a refusal at three in the morning.
+    #[must_use]
+    pub fn lock_state(&self) -> Option<Locked> {
+        self.lock.as_ref().map(|l| l.locked())
+    }
+
     /// Ask whoever this says, waiting `within`.
     ///
     /// **A setting rather than a constant**, because the right answer is
@@ -440,6 +488,7 @@ impl AskAtTheHost {
         Self {
             ask,
             clock: Box::new(MachineTime),
+            lock: None,
             within: ANSWER_WITHIN,
             grace: GRACE,
             recent: Mutex::new(Vec::new()),
@@ -460,6 +509,7 @@ impl AskAtTheHost {
         Self {
             ask,
             clock,
+            lock: None,
             within: ANSWER_WITHIN,
             grace: GRACE,
             recent: Mutex::new(Vec::new()),
@@ -482,6 +532,7 @@ impl AskAtTheHost {
         Self {
             ask,
             clock: Box::new(MachineTime),
+            lock: None,
             within,
             grace,
             recent: Mutex::new(Vec::new()),
@@ -590,6 +641,31 @@ impl Policy for AskAtTheHost {
         // locked-out one, so the prompt below is still its way in.
         let bounded = self.bounded(device);
         if device.may(Permission::Unattended) && bounded == Bounded::Applies {
+            // **And not while the screen is locked, where somebody asked for
+            // that bound.** A locked screen is the closest thing a machine has
+            // to "nobody is at this desk", and an operator who wants
+            // `unattended` for the hours they are present wants it to stop
+            // when they lock up and walk away.
+            //
+            // A state that **cannot be established counts as locked**. The
+            // alternative is a policy that silently does nothing on a machine
+            // that cannot answer, which is the worst of the three outcomes;
+            // the host says which it is when it starts, so nobody meets this
+            // for the first time in a refusal.
+            if let Some(lock) = &self.lock {
+                let state = lock.locked();
+                if !matches!(state, Locked::No(_)) {
+                    return Verdict::Deny(
+                        Reason::HOST_IS_LOCKED,
+                        format!(
+                            "the screen at this host is {} and policy.deny_when_locked is on, \
+                             so this device may not walk in unasked. It can when somebody \
+                             unlocks the machine",
+                            state.describe()
+                        ),
+                    );
+                }
+            }
             self.note(Allowed::Unattended);
             return Verdict::Grant(granted);
         }
@@ -938,6 +1014,134 @@ mod tests {
             Duration::from_millis(50),
             GRACE,
         )
+    }
+
+    /// A lock state decided in advance, and a count of how often it was asked.
+    #[derive(Debug)]
+    struct Screen {
+        says: Locked,
+        asked: AtomicUsize,
+    }
+
+    impl LockState for Screen {
+        fn locked(&self) -> Locked {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+            self.says
+        }
+    }
+
+    fn screen(says: Locked) -> std::sync::Arc<Screen> {
+        std::sync::Arc::new(Screen {
+            says,
+            asked: AtomicUsize::new(0),
+        })
+    }
+
+    impl LockState for std::sync::Arc<Screen> {
+        fn locked(&self) -> Locked {
+            (**self).locked()
+        }
+    }
+
+    fn unattended() -> Device {
+        device(&[
+            Permission::View,
+            Permission::Control,
+            Permission::Unattended,
+        ])
+    }
+
+    /// **A locked screen stops a device walking in unasked.**
+    ///
+    /// The bound the whole policy exists for: `unattended` for the hours
+    /// somebody is at the machine, and not for the hours after they lock it
+    /// and leave.
+    #[test]
+    fn a_locked_screen_refuses_an_unattended_device() {
+        let ask = std::sync::Arc::new(Scripted::nobody());
+        let seen = screen(Locked::Yes("a test"));
+        let p = policy(&ask).not_while_locked(Box::new(std::sync::Arc::clone(&seen)));
+
+        let v = p.decide(&unattended(), &wants(&[Permission::View]));
+        let Verdict::Deny(code, detail) = v else {
+            panic!("a locked screen let an unattended device in: {v:?}");
+        };
+        assert_eq!(code, Reason::HOST_IS_LOCKED);
+        // The refusal says which state, which setting, and what changes it.
+        assert!(detail.contains("locked"), "{detail}");
+        assert!(detail.contains("policy.deny_when_locked"), "{detail}");
+        assert!(detail.contains("unlocks"), "{detail}");
+        assert_eq!(seen.asked.load(Ordering::Relaxed), 1);
+    }
+
+    /// And an unlocked screen does not.
+    ///
+    /// Its own test, because a policy that refused every unattended device
+    /// would pass the one above while removing the permission entirely.
+    #[test]
+    fn an_unlocked_screen_lets_an_unattended_device_in() {
+        let ask = std::sync::Arc::new(Scripted::nobody());
+        let seen = screen(Locked::No("a test"));
+        let p = policy(&ask).not_while_locked(Box::new(std::sync::Arc::clone(&seen)));
+
+        let v = p.decide(&unattended(), &wants(&[Permission::View]));
+        assert!(matches!(v, Verdict::Grant(_)), "{v:?}");
+        assert_eq!(p.how_the_last_one_was_allowed(), Some(Allowed::Unattended));
+    }
+
+    /// **A state that cannot be established counts as locked.**
+    ///
+    /// The case a real deployment meets, and the one a test would otherwise
+    /// never reach. The alternative is a policy somebody switched on that
+    /// silently does nothing — and they find that out at three in the morning
+    /// rather than when the host started.
+    #[test]
+    fn a_lock_state_nobody_can_establish_counts_as_locked() {
+        let ask = std::sync::Arc::new(Scripted::nobody());
+        let seen = screen(Locked::CannotTell);
+        let p = policy(&ask).not_while_locked(Box::new(std::sync::Arc::clone(&seen)));
+
+        let v = p.decide(&unattended(), &wants(&[Permission::View]));
+        let Verdict::Deny(code, detail) = v else {
+            panic!("an unanswerable lock state let a device in: {v:?}");
+        };
+        assert_eq!(code, Reason::HOST_IS_LOCKED);
+        assert!(detail.contains("cannot be established"), "{detail}");
+    }
+
+    /// The bound is off unless somebody asked for it.
+    #[test]
+    fn without_the_policy_the_screen_is_never_asked_about() {
+        let ask = std::sync::Arc::new(Scripted::nobody());
+        let p = policy(&ask);
+        assert_eq!(p.lock_state(), None, "a policy with no bound reported one");
+        let v = p.decide(&unattended(), &wants(&[Permission::View]));
+        assert!(matches!(v, Verdict::Grant(_)), "{v:?}");
+    }
+
+    /// **It bounds `unattended` and nothing else.**
+    ///
+    /// A device without that permission is asked about, and a locked screen
+    /// answers that question by nobody being there — so refusing it here
+    /// would replace a prompt that reaches the right conclusion with a
+    /// refusal that names the wrong reason.
+    #[test]
+    fn a_device_without_unattended_is_still_asked_about() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::Yes));
+        let seen = screen(Locked::Yes("a test"));
+        let p = policy(&ask).not_while_locked(Box::new(std::sync::Arc::clone(&seen)));
+
+        let v = p.decide(
+            &device(&[Permission::View, Permission::Control]),
+            &wants(&[Permission::View]),
+        );
+        assert!(matches!(v, Verdict::Grant(_)), "{v:?}");
+        assert_eq!(ask.asked.load(Ordering::Relaxed), 1, "it was not asked");
+        assert_eq!(
+            seen.asked.load(Ordering::Relaxed),
+            0,
+            "the screen was asked about for a device the policy does not bound"
+        );
     }
 
     /// **The whole point: a host with nobody to ask refuses.**

@@ -65,6 +65,11 @@ const (
 	// because the fix is a specific one — grant that permission — and a device
 	// told "permission denied" would go looking at the wrong ones.
 	NobodyToAsk Reason = 306
+	// HostIsLocked has its own code because it is the one refusal that will
+	// fix itself: a device told "permission denied" would go asking for a
+	// permission it already holds, and one told this knows to try again when
+	// somebody has unlocked the machine.
+	HostIsLocked Reason = 307
 )
 
 // Capability.
@@ -160,6 +165,7 @@ var descriptions = map[Reason]string{
 	PromptTimeout:           "nobody responded to the connection prompt",
 	PromptRefused:           "somebody at the host declined this session",
 	NobodyToAsk:             "this host has nobody to ask, and this device may not connect unattended",
+	HostIsLocked:            "the screen at the host is locked",
 	NoCommonCodec:           "no codec in common",
 	NoCaptureBackend:        "no screen capture backend available",
 	NoDisplay:               "no display to capture",

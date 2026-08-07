@@ -47,6 +47,7 @@
 //! host's own output.
 
 pub mod lock;
+pub mod locked;
 pub mod null;
 
 pub use lock::{Locks, Reach, available_locker, lock_reaching, lock_screen};

@@ -84,6 +84,15 @@ impl Reason {
     /// the fix is a specific one — grant that permission — and a device told
     /// "permission denied" would go looking at the wrong ones.
     pub const NOBODY_TO_ASK: Self = Self(306);
+    /// The screen at the host is locked, and the policy says not while it is.
+    ///
+    /// **Its own code because it is the one refusal that will fix itself.** A
+    /// device told "permission denied" would go asking for a permission it
+    /// already holds; one told this knows to try again when somebody has
+    /// unlocked the machine. It is only ever sent to a device that *does* hold
+    /// `unattended` — a device without it is asked about, and a locked screen
+    /// answers that question by nobody being there.
+    pub const HOST_IS_LOCKED: Self = Self(307);
 
     // 4xx — capability
     pub const NO_COMMON_CODEC: Self = Self(400);
@@ -164,6 +173,7 @@ impl Reason {
             Self::NOBODY_TO_ASK => {
                 "this host has nobody to ask, and this device may not connect unattended"
             }
+            Self::HOST_IS_LOCKED => "the screen at the host is locked",
             Self::NO_COMMON_CODEC => "no codec in common",
             Self::NO_CAPTURE_BACKEND => "no screen capture backend available",
             Self::NO_DISPLAY => "no display to capture",
@@ -251,6 +261,7 @@ mod tests {
             Reason::PROMPT_TIMEOUT,
             Reason::PROMPT_REFUSED,
             Reason::NOBODY_TO_ASK,
+            Reason::HOST_IS_LOCKED,
             Reason::NO_COMMON_CODEC,
             Reason::NO_CAPTURE_BACKEND,
             Reason::NO_DISPLAY,

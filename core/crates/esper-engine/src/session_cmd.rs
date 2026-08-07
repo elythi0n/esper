@@ -762,6 +762,25 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     // and its record of who was just accepted is what stops a reconnect after
     // a network blip asking the same person the same question again.
     let policy = Arc::new(crate::ask_screen::wherever_somebody_is());
+    // **A policy that fails closed has to fail visibly.** Said here, on the
+    // line before the audit path, because somebody who switched this on and
+    // whose machine cannot be asked should read it when they start the host
+    // rather than meet it in a refusal at three in the morning.
+    if let Some(state) = policy.lock_state() {
+        use esper_presence::locked::Locked;
+        // **What it means, per state, rather than one sentence for three.**
+        // The first version said "unattended devices wait" whatever the answer
+        // was, which on an unlocked screen is the opposite of the truth.
+        let effect = match state {
+            Locked::No(_) => "unattended devices may walk in",
+            Locked::Yes(_) => "unattended devices wait until somebody unlocks it",
+            Locked::CannotTell => "counted as locked, so none will walk in unasked",
+        };
+        println!("  locked     {} — {effect}", state.describe());
+        if matches!(state, Locked::CannotTell) {
+            println!("             Turn policy.deny_when_locked off if that is not what you want.");
+        }
+    }
     if policy.can_ask() {
         println!(
             "  consent    a device without `unattended` is asked about at {}",

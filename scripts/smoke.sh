@@ -390,7 +390,8 @@ cleanup_terminal() {
              "${multi_host:-}" "${idle_host:-}" "${tiled_host:-}" \
              "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}" "${retain_pid:-}" \
              "${priv_host:-}" "${priv_client:-}" "${priv_x:-}" "${api_pid:-}" \
-             "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}"; do
+             "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}" \
+             "${bound_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -3222,6 +3223,74 @@ TONE
       fi
       rm -rf "$bye"
 
+      # **`unattended` bounded by whether the screen is locked.**
+      #
+      # The setting is a bound on the one permission that removes the question,
+      # for an operator who wants a device let in while they are at the machine
+      # and not after they lock up and leave.
+      #
+      # Two things are checked here and the third is elsewhere. The host has to
+      # *say* what the lock state is when it starts — a policy that fails
+      # closed has to fail visibly — and a device holding `unattended` has to
+      # still get in on a screen that is not locked, because a policy that
+      # refused everything would pass a check that only looked at the refusal.
+      # The refusal itself needs a real screen locker, which a shell cannot
+      # fake: it is covered by `esper-presence-x11`'s display tests, which hold
+      # the keyboard over a covered screen, and by the policy's own tests.
+      if [ -n "${DISPLAY:-}" ]; then
+        echo "  — unattended, bounded by whether the screen is locked"
+        bound=$(mktemp -d)
+        cp -a "$term_a/." "$bound/" 2>/dev/null || true
+        sed -i '/policy.deny_when_locked/d' "$bound/config.toml" 2>/dev/null || true
+        printf 'policy.deny_when_locked = true\n' >> "$bound/config.toml"
+        ESPER_HOME="$bound" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+        ESPER_HOME="$bound" timeout 90 "$BIN/esper-engine" host \
+          --listen 127.0.0.1:0 --no-mdns > "$bound/host.log" 2>&1 &
+        bound_host=$!
+        bound_addr=""
+        # **Waited for the last line of the banner, not the first.** The
+        # address is printed before the policy lines, so waiting for it and
+        # then grepping for one of them is a race that fails on a loaded
+        # machine and passes everywhere else — which is how it was found.
+        for _ in $(seq 1 150); do
+          if grep -q '^  consent ' "$bound/host.log" 2>/dev/null; then
+            bound_addr=$( { awk '/^  listening/{print $2}' "$bound/host.log" 2>/dev/null || true; } | head -1)
+            [ -n "$bound_addr" ] && break
+          fi
+          sleep 0.1
+        done
+        if [ -z "$bound_addr" ]; then
+          printf '  ✗ the host for the lock policy never started\n'
+          sed 's/^/      /' "$bound/host.log"
+          fail=1
+        else
+          if grep -q '^  locked ' "$bound/host.log"; then
+            printf '  ✓ a host with the policy on says what the lock state is: %s\n' \
+              "$( { grep -m1 '^  locked ' "$bound/host.log" || true; } | sed 's/^  locked *//')"
+          else
+            printf '  ✗ the host did not say whether its screen is locked\n'
+            sed 's/^/      /' "$bound/host.log"
+            fail=1
+          fi
+          # And an unattended device still walks in, because this screen is
+          # not locked. A policy that refused everything would be a policy that
+          # removed the permission.
+          walked=$(env -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$bound_addr" --seconds 2 2>&1 || true)
+          if printf '%s' "$walked" | grep -q '^  granted'; then
+            printf '  ✓ and an unattended device still walks in when it is not locked\n'
+          else
+            printf '  ✗ the lock policy refused a device on an unlocked screen\n'
+            printf '%s\n' "$walked" | sed 's/^/      /'
+            fail=1
+          fi
+        fi
+        kill "$bound_host" 2>/dev/null || true
+        wait "$bound_host" 2>/dev/null || true
+        bound_host=""
+        rm -rf "$bound"
+      fi
+
       # **A prompt on the screen, for a host with no terminal to ask at.**
       #
       # This is the case that used to have no answer: somebody who starts
@@ -3253,9 +3322,13 @@ TONE
           --listen 127.0.0.1:0 --no-mdns > "$seen/host.log" 2>&1 &
         seen_host=$!
         seen_addr=""
+        # The consent line rather than the address, for the reason above: the
+        # address is printed several lines earlier than the thing being checked.
         for _ in $(seq 1 150); do
-          seen_addr=$( { awk '/^  listening/{print $2}' "$seen/host.log" 2>/dev/null || true; } | head -1)
-          [ -n "$seen_addr" ] && break
+          if grep -q '^  consent ' "$seen/host.log" 2>/dev/null; then
+            seen_addr=$( { awk '/^  listening/{print $2}' "$seen/host.log" 2>/dev/null || true; } | head -1)
+            [ -n "$seen_addr" ] && break
+          fi
           sleep 0.1
         done
         if [ -z "$seen_addr" ]; then

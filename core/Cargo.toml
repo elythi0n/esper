@@ -76,6 +76,11 @@ x11rb = { version = "0.14", default-features = false, features = [
     # ARGB cursor with an alpha channel needs RENDER; the core protocol's
     # cursors are two-colour.
     "render",
+    # Whether the screen is locked, for the policy that bounds unattended
+    # access. A locker that uses the screensaver extension reports itself as an
+    # *external* saver, which is the one signal available without a session
+    # manager and without disturbing the keyboard.
+    "screensaver",
 ] }
 # Already in the tree through quinn, and already vetted, so this costs nothing
 # new. Wanted for `SO_REUSEPORT` — without it an mDNS responder cannot start on

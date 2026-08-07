@@ -1066,3 +1066,124 @@ fn a_recorded_session_shows_a_colour_of_its_own() {
     );
     p.hide().expect("hidden");
 }
+
+/// A window covering the whole screen, mapped and left to the caller.
+fn cover_the_screen(conn: &impl Connection, root: Window) -> Window {
+    let geometry = conn
+        .get_geometry(root)
+        .expect("the root's size")
+        .reply()
+        .expect("the root's size");
+    let window = conn.generate_id().expect("an id");
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT,
+        window,
+        root,
+        0,
+        0,
+        geometry.width,
+        geometry.height,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        x11rb::COPY_FROM_PARENT,
+        &CreateWindowAux::new()
+            .override_redirect(1)
+            .background_pixel(0x0000_0000),
+    )
+    .expect("a window")
+    .check()
+    .expect("a window");
+    conn.map_window(window).expect("map").check().expect("map");
+    conn.flush().expect("flush");
+    window
+}
+
+/// **A screen locker reads as a locked screen — and only a screen locker.**
+///
+/// The probe of last resort, and the one that matters on a desktop running
+/// `i3lock` or `swaylock`: neither registers as a screensaver and neither
+/// tells `logind`, so the only evidence there is is what they do to the
+/// display. Which is two things, and each on its own has a false positive this
+/// test walks through:
+///
+/// 1. nothing held and nothing covering — not locked
+/// 2. a window covering the screen and nothing held — a video player
+/// 3. the keyboard held and nothing covering — an open menu
+/// 4. both — a locker
+///
+/// Only the fourth is a locked screen. A probe that answered on either half
+/// would refuse an unattended device because somebody left a dropdown open or
+/// paused a film.
+#[test]
+fn only_a_locker_reads_as_a_locked_screen() {
+    if !may_disturb_the_display() {
+        return;
+    }
+    let _lock = exclusive();
+    let (conn, num) = esper_display_lock::connect().expect("a display");
+    let root = conn.setup().roots.get(num).expect("a screen").root;
+
+    // 1. Nothing at all.
+    assert_eq!(
+        esper_presence_x11::on_this_display(),
+        esper_presence::locked::Locked::No(esper_presence::locked::A_GRAB),
+        "an idle display read as locked"
+    );
+
+    // 2. Covered and nothing held: a film, not a lock.
+    let over = cover_the_screen(&conn, root);
+    let covered_only = esper_presence_x11::on_this_display();
+
+    // 3. Held with nothing covering: a menu, not a lock.
+    conn.unmap_window(over)
+        .expect("unmap")
+        .check()
+        .expect("unmap");
+    conn.flush().expect("flush");
+    let held = conn
+        .grab_keyboard(
+            false,
+            root,
+            x11rb::CURRENT_TIME,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+        )
+        .expect("ask for the keyboard")
+        .reply()
+        .expect("ask for the keyboard");
+    let took_it = held.status;
+    conn.flush().expect("flush");
+    let held_only = esper_presence_x11::on_this_display();
+
+    // 4. Both, which is a locker.
+    conn.map_window(over).expect("map").check().expect("map");
+    conn.flush().expect("flush");
+    let both = esper_presence_x11::on_this_display();
+
+    // Put the display back whatever the answers were: a grabbed keyboard or a
+    // window over everything breaks every test after this one.
+    let _ = conn.ungrab_keyboard(x11rb::CURRENT_TIME);
+    let _ = conn.destroy_window(over);
+    let _ = conn.flush();
+
+    assert_eq!(
+        took_it,
+        x11rb::protocol::xproto::GrabStatus::SUCCESS,
+        "something else already holds this display's keyboard"
+    );
+    assert_eq!(
+        covered_only,
+        esper_presence::locked::Locked::No(esper_presence::locked::A_GRAB),
+        "a window covering the screen read as a locked screen"
+    );
+    assert_eq!(
+        held_only,
+        esper_presence::locked::Locked::CannotTell,
+        "an open menu holding the keyboard read as a locked screen"
+    );
+    assert_eq!(
+        both,
+        esper_presence::locked::Locked::Yes(esper_presence::locked::A_GRAB),
+        "a locker holding the keyboard over a covered screen did not read as locked"
+    );
+}

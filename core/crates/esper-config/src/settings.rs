@@ -295,6 +295,30 @@ pub static SETTINGS: &[Setting] = &[
                 Off refuses to serve on a display where the indicator cannot be confirmed.",
     },
     Setting {
+        key: "policy.deny_when_locked",
+        kind: Kind::Flag,
+        // **Off, because it is a bound on `unattended` rather than a part of
+        // it.** A machine in a rack has no screen to lock and would be
+        // refusing sessions for a state it can never leave; a machine on a
+        // desk is exactly where somebody wants this.
+        //
+        // On, a device holding `unattended` is refused while the screen is
+        // locked — with a code of its own, because it is the one refusal that
+        // fixes itself when somebody unlocks the machine. A device *without*
+        // `unattended` is unaffected: it is asked about, and a locked screen
+        // answers that question by nobody being there.
+        //
+        // **And where the lock state cannot be established, it is treated as
+        // locked** — said out loud when the host starts, because a policy that
+        // quietly does nothing is the one somebody finds out about at three in
+        // the morning. See `esper-presence`'s `locked` module for the three
+        // probes and what each of them knows.
+        default: Value::Flag(false),
+        about: "Refuse unattended devices while the screen at this machine is locked. Where \
+                the lock state cannot be established it counts as locked, and the host says \
+                so when it starts.",
+    },
+    Setting {
         key: "consent.answer_within",
         kind: Kind::Whole {
             least: 5,
