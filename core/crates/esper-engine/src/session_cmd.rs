@@ -761,9 +761,12 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     // **One for the host, not one per session.** It owns the terminal reader,
     // and its record of who was just accepted is what stops a reconnect after
     // a network blip asking the same person the same question again.
-    let policy = Arc::new(crate::consent::AskAtTheHost::on_the_terminal());
+    let policy = Arc::new(crate::ask_screen::wherever_somebody_is());
     if policy.can_ask() {
-        println!("  consent    a device without `unattended` is asked about here");
+        println!(
+            "  consent    a device without `unattended` is asked about at {}",
+            policy.asked_at()
+        );
     } else {
         println!("  consent    nothing to ask at: only devices holding `unattended` may connect");
     }

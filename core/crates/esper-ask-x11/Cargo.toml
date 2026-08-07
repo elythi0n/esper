@@ -1,0 +1,18 @@
+[package]
+name = "esper-ask-x11"
+description = "The consent question on somebody's own screen: an override-redirect window, a keyboard grab, and two targets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-dialog.workspace = true
+x11rb.workspace = true
+
+[dev-dependencies]
+esper-display-lock.workspace = true

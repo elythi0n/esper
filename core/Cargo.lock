@@ -295,6 +295,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-ask-x11"
+version = "0.0.0"
+dependencies = [
+ "esper-dialog",
+ "esper-display-lock",
+ "x11rb",
+]
+
+[[package]]
 name = "esper-audio"
 version = "0.0.0"
 dependencies = [
@@ -467,6 +476,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-dialog"
+version = "0.0.0"
+
+[[package]]
 name = "esper-discovery"
 version = "0.0.0"
 dependencies = [
@@ -499,6 +512,7 @@ dependencies = [
 name = "esper-engine"
 version = "0.0.0"
 dependencies = [
+ "esper-ask-x11",
  "esper-audio",
  "esper-audio-pulse",
  "esper-audit",
@@ -512,6 +526,7 @@ dependencies = [
  "esper-config",
  "esper-crypto",
  "esper-decode",
+ "esper-dialog",
  "esper-discovery",
  "esper-encode",
  "esper-files",

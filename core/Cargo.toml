@@ -46,6 +46,8 @@ esper-clipboard-x11 = { path = "crates/esper-clipboard-x11" }
 esper-input = { path = "crates/esper-input" }
 esper-input-x11 = { path = "crates/esper-input-x11" }
 esper-presence = { path = "crates/esper-presence" }
+esper-dialog = { path = "crates/esper-dialog" }
+esper-ask-x11 = { path = "crates/esper-ask-x11" }
 esper-presence-x11 = { path = "crates/esper-presence-x11" }
 # Test-only: see the crate's own documentation.
 esper-display-lock = { path = "crates/esper-display-lock" }

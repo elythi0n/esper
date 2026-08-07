@@ -8,6 +8,7 @@
 //! At this stage it reports its own identity and exits. Everything else is
 //! built on top of that.
 
+mod ask_screen;
 mod audio_task;
 mod backend;
 mod broker_cmd;

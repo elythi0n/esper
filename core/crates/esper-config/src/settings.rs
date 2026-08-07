@@ -295,6 +295,27 @@ pub static SETTINGS: &[Setting] = &[
                 Off refuses to serve on a display where the indicator cannot be confirmed.",
     },
     Setting {
+        key: "consent.answer_within",
+        kind: Kind::Whole {
+            least: 5,
+            most: 300,
+        },
+        // **Forty-five seconds**, which is long enough to walk back to the
+        // machine and short enough that a controller is not left wondering
+        // whether anything is happening — it says what it is waiting for
+        // after a second of silence, so this is not a blind wait.
+        //
+        // A setting because the right answer is somebody's own: a machine on
+        // a desk wants less, and a machine in another room wants more. The
+        // floor is five seconds rather than zero, because a prompt that
+        // disappears before it can be read is not a prompt — it is a
+        // refusal with extra steps, and the person who set it to one second
+        // would not have meant that.
+        default: Value::Whole(45),
+        about: "How many seconds somebody at the host has to answer a connection prompt \
+                before it is refused. Between 5 and 300.",
+    },
+    Setting {
         key: "host.pace_to_measured",
         kind: Kind::Flag,
         // **On, and switchable.** Six attempts at pacing a media session were

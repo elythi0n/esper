@@ -68,6 +68,14 @@ pub trait Ask: Send + Sync + 'static {
 
     /// Ask, and wait up to `within`.
     fn ask(&self, about: &Asked, within: Duration) -> Answer;
+
+    /// Where the question would appear, for the host to say when it starts.
+    ///
+    /// **An operator has to be able to find out where they will be asked.** A
+    /// host that will draw a prompt on a screen nobody is watching, or wait
+    /// for a line on a terminal that scrolled away, is a host whose sessions
+    /// time out for a reason nobody can see from the outside.
+    fn asked_at(&self) -> &'static str;
 }
 
 /// What a person is being asked about.
@@ -76,7 +84,17 @@ pub struct Asked {
     /// What the device is called here.
     pub name: String,
     /// The short form of its key, so two devices with one name are still two.
+    ///
+    /// Hex, because that is what the device list shows and what `grant` and
+    /// `forget` take: this is the identifier somebody *acts* on.
     pub fingerprint: String,
+    /// The same key as words, which is the form somebody *compares*.
+    ///
+    /// Eight words read as four and four is a code somebody checks; sixteen
+    /// hex digits is a string somebody's eye slides over. Both are here
+    /// because a prompt is where the comparison happens and a command line is
+    /// where the action does.
+    pub words: String,
     /// What the session would be able to do — the clamped set, not the
     /// request, because what somebody is agreeing to is what will happen.
     pub granted: Vec<Permission>,
@@ -255,6 +273,10 @@ impl Ask for Console {
         Self::can_ask(self)
     }
 
+    fn asked_at(&self) -> &'static str {
+        "this terminal"
+    }
+
     fn ask(&self, about: &Asked, within: Duration) -> Answer {
         let what = if about.granted.is_empty() {
             "nothing".to_owned()
@@ -392,10 +414,24 @@ impl std::fmt::Debug for AskAtTheHost {
 const MOST_REMEMBERED: usize = 32;
 
 impl AskAtTheHost {
-    /// Ask on the host's terminal.
+    /// Where a question would appear.
     #[must_use]
-    pub fn on_the_terminal() -> Self {
-        Self::asking(Box::new(Console::open()))
+    pub fn asked_at(&self) -> &'static str {
+        self.ask.asked_at()
+    }
+
+    /// Ask whoever this says, waiting `within`.
+    ///
+    /// **A setting rather than a constant**, because the right answer is
+    /// somebody's own: a machine on a desk wants less than a machine in
+    /// another room. Bounded by the settings themselves, so nothing here has
+    /// to defend against a prompt that vanishes before it can be read.
+    #[must_use]
+    pub fn asking_for(ask: Box<dyn Ask>, within: Duration) -> Self {
+        Self {
+            within,
+            ..Self::asking(ask)
+        }
     }
 
     /// Ask whoever this says, with the shipping waits.
@@ -608,6 +644,7 @@ impl Policy for AskAtTheHost {
         let asked = Asked {
             name: device.name.clone(),
             fingerprint: device.fingerprint().hex(),
+            words: device.fingerprint().inline(),
             granted: granted.clone(),
             kind: request.kind.name(),
         };
@@ -672,6 +709,9 @@ mod tests {
             self.asked.fetch_add(1, Ordering::Relaxed);
             self.about.lock().unwrap().push(about.clone());
             self.says
+        }
+        fn asked_at(&self) -> &'static str {
+            "a script"
         }
     }
 

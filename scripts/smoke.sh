@@ -389,7 +389,8 @@ cleanup_terminal() {
              "${clip_x1:-}" "${clip_x2:-}" "${cp_host:-}" "${cp_wire:-}" "${cp_along:-}" \
              "${multi_host:-}" "${idle_host:-}" "${tiled_host:-}" \
              "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}" "${retain_pid:-}" \
-             "${priv_host:-}" "${priv_client:-}" "${priv_x:-}" "${api_pid:-}"; do
+             "${priv_host:-}" "${priv_client:-}" "${priv_x:-}" "${api_pid:-}" \
+             "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -3220,6 +3221,109 @@ TONE
         fi
       fi
       rm -rf "$bye"
+
+      # **A prompt on the screen, for a host with no terminal to ask at.**
+      #
+      # This is the case that used to have no answer: somebody who starts
+      # Esper from a desktop launcher or as a user service has no terminal, so
+      # every session needing agreement was refused. Three things have to be
+      # true, and the middle one is the only one that cannot be true by
+      # accident.
+      #
+      # Skipped where there is no display, which is most of CI's siblings and
+      # is why this is a check rather than a gate.
+      if [ -n "${DISPLAY:-}" ] && command -v import >/dev/null 2>&1; then
+        echo "  — asking on the screen, where there is no terminal"
+        seen=$(mktemp -d)
+        cp -a "$term_a/." "$seen/" 2>/dev/null || true
+        sed -i '/consent.answer_within/d' "$seen/config.toml" 2>/dev/null || true
+        # Six seconds, because the suite should not wait forty-five for a
+        # prompt nobody is going to answer. The setting exists because the
+        # right answer is somebody's own; this is the shortest it allows plus
+        # one.
+        printf 'consent.answer_within = 6\n' >> "$seen/config.toml"
+        ESPER_HOME="$seen" "$BIN/esper-engine" grant "$fp" view >/dev/null 2>&1 || true
+        # It may not walk in unattended, so it has to be asked about.
+        ESPER_HOME="$seen" "$BIN/esper-engine" revoke "$fp" unattended >/dev/null 2>&1 || true
+
+        # **DISPLAY kept and stdout a file**, which between them is exactly the
+        # machine this exists for: a screen to draw on and no terminal to ask
+        # at.
+        ESPER_HOME="$seen" timeout 90 "$BIN/esper-engine" host \
+          --listen 127.0.0.1:0 --no-mdns > "$seen/host.log" 2>&1 &
+        seen_host=$!
+        seen_addr=""
+        for _ in $(seq 1 150); do
+          seen_addr=$( { awk '/^  listening/{print $2}' "$seen/host.log" 2>/dev/null || true; } | head -1)
+          [ -n "$seen_addr" ] && break
+          sleep 0.1
+        done
+        if [ -z "$seen_addr" ]; then
+          printf '  ✗ the host for the screen prompt never started\n'
+          sed 's/^/      /' "$seen/host.log"
+          fail=1
+        else
+          if grep -q 'consent .*asked about at this screen' "$seen/host.log"; then
+            printf '  ✓ a host with a screen and no terminal says it will ask there\n'
+          else
+            printf '  ✗ the host did not say it would ask on the screen\n'
+            grep -i consent "$seen/host.log" | sed 's/^/      /' || true
+            fail=1
+          fi
+
+          # **The prompt's own border colour on the screen, counted.** The
+          # host says what it *will* do; this is the picture. Amber #E4A72E is
+          # the prompt's edge and nothing else in this product is that shade —
+          # the indicator's is #FFB000 — and the count is compared against the
+          # same screen a moment earlier, so a display that happens to have
+          # amber on it cannot make this pass.
+          #
+          # Every step is allowed to find nothing: this whole suite runs under
+          # `set -e` with `pipefail`, and a `grep` for a colour that is not on
+          # the screen yet is exactly the case being measured — the first
+          # version of this exited the suite instead of reporting zero.
+          amber() {
+            import -window root "png24:$1" 2>/dev/null || true
+            counted=$( { convert "$1" -define histogram:unique-colors=true \
+              -format '%c' histogram:info:- 2>/dev/null || true; } \
+              | { grep -i '#E4A72E' || true; } | head -1 \
+              | awk -F: '{print $1}' | tr -d ' ')
+            printf '%s' "${counted:-0}"
+          }
+          before=$(amber "$seen/before.png")
+          env -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$seen_addr" --seconds 2 \
+            > "$seen/client.log" 2>&1 &
+          seen_client=$!
+          sleep 3
+          during=$(amber "$seen/during.png")
+          wait "$seen_client" 2>/dev/null || true
+          if [ "$(awk -v a="${during:-0}" -v b="${before:-0}" 'BEGIN{print (a > b + 1000) ? 1 : 0}')" = 1 ]; then
+            printf '  ✓ and the prompt was really on the screen: %s amber pixels against %s\n' \
+              "${during:-0}" "${before:-0}"
+          else
+            printf '  ✗ nothing was drawn on the screen (%s amber pixels against %s)\n' \
+              "${during:-0}" "${before:-0}"
+            sed 's/^/      /' "$seen/client.log"
+            fail=1
+          fi
+
+          # **And nobody answering is a different refusal from nobody to ask.**
+          # The old behaviour on this machine was the second, and a check that
+          # accepted either would pass on a host that had not asked at all.
+          if grep -q 'nobody at the host answered' "$seen/client.log"; then
+            printf '  ✓ and a prompt nobody answered is a timeout, not "nobody to ask"\n'
+          else
+            printf '  ✗ the refusal was not a prompt going unanswered\n'
+            sed 's/^/      /' "$seen/client.log"
+            fail=1
+          fi
+        fi
+        kill "$seen_host" 2>/dev/null || true
+        wait "$seen_host" 2>/dev/null || true
+        seen_host=""
+        rm -rf "$seen"
+      fi
 
       echo "  — revoking a device that is connected right now"
       { printf 'echo holding\n'; sleep 15; } | \

@@ -1,0 +1,11 @@
+[package]
+name = "esper-dialog"
+description = "What a consent question looks like — glyphs, layout and hit targets, as pixels rather than as a window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
