@@ -167,12 +167,14 @@ impl ControllerLink {
         self.stream.link_fps()
     }
 
-    /// How fast this link carried a burst, in kbit/s.
+    /// What this link carries, and how that was established.
     ///
-    /// The only measurement of a link's *capacity* a receiver can make: see
-    /// [`esper_stream::ControllerStream::link_capacity`].
+    /// The only measurement of a link's *capacity* a receiver can make — and
+    /// it comes with its provenance, because one of the two ways of arriving
+    /// at it is a lower bound rather than a reading: see
+    /// [`esper_stream::Capacity`].
     #[must_use]
-    pub fn link_capacity(&self) -> Option<f64> {
+    pub fn link_capacity(&self) -> Option<esper_stream::Capacity> {
         self.stream.link_capacity()
     }
 

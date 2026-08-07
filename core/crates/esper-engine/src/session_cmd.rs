@@ -4915,11 +4915,28 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // own arrival measures the difference. A number worth showing on its
         // own — somebody asking why a session is soft is better served by
         // "this link carries about 800 kbit/s" than by any amount of advice.
-        if let Some(kbit) = capacity {
-            println!(
-                "  capacity   about {kbit:.0} kbit/s, from how fast a frame's \
-                 datagrams arrived together"
-            );
+        //
+        // **And it says which of the two measurements it is.** One times a
+        // frame's own datagrams arriving together; the other counts bytes
+        // while frames are failing, cannot tell a frame from a fragment, and
+        // is a lower bound. Both used to print the first sentence, which is
+        // the sentence somebody reads to decide whether to believe the
+        // number — measured, an 800 kbit/s link with a buffer too short for
+        // one frame reported "about 398 kbit/s, from how fast a frame's
+        // datagrams arrived together", and only the last clause was wrong.
+        if let Some(carried) = capacity {
+            match carried.how {
+                esper_stream::Measured::ByABurst => println!(
+                    "  capacity   about {:.0} kbit/s, from how fast a frame's \
+                     datagrams arrived together",
+                    carried.kbit
+                ),
+                esper_stream::Measured::AtLeast => println!(
+                    "  capacity   at least {:.0} kbit/s, counted while frames were \
+                     failing — nothing here could time one",
+                    carried.kbit
+                ),
+            }
         }
         // **A short buffer, which looks exactly like a lossy link and is not.**
         //

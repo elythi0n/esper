@@ -32,7 +32,7 @@ pub mod resume;
 
 pub use audio::{AudioStats, ControllerAudio, HostAudio, PAYLOAD_TYPE_OPUS};
 pub use controller::Encoded;
-pub use controller::{ControllerStats, ControllerStream, Decoded};
+pub use controller::{Capacity, ControllerStats, ControllerStream, Decoded, Measured};
 pub use cursor::{CursorTracker, POSITION_INTERVAL};
 pub use host::{Handled, HostStep, HostStream, audio_ssrc, ssrc_for};
 pub use jitter::{Jitter, JitterStats};

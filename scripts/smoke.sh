@@ -2549,17 +2549,43 @@ print(s.getsockname()[1]); s.close()')
         # thing that measures capacity, because its datagrams are handed over
         # at once — so what spread they arrive with is the wire.
         #
-        # The bench link carries 800 kbit/s. A reading within a factor of two
-        # of that is the assertion: the estimate ran 8-15% high on an idle
-        # machine, and what would fail this is reading *demand* instead, which
-        # on this link is a third of it and on a fast one is unrelated
-        # entirely.
-        seen_kbit=$(printf '%s' "$out" | awk '/^  capacity /{print $3}')
-        if [ -n "$seen_kbit" ] &&
-          [ "$(awk -v k="$seen_kbit" 'BEGIN{print (k > 400 && k < 1600) ? 1 : 0}')" = 1 ]; then
-          printf '  ✓ the link was measured at about %s kbit/s, which is what it is\n' "$seen_kbit"
+        # **Two figures, and the report says which.** A frame timed end to end
+        # is a reading of the link, and the bench link carries 800 kbit/s: a
+        # reading within a factor of two of that is the assertion, because the
+        # estimate ran 8-15% high on an idle machine and what would fail it is
+        # reporting *demand*, a third of the link here and unrelated on a fast
+        # one. But this regime can also leave nothing timeable — under load
+        # the session collapses to frames smaller than a burst has to be — and
+        # then the figure is bytes counted while frames failed, which is a
+        # lower bound and says so. Asserting 800 against *that* number failed
+        # this suite once at 398 kbit/s, for a session that was carrying 337:
+        # the number was true and the sentence around it was not.
+        #
+        # So the check reads the provenance out of the line and holds each
+        # figure to what it claims to be. A lower bound has to be at least
+        # what the session actually carried, which is the property that would
+        # still catch it going backwards.
+        seen_kbit=$(printf '%s' "$out" | awk '/^  capacity /{print ($2 == "about") ? $3 : $4}')
+        seen_how=$(printf '%s' "$out" | awk '/^  capacity /{print $2}')
+        carried_kbit=$(printf '%s' "$out" | awk '/^  received /{print $6}')
+        capacity_ok=0
+        case "$seen_how" in
+          about)
+            [ -n "$seen_kbit" ] &&
+              capacity_ok=$(awk -v k="$seen_kbit" 'BEGIN{print (k > 400 && k < 1600) ? 1 : 0}')
+            ;;
+          least)
+            [ -n "$seen_kbit" ] && [ -n "$carried_kbit" ] &&
+              capacity_ok=$(awk -v k="$seen_kbit" -v c="$carried_kbit" \
+                'BEGIN{print (k >= c && k < 1600) ? 1 : 0}')
+            ;;
+        esac
+        if [ "$capacity_ok" = 1 ]; then
+          printf '  ✓ the link read as %s %s kbit/s, which is what that measurement means\n' \
+            "$seen_how" "$seen_kbit"
         else
-          printf '  ✗ an 800 kbit/s link was measured at %s kbit/s\n' "${seen_kbit:-nothing}"
+          printf '  ✗ an 800 kbit/s link carrying %s read as "%s %s"\n' \
+            "${carried_kbit:-?}" "${seen_how:-nothing}" "${seen_kbit:-}"
           printf '%s\n' "$out" | sed 's/^/      /'
           fail=1
         fi

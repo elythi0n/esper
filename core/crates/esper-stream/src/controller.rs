@@ -73,6 +73,62 @@ const RUNGS: &[u32] = &[1920, 1280, 960, 640, 480, 320];
 /// handed over in the same breath rather than by the wire between them.
 const SMALLEST_BURST_WORTH_TIMING: u64 = 4_000;
 
+/// A link's capacity, and how it was established.
+///
+/// # Why the provenance travels with the number
+///
+/// There are two measurements here and they are not equally trustworthy. One
+/// times a frame's own datagrams arriving together, which is the only thing
+/// that measures a *link* rather than the demand on it. The other counts bytes
+/// while frames are failing — it cannot tell a frame from a fragment, and it
+/// is a lower bound rather than a reading.
+///
+/// The session report used to print both under the same sentence, "from how
+/// fast a frame's datagrams arrived together". That sentence is what somebody
+/// reads to decide whether to believe the number, and for the second
+/// measurement it was false. Measured: an 800 kbit/s link with a buffer too
+/// short for one frame reported 398 kbit/s — a true lower bound, presented as
+/// a measurement of the link.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Capacity {
+    /// The rate, in kbit/s.
+    pub kbit: f64,
+    /// What it was established from.
+    pub how: Measured,
+}
+
+impl Capacity {
+    /// Timed from a frame's datagrams arriving together.
+    #[must_use]
+    pub fn timed(kbit: f64) -> Self {
+        Self {
+            kbit,
+            how: Measured::ByABurst,
+        }
+    }
+
+    /// A lower bound, from bytes counted while frames were failing.
+    #[must_use]
+    pub fn at_least(kbit: f64) -> Self {
+        Self {
+            kbit,
+            how: Measured::AtLeast,
+        }
+    }
+}
+
+/// How a capacity figure was arrived at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Measured {
+    /// Timed from a frame's own datagrams arriving together: the accurate one,
+    /// and the only measurement of the link itself.
+    ByABurst,
+    /// Bytes counted while frames were failing — the one regime nothing can
+    /// time. A lower bound on what the link carries, which is what a pacer
+    /// wants and is not a reading of the link.
+    AtLeast,
+}
+
 /// How many burst measurements to keep.
 ///
 /// Sixteen, which at a keyframe every few seconds is most of a minute of
@@ -669,8 +725,8 @@ impl ControllerStream {
     /// sent immediately, because a host pacing on a number nothing stands
     /// behind is the one state worth leaving quickly.
     fn say_what_the_link_carries(&mut self, now: std::time::Instant) {
-        let measured = self.link_capacity().and_then(|kbit| {
-            let rounded = kbit.round();
+        let measured = self.link_capacity().and_then(|carried| {
+            let rounded = carried.kbit.round();
             (rounded > 0.0).then_some(rounded as u32)
         });
         let withdrawn = measured.is_none() && self.reported.is_some();
@@ -937,17 +993,17 @@ impl ControllerStream {
     /// on a link carrying 800 kbit/s, the readings from frames worth timing
     /// ran 763 to 886 while the maximum over all of them was 5.7 Gbit/s.
     #[must_use]
-    pub fn link_capacity(&self) -> Option<f64> {
+    pub fn link_capacity(&self) -> Option<Capacity> {
         self.capacity_at(std::time::Instant::now())
     }
 
     /// The same, at a stated instant, so a test can say when it is asking.
     #[must_use]
-    pub fn capacity_at(&self, now: std::time::Instant) -> Option<f64> {
+    pub fn capacity_at(&self, now: std::time::Instant) -> Option<Capacity> {
         let mut seen: Vec<f64> = self.burst.iter().flatten().copied().collect();
         if seen.len() >= ENOUGH_BURSTS_TO_JUDGE {
             seen.sort_by(f64::total_cmp);
-            return seen.get(seen.len() / 2).copied();
+            return seen.get(seen.len() / 2).copied().map(Capacity::timed);
         }
         // **The fallback, and only while frames are failing.**
         //
@@ -964,11 +1020,11 @@ impl ControllerStream {
         // send would pace the host down to the trickle it was already
         // sending — the opposite mistake, and a worse one.
         if self.starved(now) {
-            return self.arrival_rate;
+            return self.arrival_rate.map(Capacity::at_least);
         }
         // And otherwise what was measured while the link *was* full, which is
         // the answer a session reports once it has finished struggling.
-        self.full_link_rate
+        self.full_link_rate.map(Capacity::at_least)
     }
 
     /// Move the link ladder if a window has closed.
@@ -1110,10 +1166,25 @@ impl ControllerStream {
             .saturating_sub(self.lost_when_window_began);
         let judged = self.rung_when_window_began;
         self.lost_last_window = lost;
-        // **Remembered here, while the evidence is present.** A window that
-        // lost frames is a window in which the link was full, so what arrived
-        // during it is what the link carries.
+        // **Remembered here, while the evidence is present** — and only when
+        // the loss means what this is about to read into it.
+        //
+        // A window that lost frames *with the round trip growing* is a window
+        // in which the link was full, so what arrived during it is what the
+        // link carries. A window that lost frames with the round trip flat is
+        // a buffer too short to hold one frame, and there the rate was never
+        // the problem: what arrived is what the host happened to be offering
+        // after the collapse, which on a link with plenty of rate is a small
+        // fraction of it.
+        //
+        // Recording it anyway was measured: on an 800 kbit/s link with 40
+        // packets of queue, the session reported a capacity of 398 kbit/s
+        // against the 337 it was carrying — a number the host then paces to,
+        // which holds the session down at the size that produced it. The two
+        // failures are already told apart a few lines below, for the same
+        // reason and with the same test.
         if lost >= LOSSES_TO_STEP_DOWN
+            && !self.queue_is_flat()
             && let Some(rate) = self.arrival_rate
             && rate > 0.0
         {
@@ -1170,28 +1241,6 @@ impl ControllerStream {
             // link — unlike capping what a session *opens* at, which was tried
             // and charged every session on every link three seconds of soft
             // picture for the benefit of the few that need it.
-            if self.rung.is_none() {
-                self.before_the_collapse = Some(0);
-                self.rung = Some(RUNGS.len().saturating_sub(1));
-                self.say_what_we_want();
-                self.step_bloat_ladder();
-                return;
-            }
-            // **The first descent is a collapse, not a step.**
-            //
-            // Walking down one rung a window is a policy for a link that is
-            // slightly too slow. It is not one for a link that cannot carry
-            // the size a session *opens* at: measured on a link with 100 ms of
-            // buffer at 200 kbit/s, the walk took four seconds, and by the
-            // time it reached the bottom the queue was so far behind that no
-            // keyframe ever arrived whole — no picture at all in fifteen
-            // seconds, while the same link *pinned* at the bottom rung
-            // delivered 362.
-            //
-            // So the first losing window goes straight to the smallest rung,
-            // and the ordinary "up slow" climb brings it back. A session that
-            // never loses a frame never comes here at all, which is what makes
-            // this free on a good link.
             if self.rung.is_none() {
                 self.before_the_collapse = Some(0);
                 self.rung = Some(RUNGS.len().saturating_sub(1));
@@ -2078,6 +2127,65 @@ mod tests {
         );
     }
 
+    /// **A short buffer is not a full link, and what arrived does not measure
+    /// one.**
+    ///
+    /// A window that loses frames with the round trip *growing* is a link that
+    /// is full, and there what arrived is what it carries. A window that loses
+    /// frames with the round trip *flat* is a buffer too short to hold one
+    /// frame: the rate was never the problem, and what arrived is only what
+    /// the host happened to be offering after the collapse.
+    ///
+    /// This is the figure a session reports **once it has finished
+    /// struggling** — the one that outlives the trouble and goes on pacing the
+    /// host. Measured before this, on an 800 kbit/s link with 40 packets of
+    /// queue: 398 kbit/s against the 337 the session was carrying.
+    #[test]
+    fn a_short_buffer_is_not_remembered_as_a_full_link() {
+        /// One losing window, then a clean one, on a link whose round trip
+        /// behaves as `queueing` says — and then what it remembers.
+        fn after_struggling(queueing: bool) -> Option<Capacity> {
+            let t0 = std::time::Instant::now();
+            let mut c = ControllerStream::new(&announced(30)).expect("a config");
+
+            // A baseline to compare against, then the round trip this case is
+            // about.
+            c.set_round_trip(Duration::from_millis(20));
+            c.step_bloat_ladder();
+            c.set_round_trip(Duration::from_millis(if queueing { 400 } else { 20 }));
+
+            // Bytes arriving for more than one arrival window, so there is a
+            // rate to be tempted by.
+            for i in 0..40u32 {
+                c.note_arrival(1_200, t0 + Duration::from_millis(u64::from(i) * 30));
+            }
+
+            c.step_ladder(t0);
+            c.stats.frames_lost = LOSSES_TO_STEP_DOWN;
+            c.step_ladder(t0 + Duration::from_millis(1_200));
+            // And the struggle is over: a window with nothing lost, and a
+            // frame that completed, so the starved fallback is not the thing
+            // answering.
+            c.step_ladder(t0 + Duration::from_millis(2_400));
+            c.last_whole_frame = Some(t0 + Duration::from_millis(2_400));
+            c.capacity_at(t0 + Duration::from_millis(2_401))
+        }
+
+        assert_eq!(
+            after_struggling(false),
+            None,
+            "what arrived while a short buffer dropped frames is not a capacity"
+        );
+        let full = after_struggling(true)
+            .expect("a link that was genuinely full has to leave a number behind");
+        assert_eq!(
+            full.how,
+            Measured::AtLeast,
+            "counted bytes are a lower bound, and the report has to say so"
+        );
+        assert!(full.kbit > 0.0, "a remembered rate of nothing is not one");
+    }
+
     /// **The degradation order, which the link ladder did not follow.**
     ///
     /// This product states it: framerate, then quality, then resolution. The
@@ -2433,7 +2541,10 @@ mod tests {
         for _ in 0..ENOUGH_BURSTS_TO_JUDGE {
             c.note_burst(10_000, Duration::from_millis(800));
         }
-        let measured = c.link_capacity().expect("four readings is enough to judge");
+        let measured = c
+            .link_capacity()
+            .expect("four readings is enough to judge")
+            .kbit;
         assert!(
             (measured - 100.0).abs() < 1.0,
             "10 000 bytes over 800 ms is 100 kbit/s, not {measured:.0}"
@@ -2445,7 +2556,7 @@ mod tests {
         for _ in 0..ENOUGH_BURSTS_TO_JUDGE {
             fast.note_burst(10_000, Duration::from_millis(80));
         }
-        let measured = fast.link_capacity().expect("readings");
+        let measured = fast.link_capacity().expect("readings").kbit;
         assert!((measured - 1000.0).abs() < 10.0, "{measured:.0}");
     }
 
@@ -2506,7 +2617,7 @@ mod tests {
             c.note_burst(10_000, Duration::from_millis(80));
         }
         c.note_burst(10_000, Duration::from_secs(4));
-        let measured = c.link_capacity().expect("readings");
+        let measured = c.link_capacity().expect("readings").kbit;
         assert!(
             (measured - 1000.0).abs() < 10.0,
             "one absurd reading either way moved the estimate to {measured:.0}"
