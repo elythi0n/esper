@@ -76,6 +76,16 @@ check-reached:
 check-trail:
 	@python3 ./scripts/check-trail-stays.py
 
+## Verify the decisions the host makes alone never cross the wire
+##
+## A schedule the far end could read, negotiate or supply the time for would
+## not be a control, and a lock state it could assert would be a switch for
+## turning the policy off. Both directions are checked: the rule does not go
+## out, and nothing peer-supplied comes in.
+.PHONY: check-host-decides
+check-host-decides:
+	@python3 ./scripts/check-host-decides.py
+
 ## Check the clock against Python's own timezone handling
 ##
 ## `esper-clock` reads the machine's timezone database itself, and a parser
@@ -345,7 +355,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-trail fmt-check lint test build smoke
+ci: check-isolation check-reached check-trail check-host-decides fmt-check lint test build smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full
