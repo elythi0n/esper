@@ -53,6 +53,11 @@ pub fn list() -> Result<(), String> {
     for device in store.iter() {
         println!("  {}  {}", device.fingerprint().hex(), device.name);
         println!("      may  {}", crate::net::permissions(device));
+        // Which groups it is in, because a policy applied to a group is one
+        // an operator has to be able to see the reach of.
+        if !device.groups.is_empty() {
+            println!("      in   {}", device.groups.join(", "));
+        }
         if device.pairing.is_once() {
             any_once = true;
             println!("      for  {}", device.pairing.describe(now));
@@ -159,14 +164,27 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
     // not matter and it cannot be mistaken for a fingerprint.
     let answered_already = args.iter().any(|a| a == "--yes");
     let args: Vec<String> = args.iter().filter(|a| *a != "--yes").cloned().collect();
-    let [prefix, names @ ..] = args.as_slice() else {
-        return Err(format!(
-            "usage: {} {verb} <fingerprint> <permission>... [--yes]\n\
+    // **The target is taken off the front before anything else is read.**
+    // `--group ops control` is a group and one permission; reading the first
+    // word as a fingerprint made the *group's name* the first permission, and
+    // the error said `unknown permission "ops"`.
+    let usage = || {
+        format!(
+            "usage: {} {verb} <fingerprint>|--group <name> <permission>... [--yes]\n\
              permissions: {}",
             crate::net::me(),
             every_permission()
-        ));
+        )
     };
+    let how_many = match args.as_slice() {
+        [flag, _name, ..] if flag == "--group" => 2,
+        [_prefix, ..] => 1,
+        [] => return Err(usage()),
+    };
+    let (target, names) = args.split_at(how_many);
+    // What to call it in a message somebody has to act on.
+    let prefix = target.join(" ");
+    let prefix = prefix.as_str();
     if names.is_empty() {
         return Err(format!(
             "{} {verb} needs at least one permission\npermissions: {}",
@@ -217,45 +235,62 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
     for line in &dropped {
         eprintln!("  · {line}");
     }
-    let key = *find(&store, prefix)?;
-    let Some(device) = store.get_mut(&key) else {
-        return Err("the device disappeared between finding it and changing it".to_owned());
-    };
-
-    for p in &wanted {
-        match what {
-            Change::Grant => device.grant(*p),
-            Change::Revoke => device.revoke(*p),
+    // **Every key resolved before the first write.** A group that names
+    // nothing, or a fingerprint that names two devices, changes nothing —
+    // rather than changing some of it and then saying why it stopped.
+    let (whose, _) = whose(&store, target)?;
+    let mut changed: Vec<(String, String, Vec<Permission>, [u8; 32])> = Vec::new();
+    for key in whose.keys() {
+        let Some(device) = store.get_mut(key) else {
+            return Err("a device disappeared between finding it and changing it".to_owned());
+        };
+        for p in &wanted {
+            match what {
+                Change::Grant => device.grant(*p),
+                Change::Revoke => device.revoke(*p),
+            }
         }
+        changed.push((
+            device.name.clone(),
+            crate::net::permissions(device),
+            device.permissions.clone(),
+            *key,
+        ));
     }
-    let name = device.name.clone();
-    let now = crate::net::permissions(device);
-    let permissions = device.permissions.clone();
     paths::save_devices(&store)?;
 
     // Recorded, because changing what a device may do is one of the few things
     // a person does *to* this machine's security posture, and the audit trail
     // is where somebody looks when they want to know who widened what.
-    record(
-        &key,
-        Event::PermissionsChanged {
-            granted: permissions,
-        },
-    );
+    // **One entry per device, not one per command.** An auditor asking what a
+    // machine may do needs the answer for that machine; a single line saying
+    // "the ops group was granted control" would leave them working out who was
+    // in it at the time.
+    for (_, _, permissions, key) in &changed {
+        record(
+            key,
+            Event::PermissionsChanged {
+                granted: permissions.clone(),
+            },
+        );
+    }
 
     let done = match what {
         Change::Grant => "granted",
         Change::Revoke => "revoked",
     };
-    println!(
-        "  {done} {} on {name}",
-        wanted
-            .iter()
-            .map(|p| p.name())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    println!("  may     {now}");
+    let what_changed = wanted
+        .iter()
+        .map(|p| p.name())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let Whose::Group(name, _) = &whose {
+        println!("  {done} {what_changed} on {} in {name:?}", changed.len());
+    }
+    for (name, now, _, _) in &changed {
+        println!("  {done} {what_changed} on {name}");
+        println!("  may     {now}");
+    }
     if what == Change::Revoke {
         // A running host re-reads the store while it runs, so this reaches
         // the session that device already has. Worth saying, because the
@@ -287,21 +322,22 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
 /// names no device or more than one, the schedule cannot be read, or the store
 /// cannot be written.
 pub fn schedule(args: &[String]) -> Result<(), String> {
-    let [prefix, rest @ ..] = args else {
+    if args.is_empty() {
         return Err(schedule_usage());
-    };
+    }
+    let (mut store, dropped) = paths::devices()?;
+    for line in &dropped {
+        eprintln!("  · {line}");
+    }
+    // A fingerprint or a group, resolved before anything is written — the
+    // same rule the permission changes follow.
+    let (whose, rest) = whose(&store, args)?;
     if rest.is_empty() {
         return Err(schedule_usage());
     }
     // Joined, so `schedule <fp> weekdays 08:00-18:00` works without quoting.
     // Somebody typing a schedule has enough to think about.
     let spec = rest.join(" ");
-
-    let (mut store, dropped) = paths::devices()?;
-    for line in &dropped {
-        eprintln!("  · {line}");
-    }
-    let key = *find(&store, prefix)?;
 
     let wanted = if matches!(
         spec.trim().to_ascii_lowercase().as_str(),
@@ -312,14 +348,49 @@ pub fn schedule(args: &[String]) -> Result<(), String> {
         Some(esper_clock::Schedule::parse(&spec).map_err(|e| e.to_string())?)
     };
 
-    let Some(device) = store.get_mut(&key) else {
-        return Err("the device disappeared between finding it and scheduling it".to_owned());
-    };
-    let name = device.name.clone();
-    let had_permission = device.may(esper_proto::Permission::Unattended);
-    let fingerprint = device.fingerprint().hex();
-    device.unattended_when = wanted.clone();
+    let mut scheduled: Vec<(String, bool, String, [u8; 32])> = Vec::new();
+    for key in whose.keys() {
+        let Some(device) = store.get_mut(key) else {
+            return Err("a device disappeared between finding it and scheduling it".to_owned());
+        };
+        device.unattended_when = wanted.clone();
+        scheduled.push((
+            device.name.clone(),
+            device.may(esper_proto::Permission::Unattended),
+            device.fingerprint().hex(),
+            *key,
+        ));
+    }
     paths::save_devices(&store)?;
+    let Some((name, had_permission, fingerprint, key)) = scheduled.first().cloned() else {
+        return Err("no device to schedule".to_owned());
+    };
+    if let Whose::Group(group, _) = &whose {
+        println!();
+        println!(
+            "  scheduled {} device(s) in {group:?}: {}",
+            scheduled.len(),
+            scheduled
+                .iter()
+                .map(|(n, _, _, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    // **One entry per device**, for the same reason a permission change
+    // writes one: an auditor asking about a machine needs the answer for that
+    // machine rather than the name of a group somebody has since changed.
+    for (_, _, _, each) in scheduled.iter().skip(1) {
+        record(
+            each,
+            Event::PermissionsChanged {
+                granted: store
+                    .get(each)
+                    .map(|d| d.permissions.clone())
+                    .unwrap_or_default(),
+            },
+        );
+    }
 
     // **Recorded like every other change to what this machine trusts.**
     // Narrowing or widening when a device may walk in unasked is exactly the
@@ -486,6 +557,193 @@ fn record(key: &[u8; 32], event: Event) {
 }
 
 /// The one device whose fingerprint starts with `prefix`.
+/// Put devices in a group, take them out, or show who is in one.
+///
+/// # Why a group is a label rather than a list
+///
+/// A file of groups would be a second thing with a lifecycle: a group naming a
+/// device that was unpaired is a dangling reference, and something has to
+/// notice. A label on the device cannot dangle — forgetting a device forgets
+/// its memberships in the same write. What it costs is that a group *is* its
+/// members: the last device leaving takes the name with it.
+///
+/// # Errors
+///
+/// If the arguments are not a group name and fingerprints, a fingerprint
+/// names no device or more than one, or the store cannot be written.
+pub fn group(args: &[String]) -> Result<(), String> {
+    let removing = args.iter().any(|a| a == "--remove");
+    let args: Vec<String> = args.iter().filter(|a| *a != "--remove").cloned().collect();
+    let [name, prefixes @ ..] = args.as_slice() else {
+        return Err(group_usage());
+    };
+    let name = esper_crypto::Device::group_name(name);
+    if name.is_empty() {
+        return Err("a group needs a name".to_owned());
+    }
+
+    let (mut store, dropped) = paths::devices()?;
+    for line in &dropped {
+        eprintln!("  · {line}");
+    }
+
+    // No fingerprints is a question rather than a change.
+    if prefixes.is_empty() {
+        if removing {
+            return Err(format!(
+                "{} group --remove needs the devices to take out of {name:?}",
+                crate::net::me()
+            ));
+        }
+        show(&store, &name);
+        return Ok(());
+    }
+
+    // **Every fingerprint resolved before the first write**, so a typo in the
+    // third one does not leave the first two moved.
+    let mut keys = Vec::new();
+    for prefix in prefixes {
+        let key = *find(&store, prefix)?;
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    let mut moved = Vec::new();
+    for key in &keys {
+        let Some(device) = store.get_mut(key) else {
+            return Err("a device disappeared between finding it and changing it".to_owned());
+        };
+        if removing {
+            device.leave(&name);
+        } else {
+            device.join(&name)?;
+        }
+        moved.push((device.name.clone(), device.groups.join(", ")));
+    }
+    paths::save_devices(&store)?;
+
+    println!();
+    let done = if removing { "took out of" } else { "put in" };
+    for (device, groups) in &moved {
+        println!("  {done} {name:?}: {device}");
+        if groups.is_empty() {
+            println!("  groups  none");
+        } else {
+            println!("  groups  {groups}");
+        }
+    }
+    println!();
+    println!(
+        "  apply a policy to all of them:  {} grant --group {name} <permission>...",
+        crate::net::me()
+    );
+    Ok(())
+}
+
+/// Print who is in a group.
+fn show(store: &DeviceStore, name: &str) {
+    let members: Vec<&Device> = store.iter().filter(|d| d.in_group(name)).collect();
+    println!();
+    if members.is_empty() {
+        println!("  nobody is in {name:?}");
+        println!();
+        println!(
+            "  put a device in it:  {} group {name} <fingerprint>...",
+            crate::net::me()
+        );
+        return;
+    }
+    println!("  {} in {name:?}", members.len());
+    for d in members {
+        println!("  {}  {}", d.fingerprint().hex(), d.name);
+        println!("      may  {}", crate::net::permissions(d));
+    }
+}
+
+/// What to say when somebody asks, or gets it wrong.
+#[must_use]
+pub fn group_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} group <name> [<fingerprint>...] [--remove]\n\
+         \n\
+         Put paired devices in a group, so a policy can be applied to all of\n\
+         them at once. With no fingerprints, shows who is in it.\n\
+         \n\
+         A group is its members: the last device leaving takes the name with\n\
+         it, and forgetting a device forgets its memberships.\n\
+         \n\
+         options:\n  \
+         \x20 --remove   take those devices out of the group instead\n\
+         \n\
+         for example: {me} group ops 8a0f18d8 3423d1d7\n\
+         \x20            {me} grant --group ops control\n\
+         \x20            {me} group ops"
+    )
+}
+
+/// Which devices a command is about: one by fingerprint, or a whole group.
+///
+/// **Resolved before anything is written**, like the permission names are: a
+/// group that names nothing, or a fingerprint that names two devices, should
+/// change nothing rather than change some of it.
+#[derive(Debug)]
+pub enum Whose {
+    /// One device, found by a prefix of its fingerprint.
+    One([u8; 32]),
+    /// Every device in a group, and the group's name for saying so.
+    Group(String, Vec<[u8; 32]>),
+}
+
+impl Whose {
+    /// The keys this applies to.
+    #[must_use]
+    pub fn keys(&self) -> &[[u8; 32]] {
+        match self {
+            Self::One(key) => std::slice::from_ref(key),
+            Self::Group(_, keys) => keys,
+        }
+    }
+}
+
+/// Read `--group <name>` or a fingerprint out of the arguments.
+///
+/// Returns what is left, so the caller can go on reading its own arguments
+/// without knowing which form was used.
+fn whose<'a>(store: &DeviceStore, args: &'a [String]) -> Result<(Whose, &'a [String]), String> {
+    if let [flag, name, rest @ ..] = args
+        && flag == "--group"
+    {
+        let keys = members(store, name);
+        if keys.is_empty() {
+            return Err(format!(
+                "no paired device is in a group called {:?} — `{} group {}` puts one in it",
+                esper_crypto::Device::group_name(name),
+                crate::net::me(),
+                esper_crypto::Device::group_name(name)
+            ));
+        }
+        return Ok((
+            Whose::Group(esper_crypto::Device::group_name(name), keys),
+            rest,
+        ));
+    }
+    let [prefix, rest @ ..] = args else {
+        return Err("no fingerprint given".to_owned());
+    };
+    Ok((Whose::One(*find(store, prefix)?), rest))
+}
+
+/// Every device in a group, in the order the store holds them.
+fn members(store: &DeviceStore, group: &str) -> Vec<[u8; 32]> {
+    store
+        .iter()
+        .filter(|d| d.in_group(group))
+        .map(|d| d.public_key)
+        .collect()
+}
+
 fn find<'a>(store: &'a DeviceStore, prefix: &str) -> Result<&'a [u8; 32], String> {
     let wanted = prefix.trim().to_ascii_lowercase().replace([' ', ':'], "");
     if wanted.is_empty() {

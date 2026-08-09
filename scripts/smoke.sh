@@ -3396,6 +3396,73 @@ TONE
         rm -rf "$dark"
       fi
 
+      # **A group, and a policy applied to all of it at once.**
+      #
+      # An operator with a dozen machines does not want to type twelve
+      # fingerprints to change one thing. A group is a label on the device
+      # records rather than a file of its own, so forgetting a device forgets
+      # its memberships in the same write and nothing can dangle.
+      echo "  — a group, and a policy applied to all of it at once"
+      gp=$(mktemp -d)
+      cp -a "$term_a/." "$gp/" 2>/dev/null || true
+      : > "$gp/sessions.log"
+      if ESPER_HOME="$gp" "$BIN/esper" group desks "$fp" > "$gp/put.log" 2>&1 &&
+        printf '%s' "$(cat "$gp/put.log")" | grep -q 'put in "desks"'; then
+        printf '  ✓ a device can be put in a group\n'
+      else
+        printf '  ✗ putting a device in a group failed\n'
+        sed 's/^/      /' "$gp/put.log"
+        fail=1
+      fi
+      # The listing shows it, because a policy applied to a group is one whose
+      # reach somebody has to be able to see.
+      if ESPER_HOME="$gp" "$BIN/esper" devices 2>/dev/null | grep -q '^      in   desks'; then
+        printf '  ✓ and the device list says which groups it is in\n'
+      else
+        printf '  ✗ the device list does not show group membership\n'
+        ESPER_HOME="$gp" "$BIN/esper" devices 2>/dev/null | head -6 | sed 's/^/      /'
+        fail=1
+      fi
+      # **The policy reaches the group, and the trail records the device.** A
+      # line saying "the desks group was granted control" would leave an
+      # auditor working out who was in it at the time.
+      if ESPER_HOME="$gp" "$BIN/esper" grant --group desks record --yes > "$gp/grant.log" 2>&1 &&
+        ESPER_HOME="$gp" "$BIN/esper" devices 2>/dev/null | grep -q 'record'; then
+        printf '  ✓ and a permission granted to the group reached the device\n'
+      else
+        printf '  ✗ granting to a group did not reach its devices\n'
+        sed 's/^/      /' "$gp/grant.log"
+        fail=1
+      fi
+      if grep -q '"event":"permissions_changed"' "$gp/sessions.log" 2>/dev/null; then
+        printf '  ✓ and the trail records the device rather than the group\n'
+      else
+        printf '  ✗ a group grant left no per-device trail entry\n'
+        tail -3 "$gp/sessions.log" 2>/dev/null | sed 's/^/      /'
+        fail=1
+      fi
+      # A group nobody is in is refused by name, rather than silently doing
+      # nothing to nobody.
+      empty=$(ESPER_HOME="$gp" "$BIN/esper" grant --group nowhere record --yes 2>&1 || true)
+      if printf '%s' "$empty" | grep -q 'nowhere'; then
+        printf '  ✓ and a group nobody is in is refused by name\n'
+      else
+        printf '  ✗ granting to an empty group was not refused\n'
+        printf '%s\n' "$empty" | sed 's/^/      /'
+        fail=1
+      fi
+      # And taking the last device out takes the group with it, which is what
+      # "a group is its members" means.
+      ESPER_HOME="$gp" "$BIN/esper" group desks "$fp" --remove >/dev/null 2>&1 || true
+      if ESPER_HOME="$gp" "$BIN/esper" group desks 2>/dev/null | grep -q 'nobody is in'; then
+        printf '  ✓ and the last device leaving takes the group with it\n'
+      else
+        printf '  ✗ the group outlived its last member\n'
+        ESPER_HOME="$gp" "$BIN/esper" group desks 2>&1 | head -4 | sed 's/^/      /'
+        fail=1
+      fi
+      rm -rf "$gp"
+
       # **Locking a host's screen, with a permission of its own.**
       #
       # The point of the permission being separate is that a device can hold it

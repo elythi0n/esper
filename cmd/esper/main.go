@@ -99,6 +99,9 @@ var engineCommands = map[string]bool{
 	// permission: a device may hold `lock` without holding `view`, so this
 	// works on a host it may not watch.
 	"lock": true,
+	// A group is a label on the device records, so applying a policy to
+	// several devices at once is one write and no second lifecycle.
+	"group": true,
 }
 
 func isEngineCommand(name string) bool { return engineCommands[name] }

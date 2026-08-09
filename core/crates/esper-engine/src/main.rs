@@ -206,6 +206,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("group") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match devices_cmd::group(&rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{} group: {e}", net::me());
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("lock") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             match lock_cmd::parse(&rest).and_then(|o| lock_cmd::run(&o)) {
@@ -421,6 +431,7 @@ fn usage_for(command: &str) -> Option<String> {
         "cp" => Some(cp_cmd::usage()),
         "host" => Some(session_cmd::host_usage()),
         "lock" => Some(lock_cmd::usage()),
+        "group" => Some(devices_cmd::group_usage()),
         "screenshot" => Some(screenshot_cmd::usage()),
         "schedule" => Some(devices_cmd::schedule_usage()),
         _ => None,
@@ -446,6 +457,7 @@ fn print_help() {
            pair       pair with another device, in either direction\n  \
            config     show every setting and where its value came from\n  \
            devices    list paired devices and what they may do\n  \
+           group      put devices in a group, for applying a policy at once\n  \
            screenshot one picture of a paired host's screen, as a PNG\n  \
            grant      give a paired device a permission (--yes to confirm a\n  \
            \x20          dangerous one without being asked)\n  \

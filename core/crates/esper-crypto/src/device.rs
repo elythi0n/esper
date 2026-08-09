@@ -141,6 +141,27 @@ pub struct Device {
     /// somebody sets one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unattended_when: Option<esper_clock::Schedule>,
+    /// The groups this device is in, for applying a policy to several at once.
+    ///
+    /// # Why a label on the device rather than a file of its own
+    ///
+    /// A groups file would be a second thing with a lifecycle: a group naming
+    /// a device that was unpaired is a dangling reference, and something has
+    /// to notice. A label cannot dangle — forgetting a device forgets its
+    /// memberships with it, in the same write.
+    ///
+    /// What it costs is that a group *is* its members: the last device leaving
+    /// takes the name with it. For a local list of a handful of machines that
+    /// is the right trade, and it is the behaviour somebody would guess.
+    ///
+    /// Names are normalised on the way in, so `Ops` and `ops` are one group
+    /// rather than two that look the same in a listing.
+    ///
+    /// Absent from a store written before this existed and not written out
+    /// when empty, so a file from either version reads the same until somebody
+    /// makes a group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 impl Device {
@@ -157,6 +178,7 @@ impl Device {
             overlay_address: None,
             pairing: Pairing::Kept,
             unattended_when: None,
+            groups: Vec::new(),
         }
     }
 
@@ -228,6 +250,44 @@ impl Device {
     #[must_use]
     pub fn may(&self, p: Permission) -> bool {
         self.permissions.contains(&p)
+    }
+
+    /// A group name as it is stored: trimmed and lowercased.
+    ///
+    /// One spelling per group, so `Ops` and `ops` are the same one rather than
+    /// two that look identical in a listing and behave differently.
+    #[must_use]
+    pub fn group_name(name: &str) -> String {
+        name.trim().to_ascii_lowercase()
+    }
+
+    /// Whether this device is in a group.
+    #[must_use]
+    pub fn in_group(&self, name: &str) -> bool {
+        let wanted = Self::group_name(name);
+        self.groups.contains(&wanted)
+    }
+
+    /// Put this device in a group. Idempotent.
+    ///
+    /// Refuses a name with nothing in it: a group called "" is one nobody can
+    /// type on purpose and everybody can type by accident.
+    pub fn join(&mut self, name: &str) -> Result<(), String> {
+        let wanted = Self::group_name(name);
+        if wanted.is_empty() {
+            return Err("a group needs a name".to_owned());
+        }
+        if !self.groups.contains(&wanted) {
+            self.groups.push(wanted);
+            self.groups.sort();
+        }
+        Ok(())
+    }
+
+    /// Take this device out of a group. Idempotent.
+    pub fn leave(&mut self, name: &str) {
+        let wanted = Self::group_name(name);
+        self.groups.retain(|g| *g != wanted);
     }
 
     /// Grant a permission. Idempotent.
@@ -1185,5 +1245,53 @@ mod tests {
         let store: DeviceStore = serde_json::from_str("{}").expect("decode");
         assert!(store.is_empty());
         assert_eq!(store.version, 1, "version should default rather than fail");
+    }
+
+    /// **One spelling per group**, so a listing cannot show two groups that
+    /// look identical and behave differently.
+    #[test]
+    fn a_group_name_is_normalised_once_and_matched_that_way() {
+        let mut d = device(3);
+        d.join(" Ops ").expect("a name");
+        assert_eq!(d.groups, vec!["ops".to_owned()]);
+        assert!(d.in_group("OPS"));
+        assert!(d.in_group("ops"));
+        assert!(!d.in_group("op"));
+
+        // Idempotent, and sorted so the file reads the same however the
+        // memberships were made.
+        d.join("ops").expect("a name");
+        d.join("desks").expect("a name");
+        assert_eq!(d.groups, vec!["desks".to_owned(), "ops".to_owned()]);
+
+        d.leave("OPS");
+        assert_eq!(d.groups, vec!["desks".to_owned()]);
+        // Leaving one it is not in changes nothing.
+        d.leave("nowhere");
+        assert_eq!(d.groups, vec!["desks".to_owned()]);
+    }
+
+    /// A group with no name is one nobody can type on purpose.
+    #[test]
+    fn a_group_needs_a_name() {
+        let mut d = device(3);
+        assert!(d.join("").is_err());
+        assert!(d.join("   ").is_err());
+        assert!(d.groups.is_empty());
+    }
+
+    /// **A store written before groups existed still reads**, and one with no
+    /// groups still writes the same file.
+    #[test]
+    fn groups_are_absent_from_a_file_that_has_none() {
+        let older = r#"{"public_key":"0000000000000000000000000000000000000000000000000000000000000000","name":"laptop","permissions":["view"],"paired_at":1}"#;
+        let d: Device = serde_json::from_str(older).expect("an older record has to decode");
+        assert!(d.groups.is_empty());
+
+        let out = serde_json::to_string(&device(3)).expect("encode");
+        assert!(
+            !out.contains("groups"),
+            "a device in no groups wrote a groups field: {out}"
+        );
     }
 }
