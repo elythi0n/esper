@@ -1441,6 +1441,20 @@ except OSError:
         grep '"direction"' "$term_a/sessions.log" | head -3 | sed 's/^/      /'
         fail=1
       fi
+      # **The count, because a long list hides the total.** Every device that
+      # can walk in unasked says so on its own line, which an operator with
+      # twenty devices has to read twenty entries to add up.
+      unasked=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        "$BIN/esper" devices 2>/dev/null || true)
+      if printf '%s' "$unasked" | grep -q 'may walk in unasked'; then
+        printf '  ✓ and says how many devices may walk in unasked: %s\n' \
+          "$(printf '%s' "$unasked" | grep -m1 'may walk in unasked' | sed 's/^ *//')"
+      else
+        printf '  ✗ the device list does not say how many may walk in unasked\n'
+        printf '%s\n' "$unasked" | sed 's/^/      /'
+        fail=1
+      fi
+
       # **The arrow is in the rendering**, because a person scanning a list
       # needs to see which way a session went without reading the sentence.
       outview=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \

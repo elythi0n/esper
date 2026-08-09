@@ -70,6 +70,16 @@ pub fn list() -> Result<(), String> {
         }
     }
     println!();
+    // **The count, because a long list hides the total.** Every device that
+    // can walk in unasked says so on a line of its own, which is right and is
+    // not enough: an operator with twenty devices has to read twenty entries
+    // to find out how many of them that is. This is the same fact at a glance,
+    // and it names the unbounded ones separately because those are the ones
+    // with no hours to be outside of.
+    if let Some(count) = how_many_walk_in(&store) {
+        println!("  {count}");
+        println!();
+    }
     println!(
         "  grant more with:  {} grant <fingerprint> <permission>...",
         crate::net::me()
@@ -93,6 +103,34 @@ pub fn list() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// How many devices may walk in unasked, in one line, or `None` when none can.
+///
+/// A function rather than three `println!`s so it can be tested: the
+/// interesting cases are none, some with hours, and some without, and the
+/// third is the one an operator most needs to see.
+fn how_many_walk_in(store: &esper_crypto::DeviceStore) -> Option<String> {
+    let total = store.iter().count();
+    let unasked: Vec<&esper_crypto::Device> = store
+        .iter()
+        .filter(|d| d.may(Permission::Unattended))
+        .collect();
+    if unasked.is_empty() {
+        return None;
+    }
+    let any_time = unasked
+        .iter()
+        .filter(|d| d.unattended_when.is_none())
+        .count();
+    let devices = if total == 1 { "device" } else { "devices" };
+    let mut line = format!("{} of {total} {devices} may walk in unasked", unasked.len());
+    if any_time > 0 {
+        // Said as a share of the ones that can, not of the whole list: the
+        // question an operator is asking is "how many of those are unbounded".
+        line.push_str(&format!(", {any_time} of them at any time, day or night"));
+    }
+    Some(line)
 }
 
 /// Every permission, for help text.
@@ -654,5 +692,76 @@ mod tests {
         // 'z' is not a hex digit, so no fingerprint can start with it.
         let e = find(&s, "zzzz").unwrap_err();
         assert!(e.contains("esper-engine devices"), "{e}");
+    }
+
+    /// A real key, because the store refuses one that is not a curve point.
+    fn a_key() -> [u8; 32] {
+        esper_crypto::Identity::generate()
+            .expect("a key")
+            .public_key()
+    }
+
+    fn paired(names: &[(&str, bool, bool)]) -> esper_crypto::DeviceStore {
+        let mut store = esper_crypto::DeviceStore::default();
+        for (name, unasked, bounded) in names {
+            let mut d = esper_crypto::Device::new(a_key(), (*name).to_owned(), 0);
+            if *unasked {
+                d.permissions.push(Permission::Unattended);
+                if *bounded {
+                    d.unattended_when = Some(
+                        esper_clock::Schedule::parse("weekdays 08:00-18:00").expect("a schedule"),
+                    );
+                }
+            }
+            store.insert(d).expect("a usable key");
+        }
+        store
+    }
+
+    /// **Nothing is said when nothing can walk in.**
+    ///
+    /// The commonest case, and a line saying "0 of 3 devices" would be noise
+    /// on every machine that has not granted the permission — which is the
+    /// state this product ships in.
+    #[test]
+    fn a_list_with_no_unattended_devices_says_nothing_about_it() {
+        let store = paired(&[("elythion", false, false), ("desk", false, false)]);
+        assert_eq!(how_many_walk_in(&store), None);
+        assert_eq!(
+            how_many_walk_in(&esper_crypto::DeviceStore::default()),
+            None
+        );
+    }
+
+    /// And the count is there when it is not zero.
+    #[test]
+    fn the_count_says_how_many_and_how_many_are_unbounded() {
+        let store = paired(&[
+            ("elythion", true, false),
+            ("desk", true, true),
+            ("phone", false, false),
+        ]);
+        let line = how_many_walk_in(&store).expect("a count");
+        assert!(
+            line.starts_with("2 of 3 devices may walk in unasked"),
+            "{line}"
+        );
+        assert!(line.contains("1 of them at any time"), "{line}");
+    }
+
+    /// A device with hours is counted, and is not counted as unbounded.
+    ///
+    /// The distinction the line exists for: a schedule is the difference
+    /// between "always" and "a choice", and a count that lumped them together
+    /// would make bounding one pointless.
+    #[test]
+    fn a_bounded_device_is_not_counted_as_any_time() {
+        let store = paired(&[("elythion", true, true)]);
+        let line = how_many_walk_in(&store).expect("a count");
+        assert!(
+            line.starts_with("1 of 1 device may walk in unasked"),
+            "{line}"
+        );
+        assert!(!line.contains("any time"), "{line}");
     }
 }
