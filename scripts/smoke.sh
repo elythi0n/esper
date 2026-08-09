@@ -392,7 +392,8 @@ cleanup_terminal() {
              "${priv_host:-}" "${priv_client:-}" "${priv_x:-}" "${api_pid:-}" \
              "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}" \
              "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" \
-             "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}"; do
+             "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}" \
+             "${seat_host:-}" "${switch_x:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -3320,14 +3321,21 @@ TONE
       #
       # **What is simulated, said exactly.** The whole screen's content is
       # replaced and put back, which is what any of those looks like to a
-      # capturer. `xset s activate` was tried first and is not a simulation of
-      # anything here: Xvfb has no CRTC to blank, so the framebuffer does not
-      # change and the check measured nothing.
+      # capturer.
+      #
+      # Two earlier versions of this measured nothing while passing. `xset s
+      # activate` does not change an `Xvfb` framebuffer, because there is no
+      # CRTC to blank. And `xsetroot -solid` sets the root's background pixel
+      # and never repaints it — with no window manager the screen stays
+      # exactly as it was, so the pictures the check counted were the session
+      # indicator appearing rather than the screen changing. `display -window
+      # root` paints the root, which is the one thing here that actually does.
       #
       # A screen *locker* holding a grab is the other half, and no shell can
       # start one. That half is `esper-presence-x11`'s display test, which
       # holds the keyboard over a covered screen and reads the state back.
-      if [ -n "${DISPLAY:-}" ] && command -v xsetroot >/dev/null 2>&1; then
+      if [ -n "${DISPLAY:-}" ] && command -v display >/dev/null 2>&1 &&
+        command -v xdpyinfo >/dev/null 2>&1; then
         echo "  — a session through the screen going dark and coming back"
         dark=$(mktemp -d)
         cp -a "$term_a/." "$dark/" 2>/dev/null || true
@@ -3352,10 +3360,13 @@ TONE
             timeout 60 "$BIN/esper-engine" connect "$dark_addr" --seconds 9 \
             > "$dark/client.log" 2>&1 &
           dark_client=$!
+          size=$(xdpyinfo | awk '/dimensions:/{print $2}' | head -1)
+          convert -size "${size:-1280x800}" xc:black "$dark/black.png" 2>/dev/null || true
+          convert -size "${size:-1280x800}" xc:white "$dark/white.png" 2>/dev/null || true
           sleep 3
-          xsetroot -solid black 2>/dev/null || true
+          display -window root "$dark/black.png" >/dev/null 2>&1 || true
           sleep 3
-          xsetroot -solid white 2>/dev/null || true
+          display -window root "$dark/white.png" >/dev/null 2>&1 || true
           wait "$dark_client" 2>/dev/null || true
           # **The session ran its course, and the screen changed twice.**
           #
@@ -3383,6 +3394,103 @@ TONE
         wait "$dark_host" 2>/dev/null || true
         dark_host=""
         rm -rf "$dark"
+      fi
+
+      # **A host serves the display it was started on, and does not follow a
+      # switch.**
+      #
+      # Fast user switching on Linux is a second X server on another seat. The
+      # host's connection is to *its* display, so the honest question is not
+      # whether the process survives — it does — but whether what it serves
+      # moves. It must not: a session that followed the switch would put the
+      # screen of whoever just logged in on somebody else's monitor.
+      #
+      # Two displays with two colours, and the picture has to be the first
+      # one's. Nothing here needs a real seat: what is being checked is that
+      # the host reads the display it was given and no other.
+      if [ -n "${DISPLAY:-}" ] && command -v display >/dev/null 2>&1 &&
+        command -v convert >/dev/null 2>&1; then
+        echo "  — a host serves the display it was started on"
+        other=90
+        while [ -e "/tmp/.X${other}-lock" ] && [ "$other" -lt 99 ]; do other=$((other + 1)); done
+        Xvfb ":$other" -screen 0 640x480x24 >/dev/null 2>&1 &
+        switch_x=$!
+        sleep 1
+        seat=$(mktemp -d)
+        cp -a "$term_a/." "$seat/" 2>/dev/null || true
+        : > "$seat/sessions.log"
+        ESPER_HOME="$seat" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+        # **The host's own display is red; the one somebody switched to is
+        # green.** Painted with `display -window root`, which is the one thing
+        # available here that actually repaints a root window — `xsetroot
+        # -solid` sets the background pixel and leaves the screen alone, which
+        # is how the first version of this check came to compare black against
+        # black.
+        size=$(xdpyinfo | awk '/dimensions:/{print $2}' | head -1)
+        convert -size "${size:-1280x800}" xc:'#ff0000' "$seat/red.png" 2>/dev/null || true
+        convert -size 640x480 xc:'#00ff00' "$seat/green.png" 2>/dev/null || true
+        display -window root "$seat/red.png" >/dev/null 2>&1 || true
+        DISPLAY=":$other" display -window root "$seat/green.png" >/dev/null 2>&1 || true
+
+        ESPER_HOME="$seat" timeout 90 "$BIN/esper-engine" host \
+          --listen 127.0.0.1:0 --no-mdns > "$seat/host.log" 2>&1 &
+        seat_host=$!
+        seat_addr=""
+        for _ in $(seq 1 150); do
+          if grep -q '^  consent ' "$seat/host.log" 2>/dev/null; then
+            seat_addr=$( { awk '/^  listening/{print $2}' "$seat/host.log" 2>/dev/null || true; } | head -1)
+            [ -n "$seat_addr" ] && break
+          fi
+          sleep 0.1
+        done
+        if [ -z "$seat_addr" ]; then
+          printf '  ✗ the host for the display check never started\n'
+          sed 's/^/      /' "$seat/host.log"
+          fail=1
+        else
+          if env -u XAUTHORITY ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
+            screenshot "$seat_addr" -o "$seat/shot.png" > "$seat/shot.log" 2>&1; then
+            colours=$(convert "$seat/shot.png" -define histogram:unique-colors=true \
+              -format '%c' histogram:info:- 2>/dev/null || true)
+            reds=$(printf '%s' "$colours" | { grep -ci '#FF0000' || true; })
+            greens=$(printf '%s' "$colours" | { grep -ci '#00FF00' || true; })
+            # And the size, which is the other half of the same fact: the two
+            # displays are different shapes, so a picture of the wrong one is
+            # the wrong size whatever colour it happens to be.
+            shape=$(python3 ./scripts/check-png.py "$seat/shot.png" 2>/dev/null | awk '{print $1}')
+            if [ "${reds:-0}" -ge 1 ] && [ "${greens:-0}" = 0 ] && [ "$shape" = "${size}" ]; then
+              printf '  ✓ the picture is the display it was started on: %s and red\n' "$shape"
+            else
+              printf '  ✗ the picture came from the wrong display (red %s, green %s, %s)\n' \
+                "${reds:-0}" "${greens:-0}" "${shape:-no size}"
+              printf '%s\n' "$colours" | head -6 | sed 's/^/      /'
+              fail=1
+            fi
+          else
+            printf '  ✗ taking a picture of the host failed\n'
+            sed 's/^/      /' "$seat/shot.log"
+            fail=1
+          fi
+          # And the session ran rather than being refused, which is the
+          # "survives" half: a second X server on the machine changes nothing
+          # about the one this host holds.
+          if grep -q '"event":"session_opened"' "$seat/sessions.log" 2>/dev/null; then
+            printf '  ✓ and a second display on the machine did not disturb it\n'
+          else
+            printf '  ✗ the session did not open with a second display present\n'
+            sed 's/^/      /' "$seat/sessions.log"
+            fail=1
+          fi
+        fi
+        kill "$seat_host" 2>/dev/null || true
+        wait "$seat_host" 2>/dev/null || true
+        seat_host=""
+        kill "$switch_x" 2>/dev/null || true
+        switch_x=""
+        # Put this display back the way the rest of the suite expects it.
+        convert -size "${size:-1280x800}" xc:white "$seat/white.png" 2>/dev/null || true
+        display -window root "$seat/white.png" >/dev/null 2>&1 || true
+        rm -rf "$seat"
       fi
 
       # **The bound reaches a session already running, not only an arriving
