@@ -391,7 +391,7 @@ cleanup_terminal() {
              "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}" "${retain_pid:-}" \
              "${priv_host:-}" "${priv_client:-}" "${priv_x:-}" "${api_pid:-}" \
              "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}" \
-             "${bound_host:-}"; do
+             "${bound_host:-}" "${unat_host:-}" "${unat_client:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -3303,6 +3303,80 @@ TONE
         wait "$bound_host" 2>/dev/null || true
         bound_host=""
         rm -rf "$bound"
+      fi
+
+      # **An unattended session is still visible and still recorded.**
+      #
+      # The two guarantees that must not be what `unattended` removes. It
+      # removes the *question*, and nothing else: somebody at the machine still
+      # sees that it is being watched, and the trail still says who came in —
+      # and now says that nobody was asked, which is the answer an auditor is
+      # looking for.
+      if [ -n "${DISPLAY:-}" ] && command -v import >/dev/null 2>&1; then
+        echo "  — an unattended session is still shown and still recorded"
+        unat=$(mktemp -d)
+        cp -a "$term_a/." "$unat/" 2>/dev/null || true
+        ESPER_HOME="$unat" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+        ESPER_HOME="$unat" timeout 90 "$BIN/esper-engine" host \
+          --listen 127.0.0.1:0 --no-mdns > "$unat/host.log" 2>&1 &
+        unat_host=$!
+        unat_addr=""
+        for _ in $(seq 1 150); do
+          if grep -q '^  consent ' "$unat/host.log" 2>/dev/null; then
+            unat_addr=$( { awk '/^  listening/{print $2}' "$unat/host.log" 2>/dev/null || true; } | head -1)
+            [ -n "$unat_addr" ] && break
+          fi
+          sleep 0.1
+        done
+        if [ -z "$unat_addr" ]; then
+          printf '  ✗ the host for the unattended check never started\n'
+          sed 's/^/      /' "$unat/host.log"
+          fail=1
+        else
+          # Counted before, so the indicator's own colour cannot be something
+          # that was already on this screen. #FFB000 is what a watched session
+          # draws around it; the prompt's amber is #E4A72E and no session is
+          # being asked about here.
+          watched() {
+            import -window root "png24:$1" 2>/dev/null || true
+            counted=$( { convert "$1" -define histogram:unique-colors=true \
+              -format '%c' histogram:info:- 2>/dev/null || true; } \
+              | { grep -i '#FFB000' || true; } | head -1 \
+              | awk -F: '{print $1}' | tr -d ' ')
+            printf '%s' "${counted:-0}"
+          }
+          before=$(watched "$unat/before.png")
+          env -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$unat_addr" --seconds 6 \
+            > "$unat/client.log" 2>&1 &
+          unat_client=$!
+          sleep 3
+          during=$(watched "$unat/during.png")
+          wait "$unat_client" 2>/dev/null || true
+
+          if [ "$(awk -v a="${during:-0}" -v b="${before:-0}" 'BEGIN{print (a > b + 500) ? 1 : 0}')" = 1 ]; then
+            printf '  ✓ somebody at the machine was shown it: %s indicator pixels against %s\n' \
+              "${during:-0}" "${before:-0}"
+          else
+            printf '  ✗ an unattended session drew no indicator (%s against %s)\n' \
+              "${during:-0}" "${before:-0}"
+            sed 's/^/      /' "$unat/client.log"
+            fail=1
+          fi
+          # And the trail says nobody was asked, which is the half a reader
+          # cannot infer from "a session opened".
+          if grep -q 'the unattended permission' "$unat/sessions.log" 2>/dev/null; then
+            printf '  ✓ and the trail says nobody was asked\n'
+          else
+            printf '  ✗ the trail does not say how the session was allowed\n'
+            { grep session_opened "$unat/sessions.log" || true; } | tail -2 | sed 's/^/      /'
+            fail=1
+          fi
+        fi
+        kill "$unat_host" 2>/dev/null || true
+        wait "$unat_host" 2>/dev/null || true
+        unat_host=""
+        rm -rf "$unat"
       fi
 
       # **A prompt on the screen, for a host with no terminal to ask at.**

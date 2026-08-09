@@ -117,6 +117,7 @@ pub fn run(o: &ShotOptions) -> Result<(), String> {
             esper_audit::Event::SessionOpened {
                 granted: grant.granted.clone(),
                 tier: "one picture".to_owned(),
+                allowed: None,
             },
         );
 

@@ -1743,7 +1743,7 @@ struct Recorded {
 
 impl Recorded {
     /// Record the open. Best-effort: a full disk must not end a session.
-    fn open(log: &Log, peer: [u8; 32], granted: &[Permission]) -> Self {
+    fn open(log: &Log, peer: [u8; 32], granted: &[Permission], allowed: Option<String>) -> Self {
         if let Err(e) = log.append(&Entry::now(
             &peer,
             Event::SessionOpened {
@@ -1752,6 +1752,7 @@ impl Recorded {
                 // more than one way to reach a host, saying "direct" is
                 // accurate rather than a placeholder.
                 tier: "direct".to_owned(),
+                allowed,
             },
         )) {
             tracing::warn!(error = %e, "could not record the start of a session");
@@ -1857,7 +1858,18 @@ async fn serve_session(
             .join(", "),
         kind.name()
     );
-    let recorded = Recorded::open(log, device, &granted);
+    // **How it was allowed, on the line that records it opening.** The host
+    // prints this for whoever is watching; a log that did not carry it would
+    // read the same for a session somebody agreed to and one nobody was asked
+    // about, which are the two answers an auditor is trying to tell apart.
+    let recorded = Recorded::open(
+        log,
+        device,
+        &granted,
+        policy
+            .how_the_last_one_was_allowed()
+            .map(|how| crate::consent::describe(how).to_owned()),
+    );
     // **One session means this one.** Spent here, at the moment the session is
     // agreed, and the record removed when this guard drops — however it drops.
     let spent = Spent::open(device);
@@ -3994,6 +4006,9 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             esper_audit::Event::SessionOpened {
                 granted: grant.granted.clone(),
                 tier: tier.describe().to_owned(),
+                // This end asked and was given a session; it was never told
+                // which of the host's reasons applied.
+                allowed: None,
             },
         );
 

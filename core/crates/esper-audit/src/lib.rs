@@ -126,6 +126,21 @@ pub enum Event {
         granted: Vec<Permission>,
         /// How the peer was reached, so "relayed" is visible after the fact.
         tier: String,
+        /// How the session came to be allowed, in the host's own words, or
+        /// `None` where whoever wrote the line does not know.
+        ///
+        /// **The question an auditor asks first.** "A session opened, granted
+        /// view and control" reads the same whether somebody at the machine
+        /// agreed to it or whether nobody was asked — and those are the two
+        /// answers the log exists to tell apart. A device that walked in on
+        /// `unattended` is the one somebody goes looking for afterwards.
+        ///
+        /// `None` on the *controller's* own outbound line: that end asked for
+        /// a session and was given one, and it was never told which of the
+        /// host's reasons applied. Inventing one there would be worse than
+        /// leaving it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allowed: Option<String>,
     },
     /// A session ended.
     SessionClosed {
@@ -385,8 +400,19 @@ impl Event {
             Self::SessionNarrowed { granted } => {
                 format!("a live session was narrowed to {}", names(granted))
             }
-            Self::SessionOpened { granted, tier } => {
-                format!("session opened over {tier}, granted {}", names(granted))
+            Self::SessionOpened {
+                granted,
+                tier,
+                allowed,
+            } => {
+                let how = allowed
+                    .as_deref()
+                    .map(|how| format!(", allowed by {how}"))
+                    .unwrap_or_default();
+                format!(
+                    "session opened over {tier}, granted {}{how}",
+                    names(granted)
+                )
             }
             Self::SessionClosed {
                 duration_secs,

@@ -46,6 +46,7 @@ fn entries_round_trip_and_keep_their_order() {
         Event::SessionOpened {
             granted: vec![Permission::View, Permission::Control],
             tier: "lan".to_owned(),
+            allowed: None,
         },
         Event::TerminalOpened,
         terminal_closed(
@@ -322,6 +323,7 @@ fn variants() -> Vec<Event> {
         Event::SessionOpened {
             granted: vec![Permission::View],
             tier: "relayed".to_owned(),
+            allowed: None,
         },
         Event::SessionClosed {
             duration_secs: 1,
@@ -625,6 +627,7 @@ fn retaining_rewrites_nothing_it_keeps() {
             Event::SessionOpened {
                 granted: vec![Permission::View, Permission::Control],
                 tier: "direct".to_owned(),
+                allowed: None,
             },
             now - age,
         ))
@@ -767,4 +770,57 @@ fn a_pass_that_removed_nothing_has_nothing_to_say() {
     };
     assert_eq!(both.removed(), 5);
     assert!(both.describe().is_some_and(|s| s.contains("size limit")));
+}
+
+/// **How a session was allowed is on the line that records it opening.**
+///
+/// "A session opened, granted view and control" reads the same whether
+/// somebody at the machine agreed to it or whether nobody was asked, and those
+/// are the two answers a security log exists to tell apart. A device that
+/// walked in on `unattended` is the one somebody goes looking for afterwards.
+#[test]
+fn a_session_says_how_it_was_allowed() {
+    let entry = Event::SessionOpened {
+        granted: vec![Permission::View],
+        tier: "direct".to_owned(),
+        allowed: Some("the unattended permission".to_owned()),
+    };
+    let said = entry.detail();
+    assert!(
+        said.contains("allowed by the unattended permission"),
+        "{said}"
+    );
+    assert!(said.contains("granted view"), "{said}");
+}
+
+/// And the line reads as a sentence when nobody knows how.
+///
+/// The controller's own outbound entry: that end asked for a session and was
+/// given one, and was never told which of the host's reasons applied.
+/// Inventing one would be worse than leaving it out — and a dangling comma
+/// would be worse than either.
+#[test]
+fn a_session_nobody_can_explain_says_nothing_extra() {
+    let entry = Event::SessionOpened {
+        granted: vec![Permission::View],
+        tier: "direct".to_owned(),
+        allowed: None,
+    };
+    let said = entry.detail();
+    assert_eq!(said, "session opened over direct, granted view");
+    assert!(!said.contains("allowed"), "{said}");
+}
+
+/// An entry written before this field existed still reads.
+///
+/// The log is a file somebody keeps: a reader that refused a line written last
+/// week would make a security log useless at exactly the moment it is wanted.
+#[test]
+fn a_line_from_before_the_field_existed_still_decodes() {
+    let older = r#"{"at":1756700000,"peer":"a b c d e f g h","peer_key":"aa","event":"session_opened","granted":["view"],"tier":"direct"}"#;
+    let entry: Entry = serde_json::from_str(older).expect("an older line has to decode");
+    let Event::SessionOpened { allowed, .. } = entry.event else {
+        panic!("decoded as something else");
+    };
+    assert_eq!(allowed, None);
 }
