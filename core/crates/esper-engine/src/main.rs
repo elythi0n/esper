@@ -24,6 +24,7 @@ mod injector;
 mod input_source;
 mod invite_cmd;
 mod ladder;
+mod lock_cmd;
 mod loopback;
 mod net;
 mod pairing;
@@ -201,6 +202,16 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("connect: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("lock") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match lock_cmd::parse(&rest).and_then(|o| lock_cmd::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{} lock: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -409,6 +420,7 @@ fn usage_for(command: &str) -> Option<String> {
         "connect" => Some(session_cmd::connect_usage()),
         "cp" => Some(cp_cmd::usage()),
         "host" => Some(session_cmd::host_usage()),
+        "lock" => Some(lock_cmd::usage()),
         "screenshot" => Some(screenshot_cmd::usage()),
         "schedule" => Some(devices_cmd::schedule_usage()),
         _ => None,
@@ -445,6 +457,7 @@ fn print_help() {
            join       take somebody up on an invitation\n  \
            host       serve this machine's screen to a paired device\n  \
            connect    show a paired host's screen\n  \
+           lock       lock a paired host's screen, and nothing else\n  \
            terminal   open a shell on a paired host\n  \
            forward    reach a port on a paired host, ssh -L style\n  \
            cp         copy one file to or from a paired host\n  \

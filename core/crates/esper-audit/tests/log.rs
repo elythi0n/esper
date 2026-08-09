@@ -281,7 +281,8 @@ fn exhaustive_witness(e: &Event) {
         | Event::ForwardClosed { .. }
         | Event::ForwardRefused { .. }
         | Event::FileTransferred { .. }
-        | Event::Refused { .. } => {}
+        | Event::Refused { .. }
+        | Event::Locked { .. } => {}
     }
 }
 
@@ -328,6 +329,10 @@ fn variants() -> Vec<Event> {
         Event::SessionClosed {
             duration_secs: 1,
             reason: "done".to_owned(),
+        },
+        Event::Locked {
+            how: "i3lock".to_owned(),
+            worked: true,
         },
         Event::TerminalOpened,
         terminal_closed(
@@ -823,4 +828,29 @@ fn a_line_from_before_the_field_existed_still_decodes() {
         panic!("decoded as something else");
     };
     assert_eq!(allowed, None);
+}
+
+/// **A lock that worked and one that did not read as different sentences.**
+///
+/// The same reason a recording that started and one that stopped do: a line
+/// with a boolean in it makes a person read the JSON to find out which
+/// happened, and a device that *tried* to lock somebody's screen and could not
+/// is exactly the line an operator would go looking for.
+#[test]
+fn a_lock_that_worked_and_one_that_did_not_do_not_read_the_same() {
+    let worked = Event::Locked {
+        how: "i3lock".to_owned(),
+        worked: true,
+    }
+    .detail();
+    let did_not = Event::Locked {
+        how: "no screen locker found: tried loginctl".to_owned(),
+        worked: false,
+    }
+    .detail();
+    assert!(worked.contains("locked this machine"), "{worked}");
+    assert!(worked.contains("i3lock"), "{worked}");
+    assert!(did_not.contains("could not"), "{did_not}");
+    assert!(did_not.contains("no screen locker"), "{did_not}");
+    assert_ne!(worked, did_not);
 }

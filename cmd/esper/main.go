@@ -95,6 +95,10 @@ var engineCommands = map[string]bool{
 	"terminal": true,
 	"forward":  true,
 	"cp":       true,
+	// Locking a host's screen is its own verb because it is its own
+	// permission: a device may hold `lock` without holding `view`, so this
+	// works on a host it may not watch.
+	"lock": true,
 }
 
 func isEngineCommand(name string) bool { return engineCommands[name] }

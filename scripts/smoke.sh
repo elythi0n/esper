@@ -393,7 +393,7 @@ cleanup_terminal() {
              "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}" \
              "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" \
              "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}" \
-             "${seat_host:-}" "${switch_x:-}"; do
+             "${seat_host:-}" "${switch_x:-}" "${lk_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -3395,6 +3395,81 @@ TONE
         dark_host=""
         rm -rf "$dark"
       fi
+
+      # **Locking a host's screen, with a permission of its own.**
+      #
+      # The point of the permission being separate is that a device can hold it
+      # *without* `view`: "you may put my machine away when you are done, and
+      # you may not watch it". So both halves are checked — refused without
+      # it, and allowed with it and nothing else.
+      #
+      # The suite's display has no screen locker installed, so what a host can
+      # honestly report here is the attempt and why it failed. That is the
+      # right answer to check: a lock that silently did nothing would be a
+      # device believing it had locked somebody's machine.
+      echo "  — locking a host's screen, with a permission of its own"
+      lk=$(mktemp -d)
+      cp -a "$term_a/." "$lk/" 2>/dev/null || true
+      : > "$lk/sessions.log"
+      ESPER_HOME="$lk" "$BIN/esper-engine" revoke "$fp" lock >/dev/null 2>&1 || true
+      ESPER_HOME="$lk" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$lk" \
+        timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$lk/host.log" 2>&1 &
+      lk_host=$!
+      lk_addr=""
+      for _ in $(seq 1 150); do
+        if grep -q '^  consent ' "$lk/host.log" 2>/dev/null; then
+          lk_addr=$( { awk '/^  listening/{print $2}' "$lk/host.log" 2>/dev/null || true; } | head -1)
+          [ -n "$lk_addr" ] && break
+        fi
+        sleep 0.1
+      done
+      if [ -z "$lk_addr" ]; then
+        printf '  ✗ the host for the lock check never started\n'
+        sed 's/^/      /' "$lk/host.log"
+        fail=1
+      else
+        # Without the permission: refused, and told which one it needs.
+        refused=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 30 "$BIN/esper-engine" lock "$lk_addr" 2>&1 || true)
+        if printf '%s' "$refused" | grep -qi 'refused' &&
+          printf '%s' "$refused" | grep -q 'lock'; then
+          printf '  ✓ a device without the permission cannot lock the screen\n'
+        else
+          printf '  ✗ a device without `lock` was not refused\n'
+          printf '%s\n' "$refused" | sed 's/^/      /'
+          fail=1
+        fi
+
+        # With it, and with nothing else it needs: the host tries, and says
+        # what happened either way.
+        ESPER_HOME="$lk" "$BIN/esper-engine" grant "$fp" lock >/dev/null 2>&1 || true
+        tried=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 30 "$BIN/esper-engine" lock "$lk_addr" 2>&1 || true)
+        if grep -q '^      locked ' "$lk/host.log"; then
+          printf '  ✓ and with it the host tried, and said what happened: %s\n' \
+            "$( { grep -m1 '^      locked ' "$lk/host.log" || true; } | sed 's/^ *locked *//')"
+        else
+          printf '  ✗ the host did not report a lock attempt\n'
+          printf '%s\n' "$tried" | sed 's/^/      /'
+          tail -6 "$lk/host.log" | sed 's/^/      host: /'
+          fail=1
+        fi
+        # And the attempt is in the trail whether or not it worked, because a
+        # device that could lock a screen could lock it repeatedly.
+        if grep -q '"event":"locked"' "$lk/sessions.log" 2>/dev/null; then
+          printf '  ✓ and the attempt is in the trail either way\n'
+        else
+          printf '  ✗ a lock attempt left no trace\n'
+          sed 's/^/      /' "$lk/sessions.log" | tail -4
+          fail=1
+        fi
+      fi
+      kill "$lk_host" 2>/dev/null || true
+      wait "$lk_host" 2>/dev/null || true
+      lk_host=""
+      rm -rf "$lk"
 
       # **A host serves the display it was started on, and does not follow a
       # switch.**

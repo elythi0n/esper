@@ -142,12 +142,57 @@ pub fn lock_reaching(reach: Reach) -> Result<&'static str, String> {
                 .join(", ")
         ));
     };
-    Command::new(program)
+    let child = Command::new(program)
         .args(args)
         .spawn()
-        .map(|_| program)
-        .map_err(|e| format!("{program}: {e}"))
+        .map_err(|e| format!("{program}: {e}"))?;
+    believe(child, program)
 }
+
+/// Whether a just-started locker is one to believe.
+///
+/// # Started is not locked, and the difference is worth a moment
+///
+/// Waiting for a locker to *finish* would wait until the person unlocked,
+/// which is the last thing a panic key should do — so this waits only long
+/// enough to catch one that fell over immediately. A locker that worked is
+/// either still running (`i3lock` holds the screen) or exited zero
+/// (`xdg-screensaver` delegates and returns); one that could not is a non-zero
+/// status within a few milliseconds.
+///
+/// Found by a host with no `DISPLAY` reporting that it had locked a screen
+/// with `xdg-screensaver`: the spawn succeeded, the program failed, and the
+/// audit trail recorded a lock that never happened.
+///
+/// Takes the child rather than starting it, so a test can hand it a program
+/// that behaves each of the three ways.
+fn believe(mut child: std::process::Child, program: &'static str) -> Result<&'static str, String> {
+    for _ in 0..GAVE_UP_AT_ONCE {
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                return Err(format!("{program} could not lock this screen: {status}"));
+            }
+            // Exited cleanly, which is what a locker that delegates does.
+            Ok(Some(_)) => return Ok(program),
+            // Still running, which is what a locker that holds the screen
+            // does. Nothing more to learn.
+            Ok(None) => std::thread::sleep(BETWEEN_LOOKS),
+            Err(e) => return Err(format!("{program}: {e}")),
+        }
+    }
+    Ok(program)
+}
+
+/// How many times to look at a just-started locker before believing it.
+///
+/// Ten looks at twenty milliseconds is a fifth of a second — long enough for a
+/// program that cannot reach a display to say so, and short enough that
+/// nothing waits on it noticeably. A locker that is still running after that
+/// is a locker that is working.
+const GAVE_UP_AT_ONCE: usize = 10;
+
+/// How long between those looks.
+const BETWEEN_LOOKS: std::time::Duration = std::time::Duration::from_millis(20);
 
 #[cfg(test)]
 mod tests {
@@ -251,5 +296,31 @@ mod tests {
         let path = dir.to_string_lossy().into_owned();
         assert_eq!(available_locker_on(&path), None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **A locker that fell over is not a locked screen.**
+    ///
+    /// The three ways a just-started program can behave, and only one of them
+    /// is a failure: still running is `i3lock` holding the screen, exited
+    /// cleanly is `xdg-screensaver` delegating, and exited badly is a program
+    /// that could not reach a display.
+    #[test]
+    fn only_a_locker_that_fell_over_is_a_failure() {
+        let still_running = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep is on every machine this runs on");
+        let id = still_running.id();
+        assert_eq!(believe(still_running, "sleep").ok(), Some("sleep"));
+        // Not left behind: a `sleep 30` per test run would outlive the suite.
+        let _ = Command::new("kill").arg(id.to_string()).status();
+
+        let finished = Command::new("true").spawn().expect("true exists");
+        assert_eq!(believe(finished, "true").ok(), Some("true"));
+
+        let failed = Command::new("false").spawn().expect("false exists");
+        let err = believe(failed, "false").expect_err("a non-zero exit is a failure");
+        assert!(err.contains("could not lock"), "{err}");
+        assert!(err.contains("false"), "{err}");
     }
 }

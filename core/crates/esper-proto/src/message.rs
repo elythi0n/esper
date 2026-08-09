@@ -154,6 +154,19 @@ pub enum Permission {
     Unattended,
     /// Record the session locally.
     Record,
+    /// Lock the screen at the host.
+    ///
+    /// **Its own permission, and not part of `control`.** A device that can
+    /// drive the keyboard could lock the screen by pressing whatever the
+    /// person's shortcut is, so this grants nothing new to a device holding
+    /// `control` — but it is exactly what a device *without* `control` should
+    /// be able to be given: "you may put my machine away when you are done,
+    /// and you may not touch anything else".
+    ///
+    /// It locks the display the host is serving and nothing further out. A
+    /// remote request is not somebody standing at the machine, so it must not
+    /// reach past the screen it was made about.
+    Lock,
 }
 
 impl Permission {
@@ -162,7 +175,7 @@ impl Permission {
     /// Exists so help text, listings and a name parser cannot fall behind the
     /// enum: adding a variant without adding it here is a compile error at the
     /// exhaustive match in [`Permission::name`] and a failing test here.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::View,
         Self::Control,
         Self::ClipboardOut,
@@ -172,6 +185,7 @@ impl Permission {
         Self::Audio,
         Self::Terminal,
         Self::Forward,
+        Self::Lock,
         Self::Unattended,
         Self::Record,
     ];
@@ -196,6 +210,7 @@ impl Permission {
             Self::Forward => "forward",
             Self::Unattended => "unattended",
             Self::Record => "record",
+            Self::Lock => "lock",
         }
     }
 
@@ -559,6 +574,17 @@ pub enum SessionKind {
     /// permission to do it, which is a much larger grant than moving a file
     /// into a directory.
     Files,
+    /// Lock the screen at the host, and nothing else.
+    ///
+    /// **A session rather than a message on one**, because it is the one thing
+    /// a device might be allowed to do without being allowed to watch. A
+    /// message on a screen session would mean asking for `view` to lock a
+    /// screen, which is a much larger grant than putting somebody's machine
+    /// away for them.
+    ///
+    /// It carries no video, needs no codec, and ends as soon as the host has
+    /// answered.
+    Lock,
 }
 
 impl SessionKind {
@@ -581,7 +607,7 @@ impl SessionKind {
     pub const fn carries_video(self) -> bool {
         match self {
             Self::Screen => true,
-            Self::Terminal | Self::Forward | Self::Files => false,
+            Self::Terminal | Self::Forward | Self::Files | Self::Lock => false,
         }
     }
 
@@ -592,6 +618,7 @@ impl SessionKind {
             Self::Terminal => &[Permission::Terminal],
             Self::Forward => &[Permission::Forward],
             Self::Files => &[Permission::FilesOut, Permission::FilesIn],
+            Self::Lock => &[Permission::Lock],
         }
     }
 
@@ -610,6 +637,7 @@ impl SessionKind {
             Self::Terminal => "terminal",
             Self::Forward => "forward",
             Self::Files => "file",
+            Self::Lock => "lock",
         }
     }
 }
@@ -2455,7 +2483,7 @@ mod tests {
         // missing from it would be a permission nobody could grant.
         assert_eq!(
             Permission::ALL.len(),
-            11,
+            12,
             "a permission was added to the enum and not to ALL"
         );
         for p in Permission::ALL {

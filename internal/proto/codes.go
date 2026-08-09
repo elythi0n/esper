@@ -78,6 +78,11 @@ const (
 	NoCaptureBackend Reason = 401
 	NoDisplay        Reason = 402
 	NoInputBackend   Reason = 403
+	// NoScreenLocker is a capability rather than a permission: the device is
+	// allowed, the host is willing, and the machine has nothing installed that
+	// can lock a screen. There is nothing to retry — a person has to install
+	// one.
+	NoScreenLocker Reason = 405
 	// IndicatorUnconfirmed is a host that cannot confirm its own session
 	// indicator is on screen. A capability rather than a permission: the
 	// device is allowed and the machine cannot keep the promise that being
@@ -170,6 +175,7 @@ var descriptions = map[Reason]string{
 	NoCaptureBackend:        "no screen capture backend available",
 	NoDisplay:               "no display to capture",
 	NoInputBackend:          "no input injection backend available",
+	NoScreenLocker:          "the host has no way to lock its own screen",
 	IndicatorUnconfirmed:    "the host cannot show that it is being watched",
 	AllTiersExhausted:       "every connection tier failed",
 	RelayFull:               "relay is at capacity",

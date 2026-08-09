@@ -142,6 +142,18 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowed: Option<String>,
     },
+    /// A device asked for this machine's screen to be locked.
+    ///
+    /// **Recorded whether or not it worked.** A device that could lock
+    /// somebody's screen is a device that could lock it repeatedly, and the
+    /// only way to find that out afterwards is a line per attempt. `how` is
+    /// which locker ran, or why none did.
+    Locked {
+        /// Which locker ran, or why none could.
+        how: String,
+        /// Whether the screen was actually locked.
+        worked: bool,
+    },
     /// A session ended.
     SessionClosed {
         /// Seconds it lasted.
@@ -361,6 +373,7 @@ impl Event {
             Self::SessionNarrowed { .. } => "session_narrowed",
             Self::PermissionsChanged { .. } => "permissions_changed",
             Self::SessionOpened { .. } => "session_opened",
+            Self::Locked { .. } => "locked",
             Self::SessionClosed { .. } => "session_closed",
             Self::TerminalOpened => "terminal_opened",
             Self::TerminalClosed { .. } => "terminal_closed",
@@ -413,6 +426,13 @@ impl Event {
                     "session opened over {tier}, granted {}{how}",
                     names(granted)
                 )
+            }
+            Self::Locked { how, worked } => {
+                if *worked {
+                    format!("locked this machine's screen with {how}")
+                } else {
+                    format!("could not lock this machine's screen: {how}")
+                }
             }
             Self::SessionClosed {
                 duration_secs,

@@ -2033,6 +2033,47 @@ async fn serve_session(
     // start capture, an encoder and a presenter on a host that was asked to
     // hand over one file — and would have needed the `view` permission to do
     // it, which is a much larger grant than moving a file into a directory.
+    // **Lock the screen, say what happened, and end.**
+    //
+    // The shortest session this product has: no capture, no encoder, no
+    // presenter, no input. A device may hold this without holding `view`,
+    // which is the point of it being its own kind — "you may put my machine
+    // away when you are done" is a smaller thing to grant than "you may watch
+    // my screen".
+    if kind == esper_proto::SessionKind::Lock {
+        // **The display this host serves, and no further out.** A remote
+        // request is not somebody standing at the machine, so it must not
+        // reach the login session the way the panic key deliberately does —
+        // the same rule an automatic lock follows, and for the same reason: a
+        // host on a scratch display would otherwise lock the person's desktop.
+        let locked =
+            esper_presence::lock::lock_reaching(esper_presence::lock::Reach::OnlyThisDisplay);
+        let (how, worked) = match &locked {
+            Ok(program) => {
+                println!("      locked     this machine's screen with {program}");
+                ((*program).to_owned(), true)
+            }
+            Err(why) => {
+                println!("      locked     could not: {why}");
+                (why.clone(), false)
+            }
+        };
+        if let Err(e) = log.append(&Entry::now(&device, Event::Locked { how, worked })) {
+            tracing::warn!(error = %e, "could not record a lock request");
+        }
+        // Closed with a reason either way: a controller that asked for this
+        // and heard nothing cannot tell a locked screen from a lost link.
+        media.close(if worked {
+            esper_proto::Reason::SESSION_COMPLETE
+        } else {
+            esper_proto::Reason::NO_SCREEN_LOCKER
+        });
+        return match locked {
+            Ok(program) => Ok((format!("locked the screen with {program}"), parked)),
+            Err(why) => Err((format!("could not lock the screen: {why}"), parked)),
+        };
+    }
+
     if kind == esper_proto::SessionKind::Files {
         if !crate::settings::files_enabled() {
             println!("      files      off — set files.enabled to serve them");
