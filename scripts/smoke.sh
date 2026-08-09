@@ -391,7 +391,8 @@ cleanup_terminal() {
              "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}" "${retain_pid:-}" \
              "${priv_host:-}" "${priv_client:-}" "${priv_x:-}" "${api_pid:-}" \
              "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}" \
-             "${bound_host:-}" "${unat_host:-}" "${unat_client:-}"; do
+             "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" \
+             "${dark_host:-}" "${dark_client:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -2581,6 +2582,12 @@ print(s.getsockname()[1]); s.close()')
         # figure to what it claims to be. A lower bound has to be at least
         # what the session actually carried, which is the property that would
         # still catch it going backwards.
+        # `about NNN` or `at least NNN`, so the number is the third field in
+        # one and the fourth in the other — and the *word* to branch on is the
+        # second either way. The first version of this branched on the second
+        # field being `least`, which it never is: it is `at`. That mistake sat
+        # unexercised until a loaded machine took the lower-bound path for the
+        # first time, and then read a perfectly good 784 as a failure.
         seen_kbit=$(printf '%s' "$out" | awk '/^  capacity /{print ($2 == "about") ? $3 : $4}')
         seen_how=$(printf '%s' "$out" | awk '/^  capacity /{print $2}')
         carried_kbit=$(printf '%s' "$out" | awk '/^  received /{print $6}')
@@ -2590,7 +2597,7 @@ print(s.getsockname()[1]); s.close()')
             [ -n "$seen_kbit" ] &&
               capacity_ok=$(awk -v k="$seen_kbit" 'BEGIN{print (k > 400 && k < 1600) ? 1 : 0}')
             ;;
-          least)
+          at)
             [ -n "$seen_kbit" ] && [ -n "$carried_kbit" ] &&
               capacity_ok=$(awk -v k="$seen_kbit" -v c="$carried_kbit" \
                 'BEGIN{print (k >= c && k < 1600) ? 1 : 0}')
@@ -2598,7 +2605,7 @@ print(s.getsockname()[1]); s.close()')
         esac
         if [ "$capacity_ok" = 1 ]; then
           printf '  ✓ the link read as %s %s kbit/s, which is what that measurement means\n' \
-            "$seen_how" "$seen_kbit"
+            "$( [ "$seen_how" = at ] && echo 'at least' || echo about )" "$seen_kbit"
         else
           printf '  ✗ an 800 kbit/s link carrying %s read as "%s %s"\n' \
             "${carried_kbit:-?}" "${seen_how:-nothing}" "${seen_kbit:-}"
@@ -3303,6 +3310,79 @@ TONE
         wait "$bound_host" 2>/dev/null || true
         bound_host=""
         rm -rf "$bound"
+      fi
+
+      # **A session survives the screen going dark and coming back.**
+      #
+      # The case an unattended deployment lives in: the host's screen changes
+      # completely while a session is running — a locker, a blanker, a
+      # screensaver — and the session has to keep working through it and after.
+      #
+      # **What is simulated, said exactly.** The whole screen's content is
+      # replaced and put back, which is what any of those looks like to a
+      # capturer. `xset s activate` was tried first and is not a simulation of
+      # anything here: Xvfb has no CRTC to blank, so the framebuffer does not
+      # change and the check measured nothing.
+      #
+      # A screen *locker* holding a grab is the other half, and no shell can
+      # start one. That half is `esper-presence-x11`'s display test, which
+      # holds the keyboard over a covered screen and reads the state back.
+      if [ -n "${DISPLAY:-}" ] && command -v xsetroot >/dev/null 2>&1; then
+        echo "  — a session through the screen going dark and coming back"
+        dark=$(mktemp -d)
+        cp -a "$term_a/." "$dark/" 2>/dev/null || true
+        ESPER_HOME="$dark" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+        ESPER_HOME="$dark" timeout 90 "$BIN/esper-engine" host \
+          --listen 127.0.0.1:0 --no-mdns > "$dark/host.log" 2>&1 &
+        dark_host=$!
+        dark_addr=""
+        for _ in $(seq 1 150); do
+          if grep -q '^  consent ' "$dark/host.log" 2>/dev/null; then
+            dark_addr=$( { awk '/^  listening/{print $2}' "$dark/host.log" 2>/dev/null || true; } | head -1)
+            [ -n "$dark_addr" ] && break
+          fi
+          sleep 0.1
+        done
+        if [ -z "$dark_addr" ]; then
+          printf '  ✗ the host for the blanking check never started\n'
+          sed 's/^/      /' "$dark/host.log"
+          fail=1
+        else
+          env -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$dark_addr" --seconds 9 \
+            > "$dark/client.log" 2>&1 &
+          dark_client=$!
+          sleep 3
+          xsetroot -solid black 2>/dev/null || true
+          sleep 3
+          xsetroot -solid white 2>/dev/null || true
+          wait "$dark_client" 2>/dev/null || true
+          # **The session ran its course, and the screen changed twice.**
+          #
+          # Not a picture count: this display is a still `Xvfb`, and an idle
+          # screen costs nothing on purpose — the first version of this check
+          # asked for sixty pictures in nine seconds and got one, which was
+          # the idle path working rather than the session breaking.
+          #
+          # So the two things that would be false if it had broken: the client
+          # ended because its own clock ran out rather than because the host
+          # went away, and the blanking and the restore each arrived as a
+          # picture on top of the first one.
+          shown=$( { awk '/^  pictures /{print $2}' "$dark/client.log" 2>/dev/null || true; } | head -1)
+          if grep -q 'ending the session: session complete' "$dark/client.log" &&
+            [ "$(awk -v n="${shown:-0}" 'BEGIN{print (n >= 3) ? 1 : 0}')" = 1 ]; then
+            printf '  ✓ the session ran its nine seconds through it: %s pictures, dark and back\n' \
+              "${shown:-0}"
+          else
+            printf '  ✗ blanking the screen broke the session (%s pictures)\n' "${shown:-0}"
+            tail -14 "$dark/client.log" | sed 's/^/      /'
+            fail=1
+          fi
+        fi
+        kill "$dark_host" 2>/dev/null || true
+        wait "$dark_host" 2>/dev/null || true
+        dark_host=""
+        rm -rf "$dark"
       fi
 
       # **An unattended session is still visible and still recorded.**
