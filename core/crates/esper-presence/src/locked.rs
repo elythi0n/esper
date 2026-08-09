@@ -62,6 +62,56 @@ impl Locked {
     }
 }
 
+/// The variable that names a file standing in for the screen's lock state.
+///
+/// # Why an override exists at all
+///
+/// A screen locker cannot be started from a shell, and the probes that can
+/// answer while a session runs need either a session manager or a locker that
+/// registers with one. So the half of this policy that matters most — a live
+/// session ending because somebody locked up and walked away — has no way to
+/// be exercised by a test that drives the product from outside. The
+/// alternative to an override is that half never being tested, which for a
+/// security control is the worse of the two.
+///
+/// # Why it names a file rather than holding a value
+///
+/// A value in the environment is fixed for the life of a process, and the
+/// thing worth testing is a *transition*: a session that was allowed, and then
+/// a screen that locked under it. A file can appear while the host is running.
+///
+/// # Why it is safe to ship
+///
+/// It can only be set by whoever starts the host — somebody who can already
+/// edit the settings file, grant themselves every permission and read the
+/// trail. It buys an attacker nothing. And every answer it produces says that
+/// it produced it, so a machine running with it set can never look like a
+/// machine reporting its own screen.
+pub const OVERRIDE: &str = "ESPER_SCREEN_LOCKED";
+
+/// What the override says, or `None` when it is not set.
+#[must_use]
+pub fn overridden() -> Option<Locked> {
+    let named = std::env::var(OVERRIDE).ok()?;
+    Some(by_the_file(std::path::Path::new(&named)))
+}
+
+/// Locked exactly while that file exists.
+#[must_use]
+pub fn by_the_file(path: &std::path::Path) -> Locked {
+    if path.exists() {
+        Locked::Yes(OVERRIDDEN)
+    } else {
+        Locked::No(OVERRIDDEN)
+    }
+}
+
+/// What the override is called in a message.
+///
+/// **Said out loud wherever it decides anything**, so a machine running with
+/// it set can never look like a machine reporting its own screen.
+pub const OVERRIDDEN: &str = "the file ESPER_SCREEN_LOCKED names";
+
 /// Ask `logind` whether the login session is locked.
 ///
 /// **Shelled out rather than spoken over D-Bus**, for the same reason the
@@ -279,6 +329,42 @@ mod tests {
         );
         assert_eq!(first_answer(&[cannot, cannot]), Locked::CannotTell);
         assert_eq!(first_answer(&[]), Locked::CannotTell);
+    }
+
+    /// **The override tracks the file, both ways.**
+    ///
+    /// A transition is the whole reason it names a file rather than holding a
+    /// value: a session that was allowed, and then a screen that locked under
+    /// it. An override that only ever said "locked" would test half of that.
+    #[test]
+    fn the_override_follows_the_file_appearing_and_going() {
+        let dir =
+            std::env::temp_dir().join(format!("esper-locked-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let named = dir.join("locked");
+
+        assert_eq!(by_the_file(&named), Locked::No(OVERRIDDEN));
+        std::fs::write(&named, b"").expect("a file");
+        assert_eq!(by_the_file(&named), Locked::Yes(OVERRIDDEN));
+        std::fs::remove_file(&named).expect("remove it");
+        assert_eq!(by_the_file(&named), Locked::No(OVERRIDDEN));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And whatever it decides says that it was the thing deciding.
+    ///
+    /// A machine running with the override set must never look like a machine
+    /// reporting its own screen — the host prints where its answer came from,
+    /// so this is the word that makes that visible.
+    #[test]
+    fn an_overridden_answer_names_the_override() {
+        assert!(
+            Locked::Yes(OVERRIDDEN)
+                .describe()
+                .contains("ESPER_SCREEN_LOCKED")
+        );
+        assert!(OVERRIDDEN.contains(OVERRIDE));
     }
 
     #[test]

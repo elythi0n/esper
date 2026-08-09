@@ -78,6 +78,17 @@ impl crate::consent::LockState for TheScreenHere {
             esper_presence::locked::by_logind(None)
         }
     }
+
+    fn locked_cheaply(&self) -> esper_presence::locked::Locked {
+        #[cfg(target_os = "linux")]
+        {
+            esper_presence_x11::while_a_session_runs()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            esper_presence::locked::by_logind(None)
+        }
+    }
 }
 
 /// A question drawn on the screen in front of the machine.

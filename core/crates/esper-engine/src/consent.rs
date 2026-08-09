@@ -74,6 +74,18 @@ pub trait LockState: Send + Sync + std::fmt::Debug {
     /// and a display connection and a host nobody switched this on for should
     /// pay for neither.
     fn locked(&self) -> Locked;
+
+    /// The same question, for a session that is already running.
+    ///
+    /// **Asked every few seconds rather than once**, so it may only use probes
+    /// that cost nothing. The expensive one takes the keyboard for a round trip
+    /// to find out whether it can, and a keystroke lost every few seconds from
+    /// whoever is at the machine would be a policy they switched off.
+    ///
+    /// Where nothing free can answer, this is [`Locked::CannotTell`] — and the
+    /// caller says that the bound applies on arrival and not during a session,
+    /// which is a smaller promise and the only honest one there.
+    fn locked_cheaply(&self) -> Locked;
 }
 
 /// Somebody at the host, and what they said.
@@ -466,6 +478,15 @@ impl AskAtTheHost {
     #[must_use]
     pub fn lock_state(&self) -> Option<Locked> {
         self.lock.as_ref().map(|l| l.locked())
+    }
+
+    /// The same, using only what is free to ask, for a session already running.
+    ///
+    /// `None` when the bound is off. See [`LockState::locked_cheaply`] for why
+    /// a running session gets a different question from an arriving device.
+    #[must_use]
+    pub fn lock_state_cheaply(&self) -> Option<Locked> {
+        self.lock.as_ref().map(|l| l.locked_cheaply())
     }
 
     /// Ask whoever this says, waiting `within`.
@@ -1028,6 +1049,9 @@ mod tests {
             self.asked.fetch_add(1, Ordering::Relaxed);
             self.says
         }
+        fn locked_cheaply(&self) -> Locked {
+            self.locked()
+        }
     }
 
     fn screen(says: Locked) -> std::sync::Arc<Screen> {
@@ -1040,6 +1064,9 @@ mod tests {
     impl LockState for std::sync::Arc<Screen> {
         fn locked(&self) -> Locked {
             (**self).locked()
+        }
+        fn locked_cheaply(&self) -> Locked {
+            (**self).locked_cheaply()
         }
     }
 

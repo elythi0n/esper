@@ -345,6 +345,43 @@ pub fn on_this_display() -> Locked {
     }
 }
 
+/// Whether the screen is locked, asking only the probes that cost nothing.
+///
+/// # Why there are two of these
+///
+/// [`screen_is_locked`] is for a device *arriving*: it runs once, and where
+/// the free probes cannot answer it is worth taking the keyboard for a round
+/// trip to find out. This one is for a session that is *already running*,
+/// where the same question gets asked every few seconds — and a grab every few
+/// seconds is a keystroke lost every few seconds from whoever is at the
+/// machine. A policy that cost somebody their typing would be a policy they
+/// switched off.
+///
+/// So this asks the screensaver extension and the session manager and stops.
+/// Where neither can answer, the caller has to say that the bound applies on
+/// arrival and not while a session runs — which is a smaller promise, and the
+/// only honest one on a machine whose locker registers with nobody.
+#[must_use]
+pub fn while_a_session_runs() -> Locked {
+    // The override first, and it says so in the answer: a test cannot start a
+    // screen locker, and the alternative to this is that half of the policy
+    // never being exercised from outside.
+    if let Some(said) = esper_presence::locked::overridden() {
+        return said;
+    }
+    let ours = std::env::var("DISPLAY").ok();
+    let Ok((conn, num)) = x11rb::connect(None) else {
+        return esper_presence::locked::by_logind(ours.as_deref());
+    };
+    let Some(root) = conn.setup().roots.get(num).map(|s| s.root) else {
+        return esper_presence::locked::by_logind(ours.as_deref());
+    };
+    match saver_says(&conn, root) {
+        Locked::CannotTell => esper_presence::locked::by_logind(ours.as_deref()),
+        answered => answered,
+    }
+}
+
 /// Whether the screen somebody would be sitting at is locked.
 ///
 /// # The order, and why it is not "most authoritative first"
@@ -360,6 +397,12 @@ pub fn on_this_display() -> Locked {
 ///    either of the first two answers it never runs.
 #[must_use]
 pub fn screen_is_locked() -> Locked {
+    // The override first, and it says so in the answer: a test cannot start a
+    // screen locker, and the alternative to this is that half of the policy
+    // never being exercised from outside.
+    if let Some(said) = esper_presence::locked::overridden() {
+        return said;
+    }
     // Which display this is, so `logind`'s answer can be checked against the
     // screen it is about rather than assumed to be about ours.
     let ours = std::env::var("DISPLAY").ok();

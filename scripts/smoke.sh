@@ -392,7 +392,7 @@ cleanup_terminal() {
              "${priv_host:-}" "${priv_client:-}" "${priv_x:-}" "${api_pid:-}" \
              "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}" \
              "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" \
-             "${dark_host:-}" "${dark_client:-}"; do
+             "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -3384,6 +3384,93 @@ TONE
         dark_host=""
         rm -rf "$dark"
       fi
+
+      # **The bound reaches a session already running, not only an arriving
+      # device.**
+      #
+      # Without this, a device that walked in at five o'clock keeps watching
+      # all night once the operator locks up and leaves — which is the hour
+      # the bound was switched on for.
+      #
+      # Driven by the file `ESPER_SCREEN_LOCKED` names, because a shell cannot
+      # start a screen locker and the alternative is this half never being
+      # exercised from outside. The override says so in every answer it gives,
+      # so a run with it set cannot look like a machine reporting its own
+      # screen — and the host prints where its answer came from.
+      echo "  — a screen locked under a live session ends it"
+      mid=$(mktemp -d)
+      cp -a "$term_a/." "$mid/" 2>/dev/null || true
+      sed -i '/policy.deny_when_locked/d' "$mid/config.toml" 2>/dev/null || true
+      printf 'policy.deny_when_locked = true\n' >> "$mid/config.toml"
+      ESPER_HOME="$mid" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+      # **An empty trail**, because the copy brought this suite's earlier
+      # entries with it — and a check that greps the whole file can pass on a
+      # line written twenty checks ago. The first version of this did.
+      : > "$mid/sessions.log"
+      # The file does not exist yet, so the screen is not locked and the
+      # device gets in.
+      ESPER_SCREEN_LOCKED="$mid/locked" \
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$mid" \
+        timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$mid/host.log" 2>&1 &
+      mid_host=$!
+      mid_addr=""
+      for _ in $(seq 1 150); do
+        if grep -q '^  consent ' "$mid/host.log" 2>/dev/null; then
+          mid_addr=$( { awk '/^  listening/{print $2}' "$mid/host.log" 2>/dev/null || true; } | head -1)
+          [ -n "$mid_addr" ] && break
+        fi
+        sleep 0.1
+      done
+      if [ -z "$mid_addr" ]; then
+        printf '  ✗ the host for the mid-session lock never started\n'
+        sed 's/^/      /' "$mid/host.log"
+        fail=1
+      else
+        if grep -q 'ESPER_SCREEN_LOCKED' "$mid/host.log"; then
+          printf '  ✓ the host says its lock state came from the override\n'
+        else
+          printf '  ✗ the host did not say where its lock state came from\n'
+          { grep -m1 '^  locked ' "$mid/host.log" || true; } | sed 's/^/      /'
+          fail=1
+        fi
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 60 "$BIN/esper-engine" connect "$mid_addr" --seconds 40 \
+          > "$mid/client.log" 2>&1 &
+        mid_client=$!
+        # Let it settle into a working session, then lock the screen under it.
+        sleep 3
+        touch "$mid/locked"
+        # The host re-asks every five seconds, so this has two turns.
+        wait "$mid_client" 2>/dev/null || true
+
+        # **"The host ended the session", not "refused".** A controller that
+        # was turned away at the door prints the same reason, so grepping for
+        # the reason alone would pass on a session that never opened — which
+        # is exactly what a reconnect after this one closed would produce.
+        if grep -q 'the host ended the session: the screen at the host is locked' \
+          "$mid/client.log"; then
+          printf '  ✓ and the session ended, with the reason the far end can act on\n'
+        else
+          printf '  ✗ a locked screen did not end a session that was running\n'
+          tail -10 "$mid/client.log" | sed 's/^/      /'
+          tail -6 "$mid/host.log" | sed 's/^/      host: /'
+          fail=1
+        fi
+        # And the host's own trail says why, rather than "the session ended".
+        if grep -q '"event":"session_closed"' "$mid/sessions.log" 2>/dev/null &&
+          grep 'session_closed' "$mid/sessions.log" | grep -q 'locked'; then
+          printf '  ✓ and the trail says why it ended\n'
+        else
+          printf '  ✗ the trail does not say why the session ended\n'
+          { grep session_closed "$mid/sessions.log" || true; } | tail -2 | sed 's/^/      /'
+          fail=1
+        fi
+      fi
+      kill "$mid_host" 2>/dev/null || true
+      wait "$mid_host" 2>/dev/null || true
+      mid_host=""
+      rm -rf "$mid"
 
       # **An unattended session is still visible and still recorded.**
       #

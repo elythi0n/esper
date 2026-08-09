@@ -19,7 +19,7 @@
 //! One direction of one channel is a small enough seam to be sure about.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use esper_audit::{Entry, Event, Log};
@@ -1075,6 +1075,81 @@ const fn picture_is_held(paused: bool, indicator_missing: bool) -> bool {
     paused || indicator_missing
 }
 
+/// How often a running session's lock state is re-asked.
+///
+/// Five seconds. The bound exists so somebody can lock up and leave, and
+/// nobody walks away in under five seconds — while a shorter interval would
+/// mean a subprocess more often than a session needs anything else.
+const LOCK_CHECKED_EVERY: Duration = Duration::from_secs(5);
+
+/// Watch for the screen locking, and say so once, or `None` when nothing asked.
+///
+/// **Nothing is spawned when the policy is off**, which is the default: the
+/// probe runs a subprocess and opens a display connection, and a host nobody
+/// switched this on for should pay for neither.
+///
+/// Uses only what is free to ask — see [`crate::consent::LockState::locked_cheaply`].
+/// A machine where nothing free can answer gets the bound on arrival and not
+/// during a session, which the host says when it starts.
+fn watch_for_a_lock(
+    policy: Arc<crate::consent::AskAtTheHost>,
+    mut stopping: tokio::sync::watch::Receiver<bool>,
+) -> Option<tokio::sync::mpsc::Receiver<String>> {
+    policy.lock_state_cheaply()?;
+    // One deep: the first answer ends the session, so a second would have
+    // nowhere to go.
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stopping.changed() => return,
+                () = tokio::time::sleep(LOCK_CHECKED_EVERY) => {}
+            }
+            // On a blocking thread: the probe shells out to the session
+            // manager, and doing that on the runtime would stall every task
+            // sharing it — including the one sending pictures.
+            let policy = Arc::clone(&policy);
+            let Ok(state) = tokio::task::spawn_blocking(move || policy.lock_state_cheaply()).await
+            else {
+                return;
+            };
+            // **Only a positive answer ends a session.** "Cannot tell" is
+            // where the free probes have nothing to say, and treating that as
+            // locked here would end every session on such a machine five
+            // seconds in — the opposite of what an arriving device gets, and
+            // right for the opposite reason: refusing to *start* is
+            // recoverable, and ending a session somebody is using is not.
+            if let Some(locked @ esper_presence::locked::Locked::Yes(_)) = state {
+                // The whole sentence rather than the source's name: the first
+                // version sent only where the answer came from, and the trail
+                // read "the screen at this host is the file
+                // ESPER_SCREEN_LOCKED names".
+                let _ = tx.send(locked.describe()).await;
+                return;
+            }
+        }
+    });
+    Some(rx)
+}
+
+/// Wait for the screen to be reported locked, or for ever when nobody is
+/// watching.
+///
+/// The same shape as [`wait_for_press`] and for the same reason: a `select!`
+/// branch needs a future either way.
+async fn wait_for_a_lock(watching: Option<&mut tokio::sync::mpsc::Receiver<String>>) -> String {
+    match watching {
+        Some(rx) => match rx.recv().await {
+            Some(how) => how,
+            // The watcher stopped, which happens when the host is shutting
+            // down. Waiting for ever is right: the branch that owns the
+            // shutdown is the one that should end this session.
+            None => std::future::pending().await,
+        },
+        None => std::future::pending().await,
+    }
+}
+
 /// Wait until an indicator that is off the screen has been off it too long.
 ///
 /// Pending while nothing is wrong, so the branch costs nothing in the
@@ -1739,6 +1814,9 @@ struct Recorded {
     log: Log,
     peer: [u8; 32],
     started: Instant,
+    /// Why it ended, set by whatever ended it. `None` means it simply
+    /// finished.
+    why: Mutex<Option<String>>,
 }
 
 impl Recorded {
@@ -1761,17 +1839,45 @@ impl Recorded {
             log: log.clone(),
             peer,
             started: Instant::now(),
+            why: Mutex::new(None),
+        }
+    }
+
+    /// Say why this session is ending, before it does.
+    ///
+    /// **Because "the session ended" is what every ending used to say.** A
+    /// session closed by a revocation, by a locked screen, by the host
+    /// shutting down and by a person finishing all wrote the same line — and
+    /// telling those apart afterwards is most of what a security log is for.
+    /// The controller's own outbound entry has carried its reason since it
+    /// existed; this is the host's side of the same sentence.
+    ///
+    /// Takes `&self` so the loop that decides can say so without owning the
+    /// record, and keeps the *first* reason: the thing that ended a session is
+    /// the first thing that ended it, and whatever unwinds afterwards is
+    /// consequence rather than cause.
+    fn ending(&self, why: &str) {
+        if let Ok(mut held) = self.why.lock()
+            && held.is_none()
+        {
+            *held = Some(why.to_owned());
         }
     }
 }
 
 impl Drop for Recorded {
     fn drop(&mut self) {
+        let why = self
+            .why
+            .lock()
+            .ok()
+            .and_then(|held| held.clone())
+            .unwrap_or_else(|| "the session ended".to_owned());
         if let Err(e) = self.log.append(&Entry::now(
             &self.peer,
             Event::SessionClosed {
                 duration_secs: self.started.elapsed().as_secs(),
-                reason: "the session ended".to_owned(),
+                reason: why,
             },
         )) {
             tracing::warn!(error = %e, "could not record the end of a session");
@@ -2443,6 +2549,8 @@ async fn serve_session(
             layout,
             log,
             capacity,
+            policy,
+            recorded: &recorded,
         },
     )
     .await;
@@ -2859,6 +2967,11 @@ struct Attending<'a> {
     /// Where what the controller measures the link at goes, for this
     /// connection's own congestion controller to pace from.
     capacity: Option<esper_transport::Capacity>,
+    /// The host's policy, for the one question it answers *during* a session:
+    /// whether the screen has been locked since the device walked in.
+    policy: &'a Arc<crate::consent::AskAtTheHost>,
+    /// The trail's record of this session, so whatever ends it can say why.
+    recorded: &'a Recorded,
 }
 
 #[allow(clippy::result_large_err)]
@@ -3105,6 +3218,8 @@ async fn serve(
         Indicator,
         /// The indicator has been off the screen for too long.
         IndicatorGaveUp,
+        /// The screen at this host was locked while the session ran.
+        Locked(String),
     }
     // Which reason this side ended it with, if it did. A session the host
     // closed is not one to park — parking is for a controller that has not
@@ -3150,6 +3265,15 @@ async fn serve(
                 None
             }
         };
+    // **The bound on `unattended` applies to a session already running, not
+    // only to one arriving.**
+    //
+    // Without this, a device that walked in at five o'clock keeps watching all
+    // night once the operator locks up and leaves — which is the hour the
+    // bound was switched on for. Only when the policy is on: a host without it
+    // spawns nothing and asks nobody.
+    let mut locked = watch_for_a_lock(Arc::clone(attending.policy), stopping.clone());
+
     loop {
         let turn = tokio::select! {
             _ = stopping.changed() => Turn::Stop,
@@ -3165,6 +3289,7 @@ async fn serve(
             () = attending.live.changed() => Turn::Permissions,
             () = wait_for_the_screen(sightings.as_mut()) => Turn::Indicator,
             () = out_of_grace(hidden_since) => Turn::IndicatorGaveUp,
+            said = wait_for_a_lock(locked.as_mut()) => Turn::Locked(said),
             incoming = control.recv::<MediaMessage>() => Turn::FromController(incoming),
             outgoing = from_pipeline.recv() => Turn::ToController(outgoing),
             cursor = wait_for_cursor(attending.pointer.as_mut()) => Turn::ToController(cursor),
@@ -3173,7 +3298,20 @@ async fn serve(
             // **The reason travels.** A controller whose host simply stopped
             // sending cannot tell a shutdown from a network that broke, and
             // there is a code for this one.
+            // **A screen that locked mid-session ends it, where somebody asked
+            // for that bound.** The same reason code an arriving device gets,
+            // because it is the same rule and the same thing fixes it.
+            Turn::Locked(how) => {
+                println!("      · ending this session: the screen here is {how}");
+                attending
+                    .recorded
+                    .ending(&format!("the screen at this host is {how}"));
+                media.close(esper_proto::Reason::HOST_IS_LOCKED);
+                ours = Some(esper_proto::Reason::HOST_IS_LOCKED);
+                break;
+            }
             Turn::Stop => {
+                attending.recorded.ending("the host was shutting down");
                 media.close(esper_proto::Reason::HOST_SHUTTING_DOWN);
                 ours = Some(esper_proto::Reason::HOST_SHUTTING_DOWN);
                 break;
@@ -3286,6 +3424,9 @@ async fn serve(
                 println!(
                     "        ending the session, because a screen being watched has to say so"
                 );
+                attending
+                    .recorded
+                    .ending(&format!("the session indicator did not come back: {why}"));
                 media.close(esper_proto::Reason::INDICATOR_UNCONFIRMED);
                 ours = Some(esper_proto::Reason::INDICATOR_UNCONFIRMED);
                 break;
@@ -3318,6 +3459,7 @@ async fn serve(
                 crate::permits::Standing::Unchanged => continue,
                 crate::permits::Standing::Forgotten => {
                     println!("      · ending this session: that device is no longer paired");
+                    attending.recorded.ending("that device is no longer paired");
                     record_revocation(attending.log, &device);
                     media.close(esper_proto::Reason::REVOKED);
                     ours = Some(esper_proto::Reason::REVOKED);
@@ -3325,10 +3467,11 @@ async fn serve(
                 }
                 crate::permits::Standing::Narrowed(lost) => {
                     if lost.contains(&Permission::View) {
-                        println!(
-                            "      · ending this session: {} was taken away",
-                            lost.iter().map(|p| p.name()).collect::<Vec<_>>().join(", ")
-                        );
+                        let taken = lost.iter().map(|p| p.name()).collect::<Vec<_>>().join(", ");
+                        println!("      · ending this session: {taken} was taken away");
+                        attending
+                            .recorded
+                            .ending(&format!("{taken} was taken away"));
                         record_revocation(attending.log, &device);
                         media.close(esper_proto::Reason::REVOKED);
                         ours = Some(esper_proto::Reason::REVOKED);
