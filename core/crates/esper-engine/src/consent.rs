@@ -474,6 +474,13 @@ pub struct AskAtTheHost {
     /// to anybody, and the far end is told that it is a standing no rather
     /// than a refusal it could try again.
     may_widen: bool,
+    /// When each device was last refused one of those questions.
+    ///
+    /// **On the host rather than in the session**, because a session's own
+    /// count is reset by reconnecting and a device holding `unattended` can
+    /// reconnect without anybody being asked. A "no" that bound only the
+    /// session it was said in would bind nothing.
+    refused_more: Mutex<Vec<([u8; 32], Instant)>>,
 }
 
 impl std::fmt::Debug for AskAtTheHost {
@@ -497,6 +504,38 @@ impl AskAtTheHost {
     #[must_use]
     pub fn asked_at(&self) -> &'static str {
         self.ask.asked_at()
+    }
+
+    /// When each device was last told no about being allowed more, so a
+    /// refusal survives the session it was said in.
+    fn refused_more_recently(&self, key: &[u8; 32], now: Instant) -> Option<Duration> {
+        let refused = self.refused_more.lock().ok()?;
+        refused.iter().find_map(|(k, when)| {
+            if k != key {
+                return None;
+            }
+            let since = now.saturating_duration_since(*when);
+            (since < Knocking::AGAIN_AFTER).then(|| Knocking::AGAIN_AFTER.saturating_sub(since))
+        })
+    }
+
+    /// Remember that somebody said no to this device.
+    ///
+    /// Bounded the same way acceptances are, and for the same reason: this is
+    /// written from the network's side of a decision, so a host somebody
+    /// connects to from many devices must not grow a list per key. The oldest
+    /// goes, which is also the one closest to expiring.
+    fn note_refusal(&self, key: [u8; 32], now: Instant) {
+        let Ok(mut refused) = self.refused_more.lock() else {
+            return;
+        };
+        refused.retain(|(k, when)| {
+            *k != key && now.saturating_duration_since(*when) < Knocking::AGAIN_AFTER
+        });
+        if refused.len() >= MOST_REMEMBERED {
+            refused.remove(0);
+        }
+        refused.push((key, now));
     }
 
     /// Whether a session already open may ask for more, as this host has it
@@ -568,6 +607,7 @@ impl AskAtTheHost {
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
             may_widen: true,
+            refused_more: Mutex::new(Vec::new()),
         }
     }
 
@@ -590,6 +630,7 @@ impl AskAtTheHost {
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
             may_widen: true,
+            refused_more: Mutex::new(Vec::new()),
         }
     }
 
@@ -614,6 +655,7 @@ impl AskAtTheHost {
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
             may_widen: true,
+            refused_more: Mutex::new(Vec::new()),
         }
     }
 
@@ -748,8 +790,6 @@ pub enum Widening {
 #[derive(Debug, Default)]
 pub struct Knocking {
     put: usize,
-    /// When the last question was refused, if one was.
-    refused: Option<Instant>,
 }
 
 impl Knocking {
@@ -766,14 +806,17 @@ impl Knocking {
     /// Nothing asked yet.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            put: 0,
-            refused: None,
-        }
+        Self { put: 0 }
     }
 
-    /// Whether another question may be put now.
-    fn may_put(&self, now: Instant) -> Result<(), (Reason, String)> {
+    /// Whether this session has any questions left.
+    ///
+    /// The clock is a parameter for the reason it is everywhere else in this
+    /// tree, even where this one does not read it yet: the cooling-off after a
+    /// refusal is kept by the host — see
+    /// [`AskAtTheHost::refused_more_recently`] — because a session's own count
+    /// is reset by reconnecting.
+    fn may_put(&self, _now: Instant) -> Result<(), (Reason, String)> {
         if self.put >= Self::MOST {
             return Err((
                 Reason::ASKED_ENOUGH,
@@ -783,19 +826,6 @@ impl Knocking {
                     Self::MOST
                 ),
             ));
-        }
-        if let Some(when) = self.refused {
-            let since = now.saturating_duration_since(when);
-            if since < Self::AGAIN_AFTER {
-                return Err((
-                    Reason::ASKED_ENOUGH,
-                    format!(
-                        "somebody at the host said no {}s ago; another question may be put in {}s",
-                        since.as_secs(),
-                        Self::AGAIN_AFTER.saturating_sub(since).as_secs().max(1)
-                    ),
-                ));
-            }
         }
         Ok(())
     }
@@ -859,6 +889,27 @@ impl AskAtTheHost {
         if let Err((reason, detail)) = knocking.may_put(now) {
             return Widening::Refused(reason, detail);
         }
+        if let Some(left) = self.refused_more_recently(&device.public_key, now) {
+            // **A refusal is the host's, not the session's.** The count above
+            // is per session, and a device that could reconnect would get a
+            // fresh one — so a "no" that only bound the session it was said
+            // in would bind nothing at all for a device holding `unattended`,
+            // which opens sessions without anybody being asked. Found by the
+            // red-team pass, which reconnected.
+            return Widening::Refused(
+                Reason::ASKED_ENOUGH,
+                format!(
+                    "somebody at the host said no; another question may be put in {}s",
+                    left.as_secs().max(1)
+                ),
+            );
+        }
+        // **Counted here, before anybody is asked rather than after.** A
+        // question a host cannot put to anybody still costs it a store read
+        // and a thread, and a session that could ask for ever because nobody
+        // was there to answer would be a session spinning that for as long as
+        // it stayed open.
+        knocking.put = knocking.put.saturating_add(1);
         if !self.ask.can_ask() {
             return Widening::Refused(
                 Reason::NOBODY_TO_ASK,
@@ -870,7 +921,6 @@ impl AskAtTheHost {
                 ),
             );
         }
-        knocking.put = knocking.put.saturating_add(1);
         let asked = Asked {
             name: device.name.clone(),
             fingerprint: device.fingerprint().hex(),
@@ -882,7 +932,7 @@ impl AskAtTheHost {
         match self.ask.ask_for_more(&asked, self.within) {
             Answer::Yes => Widening::Allowed { asked: true },
             Answer::No => {
-                knocking.refused = Some(now);
+                self.note_refusal(device.public_key, now);
                 Widening::Refused(
                     Reason::PROMPT_REFUSED,
                     "somebody at the host said no".to_owned(),
@@ -1305,6 +1355,98 @@ mod tests {
             "{later:?}"
         );
         assert_eq!(ask.asked.load(Ordering::Relaxed), 2);
+    }
+
+    /// **A refusal outlives the session it was said in**, because a session's
+    /// own count is reset by reconnecting — and a device holding `unattended`
+    /// reconnects without anybody being asked, so a "no" that bound only one
+    /// session would bind nothing at all.
+    #[test]
+    fn a_refusal_is_not_reset_by_opening_another_session() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::No));
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask)));
+        let now = Instant::now();
+
+        let mut first = Knocking::new();
+        let said_no = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut first,
+            now,
+        );
+        assert!(
+            matches!(said_no, Widening::Refused(Reason::PROMPT_REFUSED, _)),
+            "{said_no:?}"
+        );
+
+        // A new session: a new count, the same host.
+        let mut second = Knocking::new();
+        let again = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut second,
+            now + Duration::from_secs(1),
+        );
+        assert!(
+            matches!(again, Widening::Refused(Reason::ASKED_ENOUGH, _)),
+            "reconnecting got the question asked again: {again:?}"
+        );
+        assert_eq!(
+            ask.asked.load(Ordering::Relaxed),
+            1,
+            "nobody should have been asked twice"
+        );
+
+        // And it does not last for ever: the cooling-off is a bound, not a ban.
+        let mut third = Knocking::new();
+        let later = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut third,
+            now + Knocking::AGAIN_AFTER + Duration::from_secs(1),
+        );
+        assert!(
+            matches!(later, Widening::Refused(Reason::PROMPT_REFUSED, _)),
+            "{later:?}"
+        );
+    }
+
+    /// **A question nobody can answer still counts against the session.**
+    /// Otherwise a session on a host with nobody at it could put the question
+    /// for as long as it stayed open, and each one costs a store read and a
+    /// thread — measured against, since nothing else would ever stop it.
+    #[test]
+    fn a_host_with_nobody_to_ask_still_bounds_the_asking() {
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::new(Scripted::nobody())));
+        let mut knocking = Knocking::new();
+        let now = Instant::now();
+        for _ in 0..Knocking::MOST {
+            let answer = policy.widen(
+                &device(&[Permission::View]),
+                Permission::Control,
+                &[Permission::View],
+                &mut knocking,
+                now,
+            );
+            assert!(
+                matches!(answer, Widening::Refused(Reason::NOBODY_TO_ASK, _)),
+                "{answer:?}"
+            );
+        }
+        let enough = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut knocking,
+            now,
+        );
+        assert!(
+            matches!(enough, Widening::Refused(Reason::ASKED_ENOUGH, _)),
+            "a session with nobody to ask asked a fourth time: {enough:?}"
+        );
     }
 
     /// **Nobody answering is not somebody saying no**, so it starts no

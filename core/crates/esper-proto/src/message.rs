@@ -2422,12 +2422,21 @@ impl MediaMessage {
             | Self::Permissions(_)
             | Self::Answer(_)
             | Self::Paused(_)
-            | Self::Recording(_)
             | Self::Audio(_) => matches!(role, Role::Host),
+            // **A recording notice comes from the side making the recording**,
+            // which is the controller and the only side that knows. This
+            // table had it the other way round and nothing noticed, because
+            // for a long time nothing consulted the table for this variant:
+            // the host accepted it in its own arm and the controller refused
+            // it in its own arm, and both were right about the direction while
+            // the table was wrong. The first thing to rely on the table
+            // refused every honest recording notice, which is how it was
+            // found.
             Self::Select(_)
             | Self::Hint(_)
             | Self::Keyframe(_)
             | Self::Report(_)
+            | Self::Recording(_)
             | Self::Ask(_) => {
                 matches!(role, Role::Controller)
             }
@@ -2485,6 +2494,67 @@ mod tests {
         assert!(m.may_be_sent_by(super::Role::Host));
         assert!(!m.may_be_sent_by(super::Role::Controller));
         assert!(m.is_well_formed());
+    }
+
+    /// **Every variant's direction, in one place.** The table was wrong about
+    /// one of them — a recording notice, which comes from the controller — for
+    /// as long as nothing consulted it: each end had an arm that happened to
+    /// be right, so the mistake could only surface the day something relied on
+    /// the table, and then it refused every honest notice. A list is cheap and
+    /// it cannot be right by coincidence.
+    #[test]
+    fn every_message_says_which_end_sends_it() {
+        use super::{
+            AudioCodec, AudioConfig, MediaMessage, Permission, PermissionAnswer, PermissionAsk,
+            PermissionChange, Role,
+        };
+
+        let from_the_host = [
+            MediaMessage::Cursor(crate::CursorMessage::Moved(crate::CursorPos {
+                x: 1,
+                y: 1,
+                monitor: 0,
+            })),
+            MediaMessage::Permissions(PermissionChange {
+                granted: vec![Permission::View],
+            }),
+            MediaMessage::Answer(PermissionAnswer::Allowed),
+            MediaMessage::Paused(super::Paused { paused: true }),
+            MediaMessage::Audio(AudioConfig {
+                codec: AudioCodec::Opus,
+                sample_rate_hz: 48_000,
+                channels: 2,
+                frame_ms: 20,
+                ssrc: 1,
+            }),
+        ];
+        for m in &from_the_host {
+            assert!(m.may_be_sent_by(Role::Host), "{}", m.name());
+            assert!(!m.may_be_sent_by(Role::Controller), "{}", m.name());
+        }
+
+        let from_the_controller = [
+            MediaMessage::Hint(super::QualityHint {
+                max_fps: None,
+                max_long_edge: None,
+                profile: super::Profile::Balanced,
+                sharpness: None,
+            }),
+            MediaMessage::Keyframe(super::KeyframeRequest {
+                reason: super::KeyframeReason::Joined,
+            }),
+            MediaMessage::Report(super::LinkReport {
+                capacity_kbit: None,
+            }),
+            MediaMessage::Recording(super::Recording { recording: true }),
+            MediaMessage::Ask(PermissionAsk {
+                wanted: Permission::Control,
+            }),
+        ];
+        for m in &from_the_controller {
+            assert!(m.may_be_sent_by(Role::Controller), "{}", m.name());
+            assert!(!m.may_be_sent_by(Role::Host), "{}", m.name());
+        }
     }
 
     /// **A controller may ask and may not answer**, which is the whole

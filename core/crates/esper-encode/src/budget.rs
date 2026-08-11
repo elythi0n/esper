@@ -959,7 +959,8 @@ mod tests {
         );
         assert!(
             !g.is_at_floor(),
-            "a host needing 1.3 cores at the top should not end at the floor,              it ended at {}",
+            "a host needing 1.3 cores at the top should not end at the floor, it ended \
+             at {}",
             g.level().describe()
         );
         // The last thousand samples must all be the same rung.

@@ -1886,6 +1886,11 @@ impl ControllerStream {
             // sending one has either been modified or is confused, and
             // accepting it would mean a viewer could be told it is recording
             // when it is not.
+            //
+            // The direction check at the top of this function refuses it
+            // first. This arm is what the union's exhaustiveness costs and
+            // what it buys: the variant cannot be added to without somebody
+            // deciding here what a controller does with one.
             MediaMessage::Recording(_) => Err(StreamError::Malformed {
                 what: "a recording notice from a host",
             }),

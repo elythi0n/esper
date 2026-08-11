@@ -3513,6 +3513,8 @@ async fn serve(
     // The question that is out, if one is. One at a time: a second dialog
     // over the first would be two questions with one answer between them.
     let mut asking: Option<Asking> = None;
+    // How many times this session has asked anything at all.
+    let mut asks = 0usize;
 
     loop {
         let turn = tokio::select! {
@@ -3873,6 +3875,31 @@ async fn serve(
                 }
             },
             Turn::FromController(Ok(message)) => {
+                // **Who may send this, and whether it is within bounds,
+                // before anything acts on it.**
+                //
+                // This loop is a boundary and did not behave like one. Three
+                // of these messages are acted on *here* — a link report, a
+                // recording notice, a request for one more permission — and
+                // the check that refuses the rest lives in the pipeline
+                // thread, on the other side of a channel. So a controller's
+                // capacity report reached the transport's pacer before
+                // anything asked whether it was in range: the pipeline
+                // refused the message a moment later and printed a line, and
+                // by then the host was pacing to whatever number had arrived.
+                //
+                // Found by attacking it rather than by reading it, which is
+                // the point of the pass this comes from.
+                if !message.may_be_sent_by(esper_proto::Role::Controller)
+                    || !message.is_well_formed()
+                {
+                    eprintln!(
+                        "      · refused a message from the controller: {} is not one a \
+                         controller may send, or is out of bounds",
+                        message.name()
+                    );
+                    continue;
+                }
                 // **The one message this loop acts on itself.** What the
                 // controller measured about the link is for the *transport* —
                 // its congestion controller is the only place that can pace
@@ -3923,7 +3950,8 @@ async fn serve(
                             if told_capacity != Some(kbit) {
                                 told_capacity = Some(kbit);
                                 println!(
-                                    "      the viewer measures this link at {kbit} kbit/s;                                      pacing to it"
+                                    "      the viewer measures this link at {kbit} \
+                                     kbit/s; pacing to it"
                                 );
                             }
                         }
@@ -3947,6 +3975,42 @@ async fn serve(
                 // they decide.
                 if let MediaMessage::Ask(request) = &message {
                     let wanted = request.wanted;
+                    // **A bound on the asks themselves, before any of them
+                    // costs anything.**
+                    //
+                    // Separate from the three questions a *person* may be put
+                    // — see `consent::Knocking` — because they bound different
+                    // things: that one is somebody's patience, this one is the
+                    // work an ask costs whether or not it reaches anybody. And
+                    // it costs some: the device record is read from disk, and
+                    // a request for `control` on a session that has none opens
+                    // an injector to find out whether a yes could be honoured,
+                    // which on Linux creates a `uinput` device. Neither is
+                    // much; unbounded, both are a lever.
+                    //
+                    // Found by a controller that asked in a loop. Four times
+                    // what a person will ever be asked, so nothing legitimate
+                    // meets it.
+                    const MOST_ASKS: usize = 12;
+                    if asks >= MOST_ASKS {
+                        if control
+                            .send(&MediaMessage::Answer(
+                                esper_proto::PermissionAnswer::Refused {
+                                    reason: esper_proto::Reason::ASKED_ENOUGH,
+                                    detail: format!(
+                                        "this session has asked {MOST_ASKS} times and will \
+                                         not be asked about again"
+                                    ),
+                                },
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                    asks = asks.saturating_add(1);
                     if asking.is_some() {
                         // **One question at a time.** A second dialog over the
                         // first would be two questions with one answer between
