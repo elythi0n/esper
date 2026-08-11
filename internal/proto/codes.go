@@ -70,6 +70,16 @@ const (
 	// permission it already holds, and one told this knows to try again when
 	// somebody has unlocked the machine.
 	HostIsLocked Reason = 307
+	// AskedEnough is a limit on questions rather than on permissions. Every
+	// ask puts a prompt in front of whoever is at that machine, so a session
+	// allowed to ask without end can stop somebody working — and the person
+	// answering has no way to say "and stop asking". A device told this has
+	// not been refused the permission; it has been told to stop knocking.
+	AskedEnough Reason = 308
+	// NoAskingHere is a standing decision rather than an answer: a device told
+	// this gets the same reply every time, and the only way forward is
+	// somebody granting the permission at the machine.
+	NoAskingHere Reason = 309
 )
 
 // Capability.
@@ -171,6 +181,8 @@ var descriptions = map[Reason]string{
 	PromptRefused:           "somebody at the host declined this session",
 	NobodyToAsk:             "this host has nobody to ask, and this device may not connect unattended",
 	HostIsLocked:            "the screen at the host is locked",
+	AskedEnough:             "this session has asked for more as often as it may",
+	NoAskingHere:            "this host does not let a session ask for more",
 	NoCommonCodec:           "no codec in common",
 	NoCaptureBackend:        "no screen capture backend available",
 	NoDisplay:               "no display to capture",

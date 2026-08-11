@@ -287,8 +287,15 @@ pub struct ControllerStats {
     pub frames_lost: u64,
     pub frames_skipped: u64,
     pub keyframes_requested: u64,
-    /// How many times the host has narrowed what this session may do.
-    pub narrowings: u64,
+    /// How many times the host has said what this session may do, after the
+    /// grant it opened with.
+    ///
+    /// **Every such message, not only the narrowings.** It counted narrowings
+    /// when narrowing was the only thing this message could carry; a session
+    /// can now also be widened by somebody at the host answering a question,
+    /// and a counter that ignored those would read as though nothing had
+    /// happened at the moment the session changed most.
+    pub permission_changes: u64,
     /// Of those, the ones asked for because nothing was arriving.
     ///
     /// Counted separately because it is the diagnostic for the state that used
@@ -379,6 +386,11 @@ pub struct ControllerStream {
     /// `None` once a caller has taken it. See
     /// [`ControllerStream::take_permissions`].
     granted_now: Option<Vec<esper_proto::Permission>>,
+    /// What somebody at the host said about a request for one more permission.
+    ///
+    /// `None` once a caller has taken it. See
+    /// [`ControllerStream::take_answer`].
+    answered: Option<esper_proto::PermissionAnswer>,
     /// How many times each resolution rung has lost frames.
     ///
     /// **The ladder's memory, and what stops it oscillating.** Down fast and
@@ -588,6 +600,7 @@ impl ControllerStream {
             keeping: false,
             asked_for: KeyframeReason::Joined,
             granted_now: None,
+            answered: None,
             paused: None,
             audio: None,
             round_trip: UNKNOWN_ROUND_TRIP,
@@ -1922,7 +1935,19 @@ impl ControllerStream {
                 // what stops the two ends drifting -- so an older one that a
                 // caller has not read yet is stale rather than lost.
                 self.granted_now = Some(change.granted.clone());
-                self.stats.narrowings = self.stats.narrowings.saturating_add(1);
+                self.stats.permission_changes = self.stats.permission_changes.saturating_add(1);
+                Ok(())
+            }
+            // **Kept for the caller, like the narrowing.** Whether to say
+            // anything about it, and what to start doing now that it is
+            // allowed, is a viewer's decision — this layer has no window to
+            // say it in and no input to send.
+            //
+            // What a session may now *do* does not come from here: the host
+            // sends a `Permissions` of its own after a yes, and that message
+            // is the only statement of what is in force.
+            MediaMessage::Answer(answer) => {
+                self.answered = Some(answer.clone());
                 Ok(())
             }
             // Listed rather than caught by a wildcard, so a message added to
@@ -1932,7 +1957,8 @@ impl ControllerStream {
             MediaMessage::Select(_)
             | MediaMessage::Hint(_)
             | MediaMessage::Keyframe(_)
-            | MediaMessage::Report(_) => Ok(()),
+            | MediaMessage::Report(_)
+            | MediaMessage::Ask(_) => Ok(()),
         }
     }
 
@@ -1945,6 +1971,17 @@ impl ControllerStream {
     #[must_use]
     pub fn take_permissions(&mut self) -> Option<Vec<esper_proto::Permission>> {
         self.granted_now.take()
+    }
+
+    /// What somebody at the host said about a request for one more
+    /// permission, if they have said anything yet.
+    ///
+    /// **Taken rather than read**, for the reason the narrowing is: an answer
+    /// a caller has already acted on must not be acted on twice, and a session
+    /// may ask more than once.
+    #[must_use]
+    pub fn take_answer(&mut self) -> Option<esper_proto::PermissionAnswer> {
+        self.answered.take()
     }
 
     /// The sound the host has announced, once, if it has.
@@ -2433,7 +2470,7 @@ mod tests {
             Some(vec![esper_proto::Permission::View])
         );
         assert_eq!(c.take_permissions(), None, "and not a second time");
-        assert_eq!(c.stats().narrowings, 1);
+        assert_eq!(c.stats().permission_changes, 1);
     }
 
     /// **A pause is handed over once, and both edges arrive.**

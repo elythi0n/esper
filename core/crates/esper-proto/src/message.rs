@@ -899,6 +899,53 @@ pub struct PermissionChange {
     pub granted: Vec<Permission>,
 }
 
+/// A session asking to be allowed something it did not open with.
+///
+/// Controller to host. **Asking is all it is**: nothing about this message
+/// changes what a session may do, and a host that acted on one without a
+/// person answering would have built the escalation path this exists to make
+/// impossible. What it buys is that the person at the machine gets the
+/// question, instead of the person at the far end having to telephone them and
+/// talk them through `esper grant`.
+///
+/// **One permission per ask.** A person answers one question at a time, and a
+/// prompt offering three things at once is one where the answer says nothing
+/// about which of them mattered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionAsk {
+    /// What the session would like to be allowed.
+    ///
+    /// Which permissions may be asked for at all is the **host's** rule and is
+    /// not on the wire: a set named here would be a controller describing its
+    /// own limits. `check-host-decides.py` holds that mechanically.
+    pub wanted: Permission,
+}
+
+/// The host's answer to a [`PermissionAsk`].
+///
+/// Host to controller, and always sent: a session left waiting on an answer
+/// that never comes is a person watching a screen wondering whether anybody
+/// saw the question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionAnswer {
+    /// Somebody at the machine said yes.
+    ///
+    /// **What the session may now do arrives separately**, in a
+    /// [`PermissionChange`]: that message is the one statement of what is in
+    /// force, and two carriers for one fact are two things that can disagree.
+    Allowed,
+    /// No — and which kind of no.
+    Refused {
+        /// The kind of refusal, as a code the far end can act on: a person
+        /// declining, nobody there to ask, a host that never asks, or one
+        /// question too many.
+        reason: Reason,
+        /// The same thing as a sentence, for whoever is reading.
+        detail: String,
+    },
+}
+
 /// The host's response to a session request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2275,6 +2322,14 @@ pub enum MediaMessage {
     /// what this type means is "anything that can travel on a media session's
     /// control stream", which is what its own documentation says.
     Permissions(PermissionChange),
+    /// May this session do one more thing? Controller to host.
+    ///
+    /// On this stream for the same reason [`MediaMessage::Permissions`] is:
+    /// it is a question about the session rather than about any one of its
+    /// streams, and the answer comes back the same way.
+    Ask(PermissionAsk),
+    /// What somebody at the host said to that. Host to controller.
+    Answer(PermissionAnswer),
 }
 
 impl MediaMessage {
@@ -2307,6 +2362,17 @@ impl MediaMessage {
             // name a permission that does not exist, and a repeat of one it
             // already named grants nothing, so applying it is idempotent.
             Self::Permissions(_) => true,
+            // **A question is within bounds by naming a permission that
+            // exists**, which the enum already guarantees — a name this build
+            // does not know fails to decode long before this. Whether it may
+            // be *asked* is the host's rule and lives at the host: a check
+            // here would be this crate deciding what somebody at a machine is
+            // allowed to be asked.
+            Self::Ask(_) => true,
+            // An answer carries a reason code, and an unrecognised code is
+            // deliberately preserved rather than refused so a newer host's
+            // reason still reaches a person.
+            Self::Answer(_) => true,
             // A boolean is within bounds by being one.
             Self::Paused(_) => true,
             Self::Recording(_) => true,
@@ -2327,6 +2393,8 @@ impl MediaMessage {
             Self::Cursor(c) => c.name(),
             Self::Report(_) => "a link report",
             Self::Permissions(_) => "a permission change",
+            Self::Ask(_) => "a request for one more permission",
+            Self::Answer(_) => "an answer about a requested permission",
             Self::Paused(_) => "a pause",
             Self::Recording(_) => "a recording notice",
             Self::Audio(_) => "an audio config",
@@ -2352,10 +2420,15 @@ impl MediaMessage {
             Self::Config(_)
             | Self::Cursor(_)
             | Self::Permissions(_)
+            | Self::Answer(_)
             | Self::Paused(_)
             | Self::Recording(_)
             | Self::Audio(_) => matches!(role, Role::Host),
-            Self::Select(_) | Self::Hint(_) | Self::Keyframe(_) | Self::Report(_) => {
+            Self::Select(_)
+            | Self::Hint(_)
+            | Self::Keyframe(_)
+            | Self::Report(_)
+            | Self::Ask(_) => {
                 matches!(role, Role::Controller)
             }
         }
@@ -2412,6 +2485,57 @@ mod tests {
         assert!(m.may_be_sent_by(super::Role::Host));
         assert!(!m.may_be_sent_by(super::Role::Controller));
         assert!(m.is_well_formed());
+    }
+
+    /// **A controller may ask and may not answer**, which is the whole
+    /// arrangement: a controller that could send its own answer would be a
+    /// controller granting itself permissions with one extra step, and one
+    /// that could send a `Permissions` would not even need the step.
+    #[test]
+    fn a_controller_asks_and_a_host_answers_and_never_the_other_way() {
+        use super::{MediaMessage, Permission, PermissionAnswer, PermissionAsk, Reason, Role};
+
+        let ask = MediaMessage::Ask(PermissionAsk {
+            wanted: Permission::Control,
+        });
+        assert!(ask.may_be_sent_by(Role::Controller));
+        assert!(!ask.may_be_sent_by(Role::Host));
+        assert!(ask.is_well_formed());
+
+        for answer in [
+            PermissionAnswer::Allowed,
+            PermissionAnswer::Refused {
+                reason: Reason::PROMPT_REFUSED,
+                detail: "somebody at the host said no".to_owned(),
+            },
+        ] {
+            let m = MediaMessage::Answer(answer);
+            assert!(m.may_be_sent_by(Role::Host));
+            assert!(!m.may_be_sent_by(Role::Controller));
+            assert!(m.is_well_formed());
+        }
+    }
+
+    /// The two survive a round trip, including the reason on a refusal — a
+    /// code the far end branches on is not a code to lose in encoding.
+    #[test]
+    fn asking_and_answering_survive_the_wire() {
+        use super::{MediaMessage, Permission, PermissionAnswer, PermissionAsk, Reason};
+
+        for m in [
+            MediaMessage::Ask(PermissionAsk {
+                wanted: Permission::FilesOut,
+            }),
+            MediaMessage::Answer(PermissionAnswer::Allowed),
+            MediaMessage::Answer(PermissionAnswer::Refused {
+                reason: Reason::ASKED_ENOUGH,
+                detail: "as often as it may".to_owned(),
+            }),
+        ] {
+            let bytes = crate::encode(&m).expect("encode");
+            let back: MediaMessage = crate::decode(&bytes).expect("decode");
+            assert_eq!(back, m);
+        }
     }
 
     /// **A config a decoder cannot be built for is refused, not rounded.**

@@ -47,6 +47,7 @@ fn exclusive() -> esper_display_lock::DisplayLock {
 
 fn question() -> Question {
     Question {
+        asking: esper_dialog::Asking::ANewSession,
         kind: "screen".to_owned(),
         name: "elythion".to_owned(),
         fingerprint: "giraffe tapestry geyser rifle jersey domain razor oboe".to_owned(),

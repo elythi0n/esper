@@ -1145,6 +1145,58 @@ async fn wait_for_a_lock(watching: Option<&mut tokio::sync::mpsc::Receiver<Strin
     }
 }
 
+/// Wait for an answer to a question somebody at this machine is being asked.
+///
+/// **Pending while no question is out**, so a session with nothing to wait for
+/// pays nothing — and, more to the point, so the picture keeps flowing while
+/// somebody decides. A prompt waits as long as this host's
+/// `consent.answer_within`, which is forty-five seconds by default, and a
+/// session loop that blocked for it would hold the screen still for the whole
+/// time.
+///
+/// A question can outlive the session that asked it: a blocking task cannot be
+/// cancelled, so a controller that disconnects while somebody is deciding
+/// leaves the prompt up until it times out, and the answer then reaches
+/// nothing. The same is true of the prompt that opens a session, and for the
+/// same reason — the asking layer has no cancellation and inventing one here
+/// would only cover this one caller.
+async fn wait_for_an_answer(asking: Option<&mut Asking>) -> TheyAnswered {
+    match asking {
+        Some(handle) => match handle.await {
+            Ok(answer) => answer,
+            // The task panicked or was cancelled. Neither is a person saying
+            // yes, and refusing is the only safe reading.
+            Err(_) => TheyAnswered {
+                wanted: esper_proto::Permission::View,
+                verdict: crate::consent::Widening::Refused(
+                    esper_proto::Reason::PROMPT_TIMEOUT,
+                    "the question could not be put".to_owned(),
+                ),
+                keyboard: None,
+            },
+        },
+        None => std::future::pending().await,
+    }
+}
+
+/// A question that is in front of somebody at this machine.
+type Asking = tokio::task::JoinHandle<TheyAnswered>;
+
+/// What came back from asking.
+struct TheyAnswered {
+    /// What was asked for.
+    wanted: esper_proto::Permission,
+    /// What the rule and the person between them decided.
+    verdict: crate::consent::Widening,
+    /// An injector opened while asking, for a session that had none.
+    ///
+    /// **Opened before the question rather than after the answer**, so a host
+    /// with nothing to inject with refuses without disturbing anybody: a
+    /// prompt whose yes cannot be honoured is worse than a refusal, because
+    /// somebody answered it. Dropped unopened if the answer is no.
+    keyboard: Option<esper_input::Dispatcher>,
+}
+
 /// Wait until an indicator that is off the screen has been off it too long.
 ///
 /// Pending while nothing is wrong, so the branch costs nothing in the
@@ -2357,6 +2409,10 @@ async fn serve_session(
         println!("      view only: control is not granted for this session");
         None
     };
+    // **One slot, two readers.** The stream that arrives takes it; the
+    // session's own loop fills it if somebody here allows control while the
+    // session is running.
+    let input = Arc::new(std::sync::Mutex::new(input));
 
     // **The clipboard, if this device was granted one.** Opened before the
     // stream that carries it, so a machine with no clipboard says so here
@@ -2437,26 +2493,29 @@ async fn serve_session(
     let clipboard_missing = clipboard.is_none();
     let files_missing = files.is_none();
 
-    let waiting_for_streams =
-        (input.is_some() || clipboard.is_some() || files.is_some()).then(|| {
-            // Accepted in a task because the controller opens these lazily — a
-            // session that sends no input never opens one — and waiting here would
-            // hold up the video.
-            let accepting = session.control_acceptor();
-            let stopping = stopping.clone();
-            let live = live.clone();
-            let granted = granted.clone();
-            tokio::spawn(serve_extra_streams(ExtraStreams {
-                accepting,
-                input,
-                layout: layout_now,
-                clipboard,
-                files,
-                stopping,
-                live,
-                granted,
-            }))
-        });
+    // **Always, even with nothing to serve yet.** It used to be spawned only
+    // when the session opened with something a stream could carry, which was
+    // right until a session could be widened while it ran: a controller
+    // allowed control at half past three opens an input stream, and nothing
+    // would have been listening for it.
+    //
+    // Accepted in a task because the controller opens these lazily — a session
+    // that sends no input never opens one — and waiting here would hold up the
+    // video.
+    let waiting_for_streams = {
+        let accepting = session.control_acceptor();
+        let stopping = stopping.clone();
+        let live = live.clone();
+        tokio::spawn(serve_extra_streams(ExtraStreams {
+            accepting,
+            input: Arc::clone(&input),
+            layout: layout_now,
+            clipboard,
+            files,
+            stopping,
+            live,
+        }))
+    };
 
     // **The indicator goes up before a single frame goes out.** A person
     // whose screen starts being watched has to be told at the moment it
@@ -2681,6 +2740,7 @@ async fn serve_session(
             pointer,
             watch: watch.as_ref(),
             live: live.clone(),
+            input: Arc::clone(&input),
             watching: esper_presence::Watching {
                 recording: false,
                 peer: session.peer_hello().name.clone(),
@@ -2714,12 +2774,10 @@ async fn serve_session(
     if let Some(indicator) = indicator {
         indicator.hide();
     }
-    if let Some(task) = waiting_for_streams {
-        // Aborted rather than awaited: it is waiting on a stream that will
-        // never arrive now. The `Drop` of what it holds is what releases a key
-        // still down and wipes what the clipboard was carrying.
-        task.abort();
-    }
+    // Aborted rather than awaited: it is waiting on a stream that will never
+    // arrive now. The `Drop` of what it holds is what releases a key still
+    // down and wipes what the clipboard was carrying.
+    waiting_for_streams.abort();
     served
 }
 
@@ -2787,7 +2845,13 @@ fn fresh(
 struct ExtraStreams {
     accepting: esper_transport::ControlAcceptor,
     /// Taken by the first input stream. There is only one keyboard.
-    input: Option<esper_input::Dispatcher>,
+    ///
+    /// **Shared with the session's own loop, and that is the point.** A
+    /// session that opened without `control` has nothing here — opening an
+    /// injector for a session that will never type would print two lines and
+    /// take a device for nothing — and if somebody at this machine allows
+    /// control later, the loop that heard them puts one in.
+    input: Arc<std::sync::Mutex<Option<esper_input::Dispatcher>>>,
     /// The host's screens, as they change, for the injector to map through.
     layout: tokio::sync::watch::Receiver<Vec<esper_input::Monitor>>,
     /// Taken by the first clipboard stream. There is only one clipboard.
@@ -2798,7 +2862,16 @@ struct ExtraStreams {
     files: Option<std::sync::Arc<crate::files_task::Files>>,
     stopping: tokio::sync::watch::Receiver<bool>,
     live: crate::permits::Live,
-    granted: Vec<Permission>,
+}
+
+/// Take the injector out of the shared slot, if there is one there.
+///
+/// A poisoned lock is nothing to inject with: a panic somewhere holding this
+/// is not a reason to hand a keyboard to a peer.
+fn take_the_keyboard(
+    slot: &std::sync::Mutex<Option<esper_input::Dispatcher>>,
+) -> Option<esper_input::Dispatcher> {
+    slot.lock().ok()?.take()
 }
 
 /// Tasks that must not outlive whatever spawned them.
@@ -2857,9 +2930,13 @@ async fn serve_extra_streams(mut extras: ExtraStreams) {
                 continue;
             }
         };
-        // **Checked against the grant, not against what was opened.** A stream
-        // is not permission to do the thing it names.
-        if !purpose.permitted_by(&extras.granted) {
+        // **Checked against the grant as it is now, not as the session
+        // opened.** A stream is not permission to do the thing it names — and
+        // the set moves in both directions while a session runs: a permission
+        // taken away at the machine must not admit a stream a moment later,
+        // and one a person has just allowed for this session must.
+        let granted = esper_transport::Grants::granted(&extras.live);
+        if !purpose.permitted_by(&granted) {
             eprintln!(
                 "      · refused a {} stream: not granted for this session",
                 purpose.name()
@@ -2867,7 +2944,7 @@ async fn serve_extra_streams(mut extras: ExtraStreams) {
             continue;
         }
         match purpose {
-            esper_proto::StreamPurpose::Input => match extras.input.take() {
+            esper_proto::StreamPurpose::Input => match take_the_keyboard(&extras.input) {
                 Some(dispatcher) => {
                     served_input = true;
                     let stopping = extras.stopping.clone();
@@ -3102,6 +3179,12 @@ struct Attending<'a> {
     watch: Option<&'a crate::cursor_task::CursorWatch>,
     /// What this session's device may do, as it changes.
     live: crate::permits::Live,
+    /// Where an injector goes if somebody here allows control mid-session.
+    ///
+    /// The other end of [`ExtraStreams::input`]. Empty for a session that
+    /// opened with control — the stream took it — and empty for one that
+    /// cannot inject at all.
+    input: Arc<std::sync::Mutex<Option<esper_input::Dispatcher>>>,
     /// What the session indicator is saying, so pausing can change one field
     /// of it rather than rebuilding what the rest should be.
     watching: esper_presence::Watching,
@@ -3366,6 +3449,9 @@ async fn serve(
         IndicatorGaveUp,
         /// The screen at this host was locked while the session ran.
         Locked(String),
+        /// Somebody at this machine answered a question about widening this
+        /// session — or the rule answered it without asking anybody.
+        Answered(TheyAnswered),
     }
     // Which reason this side ended it with, if it did. A session the host
     // closed is not one to park — parking is for a controller that has not
@@ -3419,6 +3505,14 @@ async fn serve(
     // bound was switched on for. Only when the policy is on: a host without it
     // spawns nothing and asks nobody.
     let mut locked = watch_for_a_lock(Arc::clone(attending.policy), stopping.clone());
+    // **How often this session has put a question to whoever is here.** Per
+    // session rather than per host: the limit exists so one device cannot
+    // fill somebody's screen with prompts, and a limit shared between devices
+    // would let one of them spend another's.
+    let knocking = Arc::new(std::sync::Mutex::new(crate::consent::Knocking::new()));
+    // The question that is out, if one is. One at a time: a second dialog
+    // over the first would be two questions with one answer between them.
+    let mut asking: Option<Asking> = None;
 
     loop {
         let turn = tokio::select! {
@@ -3436,6 +3530,13 @@ async fn serve(
             () = wait_for_the_screen(sightings.as_mut()) => Turn::Indicator,
             () = out_of_grace(hidden_since) => Turn::IndicatorGaveUp,
             said = wait_for_a_lock(locked.as_mut()) => Turn::Locked(said),
+            answered = wait_for_an_answer(asking.as_mut()) => {
+                // Taken out here rather than in the arm: the handle has
+                // already produced its answer, and a session that left it in
+                // place would refuse the next question for ever.
+                asking = None;
+                Turn::Answered(answered)
+            }
             incoming = control.recv::<MediaMessage>() => Turn::FromController(incoming),
             outgoing = from_pipeline.recv() => Turn::ToController(outgoing),
             cursor = wait_for_cursor(attending.pointer.as_mut()) => Turn::ToController(cursor),
@@ -3455,6 +3556,127 @@ async fn serve(
                 media.close(esper_proto::Reason::HOST_IS_LOCKED);
                 ours = Some(esper_proto::Reason::HOST_IS_LOCKED);
                 break;
+            }
+            // **What somebody at this machine said about widening it.**
+            //
+            // The order is the same discipline as everywhere else here: apply
+            // it at the host first, then say so, then tell the far end. A
+            // controller told it may drive before the injector would accept a
+            // keystroke is a controller whose first keystroke is refused.
+            Turn::Answered(answered) => {
+                use crate::consent::Widening;
+                let TheyAnswered {
+                    wanted,
+                    verdict: answer,
+                    keyboard,
+                } = answered;
+                let (allowed, how) = match &answer {
+                    Widening::Allowed { asked: true } => (true, "somebody here said yes"),
+                    Widening::Allowed { asked: false } => {
+                        (true, "the device already holds it here")
+                    }
+                    Widening::AlreadyHeld => (true, "this session already had it"),
+                    Widening::Refused(_, _) => (false, "refused"),
+                };
+                if allowed && !matches!(answer, Widening::AlreadyHeld) {
+                    // **The keyboard first, then the permission.** In the
+                    // other order there is a moment when the session may
+                    // drive and the stream that carries the driving would be
+                    // refused for having nothing to inject with.
+                    if let Some(dispatcher) = keyboard
+                        && let Ok(mut slot) = attending.input.lock()
+                    {
+                        *slot = Some(dispatcher);
+                    }
+                    attending.live.allow_here(wanted);
+                }
+                if let Err(e) = attending.log.append(&Entry::now(
+                    &device,
+                    Event::SessionAsked {
+                        wanted,
+                        allowed,
+                        how: match &answer {
+                            Widening::Refused(_, detail) => detail.clone(),
+                            _ => how.to_owned(),
+                        },
+                    },
+                )) {
+                    eprintln!("      · could not write the audit log: {e}");
+                }
+                match &answer {
+                    Widening::Refused(reason, detail) => {
+                        println!("      · not allowed {}: {detail}", wanted.name());
+                        if control
+                            .send(&MediaMessage::Answer(
+                                esper_proto::PermissionAnswer::Refused {
+                                    reason: *reason,
+                                    detail: detail.clone(),
+                                },
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Widening::AlreadyHeld | Widening::Allowed { .. } => {
+                        if matches!(answer, Widening::AlreadyHeld) {
+                            // Answered rather than ignored: a controller that
+                            // lost track of what it holds is still owed a
+                            // reply, and the set below is what puts it right.
+                            println!(
+                                "      · the controller asked for {} and already had it",
+                                wanted.name()
+                            );
+                        } else {
+                            println!(
+                                "      · this session may now {} — {how}, for this session only",
+                                wanted.name()
+                            );
+                        }
+                        // **The indicator, because the border is what somebody
+                        // at this machine reads.** A session that has just
+                        // gained control has to look like one, and nothing
+                        // else would change the colour: the store did not
+                        // move, so the branch that watches it says nothing.
+                        if wanted == Permission::Control {
+                            attending.watching.controlling = true;
+                            if let Some(i) = attending.indicator {
+                                i.show(esper_presence::Watching {
+                                    recording,
+                                    paused,
+                                    ..attending.watching.clone()
+                                });
+                            }
+                        }
+                        // **The set, then the answer.** `Permissions` is the
+                        // one statement of what a session may do, so it goes
+                        // first and the answer is the acknowledgement — a
+                        // controller that saw "allowed" and no set would have
+                        // to guess what it now holds.
+                        let granted = esper_transport::Grants::granted(&attending.live);
+                        told_permissions = Some(granted.clone());
+                        if control
+                            .send(&MediaMessage::Permissions(esper_proto::PermissionChange {
+                                granted,
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if control
+                            .send(&MediaMessage::Answer(
+                                esper_proto::PermissionAnswer::Allowed,
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                continue;
             }
             Turn::Stop => {
                 attending.recorded.ending("the host was shutting down");
@@ -3717,6 +3939,122 @@ async fn serve(
                             }
                         }
                     }
+                }
+                // **And the third: a session asking to be allowed one more
+                // thing.** It is answered by a person at this machine, so it
+                // is put to them on a thread of its own — see
+                // `wait_for_an_answer` — and the picture keeps flowing while
+                // they decide.
+                if let MediaMessage::Ask(request) = &message {
+                    let wanted = request.wanted;
+                    if asking.is_some() {
+                        // **One question at a time.** A second dialog over the
+                        // first would be two questions with one answer between
+                        // them, and whichever was on top would collect it.
+                        if control
+                            .send(&MediaMessage::Answer(
+                                esper_proto::PermissionAnswer::Refused {
+                                    reason: esper_proto::Reason::ASKED_ENOUGH,
+                                    detail: "a question is already in front of \
+                                             somebody at this machine"
+                                        .to_owned(),
+                                },
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                    println!(
+                        "      · the controller asks to be allowed {}",
+                        wanted.name()
+                    );
+                    // **What the store says, read now rather than at the
+                    // start of the session.** Somebody may have granted this
+                    // permission in the meantime, and then there is nobody to
+                    // ask.
+                    let holds = esper_transport::Grants::granted(&attending.live);
+                    let policy = Arc::clone(attending.policy);
+                    let counted = Arc::clone(&knocking);
+                    // Whether saying yes would need an injector this session
+                    // has never opened. `controlling` is what the session
+                    // opened with, so this is false for one that already
+                    // drives and for anything that is not `control`.
+                    let needs_a_keyboard =
+                        wanted == Permission::Control && !attending.watching.controlling;
+                    let screens = attending.layout.borrow().clone();
+                    asking = Some(tokio::task::spawn_blocking(move || {
+                        // The device record, read here because the answer
+                        // depends on what the store says now and a session's
+                        // copy of it is as old as the session.
+                        let named = crate::paths::devices()
+                            .ok()
+                            .and_then(|(store, _)| store.get(&device).cloned());
+                        let refuse = |reason, detail: &str| TheyAnswered {
+                            wanted,
+                            verdict: crate::consent::Widening::Refused(reason, detail.to_owned()),
+                            keyboard: None,
+                        };
+                        let Some(record) = named else {
+                            // Not paired any more. The session is about to end
+                            // on its own — `Turn::Permissions` reads the same
+                            // store — and this is not the branch that should
+                            // end it.
+                            return refuse(
+                                esper_proto::Reason::REVOKED,
+                                "this device is no longer paired",
+                            );
+                        };
+                        // **Before anybody is asked.** A machine that cannot
+                        // inject cannot honour a yes, and a question somebody
+                        // answered for nothing is worse than a refusal.
+                        let keyboard = if needs_a_keyboard {
+                            let chosen = crate::injector::open();
+                            for line in &chosen.attempts {
+                                println!("      {line}");
+                            }
+                            if !chosen.real {
+                                return refuse(
+                                    esper_proto::Reason::NO_INPUT_BACKEND,
+                                    "this host has nothing it can inject input with",
+                                );
+                            }
+                            Some(esper_input::Dispatcher::new(chosen.sink, screens, true))
+                        } else {
+                            None
+                        };
+                        let Ok(mut counting) = counted.lock() else {
+                            // A panic somewhere holding the count. Refusing is
+                            // the only safe answer to a question about
+                            // permissions.
+                            return refuse(
+                                esper_proto::Reason::PROMPT_TIMEOUT,
+                                "the question could not be put",
+                            );
+                        };
+                        let verdict = policy.widen(
+                            &record,
+                            wanted,
+                            &holds,
+                            &mut counting,
+                            std::time::Instant::now(),
+                        );
+                        // **Dropped on a no**, which releases whatever the
+                        // injector took — a `uinput` device, or a connection
+                        // to the display server.
+                        let keyboard = match verdict {
+                            crate::consent::Widening::Allowed { .. } => keyboard,
+                            _ => None,
+                        };
+                        TheyAnswered {
+                            wanted,
+                            verdict,
+                            keyboard,
+                        }
+                    }));
+                    continue;
                 }
                 if to_pipeline.send(message).is_err() {
                     break;
@@ -4301,12 +4639,20 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             },
         );
 
-        // Asked for and not given: said here rather than discovered later by
-        // a keystroke that had no effect.
-        if o.control && !grant.allows(Permission::Control) {
-            println!("  control    refused by the host — this session is view only");
-        }
         let may_drive = grant.allows(Permission::Control);
+        // **Asked for and not granted, so the host is asked.** Said here
+        // rather than discovered later by a keystroke that had no effect —
+        // and asked rather than only said, because the alternative is a phone
+        // call in which somebody is talked through `esper grant`, and the
+        // fastest way through that call is granting more than the moment
+        // needs, for ever.
+        //
+        // The question is put once the session is up: it is a question about
+        // this session, and the answer lasts exactly as long as it does.
+        let ask_to_drive = o.control && !may_drive;
+        if ask_to_drive {
+            println!("  control    not granted — asking somebody at the host for this session");
+        }
 
         let link = ControllerLink::open(media, control)
             .await
@@ -4393,6 +4739,13 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         link.want_sharpness(wanted)
             .await
             .map_err(|e| format!("saying what this viewer will settle for: {e}"))?;
+        if ask_to_drive {
+            // **Not fatal, and said.** A host that cannot be asked is a
+            // session that watches, which is what it was going to be anyway.
+            if let Err(e) = link.ask_for(Permission::Control).await {
+                println!("  control    could not ask the host ({e}); watching only");
+            }
+        }
 
         let mut asked_for: Option<Vec<u32>> = None;
         // Which screens the picture is of, so a layout change can be told
@@ -4954,6 +5307,37 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 if !lost.is_empty() {
                     println!("  · the host took away: {}", lost.join(", "));
                 }
+                // **And the other direction, which only somebody at the host
+                // can cause.** The store cannot widen a live session, so a
+                // set that has *gained* something is a person there having
+                // answered a question about this session.
+                if held_permissions.contains(&Permission::Control) && driving.is_none() && o.control
+                {
+                    match presenter.as_mut() {
+                        Some(p) => {
+                            match announce(&session, esper_proto::StreamPurpose::Input).await {
+                                Ok(control) => {
+                                    p.forward_input(true);
+                                    println!(
+                                        "  · allowed at the host: keys and pointer go there now"
+                                    );
+                                    driving = Some((
+                                        crate::input_source::InputSource::new(
+                                            esper_stream::tiles_of(&config),
+                                            (config.width, config.height),
+                                        ),
+                                        control,
+                                    ));
+                                }
+                                Err(e) => println!("  · control was allowed, but ({e})"),
+                            }
+                        }
+                        // Nothing to drive from, which is the same answer as
+                        // at the start of a session: input comes from the
+                        // viewer's own window.
+                        None => println!("  · control was allowed, but this viewer has no window"),
+                    }
+                }
                 if !held_permissions.contains(&Permission::Control)
                     && let Some((source, control)) = driving.as_mut()
                 {
@@ -4966,6 +5350,19 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     }
                     println!("  · no longer driving this session; watching only");
                     driving = None;
+                }
+            }
+            // **What somebody at the host said about a request for more.**
+            // The set itself arrives in its own message, handled above; this
+            // is the answer to the question, and a refusal is the only thing
+            // that would otherwise leave somebody watching a screen wondering
+            // whether anybody saw it.
+            if let Some(answer) = link.take_answer() {
+                match answer {
+                    esper_proto::PermissionAnswer::Allowed => {}
+                    esper_proto::PermissionAnswer::Refused { reason, detail } => {
+                        println!("  · the host did not allow it: {detail} [{reason}]");
+                    }
                 }
             }
             if let Some((source, control)) = driving.as_mut() {

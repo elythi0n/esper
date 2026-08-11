@@ -193,6 +193,9 @@ impl Canvas {
 /// What somebody is being asked.
 #[derive(Debug, Clone)]
 pub struct Question {
+    /// Which question this is: a session that wants to start, or one already
+    /// running that wants more.
+    pub asking: Asking,
     /// What kind of session: a screen, a shell, a forward.
     pub kind: String,
     /// What the device is called. **Peer-supplied**, so it is cut to fit and
@@ -206,6 +209,23 @@ pub struct Question {
     pub granted: Vec<String>,
     /// How long is left to answer, in seconds.
     pub seconds: u64,
+}
+
+/// What a person is being asked about.
+///
+/// **Two headings, because they are two different decisions.** Agreeing to a
+/// session is agreeing to somebody being here at all; agreeing to one more
+/// permission is a decision about a session already running, and somebody
+/// reading "a device wants to open a screen session" while watching that
+/// device use their screen would rightly wonder what happened to the first
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Asking {
+    /// A device that wants to open a session.
+    #[default]
+    ANewSession,
+    /// A session already open that wants one more permission.
+    MoreForOneOpen,
 }
 
 /// A painted question, and where its two answers are.
@@ -300,7 +320,12 @@ pub fn paint(q: &Question) -> Painted {
 
     let mut body = vec![
         Line {
-            text: format!("a device wants to open a {} session", cut(&q.kind, 10)),
+            text: match q.asking {
+                Asking::ANewSession => {
+                    format!("a device wants to open a {} session", cut(&q.kind, 10))
+                }
+                Asking::MoreForOneOpen => "a device already watching wants more".to_owned(),
+            },
             indent: 0,
             colour: ink::TEXT,
         },
@@ -533,6 +558,7 @@ mod tests {
 
     fn question() -> Question {
         Question {
+            asking: Asking::ANewSession,
             kind: "screen".to_owned(),
             name: "elythion".to_owned(),
             fingerprint: "giraffe tapestry geyser rifle jersey domain razor oboe".to_owned(),

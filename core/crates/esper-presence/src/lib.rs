@@ -151,7 +151,8 @@ impl Missing {
                 saw,
                 at: (x, y),
             } => format!(
-                "something is drawn over the indicator: {wrong} of {of} places checked are not                  its colour, at {x},{y} the screen is #{:02x}{:02x}{:02x}",
+                "something is drawn over the indicator: {wrong} of {of} places checked \
+                 are not its colour, at {x},{y} the screen is #{:02x}{:02x}{:02x}",
                 saw[0], saw[1], saw[2]
             ),
             Self::Unreadable(why) => format!("the screen could not be read: {why}"),

@@ -299,8 +299,12 @@ pub fn parse_invite(args: &[String]) -> Result<InviteOptions, String> {
         // does not fall back to anyone.** That refusal is the product working
         // correctly: there is no address for a broker anywhere in Esper, and
         // there is no one else's server to borrow.
-        return Err("invite needs a broker you run: --via <address> --broker-key <key>.\n               There is no default broker anywhere in Esper, and this will not use              somebody else's.\n  Start one with: esper-broker serve --listen :7443"
-            .to_owned());
+        return Err(
+            "invite needs a broker you run: --via <address> --broker-key <key>.\n  \
+                    There is no default broker anywhere in Esper, and this will not use \
+                    somebody else's.\n  Start one with: esper-broker serve --listen :7443"
+                .to_owned(),
+        );
     };
     Ok(InviteOptions {
         via: esper_rendezvous::Via { addr, key },
@@ -557,10 +561,9 @@ async fn join(identity: Identity, invitation: Invitation, code: PairingCode) -> 
         Ok(Ok(met)) => met,
         Ok(Err(e)) => return Err(format!("waiting to be introduced: {e}")),
         Err(_) => {
-            return Err(
-                "nobody was waiting with that invitation — ask them to run `esper-engine                  invite` again"
-                    .to_owned(),
-            );
+            return Err("nobody was waiting with that invitation — ask them to run \
+                 `esper-engine invite` again"
+                .to_owned());
         }
     };
     dial.allow(met.peer);

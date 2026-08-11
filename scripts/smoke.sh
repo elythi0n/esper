@@ -394,7 +394,8 @@ cleanup_terminal() {
              "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" \
              "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}" \
              "${seat_host:-}" "${switch_x:-}" "${lk_host:-}" "${wk_listener:-}" \
-             "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}"; do
+             "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}" \
+             "${mk_host:-}" "${mk_client:-}" "${na_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -4284,6 +4285,220 @@ PYLISTEN
         wait "$seen_host" 2>/dev/null || true
         seen_host=""
         rm -rf "$seen"
+      fi
+
+      # **A session that asks to be allowed more, while it runs.**
+      #
+      # The escalation this phase asks to be impossible, made possible in the
+      # one way that is not an escalation: a person at the machine answering a
+      # question about the session in front of them. Nothing the far end sends
+      # widens anything.
+      #
+      # `script` is what makes the yes path checkable at all. A host in this
+      # suite has its output in a file, so it has no terminal to ask at and
+      # falls back to drawing on the screen — where nothing here can click a
+      # button. Under `script` the host has a pty, so the question is asked as
+      # text and answered by writing to a pipe, which is also how a person
+      # would answer it.
+      if [ -n "${DISPLAY:-}" ] && command -v script >/dev/null 2>&1; then
+        echo "  — a session that asks to be allowed more while it runs"
+        mk=$(mktemp -d)
+        cp -a "$term_a/." "$mk/" 2>/dev/null || true
+        : > "$mk/sessions.log"
+        sed -i '/consent.answer_within/d' "$mk/config.toml" 2>/dev/null || true
+        printf 'consent.answer_within = 20\n' >> "$mk/config.toml"
+        # **Unattended, and without control.** Unattended so the only question
+        # in this run is the one being tested; without control so there is
+        # something to ask for. Pairing grants control, so it is taken away.
+        ESPER_HOME="$mk" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+        ESPER_HOME="$mk" "$BIN/esper-engine" revoke "$fp" control >/dev/null 2>&1 || true
+        # A pipe held open at both ends: opening a fifo for writing blocks
+        # until somebody reads it and for reading until somebody writes, so
+        # `<>` is what avoids a suite that hangs before its first check.
+        mkfifo "$mk/answers"
+        exec 3<> "$mk/answers"
+        ESPER_HOME="$mk" timeout 120 script -q \
+          -c "$BIN/esper-engine host --listen 127.0.0.1:0 --no-mdns" /dev/null \
+          < "$mk/answers" > "$mk/host.log" 2>&1 &
+        mk_host=$!
+        mk_addr=""
+        for _ in $(seq 1 200); do
+          if grep -q 'consent ' "$mk/host.log" 2>/dev/null; then
+            mk_addr=$( { awk '/listening/{print $2}' "$mk/host.log" 2>/dev/null || true; } \
+              | head -1 | tr -d '\r')
+            [ -n "$mk_addr" ] && break
+          fi
+          sleep 0.1
+        done
+        if [ -z "$mk_addr" ]; then
+          printf '  ✗ the host for the asking check never started\n'
+          sed 's/^/      /' "$mk/host.log"
+          fail=1
+        else
+          env -u XAUTHORITY ESPER_HOME="$term_b" timeout 90 "$BIN/esper-engine" \
+            connect "$mk_addr" --control --present --seconds 20 > "$mk/client.log" 2>&1 &
+          mk_client=$!
+          put=""
+          for _ in $(seq 1 200); do
+            grep -q 'wants more' "$mk/host.log" 2>/dev/null && { put=yes; break; }
+            sleep 0.1
+          done
+          if [ -n "$put" ]; then
+            printf '  ✓ a session without control asks for it, and the host puts the question\n'
+          else
+            printf '  ✗ nothing asked, or the question was never put\n'
+            tail -12 "$mk/host.log" | sed 's/^/      /'
+            fail=1
+          fi
+          # **What the question says.** A person agreeing to this has to be
+          # told what it costs and how long it lasts — the permission by name,
+          # and that nothing is saved.
+          if grep -q 'allowing control' "$mk/host.log" &&
+             grep -q 'for this session only' "$mk/host.log"; then
+            printf '  ✓ and the question names the permission and says it is not saved\n'
+          else
+            printf '  ✗ the question did not say what it was for\n'
+            sed -n '/wants more/,+4p' "$mk/host.log" | sed 's/^/      /'
+            fail=1
+          fi
+          # Answered the way a person would: after the question, not before.
+          # Anything typed *before* a prompt is deliberately thrown away —
+          # something granted by a stray keystroke is something nobody agreed
+          # to — so an answer written at the start of this block would be
+          # discarded and this check would read a timeout.
+          sleep 0.5
+          printf 'y\n' >&3
+          allowed=""
+          for _ in $(seq 1 150); do
+            grep -q 'this session may now control' "$mk/host.log" 2>/dev/null &&
+              { allowed=yes; break; }
+            sleep 0.1
+          done
+          if [ -n "$allowed" ]; then
+            printf '  ✓ and a yes at the host widens the session that asked\n'
+          else
+            printf '  ✗ a yes did not widen the session\n'
+            tail -12 "$mk/host.log" | sed 's/^/      /'
+            fail=1
+          fi
+          # **And the far end starts driving**, which is the half that makes
+          # the feature worth having: the alternative is a session that has to
+          # be closed and opened again to use what it was just allowed.
+          drove=""
+          for _ in $(seq 1 150); do
+            grep -q 'allowed at the host' "$mk/client.log" 2>/dev/null && { drove=yes; break; }
+            sleep 0.1
+          done
+          if [ -n "$drove" ]; then
+            printf '  ✓ and the viewer starts driving without reconnecting\n'
+          else
+            printf '  ✗ the viewer never started driving\n'
+            tail -8 "$mk/client.log" | sed 's/^/      /'
+            fail=1
+          fi
+          # **And the host took the stream that carries the driving.** The
+          # line above is the *viewer's* view: it opened a stream and said so,
+          # which it would have done even if the host refused it. The host
+          # names what it refuses, and a session whose permissions were read
+          # once at the start refuses this one — which is what happened before
+          # the check against the grant was made a live one.
+          if [ -n "$drove" ] && ! grep -q 'refused an input stream\|refused a input stream' \
+               "$mk/host.log"; then
+            printf '  ✓ and the host accepted the input stream that was then opened\n'
+          else
+            printf '  ✗ the host refused the input stream for a session it had just widened\n'
+            { grep -m3 'refused a' "$mk/host.log" || true; } | sed 's/^/      /'
+            fail=1
+          fi
+          # It is written down, with what was asked for and who decided.
+          if grep -q '"event":"session_asked"' "$mk/sessions.log" 2>/dev/null &&
+             grep -q '"wanted":"control","allowed":true' "$mk/sessions.log" 2>/dev/null; then
+            printf '  ✓ and the trail records what was asked for and that it was allowed\n'
+          else
+            printf '  ✗ the trail does not record the asking\n'
+            { grep -o '"event":"[a-z_]*"' "$mk/sessions.log" || true; } | sed 's/^/      /' | tail -5
+            fail=1
+          fi
+          kill "$mk_client" 2>/dev/null || true
+          wait "$mk_client" 2>/dev/null || true
+          # **And nothing was saved.** The whole claim of the feature: the
+          # answer was about one session, so the device record is what it was
+          # before anybody was asked.
+          #
+          # The device's own line, not the whole listing: `devices` prints a
+          # help line naming every permission there is, so a search of its
+          # output for "control" matches on every machine and would pass
+          # whatever had happened. And the line has to *say* something — an
+          # empty answer would otherwise read as "no control here".
+          may=$( { ESPER_HOME="$mk" "$BIN/esper-engine" devices | grep -m1 'may ' || true; } )
+          case "$may" in
+            *view*control* | *control*view*)
+              printf '  ✗ answering a question changed what the device may do: %s\n' "$may"
+              fail=1
+              ;;
+            *view*)
+              printf '  ✓ and the device still may not control: nothing was written down\n'
+              ;;
+            *)
+              printf '  ✗ the device list said nothing, so this check proves nothing: %s\n' "$may"
+              fail=1
+              ;;
+          esac
+        fi
+        exec 3>&-
+        kill "$mk_host" 2>/dev/null || true
+        wait "$mk_host" 2>/dev/null || true
+        mk_host=""
+        rm -rf "$mk"
+
+        # **And a host that does not put such questions at all.** A standing
+        # no rather than a refusal: the far end is told it is one, because a
+        # device told "somebody said no" would reasonably ask again.
+        na=$(mktemp -d)
+        cp -a "$term_a/." "$na/" 2>/dev/null || true
+        : > "$na/sessions.log"
+        printf 'host.allow_asking = false\n' >> "$na/config.toml"
+        ESPER_HOME="$na" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+        ESPER_HOME="$na" "$BIN/esper-engine" revoke "$fp" control >/dev/null 2>&1 || true
+        ESPER_HOME="$na" timeout 60 "$BIN/esper-engine" host \
+          --listen 127.0.0.1:0 --no-mdns > "$na/host.log" 2>&1 &
+        na_host=$!
+        na_addr=""
+        for _ in $(seq 1 150); do
+          if grep -q '^  consent ' "$na/host.log" 2>/dev/null; then
+            na_addr=$( { awk '/^  listening/{print $2}' "$na/host.log" 2>/dev/null || true; } | head -1)
+            [ -n "$na_addr" ] && break
+          fi
+          sleep 0.1
+        done
+        if [ -z "$na_addr" ]; then
+          printf '  ✗ the host with asking switched off never started\n'
+          sed 's/^/      /' "$na/host.log"
+          fail=1
+        else
+          env -u XAUTHORITY ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
+            connect "$na_addr" --control --seconds 4 > "$na/client.log" 2>&1 || true
+          if grep -q 'does not let a session ask for more' "$na/client.log"; then
+            printf '  ✓ a host with asking switched off says so, and it is a standing no\n'
+          else
+            printf '  ✗ the refusal was not the standing one\n'
+            tail -8 "$na/client.log" | sed 's/^/      /'
+            fail=1
+          fi
+          # And nobody was disturbed: no question was put to this machine.
+          if ! grep -q 'wants more' "$na/host.log"; then
+            printf '  ✓ and nobody at that machine was asked anything\n'
+          else
+            printf '  ✗ a question was put on a host that does not allow them\n'
+            fail=1
+          fi
+        fi
+        kill "$na_host" 2>/dev/null || true
+        wait "$na_host" 2>/dev/null || true
+        na_host=""
+        rm -rf "$na"
+      elif [ -n "${DISPLAY:-}" ]; then
+        printf '  — skipped the asking checks: needs `script` for a host with a terminal\n'
       fi
 
       echo "  — revoking a device that is connected right now"

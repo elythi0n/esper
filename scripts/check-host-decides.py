@@ -67,7 +67,29 @@ ALONE = {
         ],
         "code": "HOST_IS_LOCKED",
     },
+    "what a session already open may ask to be allowed": {
+        "why": (
+            "a list the far end could read would be the host's rule travelling "
+            "as data, and the next step from there is a controller that filters "
+            "the question for the host"
+        ),
+        "absent": [
+            (r"MAY_BE_ASKED_FOR", "the list of what may be asked for"),
+            (r"\baskable\b", "whether a permission is askable"),
+            (r"may_be_asked", "whether a permission may be asked for"),
+            (r"\bKnocking\b", "how often a session may ask"),
+            (r"AGAIN_AFTER", "how long a refusal holds"),
+        ],
+        "code": "NO_ASKING_HERE",
+    },
 }
+
+# **What the peer names in a question is not a rule input.** A `PermissionAsk`
+# carries one permission, which is the *subject* of the question rather than a
+# value the rule reads — the same standing as `request.want` below, and bounded
+# by the enum in the same way. What must not cross is which permissions may be
+# asked for, how often, and whether this machine asks at all: those are in the
+# list above.
 
 # What the policy may read from what the peer sent. Two fields: what it wants,
 # and which kind of session. Anything else is a value from the far end reaching

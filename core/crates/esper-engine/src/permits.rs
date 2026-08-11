@@ -223,13 +223,30 @@ pub fn watch(mut stopping: tokio::sync::watch::Receiver<bool>) -> Watching {
 /// asked.
 ///
 /// **The intersection of what the session was granted and what the device
-/// holds now**, so it can only ever shrink. Widening a live session would hand
-/// a controller something it never asked for and never rendered a control for.
+/// holds now**, so a change in the store can only ever shrink it. Widening a
+/// live session from the *store* would hand a controller something it never
+/// asked for and never rendered a control for.
+///
+/// # The one way it widens
+///
+/// Somebody at the machine answering a question about this session, and
+/// nothing else. That set is kept apart from the store's — see
+/// [`Live::allow_here`] — because the two answer different questions and
+/// mixing them would break both: a permission allowed for one session is not
+/// in the store, so comparing the whole set against the store would read as a
+/// withdrawal and end the session a moment after it was widened.
 #[derive(Debug, Clone)]
 pub struct Live {
     permits: Watching,
     device: [u8; KEY_LEN],
     granted: Vec<Permission>,
+    /// Allowed by a person at this machine, for this session and no other.
+    ///
+    /// A channel rather than a field, because every clone of a `Live` is a
+    /// different task's view of the same session — the one that injects input
+    /// is not the one that asked the question — and an answer that reached
+    /// only the task that heard it would be an answer that changed nothing.
+    allowed_here: Arc<tokio::sync::watch::Sender<Vec<Permission>>>,
 }
 
 impl Live {
@@ -240,7 +257,38 @@ impl Live {
             permits,
             device,
             granted,
+            allowed_here: Arc::new(tokio::sync::watch::Sender::new(Vec::new())),
         }
+    }
+
+    /// Allow one more thing, because somebody at this machine said so.
+    ///
+    /// **For this session only, and deliberately not written to the store.**
+    /// The question a person answered was about the session in front of them;
+    /// a permission that outlived it would be one they never agreed to, and
+    /// the way to grant one of those is `esper grant`, which is a decision
+    /// somebody makes deliberately and can review afterwards.
+    ///
+    /// Idempotent: allowing what is already allowed changes nothing and wakes
+    /// nobody.
+    ///
+    /// # The limit, stated rather than papered over
+    ///
+    /// It cannot be taken back on its own. `revoke` works on the store and
+    /// this is not in the store, so somebody who changes their mind ends the
+    /// session — the panic key, or taking away the `view` that the session is
+    /// made of. That is the same answer the product gives for "stop this now"
+    /// everywhere else, and the prompt says the allowance lasts for the
+    /// session, so it is what somebody agreed to.
+    pub fn allow_here(&self, p: Permission) {
+        self.allowed_here.send_if_modified(|allowed| {
+            if allowed.contains(&p) {
+                false
+            } else {
+                allowed.push(p);
+                true
+            }
+        });
     }
 
     /// Wait until the store changes.
@@ -269,15 +317,27 @@ impl esper_transport::Grants for Live {
         let permits = self.permits.borrow();
         let Some(now) = permits.of(&self.device) else {
             // Not paired any more, so nothing at all — not "what it used to
-            // have". This is the answer that stops a revoked device's shell
+            // have", and not what somebody allowed for this session either.
+            // Unpairing a device takes back every answer anybody gave about
+            // it. This is also the answer that stops a revoked device's shell
             // being parked for it to come back to.
             return Vec::new();
         };
-        self.granted
+        let mut held: Vec<Permission> = self
+            .granted
             .iter()
             .copied()
             .filter(|p| now.contains(p))
-            .collect()
+            .collect();
+        // **And what a person allowed for this session.** Added rather than
+        // intersected: it is not in the store and never will be, so an
+        // intersection would drop it.
+        for p in self.allowed_here.borrow().iter() {
+            if !held.contains(p) {
+                held.push(*p);
+            }
+        }
+        held
     }
 }
 
@@ -378,8 +438,12 @@ mod tests {
         );
     }
 
+    /// **A grant at the machine does not reach a session already running.**
+    /// The one thing that widens one is somebody answering a question about
+    /// it — see `allow_here` and the test below — and that is deliberately a
+    /// different path: this one nobody asked for.
     #[test]
-    fn gaining_a_permission_mid_session_changes_nothing() {
+    fn a_grant_in_the_store_does_not_widen_a_session_already_open() {
         let p = permits(&[(
             [1u8; 32],
             &[Permission::View, Permission::Control, Permission::Terminal],
@@ -421,6 +485,72 @@ mod tests {
 
         // Nothing changed, nothing lost.
         assert!(before.lost_since(&before, Permission::Terminal).is_empty());
+    }
+
+    /// **The one thing that widens a live session, and the trap in it.**
+    ///
+    /// A permission somebody allowed for one session is not in the store — and
+    /// `standing` compares the session against the store. So if the two sets
+    /// were kept together, a session widened at the machine would report
+    /// itself *narrowed* a moment later and end. They are kept apart, and this
+    /// holds them apart.
+    #[test]
+    fn what_a_person_allows_for_one_session_widens_it_and_is_not_a_narrowing() {
+        use esper_transport::Grants as _;
+
+        let (_tx, rx) =
+            tokio::sync::watch::channel(Arc::new(permits(&[([1u8; 32], &[Permission::View])])));
+        let live = Live::new(rx, [1u8; 32], vec![Permission::View]);
+        assert_eq!(live.standing(), Standing::Unchanged);
+
+        live.allow_here(Permission::Control);
+        assert_eq!(live.granted(), vec![Permission::View, Permission::Control]);
+        assert!(live.allows(Permission::Control));
+        assert_eq!(
+            live.standing(),
+            Standing::Unchanged,
+            "a session widened at the machine must not read as one that lost something"
+        );
+
+        // Twice is once: a controller that asked again gains nothing and the
+        // set does not grow a duplicate.
+        live.allow_here(Permission::Control);
+        assert_eq!(live.granted(), vec![Permission::View, Permission::Control]);
+    }
+
+    /// **Every clone of a `Live` is the same session**, and the task that
+    /// injects input is not the one that heard the answer.
+    #[test]
+    fn allowing_it_on_one_handle_allows_it_on_every_other() {
+        use esper_transport::Grants as _;
+
+        let (_tx, rx) =
+            tokio::sync::watch::channel(Arc::new(permits(&[([1u8; 32], &[Permission::View])])));
+        let live = Live::new(rx, [1u8; 32], vec![Permission::View]);
+        let injecting = live.clone();
+        assert!(!injecting.allows(Permission::Control));
+        live.allow_here(Permission::Control);
+        assert!(
+            injecting.allows(Permission::Control),
+            "the task that injects would have gone on refusing keystrokes"
+        );
+    }
+
+    /// Unpairing takes back every answer anybody gave about a device,
+    /// including one that was only ever about this session.
+    #[test]
+    fn unpairing_takes_back_what_was_allowed_for_the_session_too() {
+        use esper_transport::Grants as _;
+
+        let (tx, rx) =
+            tokio::sync::watch::channel(Arc::new(permits(&[([1u8; 32], &[Permission::View])])));
+        let live = Live::new(rx, [1u8; 32], vec![Permission::View]);
+        live.allow_here(Permission::Control);
+        assert!(live.allows(Permission::Control));
+
+        tx.send(Arc::new(permits(&[]))).expect("a receiver is held");
+        assert!(live.granted().is_empty());
+        assert_eq!(live.standing(), Standing::Forgotten);
     }
 
     #[test]

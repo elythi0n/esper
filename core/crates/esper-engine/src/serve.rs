@@ -62,7 +62,8 @@ fn answer(command: &Command) -> Report {
         // being watched. The question belongs to `host`, over the channel in
         // `crate::supervised`.
         Command::Alive => Report::Failed {
-            detail: "this engine is answering a command channel rather than hosting, so it                      has nothing to report being alive about — ask the host that is serving"
+            detail: "this engine is answering a command channel rather than hosting, so \
+                     it has nothing to report being alive about — ask the host that is serving"
                 .to_owned(),
         },
     }

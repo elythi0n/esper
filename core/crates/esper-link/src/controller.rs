@@ -521,6 +521,35 @@ impl ControllerLink {
         self.stream.take_permissions()
     }
 
+    /// Ask somebody at the host to allow this session one more thing.
+    ///
+    /// **Sent rather than queued**, like the recording notice and for a
+    /// related reason: a question that waits for the next flush is a question
+    /// whose answer somebody is already waiting for.
+    ///
+    /// Asking changes nothing by itself. What the session may do is whatever
+    /// the host last said in a [`esper_proto::PermissionChange`], and the
+    /// answer to this arrives separately — see
+    /// [`ControllerLink::take_answer`].
+    ///
+    /// # Errors
+    ///
+    /// If the control stream will not carry it.
+    pub async fn ask_for(&mut self, wanted: esper_proto::Permission) -> Result<(), LinkError> {
+        self.control
+            .send(&MediaMessage::Ask(esper_proto::PermissionAsk { wanted }))
+            .await?;
+        Ok(())
+    }
+
+    /// What somebody at the host said to that, if they have said anything.
+    ///
+    /// See [`esper_stream::ControllerStream::take_answer`].
+    #[must_use]
+    pub fn take_answer(&mut self) -> Option<esper_proto::PermissionAnswer> {
+        self.stream.take_answer()
+    }
+
     /// Wait for the next control message from the host.
     pub async fn recv_control(&mut self) -> Result<MediaMessage, LinkError> {
         Ok(self.control.recv().await?)

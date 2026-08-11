@@ -52,7 +52,12 @@ from pathlib import Path
 # name -> why it has no producer. Every entry is a claim somebody can check.
 LEDGER = {
     # Features that are not built. Each is a tracked item, not an oversight.
-    "Permission::Record": "recording is not built",
+    "Permission::Record": (
+        "recording is built and this permission is not what governs it: a recording "
+        "happens on the controller's own disk, so the host announces it rather than "
+        "granting it — see the finding of 2026-09-08. Nothing checks this, and a "
+        "session may not ask for it either"
+    ),
     "Reason::RELAY_FULL": "the relay is not built",
     # States this product cannot produce, which is a different thing from a
     # state it has not got round to producing.
@@ -71,10 +76,6 @@ LEDGER = {
     "Reason::PAIRING_EXPIRED": "as PAIRING_FAILED",
     "Reason::PAIRING_RATE_LIMITED": "as PAIRING_FAILED",
     # Deliberate choices to do something better than refusing.
-    "Reason::NO_INPUT_BACKEND": (
-        "a host that cannot inject narrows the session to view-only and says so, "
-        "rather than refusing it: a session somebody can watch beats no session"
-    ),
     "Reason::NO_CAPTURE_BACKEND": (
         "the backend chooser falls back to the synthetic screen and names what it "
         "chose, so there is no host that has nothing to capture"

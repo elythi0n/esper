@@ -107,6 +107,26 @@ pub enum Event {
         /// Everything the session may do now.
         granted: Vec<Permission>,
     },
+    /// A session that was already open asked to be allowed one more thing,
+    /// and what came of it.
+    ///
+    /// **Recorded whichever way it went**, because the refusals are the half
+    /// somebody investigating wants: a device that asked for control four
+    /// times in a session and was told no is a device whose behaviour is worth
+    /// knowing about, and nothing else in this log would show it.
+    ///
+    /// It is *not* a [`Event::PermissionsChanged`]: nothing about the device
+    /// record changed, and a reader who found this and then found the device
+    /// still without the permission would be right — the answer lasted for one
+    /// session and was never saved.
+    SessionAsked {
+        /// What was asked for.
+        wanted: Permission,
+        /// Whether it was allowed.
+        allowed: bool,
+        /// Why, in a few words: who or what decided.
+        how: String,
+    },
     /// What a device may do was changed by somebody at this machine.
     ///
     /// The whole new set, not the difference: a log line saying "control was
@@ -385,6 +405,7 @@ impl Event {
             Self::Unpaired { .. } => "unpaired",
             Self::Revoked { .. } => "revoked",
             Self::SessionNarrowed { .. } => "session_narrowed",
+            Self::SessionAsked { .. } => "session_asked",
             Self::PermissionsChanged { .. } => "permissions_changed",
             Self::SessionOpened { .. } => "session_opened",
             Self::Locked { .. } => "locked",
@@ -427,6 +448,17 @@ impl Event {
             Self::PermissionsChanged { granted } => format!("may now {}", names(granted)),
             Self::SessionNarrowed { granted } => {
                 format!("a live session was narrowed to {}", names(granted))
+            }
+            Self::SessionAsked {
+                wanted,
+                allowed,
+                how,
+            } => {
+                let what = if *allowed { "allowed" } else { "refused" };
+                format!(
+                    "a live session asked for {} and was {what}: {how}",
+                    wanted.name()
+                )
             }
             Self::SessionOpened {
                 granted,

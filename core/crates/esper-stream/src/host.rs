@@ -642,6 +642,12 @@ impl HostStream {
             // exhaustively on purpose: a variant nobody handles fails to
             // compile rather than being quietly dropped.
             MediaMessage::Recording(_) => Ok(Handled::Nothing),
+            // **Nothing here for the same reason.** A request for one more
+            // permission has to reach a person at this machine, and there is
+            // nobody to ask inside a stream: the session's own loop puts the
+            // question and answers on the wire. This arm exists so that a
+            // variant nobody handles fails to compile.
+            MediaMessage::Ask(_) => Ok(Handled::Nothing),
             // **Kept for the caller rather than acted on here.** What to do
             // with a capacity is the transport's — its congestion controller
             // is the only place that can pace without putting a second
@@ -715,6 +721,13 @@ impl HostStream {
             // refused by `may_be_sent_by` — the host never asks a controller
             // what it may do, it tells it.
             MediaMessage::Permissions(_) => Err(StreamError::WrongDirection {
+                role: Role::Controller,
+                what: message.name(),
+            }),
+            // **And this one is the same escalation from the other side.** A
+            // controller that could answer its own request would be a
+            // controller granting itself permissions with an extra step.
+            MediaMessage::Answer(_) => Err(StreamError::WrongDirection {
                 role: Role::Controller,
                 what: message.name(),
             }),

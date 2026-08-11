@@ -93,6 +93,22 @@ impl Reason {
     /// `unattended` — a device without it is asked about, and a locked screen
     /// answers that question by nobody being there.
     pub const HOST_IS_LOCKED: Self = Self(307);
+    /// This session has asked to be widened as often as it may.
+    ///
+    /// **A limit on questions, not on permissions.** Every ask puts a prompt
+    /// in front of whoever is at that machine, so a session allowed to ask
+    /// without end is a session that can stop somebody working — and the
+    /// person answering has no way to say "and stop asking". Its own code
+    /// because nothing about the *permission* was decided: a device told this
+    /// has not been refused control, it has been told to stop knocking.
+    pub const ASKED_ENOUGH: Self = Self(308);
+    /// This host does not let a session ask for more than it opened with.
+    ///
+    /// Its own code because it is a standing decision rather than an answer: a
+    /// device told this will get the same reply every time, and the only way
+    /// forward is somebody granting the permission at the machine. A device
+    /// told `PROMPT_REFUSED` would reasonably ask again later.
+    pub const NO_ASKING_HERE: Self = Self(309);
 
     // 4xx — capability
     pub const NO_COMMON_CODEC: Self = Self(400);
@@ -190,6 +206,8 @@ impl Reason {
             Self::NO_CAPTURE_BACKEND => "no screen capture backend available",
             Self::NO_DISPLAY => "no display to capture",
             Self::NO_INPUT_BACKEND => "no input injection backend available",
+            Self::ASKED_ENOUGH => "this session has asked for more as often as it may",
+            Self::NO_ASKING_HERE => "this host does not let a session ask for more",
             Self::NO_SCREEN_LOCKER => "the host has no way to lock its own screen",
             Self::INDICATOR_UNCONFIRMED => "the host cannot show that it is being watched",
             Self::ALL_TIERS_EXHAUSTED => "every connection tier failed",
@@ -275,6 +293,8 @@ mod tests {
             Reason::PROMPT_REFUSED,
             Reason::NOBODY_TO_ASK,
             Reason::HOST_IS_LOCKED,
+            Reason::ASKED_ENOUGH,
+            Reason::NO_ASKING_HERE,
             Reason::NO_COMMON_CODEC,
             Reason::NO_CAPTURE_BACKEND,
             Reason::NO_DISPLAY,

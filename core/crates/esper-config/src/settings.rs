@@ -312,6 +312,29 @@ pub static SETTINGS: &[Setting] = &[
                 this is on.",
     },
     Setting {
+        key: "host.allow_asking",
+        kind: Kind::Flag,
+        // **On, because the alternative is worse in practice.** A session that
+        // cannot ask leaves the person at the far end telephoning the person
+        // at the machine to talk them through `esper grant` — and the fastest
+        // way through that call is granting more than the moment needs, for
+        // ever, because nobody wants to do it twice.
+        //
+        // What asking cannot do is grant anything: the answer comes from
+        // somebody at the machine, it lasts for that session only, and nothing
+        // is written to the device list. A session may put at most three
+        // questions and a refusal is good for thirty seconds, so a device
+        // cannot make somebody's screen unusable with prompts.
+        //
+        // Off is for a machine that should never draw a dialog on its own
+        // screen — a kiosk, a machine in a rack with somebody's session on it
+        // — and the far end is told it is a standing no rather than a refusal
+        // worth retrying.
+        default: Value::Flag(true),
+        about: "Let a session that is already open ask somebody at this machine to allow it \
+                one more thing. The answer lasts for that session only and is never saved.",
+    },
+    Setting {
         key: "host.serve_without_indicator",
         kind: Kind::Flag,
         // **Off, which is a refusal to serve.** Software that can watch a
@@ -421,7 +444,9 @@ pub static SETTINGS: &[Setting] = &[
         // check that set the value explicitly and watched the default case do
         // nothing.
         default: Value::Whole(90 * 86_400),
-        about: "How long to keep the session trail. Older entries are deleted when the host                 starts and once a day while it runs. `none` keeps everything, which on a                 machine that can be lost is a decision rather than a default.",
+        about: "How long to keep the session trail. Older entries are deleted when the \
+                host starts and once a day while it runs. `none` keeps everything, which on \
+                a machine that can be lost is a decision rather than a default.",
     },
     Setting {
         key: "audit.max_size",
@@ -435,7 +460,9 @@ pub static SETTINGS: &[Setting] = &[
         // time would let it. The oldest entries go first, which is the same
         // rule the age applies, so the two cannot disagree about what to keep.
         default: Value::Whole(64),
-        about: "Largest the session trail may grow, in megabytes. The oldest entries are                 deleted to stay inside it. `none` is no ceiling, which leaves the age above                 as the only limit.",
+        about: "Largest the session trail may grow, in megabytes. The oldest entries \
+                are deleted to stay inside it. `none` is no ceiling, which leaves the age \
+                above as the only limit.",
     },
     Setting {
         key: "forward.allow",

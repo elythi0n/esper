@@ -270,6 +270,7 @@ fn exhaustive_witness(e: &Event) {
         | Event::Unpaired { .. }
         | Event::Revoked { .. }
         | Event::SessionNarrowed { .. }
+        | Event::SessionAsked { .. }
         | Event::PermissionsChanged { .. }
         | Event::SessionOpened { .. }
         | Event::SessionClosed { .. }
@@ -318,6 +319,11 @@ fn variants() -> Vec<Event> {
         Event::Revoked { sessions_closed: 2 },
         Event::SessionNarrowed {
             granted: vec![Permission::View],
+        },
+        Event::SessionAsked {
+            wanted: Permission::Control,
+            allowed: true,
+            how: "somebody here said yes".to_owned(),
         },
         Event::PermissionsChanged {
             granted: vec![Permission::View, Permission::Terminal],

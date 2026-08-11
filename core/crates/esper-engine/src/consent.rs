@@ -100,6 +100,18 @@ pub trait Ask: Send + Sync + 'static {
     /// Ask, and wait up to `within`.
     fn ask(&self, about: &Asked, within: Duration) -> Answer;
 
+    /// Ask whether a session that is **already running** may do one more
+    /// thing, and wait up to `within`.
+    ///
+    /// A separate question from [`Ask::ask`] because it is a separate
+    /// decision, and somebody reading "a device wants to open a screen
+    /// session" while watching that device use their screen would rightly
+    /// wonder what had happened to the first one.
+    ///
+    /// `about.granted` is **what saying yes would add** rather than what the
+    /// session already holds: what a person is agreeing to is the change.
+    fn ask_for_more(&self, about: &Asked, within: Duration) -> Answer;
+
     /// Where the question would appear, for the host to say when it starts.
     ///
     /// **An operator has to be able to find out where they will be asked.** A
@@ -333,6 +345,29 @@ impl Ask for Console {
             within,
         )
     }
+
+    fn ask_for_more(&self, about: &Asked, within: Duration) -> Answer {
+        let what = about
+            .granted
+            .iter()
+            .map(|p| p.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.confirm(
+            &[
+                "a device already watching this screen wants more".to_owned(),
+                format!(
+                    "from     {} ({})",
+                    shown(&about.name),
+                    shown(&about.fingerprint)
+                ),
+                format!("allowing {what}"),
+                "for this session only — not saved".to_owned(),
+            ],
+            "allow it?",
+            within,
+        )
+    }
 }
 
 /// How a session came to be allowed.
@@ -432,6 +467,13 @@ pub struct AskAtTheHost {
     /// allowed, for whoever reports it.
     recent: Mutex<Vec<([u8; 32], Instant)>>,
     last: Mutex<Option<Allowed>>,
+    /// Whether a session that is already open may ask to be allowed more.
+    ///
+    /// A standing decision of this machine's rather than an answer to any one
+    /// request — see `host.allow_asking`. Off means the question is never put
+    /// to anybody, and the far end is told that it is a standing no rather
+    /// than a refusal it could try again.
+    may_widen: bool,
 }
 
 impl std::fmt::Debug for AskAtTheHost {
@@ -455,6 +497,17 @@ impl AskAtTheHost {
     #[must_use]
     pub fn asked_at(&self) -> &'static str {
         self.ask.asked_at()
+    }
+
+    /// Whether a session already open may ask for more, as this host has it
+    /// set.
+    ///
+    /// Off unless somebody says so: see `host.allow_asking`, which defaults to
+    /// allowing it.
+    #[must_use]
+    pub const fn never_asked_for_more(mut self) -> Self {
+        self.may_widen = false;
+        self
     }
 
     /// Also refuse `unattended` while the screen is locked.
@@ -514,6 +567,7 @@ impl AskAtTheHost {
             grace: GRACE,
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
+            may_widen: true,
         }
     }
 
@@ -535,6 +589,7 @@ impl AskAtTheHost {
             grace: GRACE,
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
+            may_widen: true,
         }
     }
 
@@ -558,6 +613,7 @@ impl AskAtTheHost {
             grace,
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
+            may_widen: true,
         }
     }
 
@@ -629,6 +685,216 @@ impl AskAtTheHost {
     fn note(&self, how: Allowed) {
         if let Ok(mut last) = self.last.lock() {
             *last = Some(how);
+        }
+    }
+}
+
+/// The permissions a session that is already open may **ask** to be allowed.
+///
+/// **A session may ask to do more of what it is, not to become something
+/// else.** Everything left out is left out for a stated reason rather than
+/// caution:
+///
+/// - `view` is what a screen session *is*, so a session that has it cannot ask
+///   for it and one that has lost it is ending rather than narrowing.
+/// - `terminal` and `forward` open a different kind of session, each with its
+///   own request and its own prompt at the moment it happens. A yes here would
+///   be somebody agreeing to a shell in a dialog about a screen.
+/// - `unattended`, `logoff` and `reboot` **outlive the session**. The first
+///   lets the next connection in without anybody being asked; the other two
+///   take the machine away. None of them is a thing to hand over in the middle
+///   of something else, and all three are what `esper grant --yes` is for.
+/// - `lock` is a verb a controller asks for when it wants it, and is refused
+///   or allowed then.
+/// - `record` is announced by the controller rather than granted by the host —
+///   the honest limit is written up where the recording is.
+const MAY_BE_ASKED_FOR: [Permission; 6] = [
+    Permission::Control,
+    Permission::ClipboardOut,
+    Permission::ClipboardIn,
+    Permission::FilesOut,
+    Permission::FilesIn,
+    Permission::Audio,
+];
+
+/// What the host says about a session asking to be allowed one more thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Widening {
+    /// It may, from now until this session ends.
+    ///
+    /// `asked` says whether a person was put to the question. False means the
+    /// device already holds the permission in the store and this session
+    /// simply did not open with it — which is not an escalation at all, and is
+    /// a different line in the log.
+    Allowed { asked: bool },
+    /// It already may, so nothing changed and nobody was disturbed.
+    AlreadyHeld,
+    /// It may not, with a code the far end can act on and a sentence a person
+    /// can read.
+    Refused(Reason, String),
+}
+
+/// How often one session may put a question to whoever is at the machine.
+///
+/// **A limit on questions, not on permissions.** Every ask draws a prompt in
+/// front of somebody, and a session that could ask without end could stop them
+/// working — while the person answering has no way to say "and stop asking".
+/// Three, because the honest reasons to ask twice are a mistyped answer and a
+/// second permission, and nothing needs a fourth.
+///
+/// The clock is a parameter for the reason it is everywhere else in this tree:
+/// a test that proved a thirty-second wait by waiting thirty seconds is a test
+/// nobody runs.
+#[derive(Debug, Default)]
+pub struct Knocking {
+    put: usize,
+    /// When the last question was refused, if one was.
+    refused: Option<Instant>,
+}
+
+impl Knocking {
+    /// The most questions one session may put.
+    pub const MOST: usize = 3;
+
+    /// How long after a refusal before another may be put.
+    ///
+    /// **Because "no" needs to mean something for a moment.** A session that
+    /// re-asked the instant somebody clicked refuse would be a session that
+    /// took the answer as a starting position.
+    pub const AGAIN_AFTER: Duration = Duration::from_secs(30);
+
+    /// Nothing asked yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            put: 0,
+            refused: None,
+        }
+    }
+
+    /// Whether another question may be put now.
+    fn may_put(&self, now: Instant) -> Result<(), (Reason, String)> {
+        if self.put >= Self::MOST {
+            return Err((
+                Reason::ASKED_ENOUGH,
+                format!(
+                    "this session has asked {} times, which is as often as it may. A \
+                     permission that is wanted from now on is one to grant at the host",
+                    Self::MOST
+                ),
+            ));
+        }
+        if let Some(when) = self.refused {
+            let since = now.saturating_duration_since(when);
+            if since < Self::AGAIN_AFTER {
+                return Err((
+                    Reason::ASKED_ENOUGH,
+                    format!(
+                        "somebody at the host said no {}s ago; another question may be put in {}s",
+                        since.as_secs(),
+                        Self::AGAIN_AFTER.saturating_sub(since).as_secs().max(1)
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AskAtTheHost {
+    /// Whether a session already open may be allowed one more thing.
+    ///
+    /// **Everything about this decision is here**, so there is one place to
+    /// read the rule and one place to test it: what may be asked for at all,
+    /// whether this machine puts such questions, whether anybody is there,
+    /// how often one session may ask, and what a person said.
+    ///
+    /// `holds` is what the *session* may do now, and `device` is what the
+    /// store says — the two differ, and the difference is the whole point: a
+    /// session that did not ask for something its device already holds is not
+    /// escalating by asking for it now.
+    ///
+    /// **Nothing here writes to the store.** A yes is about the session in
+    /// front of somebody; a permission that outlived it would be one nobody
+    /// agreed to.
+    pub fn widen(
+        &self,
+        device: &Device,
+        wanted: Permission,
+        holds: &[Permission],
+        knocking: &mut Knocking,
+        now: Instant,
+    ) -> Widening {
+        if holds.contains(&wanted) {
+            return Widening::AlreadyHeld;
+        }
+        if !MAY_BE_ASKED_FOR.contains(&wanted) {
+            return Widening::Refused(
+                Reason::PERMISSION_DENIED,
+                format!(
+                    "{} is not something a session that is already open may ask for. On \
+                     the host: esper-engine grant {} {}",
+                    wanted.name(),
+                    device.fingerprint().hex(),
+                    wanted.name()
+                ),
+            );
+        }
+        if !self.may_widen {
+            return Widening::Refused(
+                Reason::NO_ASKING_HERE,
+                "this host does not let a session ask for more than it opened with. On \
+                 the host: host.allow_asking"
+                    .to_owned(),
+            );
+        }
+        // **Already granted at the machine, so there is nobody to ask.** The
+        // person whose machine it is has said yes to this permission already,
+        // in the store, deliberately; a session that simply did not ask for it
+        // when it opened is not escalating by asking now, and putting the
+        // question again would teach somebody that these prompts are noise.
+        if device.may(wanted) {
+            return Widening::Allowed { asked: false };
+        }
+        if let Err((reason, detail)) = knocking.may_put(now) {
+            return Widening::Refused(reason, detail);
+        }
+        if !self.ask.can_ask() {
+            return Widening::Refused(
+                Reason::NOBODY_TO_ASK,
+                format!(
+                    "this host has nobody to ask, so nothing can be allowed that was not \
+                     granted already. On the host: esper-engine grant {} {}",
+                    device.fingerprint().hex(),
+                    wanted.name()
+                ),
+            );
+        }
+        knocking.put = knocking.put.saturating_add(1);
+        let asked = Asked {
+            name: device.name.clone(),
+            fingerprint: device.fingerprint().hex(),
+            words: device.fingerprint().inline(),
+            // What a yes allows, which is what somebody is agreeing to.
+            granted: vec![wanted],
+            kind: esper_proto::SessionKind::Screen.name(),
+        };
+        match self.ask.ask_for_more(&asked, self.within) {
+            Answer::Yes => Widening::Allowed { asked: true },
+            Answer::No => {
+                knocking.refused = Some(now);
+                Widening::Refused(
+                    Reason::PROMPT_REFUSED,
+                    "somebody at the host said no".to_owned(),
+                )
+            }
+            // **Not counted as a refusal.** Nobody said no; nobody was there
+            // to say anything, and a cooling-off period after silence would
+            // punish the far end for the host's screen being unattended.
+            Answer::Silence => Widening::Refused(
+                Reason::PROMPT_TIMEOUT,
+                "nobody at the host answered".to_owned(),
+            ),
         }
     }
 }
@@ -807,6 +1073,12 @@ mod tests {
             self.about.lock().unwrap().push(about.clone());
             self.says
         }
+        fn ask_for_more(&self, about: &Asked, within: Duration) -> Answer {
+            // The same script answers both questions: what a test about
+            // widening is checking is the rule, and a second script would let
+            // the two drift.
+            self.ask(about, within)
+        }
         fn asked_at(&self) -> &'static str {
             "a script"
         }
@@ -930,6 +1202,296 @@ mod tests {
             matches!(verdict, Verdict::Deny(Reason::PROMPT_REFUSED, _)),
             "{verdict:?}"
         );
+    }
+
+    // # Asking to be allowed more, mid-session
+    //
+    // The rule has one place — `AskAtTheHost::widen` — and these hold it to
+    // every branch of it. What they cannot check is the wording on somebody's
+    // screen; that is `esper-dialog`'s own tests and the smoke suite's amber
+    // pixels.
+
+    /// A session with `view` asks for `control`, and somebody says yes.
+    #[test]
+    fn a_person_at_the_host_can_widen_one_session() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::Yes));
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask)));
+        let mut knocking = Knocking::new();
+        let answer = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut knocking,
+            Instant::now(),
+        );
+        assert_eq!(answer, Widening::Allowed { asked: true });
+        assert_eq!(ask.asked.load(Ordering::Relaxed), 1);
+        // **And what they were asked about was the change**, not the whole
+        // set: agreeing to "view, control" when the session already has view
+        // is a question about something that has already happened.
+        let put = ask.about.lock().unwrap();
+        assert_eq!(put.len(), 1);
+        let only = put.first().expect("one question");
+        assert_eq!(only.granted, vec![Permission::Control]);
+    }
+
+    /// **And it is one session's answer, so nothing is written down.** The
+    /// rule cannot write to the store — it takes the device record by
+    /// reference and hands back a verdict — and this holds that shape: the
+    /// permissions on the record are the same afterwards.
+    #[test]
+    fn widening_a_session_does_not_change_what_the_device_may_do() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::Yes));
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask)));
+        let record = device(&[Permission::View]);
+        let mut knocking = Knocking::new();
+        let answer = policy.widen(
+            &record,
+            Permission::Control,
+            &[Permission::View],
+            &mut knocking,
+            Instant::now(),
+        );
+        assert_eq!(answer, Widening::Allowed { asked: true });
+        assert_eq!(record.permissions, vec![Permission::View]);
+    }
+
+    /// Somebody saying no is a refusal, and it holds for a while: a session
+    /// that re-asked the instant the answer came would treat "no" as an
+    /// opening position.
+    #[test]
+    fn a_refusal_holds_for_long_enough_to_mean_something() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::No));
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask)));
+        let mut knocking = Knocking::new();
+        let now = Instant::now();
+        let first = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut knocking,
+            now,
+        );
+        assert!(
+            matches!(first, Widening::Refused(Reason::PROMPT_REFUSED, _)),
+            "{first:?}"
+        );
+        let again = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut knocking,
+            now + Duration::from_secs(1),
+        );
+        assert!(
+            matches!(again, Widening::Refused(Reason::ASKED_ENOUGH, _)),
+            "{again:?}"
+        );
+        assert_eq!(
+            ask.asked.load(Ordering::Relaxed),
+            1,
+            "nobody should have been asked a second time inside the cooling-off period"
+        );
+        // And afterwards the question may be put again.
+        let later = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut knocking,
+            now + Knocking::AGAIN_AFTER + Duration::from_secs(1),
+        );
+        assert!(
+            matches!(later, Widening::Refused(Reason::PROMPT_REFUSED, _)),
+            "{later:?}"
+        );
+        assert_eq!(ask.asked.load(Ordering::Relaxed), 2);
+    }
+
+    /// **Nobody answering is not somebody saying no**, so it starts no
+    /// cooling-off period: the far end would otherwise be punished for the
+    /// host's screen being unattended, and the reason code is the one that
+    /// says to try again.
+    #[test]
+    fn silence_is_not_a_refusal_and_may_be_asked_again_at_once() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::Silence));
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask)));
+        let mut knocking = Knocking::new();
+        let now = Instant::now();
+        for _ in 0..2 {
+            let answer = policy.widen(
+                &device(&[Permission::View]),
+                Permission::Control,
+                &[Permission::View],
+                &mut knocking,
+                now,
+            );
+            assert!(
+                matches!(answer, Widening::Refused(Reason::PROMPT_TIMEOUT, _)),
+                "{answer:?}"
+            );
+        }
+        assert_eq!(ask.asked.load(Ordering::Relaxed), 2);
+    }
+
+    /// **Three questions, and no more.** Every one draws a prompt in front of
+    /// whoever is at the machine, and the person answering has no way to say
+    /// "and stop asking".
+    #[test]
+    fn one_session_may_put_only_so_many_questions() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::Silence));
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask)));
+        let mut knocking = Knocking::new();
+        let now = Instant::now();
+        for _ in 0..Knocking::MOST {
+            let answer = policy.widen(
+                &device(&[Permission::View]),
+                Permission::Control,
+                &[Permission::View],
+                &mut knocking,
+                now,
+            );
+            assert!(
+                matches!(answer, Widening::Refused(Reason::PROMPT_TIMEOUT, _)),
+                "{answer:?}"
+            );
+        }
+        let enough = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut knocking,
+            now,
+        );
+        assert!(
+            matches!(enough, Widening::Refused(Reason::ASKED_ENOUGH, _)),
+            "{enough:?}"
+        );
+        assert_eq!(
+            ask.asked.load(Ordering::Relaxed),
+            Knocking::MOST,
+            "the limit has to stop the question being put, not just its answer being used"
+        );
+    }
+
+    /// A host with nobody to ask says so, and the reason names what to do
+    /// about it — the same shape the session refusal has.
+    #[test]
+    fn with_nobody_to_ask_nothing_can_be_widened() {
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::new(Scripted::nobody())));
+        let mut knocking = Knocking::new();
+        let answer = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut knocking,
+            Instant::now(),
+        );
+        let Widening::Refused(reason, why) = answer else {
+            panic!("expected a refusal");
+        };
+        assert_eq!(reason, Reason::NOBODY_TO_ASK);
+        assert!(why.contains("grant"), "{why:?}");
+    }
+
+    /// **A host that never asks refuses without asking**, and says it is a
+    /// standing answer rather than one worth trying again.
+    #[test]
+    fn a_host_with_asking_switched_off_puts_no_question() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::Yes));
+        let policy =
+            AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask))).never_asked_for_more();
+        let mut knocking = Knocking::new();
+        let answer = policy.widen(
+            &device(&[Permission::View]),
+            Permission::Control,
+            &[Permission::View],
+            &mut knocking,
+            Instant::now(),
+        );
+        assert!(
+            matches!(answer, Widening::Refused(Reason::NO_ASKING_HERE, _)),
+            "{answer:?}"
+        );
+        assert_eq!(ask.asked.load(Ordering::Relaxed), 0);
+    }
+
+    /// **The things a session may not ask for are refused before anybody is
+    /// disturbed**, each for its own reason — see `MAY_BE_ASKED_FOR`.
+    #[test]
+    fn a_session_cannot_ask_for_what_outlives_it_or_replaces_it() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::Yes));
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask)));
+        for wanted in [
+            Permission::Unattended,
+            Permission::Reboot,
+            Permission::Logoff,
+            Permission::Terminal,
+            Permission::Forward,
+            Permission::Lock,
+            Permission::Record,
+        ] {
+            let mut knocking = Knocking::new();
+            let answer = policy.widen(
+                &device(&[Permission::View]),
+                wanted,
+                &[Permission::View],
+                &mut knocking,
+                Instant::now(),
+            );
+            let Widening::Refused(reason, why) = answer else {
+                panic!("{} should not be askable, got {answer:?}", wanted.name());
+            };
+            assert_eq!(reason, Reason::PERMISSION_DENIED, "{}", wanted.name());
+            assert!(why.contains(wanted.name()), "{why:?}");
+        }
+        assert_eq!(
+            ask.asked.load(Ordering::Relaxed),
+            0,
+            "nobody should be asked a question whose answer cannot be honoured"
+        );
+    }
+
+    /// **A device that already holds it needs no question.** The person whose
+    /// machine it is granted the permission deliberately; a session that did
+    /// not ask for it when it opened is not escalating by asking now, and a
+    /// prompt here would teach somebody that these are noise.
+    #[test]
+    fn a_permission_the_device_already_holds_needs_nobody_asked() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::No));
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask)));
+        let mut knocking = Knocking::new();
+        let answer = policy.widen(
+            &device(&[Permission::View, Permission::Control]),
+            Permission::Control,
+            // The session opened without it, which is the case this is about.
+            &[Permission::View],
+            &mut knocking,
+            Instant::now(),
+        );
+        assert_eq!(answer, Widening::Allowed { asked: false });
+        assert_eq!(ask.asked.load(Ordering::Relaxed), 0);
+    }
+
+    /// Asking for what the session already has changes nothing and disturbs
+    /// nobody — and does not count against the limit, because a controller
+    /// that lost track of its own state must not be able to spend somebody
+    /// else's patience with it.
+    #[test]
+    fn asking_for_what_a_session_already_has_is_a_no_op() {
+        let ask = std::sync::Arc::new(Scripted::saying(Answer::Yes));
+        let policy = AskAtTheHost::asking(Box::new(std::sync::Arc::clone(&ask)));
+        let mut knocking = Knocking::new();
+        for _ in 0..Knocking::MOST + 2 {
+            let answer = policy.widen(
+                &device(&[Permission::View, Permission::Control]),
+                Permission::Control,
+                &[Permission::View, Permission::Control],
+                &mut knocking,
+                Instant::now(),
+            );
+            assert_eq!(answer, Widening::AlreadyHeld);
+        }
+        assert_eq!(ask.asked.load(Ordering::Relaxed), 0);
     }
 
     /// **The refusal names the schedule, not the permission.** A device

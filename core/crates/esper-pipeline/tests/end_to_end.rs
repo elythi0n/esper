@@ -348,7 +348,8 @@ fn degrading_actually_reduces_the_frames_encoded() {
     );
     assert!(
         degraded < unrestricted,
-        "degrading encoded {degraded} frames against {unrestricted}          unrestricted — the framerate rung is not reaching the damage gate, so          it costs nothing"
+        "degrading encoded {degraded} frames against {unrestricted} unrestricted — the \
+         framerate rung is not reaching the damage gate, so it costs nothing"
     );
 }
 

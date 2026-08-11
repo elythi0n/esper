@@ -48,11 +48,18 @@ fn chosen(within: Duration) -> AskAtTheHost {
     AskAtTheHost::asking_for(Box::new(console), within)
 }
 
-/// Apply the bound on `unattended`, if somebody asked for one.
+/// Apply this machine's standing decisions about asking.
 ///
-/// Separate from choosing the asker because it is a different question: where
-/// a person would be asked, against whether a device may skip the asking.
+/// Separate from choosing the asker because they are different questions:
+/// *where* a person would be asked, against whether a device may skip the
+/// asking (`policy.deny_when_locked`) and whether a session already open may
+/// put a question at all (`host.allow_asking`).
 fn bound(policy: AskAtTheHost) -> AskAtTheHost {
+    let policy = if crate::settings::flag("host.allow_asking", true) {
+        policy
+    } else {
+        policy.never_asked_for_more()
+    };
     if !crate::settings::flag("policy.deny_when_locked", false) {
         return policy;
     }
@@ -111,6 +118,32 @@ impl Ask for OnTheScreen {
     /// was there".
     fn ask(&self, about: &Asked, within: Duration) -> Answer {
         let question = esper_dialog::Question {
+            asking: esper_dialog::Asking::ANewSession,
+            kind: about.kind.to_owned(),
+            name: about.name.clone(),
+            fingerprint: about.words.clone(),
+            granted: about.granted.iter().map(|p| p.name().to_owned()).collect(),
+            seconds: within.as_secs(),
+        };
+        match esper_ask_x11::ask(&question, within) {
+            Ok(esper_ask_x11::Answer::Yes) => Answer::Yes,
+            Ok(esper_ask_x11::Answer::No) => Answer::No,
+            Ok(esper_ask_x11::Answer::Silence) => Answer::Silence,
+            Err(e) => {
+                eprintln!("  · the prompt could not be drawn: {e}");
+                Answer::Silence
+            }
+        }
+    }
+
+    /// The same, for a session that is already running.
+    ///
+    /// The heading is the dialog's business — see [`esper_dialog::Asking`] —
+    /// and everything else about the window is identical on purpose: a prompt
+    /// somebody has learned the shape of is one they answer correctly.
+    fn ask_for_more(&self, about: &Asked, within: Duration) -> Answer {
+        let question = esper_dialog::Question {
+            asking: esper_dialog::Asking::MoreForOneOpen,
             kind: about.kind.to_owned(),
             name: about.name.clone(),
             fingerprint: about.words.clone(),
