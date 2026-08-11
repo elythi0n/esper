@@ -227,12 +227,18 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some("lock") => {
+        // **One arm for three verbs**, because the difference between them is
+        // the permission and the session kind and nothing else.
+        Some(verb @ ("lock" | "logoff" | "reboot")) => {
+            let Some(what) = lock_cmd::What::parse(verb) else {
+                eprintln!("{}: unknown command {verb:?}", net::me());
+                return ExitCode::FAILURE;
+            };
             let rest: Vec<String> = std::env::args().skip(2).collect();
-            match lock_cmd::parse(&rest).and_then(|o| lock_cmd::run(&o)) {
+            match lock_cmd::parse(what, &rest).and_then(|o| lock_cmd::run(&o)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("{} lock: {e}", net::me());
+                    eprintln!("{} {verb}: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -441,7 +447,9 @@ fn usage_for(command: &str) -> Option<String> {
         "connect" => Some(session_cmd::connect_usage()),
         "cp" => Some(cp_cmd::usage()),
         "host" => Some(session_cmd::host_usage()),
-        "lock" => Some(lock_cmd::usage()),
+        "lock" => Some(lock_cmd::usage(lock_cmd::What::Lock)),
+        "logoff" => Some(lock_cmd::usage(lock_cmd::What::Logoff)),
+        "reboot" => Some(lock_cmd::usage(lock_cmd::What::Reboot)),
         "group" => Some(devices_cmd::group_usage()),
         "wake" => Some(wake_cmd::usage()),
         "screenshot" => Some(screenshot_cmd::usage()),
@@ -483,6 +491,8 @@ fn print_help() {
            host       serve this machine's screen to a paired device\n  \
            connect    show a paired host's screen\n  \
            lock       lock a paired host's screen, and nothing else\n  \
+           logoff     end the login session on a paired host\n  \
+           reboot     restart a paired host\n  \
            terminal   open a shell on a paired host\n  \
            forward    reach a port on a paired host, ssh -L style\n  \
            cp         copy one file to or from a paired host\n  \

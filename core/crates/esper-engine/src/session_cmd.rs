@@ -2083,6 +2083,67 @@ async fn serve_session(
         };
     }
 
+    // **Log off, or restart, and end.** The same shape as a lock: no capture,
+    // no encoder, no input. Their own kinds and their own permissions because
+    // they are different amounts of damage — one closes what somebody is
+    // working on, the other takes the machine away and every other session on
+    // it with it.
+    if let Some(action) = match kind {
+        esper_proto::SessionKind::Logoff => Some(esper_presence::power::Action::Logoff),
+        esper_proto::SessionKind::Reboot => Some(esper_presence::power::Action::Reboot),
+        _ => None,
+    } {
+        // **The trail is written before the action, which for a restart is
+        // the only chance.** The machine is gone a moment later, and a line
+        // written afterwards would be a line nobody wrote. So the attempt is
+        // recorded, then made, then the outcome is recorded if there is still
+        // a machine to record it on.
+        if let Err(e) = log.append(&Entry::now(
+            &device,
+            Event::Powered {
+                what: action.name().to_owned(),
+                how: "asked for".to_owned(),
+                worked: false,
+            },
+        )) {
+            tracing::warn!(error = %e, "could not record a power request");
+        }
+        let done = esper_presence::power::ask_for(action);
+        let (how, worked) = match &done {
+            Ok(program) => {
+                println!("      {}     with {program}", action.name());
+                ((*program).to_owned(), true)
+            }
+            Err(why) => {
+                println!("      {}     could not: {why}", action.name());
+                (why.clone(), false)
+            }
+        };
+        if let Err(e) = log.append(&Entry::now(
+            &device,
+            Event::Powered {
+                what: action.name().to_owned(),
+                how,
+                worked,
+            },
+        )) {
+            tracing::warn!(error = %e, "could not record a power request");
+        }
+        // **Closed before the machine goes.** A restart takes this process
+        // with it, so the close frame is the last thing that can reach the
+        // far end — and a controller that heard nothing cannot tell a machine
+        // that restarted from a link that broke.
+        media.close(if worked {
+            esper_proto::Reason::SESSION_COMPLETE
+        } else {
+            esper_proto::Reason::NO_SCREEN_LOCKER
+        });
+        return match done {
+            Ok(program) => Ok((format!("{} with {program}", action.name()), parked)),
+            Err(why) => Err((format!("could not {}: {why}", action.name()), parked)),
+        };
+    }
+
     if kind == esper_proto::SessionKind::Files {
         if !crate::settings::files_enabled() {
             println!("      files      off — set files.enabled to serve them");

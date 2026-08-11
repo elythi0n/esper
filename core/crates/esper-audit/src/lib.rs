@@ -154,6 +154,20 @@ pub enum Event {
         /// Whether the screen was actually locked.
         worked: bool,
     },
+    /// A device asked for this machine to be logged out or restarted.
+    ///
+    /// **Recorded before it happens**, which for a restart is the only chance:
+    /// the machine is gone a moment later, and a line written afterwards would
+    /// be a line nobody wrote. `what` is the action and `how` is which
+    /// program ran, or why none did.
+    Powered {
+        /// What was asked for: `log off` or `restart`.
+        what: String,
+        /// Which program ran, or why none could.
+        how: String,
+        /// Whether it was carried out.
+        worked: bool,
+    },
     /// A session ended.
     SessionClosed {
         /// Seconds it lasted.
@@ -374,6 +388,7 @@ impl Event {
             Self::PermissionsChanged { .. } => "permissions_changed",
             Self::SessionOpened { .. } => "session_opened",
             Self::Locked { .. } => "locked",
+            Self::Powered { .. } => "powered",
             Self::SessionClosed { .. } => "session_closed",
             Self::TerminalOpened => "terminal_opened",
             Self::TerminalClosed { .. } => "terminal_closed",
@@ -432,6 +447,13 @@ impl Event {
                     format!("locked this machine's screen with {how}")
                 } else {
                     format!("could not lock this machine's screen: {how}")
+                }
+            }
+            Self::Powered { what, how, worked } => {
+                if *worked {
+                    format!("asked this machine to {what}, with {how}")
+                } else {
+                    format!("could not make this machine {what}: {how}")
                 }
             }
             Self::SessionClosed {

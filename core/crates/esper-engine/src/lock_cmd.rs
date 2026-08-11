@@ -1,4 +1,4 @@
-//! Locking a paired host's screen, and nothing else.
+//! Locking a paired host's screen, logging it out, or restarting it.
 //!
 //! # Why this is a verb rather than a key in a session
 //!
@@ -24,13 +24,84 @@ use std::net::SocketAddr;
 
 use crate::session_cmd::{Reached, Reaching, reach};
 
-/// Which host to lock, and how to get to it.
+/// Which host, what to ask it for, and how to get to it.
 #[derive(Debug)]
 pub struct LockOptions {
     pub addr: Option<SocketAddr>,
     pub named: Option<String>,
     pub via: Option<esper_rendezvous::Via>,
     pub mdns: bool,
+    /// What to ask for. Each is its own permission at the host.
+    pub what: What,
+}
+
+/// What a host is being asked to do to itself.
+///
+/// **Three verbs and one path**, because the difference between them is
+/// entirely in the permission and the session kind — everything about
+/// reaching the host, agreeing what may happen and reading the answer is the
+/// same. Three copies of it would be three places to fix one bug in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum What {
+    /// Lock the screen.
+    Lock,
+    /// End the login session.
+    Logoff,
+    /// Restart the machine.
+    Reboot,
+}
+
+impl What {
+    /// The verb somebody typed.
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Lock => "lock",
+            Self::Logoff => "logoff",
+            Self::Reboot => "reboot",
+        }
+    }
+
+    /// The permission it needs at the host.
+    #[must_use]
+    pub const fn needs(self) -> esper_proto::Permission {
+        match self {
+            Self::Lock => esper_proto::Permission::Lock,
+            Self::Logoff => esper_proto::Permission::Logoff,
+            Self::Reboot => esper_proto::Permission::Reboot,
+        }
+    }
+
+    /// The kind of session it opens.
+    #[must_use]
+    pub const fn kind(self) -> esper_proto::SessionKind {
+        match self {
+            Self::Lock => esper_proto::SessionKind::Lock,
+            Self::Logoff => esper_proto::SessionKind::Logoff,
+            Self::Reboot => esper_proto::SessionKind::Reboot,
+        }
+    }
+
+    /// What to say when it worked.
+    #[must_use]
+    pub const fn done(self) -> &'static str {
+        match self {
+            Self::Lock => "locked that host's screen",
+            Self::Logoff => "asked that host to log out",
+            Self::Reboot => "asked that host to restart",
+        }
+    }
+
+    /// Read it from the word somebody typed.
+    #[must_use]
+    pub fn parse(verb: &str) -> Option<Self> {
+        match verb {
+            "lock" => Some(Self::Lock),
+            "logoff" => Some(Self::Logoff),
+            "reboot" => Some(Self::Reboot),
+            _ => None,
+        }
+    }
 }
 
 /// Ask a host to lock its screen.
@@ -46,7 +117,7 @@ pub fn run(o: &LockOptions) -> Result<(), String> {
         let reached = reach(
             &identity,
             &Reaching {
-                label: "🔒 esper lock",
+                label: &format!("🔒 esper {}", o.what.verb()),
                 addr: o.addr,
                 named: o.named.as_deref(),
                 via: o.via,
@@ -65,16 +136,16 @@ pub fn run(o: &LockOptions) -> Result<(), String> {
         let grant = esper_transport::request_session(
             &mut control,
             &esper_proto::SessionRequest {
-                kind: esper_proto::SessionKind::Lock,
+                kind: o.what.kind(),
                 // **`lock` and nothing else.** Asking for a permission this
                 // will not use is asking somebody to agree to more than is
                 // happening — and the whole point of the permission is that
                 // it can be held alone.
-                want: vec![esper_proto::Permission::Lock],
+                want: vec![o.what.needs()],
                 // No pictures, so no codec: a host refusing this for a codec
                 // would refuse it for something it was never going to use.
                 codecs: Vec::new(),
-                reason: "lock the screen".to_owned(),
+                reason: o.what.verb().to_owned(),
             },
         )
         .await
@@ -84,8 +155,8 @@ pub fn run(o: &LockOptions) -> Result<(), String> {
             }
             other => format!("agreeing what the session may do: {other}"),
         })?;
-        if !grant.allows(esper_proto::Permission::Lock) {
-            return Err("this device may not lock that host's screen".to_owned());
+        if !grant.allows(o.what.needs()) {
+            return Err(format!("this device may not {} that host", o.what.verb()));
         }
 
         // **In the trail as a session, because it is one.** The shortest thing
@@ -96,7 +167,7 @@ pub fn run(o: &LockOptions) -> Result<(), String> {
             &far_end,
             esper_audit::Event::SessionOpened {
                 granted: grant.granted.clone(),
-                tier: "lock".to_owned(),
+                tier: o.what.verb().to_owned(),
                 // This end asked and was allowed; the host's reason is the
                 // host's to record.
                 allowed: None,
@@ -116,14 +187,26 @@ pub fn run(o: &LockOptions) -> Result<(), String> {
         match said {
             Answered::Locked => {
                 println!();
-                println!("  locked     that host's screen");
+                println!("  done       {}", o.what.done());
                 Ok(())
             }
             Answered::Refused(code, text) => {
                 let described = code.describe().unwrap_or(&text);
-                Err(format!("the host did not lock its screen: {described}"))
+                Err(format!("the host did not: {described}"))
             }
-            Answered::Nothing => Err("the host said nothing about locking its screen".to_owned()),
+            // **Silence is the answer for a restart.** The machine is gone
+            // before the close frame can be read, so nothing arriving is what
+            // success looks like — and for the other two it is a link that
+            // broke, which is worth saying differently.
+            Answered::Nothing if o.what == What::Reboot => {
+                println!();
+                println!("  done       asked that host to restart, and it stopped answering");
+                Ok(())
+            }
+            Answered::Nothing => Err(format!(
+                "the host said nothing about the {} it was asked for",
+                o.what.verb()
+            )),
         }
     })
 }
@@ -163,22 +246,40 @@ async fn wait_for_the_answer(media: &esper_transport::MediaChannel) -> Answered 
 
 /// What to say when somebody asks, or gets it wrong.
 #[must_use]
-pub fn usage() -> String {
+pub fn usage(what: What) -> String {
     let me = crate::net::me();
+    let verb = what.verb();
+    let about = match what {
+        What::Lock => {
+            "Lock a paired host's screen. Nothing else: a device may hold `lock`\n\
+             without holding `view`, so this works on a host it may not watch.\n\
+             \n\
+             It locks the display that host is serving and nothing further out."
+        }
+        What::Logoff => {
+            "End the login session on a paired host, closing what is running in\n\
+             it. Its own permission, and a sensitive one: granting it needs\n\
+             confirming at that host."
+        }
+        What::Reboot => {
+            "Restart a paired host. Its own permission, and the most\n\
+             consequential one there is — the effect outlives the session that\n\
+             asked for it, so granting it needs confirming at that host.\n\
+             \n\
+             Nothing answers a restart: the machine is gone before it could."
+        }
+    };
     format!(
-        "usage: {me} lock [<address>|<name>] [options]\n\
+        "usage: {me} {verb} [<address>|<name>] [options]\n\
          \n\
-         Lock a paired host's screen. Nothing else: a device may hold `lock`\n\
-         without holding `view`, so this works on a host it may not watch.\n\
-         \n\
-         It locks the display that host is serving and nothing further out.\n\
+         {about}\n\
          \n\
          options:\n  \
          \x20 --via <addr>         a broker to be introduced through\n  \
          \x20 --broker-key <key>   the broker's key\n  \
          \x20 --no-mdns            do not ask the segment where the host is\n\
          \n\
-         for example: {me} lock elythion"
+         for example: {me} {verb} elythion"
     )
 }
 
@@ -187,7 +288,7 @@ pub fn usage() -> String {
 /// # Errors
 ///
 /// On an unknown option, or an option with no value.
-pub fn parse(args: &[String]) -> Result<LockOptions, String> {
+pub fn parse(what: What, args: &[String]) -> Result<LockOptions, String> {
     let mut addr: Option<SocketAddr> = None;
     let mut named: Option<String> = None;
     let mut via_addr: Option<SocketAddr> = None;
@@ -217,7 +318,7 @@ pub fn parse(args: &[String]) -> Result<LockOptions, String> {
                 i += 1;
             }
             other if other.starts_with('-') => {
-                return Err(format!("unknown option {other}\n\n{}", usage()));
+                return Err(format!("unknown option {other}\n\n{}", usage(what)));
             }
             other => {
                 // An address if it parses as one, otherwise a paired host's
@@ -235,5 +336,6 @@ pub fn parse(args: &[String]) -> Result<LockOptions, String> {
         named,
         via: crate::session_cmd::broker_from(via_addr, via_key)?,
         mdns,
+        what,
     })
 }

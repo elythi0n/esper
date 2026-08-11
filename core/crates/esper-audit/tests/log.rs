@@ -282,7 +282,8 @@ fn exhaustive_witness(e: &Event) {
         | Event::ForwardRefused { .. }
         | Event::FileTransferred { .. }
         | Event::Refused { .. }
-        | Event::Locked { .. } => {}
+        | Event::Locked { .. }
+        | Event::Powered { .. } => {}
     }
 }
 
@@ -332,6 +333,11 @@ fn variants() -> Vec<Event> {
         },
         Event::Locked {
             how: "i3lock".to_owned(),
+            worked: true,
+        },
+        Event::Powered {
+            what: "restart".to_owned(),
+            how: "systemctl".to_owned(),
             worked: true,
         },
         Event::TerminalOpened,

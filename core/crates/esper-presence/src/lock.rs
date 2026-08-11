@@ -166,7 +166,10 @@ pub fn lock_reaching(reach: Reach) -> Result<&'static str, String> {
 ///
 /// Takes the child rather than starting it, so a test can hand it a program
 /// that behaves each of the three ways.
-fn believe(mut child: std::process::Child, program: &'static str) -> Result<&'static str, String> {
+pub(crate) fn believe(
+    mut child: std::process::Child,
+    program: &'static str,
+) -> Result<&'static str, String> {
     for _ in 0..GAVE_UP_AT_ONCE {
         match child.try_wait() {
             Ok(Some(status)) if !status.success() => {

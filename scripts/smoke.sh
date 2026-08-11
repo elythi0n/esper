@@ -393,7 +393,8 @@ cleanup_terminal() {
              "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}" \
              "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" \
              "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}" \
-             "${seat_host:-}" "${switch_x:-}" "${lk_host:-}" "${wk_listener:-}"; do
+             "${seat_host:-}" "${switch_x:-}" "${lk_host:-}" "${wk_listener:-}" \
+             "${pw_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -3459,6 +3460,114 @@ PYLISTEN
         fail=1
       fi
       rm -rf "$wk"
+
+      # **Logging a host out and restarting it, without doing either.**
+      #
+      # Neither can be executed by a test on somebody's machine: one closes the
+      # developer's session and the other takes the machine away. What makes
+      # the whole path checkable anyway is that the host searches `PATH` for
+      # the program to run — so a directory of fakes earlier on it means the
+      # real `systemctl` is never reached, and everything up to and including
+      # "which program would run" is exercised for real.
+      echo "  — logging a host out and restarting it, safely"
+      pw=$(mktemp -d)
+      cp -a "$term_a/." "$pw/" 2>/dev/null || true
+      : > "$pw/sessions.log"
+      mkdir -p "$pw/bin"
+      # Fakes that record being called and exit cleanly, which is what a
+      # program that delegated would do.
+      for fake in systemctl loginctl; do
+        printf '#!/bin/sh\necho "$0 $*" >> "%s/ran.log"\nexit 0\n' "$pw" > "$pw/bin/$fake"
+        chmod 755 "$pw/bin/$fake"
+      done
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$pw" \
+        PATH="$pw/bin:$PATH" timeout 90 "$BIN/esper-engine" host \
+        --listen 127.0.0.1:0 --no-mdns > "$pw/host.log" 2>&1 &
+      pw_host=$!
+      pw_addr=""
+      for _ in $(seq 1 150); do
+        if grep -q '^  consent ' "$pw/host.log" 2>/dev/null; then
+          pw_addr=$( { awk '/^  listening/{print $2}' "$pw/host.log" 2>/dev/null || true; } | head -1)
+          [ -n "$pw_addr" ] && break
+        fi
+        sleep 0.1
+      done
+      if [ -z "$pw_addr" ]; then
+        printf '  ✗ the host for the power check never started\n'
+        sed 's/^/      /' "$pw/host.log"
+        fail=1
+      else
+        # Neither permission is granted yet, so both are refused — and nothing
+        # ran, which is the assertion that matters most on this machine.
+        for verb in logoff reboot; do
+          out=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 30 "$BIN/esper-engine" "$verb" "$pw_addr" 2>&1 || true)
+          # Refused at the host, which happens before the controller's own
+          # check — so the words are the host's refusal rather than "may not".
+          if printf '%s' "$out" | grep -qi 'refus' &&
+            printf '%s' "$out" | grep -q "$verb"; then
+            printf '  ✓ a device without the permission cannot %s a host\n' "$verb"
+          else
+            printf '  ✗ %s was not refused without its permission\n' "$verb"
+            printf '%s\n' "$out" | sed 's/^/      /' | tail -8
+            fail=1
+          fi
+        done
+        if [ ! -f "$pw/ran.log" ]; then
+          printf '  ✓ and nothing was run for either of them\n'
+        else
+          printf '  ✗ something ran for a refused request\n'
+          sed 's/^/      /' "$pw/ran.log"
+          fail=1
+        fi
+
+        # **Sensitive, so granting needs saying so.** Both of these are on the
+        # list `--yes` exists for.
+        needs_yes=$(ESPER_HOME="$pw" "$BIN/esper-engine" grant "$fp" reboot 2>&1 || true)
+        if printf '%s' "$needs_yes" | grep -q -- '--yes'; then
+          printf '  ✓ and granting one needs confirming at the host\n'
+        else
+          printf '  ✗ a sensitive permission was granted without confirmation\n'
+          printf '%s\n' "$needs_yes" | sed 's/^/      /' | head -4
+          fail=1
+        fi
+
+        # Granted, and now the host runs the fake rather than the real one.
+        ESPER_HOME="$pw" "$BIN/esper-engine" grant "$fp" reboot --yes >/dev/null 2>&1 || true
+        asked=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+          timeout 30 "$BIN/esper-engine" reboot "$pw_addr" 2>&1 || true)
+        if [ -f "$pw/ran.log" ] && grep -q 'systemctl reboot' "$pw/ran.log"; then
+          printf '  ✓ and with it the host asked the init system: %s\n' \
+            "$(head -1 "$pw/ran.log")"
+        else
+          printf '  ✗ the host did not ask anything to restart it\n'
+          printf '%s\n' "$asked" | sed 's/^/      /' | head -4
+          tail -4 "$pw/host.log" | sed 's/^/      host: /'
+          fail=1
+        fi
+        # **Two lines, which is what proves the order.** The attempt is
+        # recorded *before* it is made — for a real restart that is the only
+        # chance there is, because the machine is gone a moment later — and
+        # the outcome after. Asserting that a `powered` line exists would pass
+        # on the second alone, which is the version that records nothing when
+        # the machine actually goes.
+        asked_first=$( { grep -c '"how":"asked for"' "$pw/sessions.log" 2>/dev/null || true; } )
+        outcome=$( { grep '"event":"powered"' "$pw/sessions.log" 2>/dev/null || true; } \
+          | { grep -c 'systemctl' || true; } )
+        if [ "${asked_first:-0}" -ge 1 ] && [ "${outcome:-0}" -ge 1 ] &&
+          grep -q '"what":"restart"' "$pw/sessions.log"; then
+          printf '  ✓ and the trail records the asking before it happens, and the outcome after\n'
+        else
+          printf '  ✗ the trail does not record a restart both sides of it (%s, %s)\n' \
+            "${asked_first:-0}" "${outcome:-0}"
+          tail -4 "$pw/sessions.log" 2>/dev/null | sed 's/^/      /'
+          fail=1
+        fi
+      fi
+      kill "$pw_host" 2>/dev/null || true
+      wait "$pw_host" 2>/dev/null || true
+      pw_host=""
+      rm -rf "$pw"
 
       # **A group, and a policy applied to all of it at once.**
       #

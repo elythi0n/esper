@@ -167,6 +167,19 @@ pub enum Permission {
     /// remote request is not somebody standing at the machine, so it must not
     /// reach past the screen it was made about.
     Lock,
+    /// End the login session at the host, closing what is running in it.
+    ///
+    /// **Sensitive**, and separate from [`Permission::Reboot`]: they are
+    /// different amounts of damage. This closes somebody's applications;
+    /// that takes the machine away and every other session on it with it.
+    Logoff,
+    /// Restart the host.
+    ///
+    /// **The most consequential thing a device can be granted**, and the only
+    /// one whose effect outlives the session that asked for it. Sensitive,
+    /// and its own permission for the same reason: a helper who may log
+    /// somebody out has not been given the machine's power button.
+    Reboot,
 }
 
 impl Permission {
@@ -175,7 +188,7 @@ impl Permission {
     /// Exists so help text, listings and a name parser cannot fall behind the
     /// enum: adding a variant without adding it here is a compile error at the
     /// exhaustive match in [`Permission::name`] and a failing test here.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::View,
         Self::Control,
         Self::ClipboardOut,
@@ -186,6 +199,8 @@ impl Permission {
         Self::Terminal,
         Self::Forward,
         Self::Lock,
+        Self::Logoff,
+        Self::Reboot,
         Self::Unattended,
         Self::Record,
     ];
@@ -211,6 +226,8 @@ impl Permission {
             Self::Unattended => "unattended",
             Self::Record => "record",
             Self::Lock => "lock",
+            Self::Logoff => "logoff",
+            Self::Reboot => "reboot",
         }
     }
 
@@ -240,7 +257,19 @@ impl Permission {
     /// the host rather than a checkbox.
     #[must_use]
     pub const fn is_sensitive(self) -> bool {
-        matches!(self, Self::Unattended | Self::FilesIn | Self::Record)
+        matches!(
+            self,
+            // Removes the question a session is otherwise held up by.
+            Self::Unattended
+                // Writes to this machine's filesystem.
+                | Self::FilesIn
+                // Keeps a copy of somebody's screen after the session.
+                | Self::Record
+                // Closes what somebody is working on.
+                | Self::Logoff
+                // Takes the machine away, and every other session on it.
+                | Self::Reboot
+        )
     }
 }
 
@@ -585,6 +614,14 @@ pub enum SessionKind {
     /// It carries no video, needs no codec, and ends as soon as the host has
     /// answered.
     Lock,
+    /// End the login session at the host, and nothing else.
+    Logoff,
+    /// Restart the host, and nothing else.
+    ///
+    /// The one session whose effect outlives it: the host is gone before the
+    /// close frame can be read, so a controller learns it worked by the
+    /// machine going away.
+    Reboot,
 }
 
 impl SessionKind {
@@ -607,7 +644,12 @@ impl SessionKind {
     pub const fn carries_video(self) -> bool {
         match self {
             Self::Screen => true,
-            Self::Terminal | Self::Forward | Self::Files | Self::Lock => false,
+            Self::Terminal
+            | Self::Forward
+            | Self::Files
+            | Self::Lock
+            | Self::Logoff
+            | Self::Reboot => false,
         }
     }
 
@@ -619,6 +661,8 @@ impl SessionKind {
             Self::Forward => &[Permission::Forward],
             Self::Files => &[Permission::FilesOut, Permission::FilesIn],
             Self::Lock => &[Permission::Lock],
+            Self::Logoff => &[Permission::Logoff],
+            Self::Reboot => &[Permission::Reboot],
         }
     }
 
@@ -638,6 +682,8 @@ impl SessionKind {
             Self::Forward => "forward",
             Self::Files => "file",
             Self::Lock => "lock",
+            Self::Logoff => "logoff",
+            Self::Reboot => "reboot",
         }
     }
 }
@@ -2483,7 +2529,7 @@ mod tests {
         // missing from it would be a permission nobody could grant.
         assert_eq!(
             Permission::ALL.len(),
-            12,
+            14,
             "a permission was added to the enum and not to ALL"
         );
         for p in Permission::ALL {

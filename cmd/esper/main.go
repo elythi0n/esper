@@ -99,6 +99,11 @@ var engineCommands = map[string]bool{
 	// permission: a device may hold `lock` without holding `view`, so this
 	// works on a host it may not watch.
 	"lock": true,
+	// Logging a host out and restarting it are sensitive permissions of
+	// their own: "may see the screen" and "may take the machine away" are
+	// not the same grant.
+	"logoff": true,
+	"reboot": true,
 	// A group is a label on the device records, so applying a policy to
 	// several devices at once is one write and no second lifecycle.
 	"group": true,

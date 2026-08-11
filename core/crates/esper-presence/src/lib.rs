@@ -49,6 +49,7 @@
 pub mod lock;
 pub mod locked;
 pub mod null;
+pub mod power;
 
 pub use lock::{Locks, Reach, available_locker, lock_reaching, lock_screen};
 pub use null::{NullPresence, Shown};
