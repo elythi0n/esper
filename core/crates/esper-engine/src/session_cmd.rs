@@ -528,12 +528,7 @@ fn restore_what_a_dead_host_left() {
     );
     let mut done = 0usize;
     for undo in &left {
-        #[cfg(target_os = "linux")]
-        let applied = esper_presence_x11::put_back(undo);
-        #[cfg(not(target_os = "linux"))]
-        let applied: Result<(), String> =
-            Err("no backend on this platform knows how to put that back".to_owned());
-        match applied {
+        match crate::put_back::put_back(undo) {
             Ok(()) => {
                 println!("             put back {}", undo.describe());
                 done = done.saturating_add(1);
@@ -2538,6 +2533,41 @@ async fn serve_session(
         }
     }
 
+    // **The other half of it, if this machine's owner asked for that too.**
+    // Same order and the same reason: nothing is detached until somebody
+    // other than this process can put it back. A dark monitor still leaves
+    // whoever is there able to type blind; a floating keyboard leaves them
+    // with no way to say anything at all, so this one is the more careful of
+    // the two.
+    let mut local_input: Option<crate::presence_task::LocalInput> = None;
+    if crate::settings::flag("host.lock_local_input", false) {
+        match crate::presence_task::lock_local_input() {
+            Ok(held) => {
+                println!(
+                    "      local      {} out of the picture for this session, and a keeper is \
+                     holding the way back",
+                    held.what
+                );
+                // **What it costs, said every time.** The panic key is a key
+                // combination and a keyboard with no master sends its keys
+                // nowhere, so the one escape this machine has while a session
+                // runs is gone for as long as the session does. Somebody who
+                // set this asked for exactly that; somebody who inherited the
+                // setting from a policy did not, and this line is the only
+                // place they will find out.
+                println!(
+                    "      local      the panic key goes with it: this session ends from the \
+                     far end, on its own clock, or when this host stops"
+                );
+                local_input = Some(held);
+            }
+            // **Not fatal**, for the reason the privacy screen is not: a
+            // session refused because the host could not silence its own
+            // keyboard is a worse product than one that says so.
+            Err(why) => println!("      local      input NOT taken out of the picture: {why}"),
+        }
+    }
+
     // **The pointer, read on its own schedule.** A cursor sampled at the frame
     // rate is a cursor sampled at five hertz on a quiet desktop, which is why
     // this is not part of the sending loop.
@@ -2676,6 +2706,11 @@ async fn serve_session(
     if let Some(held) = privacy.take() {
         held.give_back();
     }
+    // **And the keyboard comes back with them.** Dropped rather than asked,
+    // because the `Drop` is the thing that must happen on every path out of
+    // this function — including the ones that return early — and a `give_back`
+    // that had to be remembered would eventually not be.
+    drop(local_input.take());
     if let Some(indicator) = indicator {
         indicator.hide();
     }

@@ -28,10 +28,26 @@
 //! backend, and every sink releases it — on `ReleaseAll`, and again on drop,
 //! because a drop is what a dropped session looks like from here.
 
+use esper_keeper::Undo;
+
 pub mod dispatch;
 pub mod held;
 pub mod hid;
 pub mod null;
+
+/// What detaching this machine's input would take, and how to put it back.
+///
+/// **Asked for before anything is registered or done**, so the order is: plan,
+/// register the plan with something that outlives this process, then apply it.
+/// A registered plan that is never applied costs nothing — attaching a device
+/// to the master it is already attached to is a no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Floating {
+    /// What a person would call what stops working.
+    pub what: String,
+    /// How to put each device back.
+    pub undo: Vec<Undo>,
+}
 
 pub use dispatch::{Dispatcher, Monitor};
 pub use held::Held;

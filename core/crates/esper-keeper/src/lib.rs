@@ -71,6 +71,24 @@ pub enum Undo {
         /// printed when it happens.
         what: String,
     },
+    /// Attach an input device back to the master it was detached from.
+    ///
+    /// The other half of the same hazard as [`Undo::Crtc`], and a worse one: a
+    /// dark monitor still leaves somebody able to type blind, and a floating
+    /// keyboard leaves them with no way to say anything at all. Which is
+    /// exactly why the feature that floats one may not exist without this.
+    ///
+    /// The fields are the arguments of the request that restores it, for the
+    /// same reason: by the time this runs, nothing can ask what the state used
+    /// to be.
+    Slave {
+        /// The physical device that was detached.
+        device: u16,
+        /// The master it belonged to.
+        master: u16,
+        /// What a person would call it.
+        what: String,
+    },
 }
 
 impl Undo {
@@ -78,7 +96,7 @@ impl Undo {
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
-            Self::Crtc { what, .. } => what.clone(),
+            Self::Crtc { what, .. } | Self::Slave { what, .. } => what.clone(),
         }
     }
 }

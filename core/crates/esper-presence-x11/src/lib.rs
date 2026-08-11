@@ -799,6 +799,9 @@ impl X11Presence {
     /// sitting in front of the thing that is still dark.
     fn put_back(&self, blanked: &[(u32, Undo)], config_at: u32) {
         for (crtc, undo) in blanked {
+            // A blanking plan carries screens and nothing else; anything
+            // else in this list belongs to another backend and is not this
+            // one's to put back.
             let Undo::Crtc {
                 x,
                 y,
@@ -807,7 +810,10 @@ impl X11Presence {
                 outputs,
                 what,
                 ..
-            } = undo;
+            } = undo
+            else {
+                continue;
+            };
             let asked = self
                 .conn
                 .randr_set_crtc_config(
@@ -1099,7 +1105,9 @@ impl Presence for X11Presence {
 
         let mut done: Vec<(u32, Undo)> = Vec::new();
         for undo in &plan.undo {
-            let Undo::Crtc { crtc, .. } = undo;
+            let Undo::Crtc { crtc, .. } = undo else {
+                continue;
+            };
             if let Err(e) = self.turn_off(*crtc, self.config_at) {
                 // **Undo our own work before reporting.** A half-blanked
                 // screen whose caller got an error is exactly the situation
@@ -1244,7 +1252,13 @@ pub fn put_back(undo: &Undo) -> Result<(), String> {
         rotation,
         outputs,
         ..
-    } = undo;
+    } = undo
+    else {
+        // Not this backend's state. The caller composes the appliers and
+        // hands each undo to the one that owns it — see the engine's own
+        // `put_back`.
+        return Err("this is not a screen to put back".to_owned());
+    };
     let (conn, screen_num) = x11rb::connect(None).map_err(|e| e.to_string())?;
     let root = conn
         .setup()

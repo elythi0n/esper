@@ -484,6 +484,73 @@ pub fn blank_for_the_session(indicator: &Indicator) -> Result<Privacy, String> {
     })
 }
 
+/// This machine's own input, taken out of the picture for a session.
+///
+/// Held for as long as the session runs. Dropping it puts the devices back and
+/// stops the keeper, in that order — the same shape as [`Privacy`], and for
+/// the same reason: whatever ends the session should not have to remember.
+#[derive(Debug)]
+pub struct LocalInput {
+    /// What a person would call what stopped working.
+    pub what: String,
+    plan: esper_input::Floating,
+    keeper: esper_keeper::Keeper,
+}
+
+impl Drop for LocalInput {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        for trouble in esper_input_x11::floating::reattach(&self.plan) {
+            // Said rather than swallowed: somebody is sitting at a machine
+            // whose keyboard has not come back, and the keeper is the other
+            // half of this — it still holds the record until it is told
+            // otherwise.
+            eprintln!("      · could not give the input back: {trouble}");
+        }
+        // Cancelled last: the keeper's records are the way back, and letting
+        // it go before the devices are attached would leave a window with
+        // nobody holding them.
+        self.keeper.cancel();
+    }
+}
+
+/// Take this machine's own keyboard and pointer out of the picture.
+///
+/// **The order here is the safety story**, and it is the same one the privacy
+/// screen has: ask what detaching would take, start something that will
+/// outlive this process, give it the undo, and only then detach anything. Any
+/// other order leaves a window where a crash leaves somebody with no keyboard
+/// and nobody holding the way back — which is worse than a dark monitor,
+/// because they cannot even type blind.
+///
+/// # Errors
+///
+/// If the display cannot be asked, if a keeper cannot be started, or if the
+/// undo cannot be written down. **Every one of those detaches nothing**, which
+/// is the point.
+#[cfg(target_os = "linux")]
+pub fn lock_local_input() -> Result<LocalInput, String> {
+    let plan = esper_input_x11::floating::plan()?;
+    let home = crate::paths::home()?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut keeper = esper_keeper::Keeper::start(&exe, &home).map_err(|e| e.to_string())?;
+    for undo in &plan.undo {
+        keeper.keep(undo.clone()).map_err(|e| e.to_string())?;
+    }
+    esper_input_x11::floating::detach(&plan)?;
+    Ok(LocalInput {
+        what: plan.what.clone(),
+        plan,
+        keeper,
+    })
+}
+
+/// No backend on this platform knows how.
+#[cfg(not(target_os = "linux"))]
+pub fn lock_local_input() -> Result<LocalInput, String> {
+    Err("no backend on this platform can take this machine's input out of the picture".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

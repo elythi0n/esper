@@ -28,6 +28,8 @@
 // another target still covers every member.
 #![cfg(target_os = "linux")]
 
+pub mod floating;
+
 use esper_input::{Held, InputError, InputSink, Point, hid};
 use esper_proto::{Button, KeyEvent, PointerButton, Scroll};
 use x11rb::connection::Connection as _;

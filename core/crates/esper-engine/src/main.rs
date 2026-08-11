@@ -32,6 +32,7 @@ mod paths;
 mod permits;
 mod playback_task;
 mod presence_task;
+mod put_back;
 mod record_task;
 mod screenshot_cmd;
 mod serve;
@@ -141,17 +142,12 @@ fn main() -> ExitCode {
             let home = crate::paths::home().unwrap_or_default();
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
-            #[cfg(target_os = "linux")]
             let applied = esper_keeper::run_keeper(
                 stdin.lock(),
                 stdout.lock(),
                 &home,
-                esper_presence_x11::put_back,
+                crate::put_back::put_back,
             );
-            #[cfg(not(target_os = "linux"))]
-            let applied = esper_keeper::run_keeper(stdin.lock(), stdout.lock(), &home, |_| {
-                Err("no backend on this platform knows how to put that back".to_owned())
-            });
             // Nothing to put back is the ordinary ending, and it is not a
             // failure: it means the host shut down properly.
             let _ = applied;

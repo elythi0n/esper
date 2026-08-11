@@ -276,6 +276,42 @@ pub static SETTINGS: &[Setting] = &[
                 its picture; somebody walking past this machine sees nothing.",
     },
     Setting {
+        key: "host.lock_local_input",
+        kind: Kind::Flag,
+        // **The other half of the privacy screen, and off for the same
+        // reason.** That one stops somebody walking past *seeing* a session;
+        // this stops them typing into it. The case is a machine in a shared
+        // room being worked on remotely by the person who owns it, and the two
+        // halves are wanted together or not at all.
+        //
+        // It detaches this machine's own keyboard and pointer from their
+        // master for the session, which leaves remote injection working —
+        // injection is delivered as the master. A *grab* was the obvious
+        // implementation and cannot work: it redirects injected events too, so
+        // it would block the remote control it exists to protect.
+        //
+        // Every device is registered with a keeper before it is detached, and
+        // a keeper that cannot be started means nothing is detached. Without
+        // that, a host that died would leave the person at that machine with
+        // no keyboard and no pointer — worse than a dark monitor, where they
+        // can still type blind.
+        //
+        // **And the panic key goes with them**, which is the price of this and
+        // is said in the `about` rather than left for somebody to discover. A
+        // hotkey is a key combination, and a keyboard with no master sends its
+        // keys nowhere — so while this is on, a session ends from the far end,
+        // on its own clock, or when the host stops. That is the same trade
+        // somebody makes when they ask for a machine nobody at it can type
+        // into; it is not a trade to make on their behalf, which is why this
+        // is off by default.
+        default: Value::Flag(false),
+        about: "Take this machine's own keyboard and pointer out of the picture while a \
+                session runs, so somebody at it cannot type into one. Remote input keeps \
+                working, and a keeper puts the devices back if this host dies. The panic \
+                key goes with them: nothing typed at this machine can end a session while \
+                this is on.",
+    },
+    Setting {
         key: "host.serve_without_indicator",
         kind: Kind::Flag,
         // **Off, which is a refusal to serve.** Software that can watch a

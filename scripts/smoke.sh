@@ -394,7 +394,7 @@ cleanup_terminal() {
              "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" \
              "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}" \
              "${seat_host:-}" "${switch_x:-}" "${lk_host:-}" "${wk_listener:-}" \
-             "${pw_host:-}"; do
+             "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -486,8 +486,15 @@ else
     # timeout is a bound on how long everything between them may take — and a
     # suite that grows past it fails at the far end, in a step that has nothing
     # to do with what was added.
+    #
+    # Which is exactly what happened at 420: a section's worth of new checks
+    # pushed the suite past it, and the failure landed on "a forgotten device
+    # was still able to open a session" — a check about unpairing, reporting
+    # that nothing answered. Raised with room, because the cost of a large
+    # number here is nothing (this host is killed at the end regardless) and
+    # the cost of a small one is an afternoon looking at the wrong check.
     env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
-      timeout 420 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+      timeout 900 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
       > "$term_a/host.log" 2>&1 &
     host_pid=$!
     host_addr=""
@@ -3395,6 +3402,209 @@ TONE
         wait "$dark_host" 2>/dev/null || true
         dark_host=""
         rm -rf "$dark"
+      fi
+
+      # **This machine's own input, out of the picture for a session.**
+      #
+      # The other half of the privacy screen: that one stops somebody walking
+      # past *seeing* a session, this stops them typing into it. Four things
+      # are checked and the third is the reason the mechanism is detaching
+      # rather than grabbing.
+      #
+      # `xinput` reads the hierarchy back, so "the devices are floating" is
+      # the server's answer rather than the host's claim.
+      if [ -n "${DISPLAY:-}" ] && command -v xinput >/dev/null 2>&1 &&
+         command -v xprop >/dev/null 2>&1; then
+        echo "  — this machine's own input, out of the picture for a session"
+        # **One client kept connected for the whole block, on purpose.**
+        #
+        # A display server with no clients left *resets*: it reinitialises the
+        # input hierarchy, which attaches a floating device again all by
+        # itself. Measured while writing this: with nothing else connected, a
+        # detach came undone within milliseconds of the detaching connection
+        # closing; with one client held open it stayed. So the checks below
+        # need somebody connected or they measure the server's own housekeeping
+        # — which is exactly what the keeper check was doing before this was
+        # found, and it passed with the keeper taken out of the code.
+        xprop -spy -root >/dev/null 2>&1 &
+        li_hold=$!
+        li=$(mktemp -d)
+        cp -a "$term_a/." "$li/" 2>/dev/null || true
+        : > "$li/sessions.log"
+        sed -i '/host.lock_local_input/d' "$li/config.toml" 2>/dev/null || true
+        printf 'host.lock_local_input = true\n' >> "$li/config.toml"
+        ESPER_HOME="$li" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+        floating_now() { xinput list --short 2>/dev/null | { grep -c 'floating slave' || true; }; }
+        before=$(floating_now)
+        ESPER_HOME="$li" timeout 90 "$BIN/esper-engine" host \
+          --listen 127.0.0.1:0 --no-mdns > "$li/host.log" 2>&1 &
+        li_host=$!
+        li_addr=""
+        for _ in $(seq 1 150); do
+          if grep -q '^  consent ' "$li/host.log" 2>/dev/null; then
+            li_addr=$( { awk '/^  listening/{print $2}' "$li/host.log" 2>/dev/null || true; } | head -1)
+            [ -n "$li_addr" ] && break
+          fi
+          sleep 0.1
+        done
+        if [ -z "$li_addr" ]; then
+          printf '  ✗ the host for the local-input check never started\n'
+          sed 's/^/      /' "$li/host.log"
+          fail=1
+        else
+          env -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$li_addr" --seconds 8 \
+            > "$li/client.log" 2>&1 &
+          li_client=$!
+          sleep 3
+          during=$(floating_now)
+          wait "$li_client" 2>/dev/null || true
+          after=$(floating_now)
+
+          if grep -q 'local .*out of the picture' "$li/host.log"; then
+            printf '  ✓ the host says it took its own input out of the picture\n'
+          else
+            printf '  ✗ the host did not take its own input out of the picture\n'
+            { grep -m2 '^      local ' "$li/host.log" || true; } | sed 's/^/      /'
+            fail=1
+          fi
+          # **And what it costs, which is the part somebody has to be told.**
+          # A hotkey is a key combination and a keyboard with no master sends
+          # its keys nowhere, so the panic key goes with the keyboard. Nothing
+          # here can measure that — no test can produce a physical press — so
+          # what is checked is that the host says it, every session.
+          if grep -q 'the panic key goes with it' "$li/host.log"; then
+            printf '  ✓ and it says the panic key went with it\n'
+          else
+            printf '  ✗ the host took the input away without saying the panic key went too\n'
+            { grep -m3 '^      local ' "$li/host.log" || true; } | sed 's/^/      /'
+            fail=1
+          fi
+          # The server's own answer, not the host's claim.
+          if [ "$(awk -v d="${during:-0}" -v b="${before:-0}" 'BEGIN{print (d > b) ? 1 : 0}')" = 1 ]; then
+            printf '  ✓ and the server says the devices were floating: %s against %s\n' \
+              "${during:-0}" "${before:-0}"
+          else
+            printf '  ✗ no device was floating during the session (%s against %s)\n' \
+              "${during:-0}" "${before:-0}"
+            fail=1
+          fi
+          # **And the session kept working, which is why this is not a grab.**
+          # A grab of the keyboard takes injected events with it, so it would
+          # block the remote control the feature exists to protect.
+          if grep -q 'ending the session: session complete' "$li/client.log"; then
+            printf '  ✓ and the session ran its course with them floating\n'
+          else
+            printf '  ✗ the session did not survive its own input being detached\n'
+            tail -8 "$li/client.log" | sed 's/^/      /'
+            fail=1
+          fi
+          # And they came back when the session ended.
+          if [ "${after:-0}" = "${before:-0}" ]; then
+            printf '  ✓ and they were attached again when it ended\n'
+          else
+            printf '  ✗ the devices did not come back (%s against %s)\n' \
+              "${after:-0}" "${before:-0}"
+            fail=1
+          fi
+
+          # **And now the case that decides whether this may ship at all.**
+          #
+          # A floating device is server state that outlives the process. A host
+          # that dies leaves the person at that machine with no keyboard and no
+          # pointer — worse than a dark monitor, where they can still type
+          # blind. This feature waited for the keeper, and this is the check
+          # that the keeper actually covers it.
+          #
+          # The engine, not the `timeout` wrapping it: killing the wrapper
+          # leaves the engine to shut down cleanly, put its own devices back
+          # and cancel the keeper — which reads as a clean shutdown and calls
+          # it a kill. The same trap the privacy screen's check documents.
+          env -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$li_addr" --seconds 12 \
+            > "$li/second.log" 2>&1 &
+          li_client=$!
+          killed=""
+          for _ in $(seq 1 150); do
+            [ "$(floating_now)" -gt "${before:-0}" ] && { killed=yes; break; }
+            sleep 0.1
+          done
+          li_engine=$(pgrep -P "$li_host" -x esper-engine | head -1)
+          if [ -z "$killed" ] || [ -z "$li_engine" ]; then
+            printf '  ✗ could not get to the state the keeper exists for (%s, %s)\n' \
+              "$(floating_now)" "${li_engine:-no engine}"
+            fail=1
+          elif ! kill -0 "${li_hold:-0}" 2>/dev/null; then
+            # Said rather than skipped: with nothing holding the display open
+            # the server puts the devices back on its own and the check below
+            # would pass without a keeper anywhere near it.
+            printf '  ✗ the client holding the display open is gone, so nothing here could tell a keeper from a server reset\n'
+            fail=1
+          else
+            kill -9 "$li_engine" 2>/dev/null || true
+            # The wrapper is reaped here rather than at the end of the block:
+            # its engine has just been shot, and a background job that dies
+            # while the checks below are sleeping gets the shell printing its
+            # own notice about it in the middle of the results.
+            kill "$li_host" 2>/dev/null || true
+            wait "$li_host" 2>/dev/null || true
+            li_host=""
+            # Killed rather than waited for: its host has gone, so it would
+            # otherwise sit out its own clock — and every second of that is a
+            # second off the shared host's budget at the end of the file.
+            kill "$li_client" 2>/dev/null || true
+            wait "$li_client" 2>/dev/null || true
+            # **What the keeper said, and then what the server says.** Two
+            # checks because either one alone can be true for the wrong
+            # reason: the keeper's stderr is the host's, so its line is a
+            # record of the work rather than of the outcome — and the outcome
+            # on its own is something a server reset produces, which is what
+            # the client above is held open to prevent.
+            said=""
+            for _ in $(seq 1 150); do
+              if grep -q "put back this machine's .* after the host went away" \
+                   "$li/host.log" 2>/dev/null; then
+                said=yes; break
+              fi
+              sleep 0.1
+            done
+            if [ -n "$said" ]; then
+              printf '  ✓ and a keeper outlived a host killed with -9 and put the input back\n'
+            else
+              printf '  ✗ no keeper put the input back after the host was killed\n'
+              tail -8 "$li/host.log" 2>/dev/null | sed 's/^/      /'
+              fail=1
+            fi
+            back=""
+            for _ in $(seq 1 150); do
+              [ "$(floating_now)" = "${before:-0}" ] && { back=yes; break; }
+              sleep 0.1
+            done
+            if [ -n "$back" ]; then
+              printf '  ✓ and the server agrees the devices have a master again\n'
+            else
+              printf '  ✗ the devices are still floating after the keeper ran (%s against %s)\n' \
+                "$(floating_now)" "${before:-0}"
+              fail=1
+            fi
+          fi
+        fi
+        kill "$li_host" 2>/dev/null || true
+        wait "$li_host" 2>/dev/null || true
+        li_host=""
+        # **Whatever happened, put this display's input back.** A run that
+        # left devices floating would take the keyboard away from every check
+        # after it — and from whoever is running the suite.
+        xinput list --short 2>/dev/null | sed -n 's/.*id=\([0-9]*\).*floating slave.*/\1/p' \
+          | while read -r id; do
+            xinput reattach "$id" 'Virtual core keyboard' 2>/dev/null ||
+              xinput reattach "$id" 'Virtual core pointer' 2>/dev/null || true
+          done
+        kill "${li_hold:-0}" 2>/dev/null || true
+        li_hold=""
+        rm -rf "$li"
+      elif [ -n "${DISPLAY:-}" ]; then
+        printf '  — skipped taking this machine'"'"'s input out of the picture: needs xinput and xprop\n'
       fi
 
       # **Waking a machine that is asleep — the one verb the far end cannot

@@ -571,6 +571,7 @@ dependencies = [
 name = "esper-input"
 version = "0.0.0"
 dependencies = [
+ "esper-keeper",
  "esper-proto",
  "thiserror",
  "tracing",
@@ -582,6 +583,7 @@ version = "0.0.0"
 dependencies = [
  "esper-display-lock",
  "esper-input",
+ "esper-keeper",
  "esper-proto",
  "thiserror",
  "tracing",

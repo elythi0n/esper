@@ -12,15 +12,16 @@ workspace = true
 
 [dependencies]
 esper-input.workspace = true
+# The undo vocabulary, because a floating device is server state that outlives
+# this process and may not be created without something that can restore it.
+esper-keeper.workspace = true
 esper-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-x11rb.workspace = true
+# XInput2, for detaching this machine's own keyboard and pointer from their
+# master while a session runs — the other half of the privacy screen. See the
+# `floating` module for what that does and does not claim.
+x11rb = { workspace = true, features = ["xinput"] }
 
 [dev-dependencies]
 esper-display-lock.workspace = true
-# XInput2, for the one test that measures why local input is *not* blocked
-# during a session. A dev-dependency rather than a workspace feature: the
-# production binaries have no use for it, and the measurement it guards is the
-# reason a feature was not built.
-x11rb = { workspace = true, features = ["xinput"] }

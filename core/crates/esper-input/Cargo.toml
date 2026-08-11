@@ -12,5 +12,9 @@ workspace = true
 
 [dependencies]
 esper-proto.workspace = true
+# The undo vocabulary, for a plan that detaches this machine's own input:
+# server state that outlives the process may not be created without something
+# that can restore it.
+esper-keeper.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
