@@ -393,7 +393,7 @@ cleanup_terminal() {
              "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}" \
              "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" \
              "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}" \
-             "${seat_host:-}" "${switch_x:-}" "${lk_host:-}"; do
+             "${seat_host:-}" "${switch_x:-}" "${lk_host:-}" "${wk_listener:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -3395,6 +3395,70 @@ TONE
         dark_host=""
         rm -rf "$dark"
       fi
+
+      # **Waking a machine that is asleep — the one verb the far end cannot
+      # take part in.**
+      #
+      # There is no reply to a magic packet and nothing to acknowledge it, so
+      # what a test can check is the packet itself: 102 bytes, six `0xFF` and
+      # the hardware address sixteen times, arriving where it was sent.
+      # `--to` exists for a segment this machine is not on, and is also what
+      # makes this checkable without a second machine.
+      echo "  — waking a machine that is asleep"
+      wk=$(mktemp -d)
+      cp -a "$term_a/." "$wk/" 2>/dev/null || true
+      # Nothing knows a hardware address for this device yet, so it says so
+      # and names what to do about it — rather than sending a packet to
+      # nowhere and reporting success.
+      unknown=$(ESPER_HOME="$wk" "$BIN/esper" wake "$fp" 2>&1 || true)
+      if printf '%s' "$unknown" | grep -q 'no hardware address'; then
+        printf '  ✓ a device with no known hardware address is not woken silently\n'
+      else
+        printf '  ✗ waking a device with no address did not say so\n'
+        printf '%s\n' "$unknown" | sed 's/^/      /' | head -4
+        fail=1
+      fi
+      # Now one is known. Written into the record the way a session would.
+      python3 - "$wk/devices.json" <<'PYWAKE'
+import json, sys
+path = sys.argv[1]
+store = json.load(open(path))
+for record in store["devices"].values():
+    record["last_mac"] = "aa:bb:cc:dd:ee:ff"
+json.dump(store, open(path, "w"), indent=2)
+PYWAKE
+      # A listener on loopback, so the packet has somewhere to land.
+      port=$(python3 -c 'import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1]); s.close()')
+      cat > "$wk/listen.py" <<'PYLISTEN'
+import socket, sys
+
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(20)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+try:
+    data, _ = s.recvfrom(2048)
+    open(sys.argv[2], "wb").write(data)
+except Exception as e:
+    print(e)
+PYLISTEN
+      python3 "$wk/listen.py" "$port" "$wk/packet.bin" > "$wk/listen.log" 2>&1 &
+      wk_listener=$!
+      sleep 0.5
+      sent=$(ESPER_HOME="$wk" "$BIN/esper" wake "$fp" --to "127.0.0.1:$port" 2>&1 || true)
+      wait "$wk_listener" 2>/dev/null || true
+      if [ -f "$wk/packet.bin" ] && [ "$(wc -c < "$wk/packet.bin")" = 102 ] &&
+        [ "$(head -c 6 "$wk/packet.bin" | od -An -tx1 | tr -d ' \n')" = "ffffffffffff" ] &&
+        [ "$(tail -c 6 "$wk/packet.bin" | od -An -tx1 | tr -d ' \n')" = "aabbccddeeff" ]; then
+        printf '  ✓ and the magic packet arrived: 102 bytes, six ones and the address\n'
+      else
+        printf '  ✗ the magic packet did not arrive as one\n'
+        printf '%s\n' "$sent" | sed 's/^/      /' | head -4
+        [ -f "$wk/packet.bin" ] && od -An -tx1 "$wk/packet.bin" | head -2 | sed 's/^/      /'
+        fail=1
+      fi
+      rm -rf "$wk"
 
       # **A group, and a policy applied to all of it at once.**
       #

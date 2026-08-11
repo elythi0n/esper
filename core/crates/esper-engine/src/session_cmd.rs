@@ -1457,9 +1457,15 @@ fn remember_where(key: &[u8; 32], addr: SocketAddr, private: bool) {
         return;
     };
     let text = addr.to_string();
+    // **The hardware address, while the neighbour entry is fresh.** A session
+    // that just ended used this address, so the kernel has one; asked for
+    // later it would be gone. It is only ever learned, never asked for, and
+    // only for one purpose — see `wake_cmd`.
+    let mac = crate::wake_cmd::mac_for(addr.ip());
+    let mac_known = mac.is_none() || device.last_mac == mac;
     let known = device.last_address.as_deref() == Some(text.as_str());
     let private_known = !private || device.overlay_address.as_deref() == Some(text.as_str());
-    if known && private_known {
+    if known && private_known && mac_known {
         // Nothing changed, so nothing is written: a session should not cost a
         // disk write for a fact already recorded.
         return;
@@ -1468,6 +1474,9 @@ fn remember_where(key: &[u8; 32], addr: SocketAddr, private: bool) {
         device.remember_private(&text, paths::now_secs());
     } else {
         device.remember(&text, paths::now_secs());
+    }
+    if let Some(mac) = mac {
+        device.last_mac = Some(mac);
     }
     if let Err(e) = paths::save_devices(&store) {
         eprintln!("      · could not remember where that device was ({e})");

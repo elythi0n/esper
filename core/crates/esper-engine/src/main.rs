@@ -41,6 +41,7 @@ mod settings;
 mod supervised;
 mod terminal_cmd;
 mod trail;
+mod wake_cmd;
 
 use std::process::ExitCode;
 
@@ -202,6 +203,16 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("connect: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("wake") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match wake_cmd::parse(&rest).and_then(|o| wake_cmd::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{} wake: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -432,6 +443,7 @@ fn usage_for(command: &str) -> Option<String> {
         "host" => Some(session_cmd::host_usage()),
         "lock" => Some(lock_cmd::usage()),
         "group" => Some(devices_cmd::group_usage()),
+        "wake" => Some(wake_cmd::usage()),
         "screenshot" => Some(screenshot_cmd::usage()),
         "schedule" => Some(devices_cmd::schedule_usage()),
         _ => None,
@@ -458,6 +470,7 @@ fn print_help() {
            config     show every setting and where its value came from\n  \
            devices    list paired devices and what they may do\n  \
            group      put devices in a group, for applying a policy at once\n  \
+           wake       send a magic packet to a paired device that is asleep\n  \
            screenshot one picture of a paired host's screen, as a PNG\n  \
            grant      give a paired device a permission (--yes to confirm a\n  \
            \x20          dangerous one without being asked)\n  \

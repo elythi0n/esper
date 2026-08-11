@@ -102,6 +102,9 @@ var engineCommands = map[string]bool{
 	// A group is a label on the device records, so applying a policy to
 	// several devices at once is one write and no second lifecycle.
 	"group": true,
+	// Waking a machine is the one verb that does not need the far end to be
+	// running, which is exactly why it exists.
+	"wake": true,
 }
 
 func isEngineCommand(name string) bool { return engineCommands[name] }

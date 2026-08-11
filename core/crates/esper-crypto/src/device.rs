@@ -162,6 +162,20 @@ pub struct Device {
     /// makes a group.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// The hardware address this device was last reached at, if it is on a
+    /// segment where that means anything.
+    ///
+    /// **A hint like the addresses, and for one purpose**: waking a machine
+    /// that is asleep. Learned from the kernel's neighbour table after a
+    /// session rather than asked for, so nobody has to write one down — and a
+    /// stale one costs a packet that nothing answers, which is what happens
+    /// anyway when a machine is unplugged.
+    ///
+    /// Absent for a device reached over anything that is not a local segment:
+    /// a relay, a tunnel, the internet. There is no hardware address to learn
+    /// there, and a magic packet would have nowhere to go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_mac: Option<String>,
 }
 
 impl Device {
@@ -179,6 +193,7 @@ impl Device {
             pairing: Pairing::Kept,
             unattended_when: None,
             groups: Vec::new(),
+            last_mac: None,
         }
     }
 
