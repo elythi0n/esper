@@ -2657,6 +2657,46 @@ async fn serve_session(
         }
     }
 
+    // **And the cheapest of the three, if this machine's owner asked for it.**
+    //
+    // Not a privacy measure at all: a plain background is bandwidth. A
+    // desktop is windows over a background, the windows are what the far end
+    // came for, and a photograph behind them is 63% of a keyframe at
+    // 1280x720 with a tenth of the screen covered — measured in
+    // `esper-encode/tests/background_cost.rs`. It lands on the *first*
+    // picture and on every keyframe after a change of size, because capture
+    // is damage-driven and a still background is sent once.
+    let mut backdrop: Option<crate::presence_task::PlainBackdrop> = None;
+    if crate::settings::flag("host.plain_background", false) {
+        match crate::presence_task::plain_backdrop() {
+            Ok(plain) => {
+                if plain.moved == 0 {
+                    // **Nothing changed, so nothing is kept.** Either the
+                    // background was plain already or something covers every
+                    // place looked at — and a wallpaper hidden for no
+                    // measurable gain is a change nobody asked for. Dropping
+                    // it here puts it back and lets the keeper go.
+                    println!(
+                        "      backdrop   left alone: making it plain changed nothing that \
+                         could be seen"
+                    );
+                    drop(plain);
+                } else {
+                    println!(
+                        "      backdrop   {} is plain for this session ({} of {} places \
+                         changed), and a keeper is holding the way back",
+                        plain.what, plain.moved, plain.of
+                    );
+                    backdrop = Some(plain);
+                }
+            }
+            // **Not fatal**, for the reason the privacy screen is not: a
+            // session refused because a wallpaper could not be hidden would
+            // be a worse product than one that says so.
+            Err(why) => println!("      backdrop   left alone: {why}"),
+        }
+    }
+
     // **The other half of it, if this machine's owner asked for that too.**
     // Same order and the same reason: nothing is detached until somebody
     // other than this process can put it back. A dark monitor still leaves
@@ -2837,6 +2877,8 @@ async fn serve_session(
     // this function — including the ones that return early — and a `give_back`
     // that had to be remembered would eventually not be.
     drop(local_input.take());
+    // And the wallpaper, for the same reason and by the same means.
+    drop(backdrop.take());
     if let Some(indicator) = indicator {
         indicator.hide();
     }

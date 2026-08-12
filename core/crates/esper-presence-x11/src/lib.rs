@@ -75,6 +75,8 @@
 use esper_keeper::Undo;
 use esper_presence::locked::Locked;
 use esper_presence::{Blanking, HostEvent, Missing, Presence, PresenceError, Verdict, Watching};
+
+pub mod backdrop;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::randr::ConnectionExt as _;

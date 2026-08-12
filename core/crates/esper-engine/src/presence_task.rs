@@ -489,6 +489,78 @@ pub fn blank_for_the_session(indicator: &Indicator) -> Result<Privacy, String> {
 /// Held for as long as the session runs. Dropping it puts the devices back and
 /// stops the keeper, in that order — the same shape as [`Privacy`], and for
 /// the same reason: whatever ends the session should not have to remember.
+/// The desktop background, plain for as long as this is held.
+///
+/// **The mildest of the three things a session changes and does not own**, and
+/// held the same way for the same reason: a host that dies must not leave
+/// somebody's wallpaper gone. Dropping it puts the background back and lets
+/// the keeper go, in that order — see [`LocalInput`], which explains why the
+/// order is that way round.
+#[derive(Debug)]
+pub struct PlainBackdrop {
+    /// What a person would call what changed.
+    pub what: String,
+    /// How much of the picture actually moved, so a caller can say whether it
+    /// was worth doing.
+    pub moved: usize,
+    /// Of how many places looked at.
+    pub of: usize,
+    plan: esper_presence::Backdrop,
+    keeper: esper_keeper::Keeper,
+}
+
+impl Drop for PlainBackdrop {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        for undo in &self.plan.undo {
+            if let Err(e) = esper_presence_x11::backdrop::put_back(undo) {
+                // Said rather than swallowed: somebody is looking at a black
+                // desktop, and the keeper still holds the record until it is
+                // told otherwise.
+                eprintln!("      · could not put the desktop background back: {e}");
+            }
+        }
+        self.keeper.cancel();
+    }
+}
+
+/// Make this machine's desktop background plain for the session.
+///
+/// **The order is the safety story**, and it is the same one the privacy
+/// screen and the input lockout have: ask what the desktop published, start
+/// something that will outlive this process, give it the undo, and only then
+/// change anything.
+///
+/// # Errors
+///
+/// If the desktop published no background pixmap — nothing that can be put
+/// back may be taken away — if a keeper cannot be started, or if the server
+/// refuses. Every one of those changes nothing.
+#[cfg(target_os = "linux")]
+pub fn plain_backdrop() -> Result<PlainBackdrop, String> {
+    let plan = esper_presence_x11::backdrop::plan()?;
+    let home = crate::paths::home()?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut keeper = esper_keeper::Keeper::start(&exe, &home).map_err(|e| e.to_string())?;
+    for undo in &plan.undo {
+        keeper.keep(undo.clone()).map_err(|e| e.to_string())?;
+    }
+    let changed = esper_presence_x11::backdrop::plain(&plan)?;
+    Ok(PlainBackdrop {
+        what: plan.what.clone(),
+        moved: changed.moved,
+        of: changed.of,
+        plan,
+        keeper,
+    })
+}
+
+/// No backend on this platform knows how.
+#[cfg(not(target_os = "linux"))]
+pub fn plain_backdrop() -> Result<PlainBackdrop, String> {
+    Err("no backend on this platform can make this machine's desktop background plain".to_owned())
+}
+
 #[derive(Debug)]
 pub struct LocalInput {
     /// What a person would call what stopped working.

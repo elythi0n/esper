@@ -2,11 +2,11 @@
 //!
 //! # Why this is one function and not each backend's own
 //!
-//! Two backends change server-side state that outlives the process: the
-//! presence backend turns screens off, and the input backend detaches this
-//! machine's keyboard and pointer. Both register an [`Undo`] with the same
-//! keeper, and the keeper has one applier — so something has to know which
-//! backend owns which record.
+//! Three kinds of server-side state outlive the process: the presence backend
+//! turns screens off and makes the desktop background plain, and the input
+//! backend detaches this machine's keyboard and pointer. All of them register
+//! an [`Undo`] with the same keeper, and the keeper has one applier — so
+//! something has to know which backend owns which record.
 //!
 //! It is here rather than in the keeper because the keeper is
 //! platform-neutral by design: it knows how to outlive a process and nothing
@@ -26,6 +26,7 @@ pub fn put_back(undo: &Undo) -> Result<(), String> {
     {
         match undo {
             Undo::Crtc { .. } => esper_presence_x11::put_back(undo),
+            Undo::Backdrop { .. } => esper_presence_x11::backdrop::put_back(undo),
             Undo::Slave { .. } => esper_input_x11::floating::put_back(undo),
         }
     }

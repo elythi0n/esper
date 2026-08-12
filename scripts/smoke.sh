@@ -395,7 +395,8 @@ cleanup_terminal() {
              "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}" \
              "${seat_host:-}" "${switch_x:-}" "${lk_host:-}" "${wk_listener:-}" \
              "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}" \
-             "${mk_host:-}" "${mk_client:-}" "${na_host:-}" "${la_host:-}"; do
+             "${mk_host:-}" "${mk_client:-}" "${na_host:-}" "${la_host:-}" \
+             "${bd_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -4286,6 +4287,76 @@ PYLISTEN
         seen_host=""
         rm -rf "$seen"
       fi
+
+      # **The desktop background, plain for the length of a session.**
+      #
+      # Bandwidth rather than privacy: a photograph behind the windows is 63%
+      # of a keyframe at 1280x720 with a tenth of the screen covered, and it
+      # lands on the first picture and every keyframe after a change of size.
+      #
+      # What is checked here is the **refusal** and the wiring, because the
+      # thing that would prove the rest cannot be built from a shell: this
+      # display has no desktop publishing a background pixmap, and no tool on
+      # this machine can make one that outlives the command that set it. The
+      # mechanism itself — a wallpaper painted, made plain, and put back
+      # exactly — is measured against a real server in
+      # `esper-presence-x11/tests/backdrop_on_a_display.rs`, which plays the
+      # desktop's part.
+      echo "  — the desktop background, plain for a session"
+      bd=$(mktemp -d)
+      cp -a "$term_a/." "$bd/" 2>/dev/null || true
+      printf 'host.plain_background = true\n' >> "$bd/config.toml"
+      ESPER_HOME="$bd" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+      ESPER_HOME="$bd" timeout 60 "$BIN/esper-engine" host \
+        --listen 127.0.0.1:0 --no-mdns > "$bd/host.log" 2>&1 &
+      bd_host=$!
+      bd_addr=""
+      for _ in $(seq 1 150); do
+        if grep -q '^  consent ' "$bd/host.log" 2>/dev/null; then
+          bd_addr=$( { awk '/^  listening/{print $2}' "$bd/host.log" 2>/dev/null || true; } | head -1)
+          [ -n "$bd_addr" ] && break
+        fi
+        sleep 0.1
+      done
+      if [ -z "$bd_addr" ]; then
+        printf '  ✗ the host for the background check never started\n'
+        sed 's/^/      /' "$bd/host.log"
+        fail=1
+      else
+        env -u XAUTHORITY ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
+          connect "$bd_addr" --seconds 2 > "$bd/client.log" 2>&1 || true
+        # **A background nothing can put back may not be taken away.** The
+        # refusal names why, because "left alone" with no reason is the same
+        # line as a feature that silently did nothing.
+        if grep -q 'backdrop.*left alone: this desktop has not published' "$bd/host.log"; then
+          printf '  ✓ a desktop that published no background is left alone, and told why\n'
+        else
+          printf '  ✗ the background was not left alone, or no reason was given\n'
+          { grep -m3 'backdrop' "$bd/host.log" || true; } | sed 's/^/      /'
+          fail=1
+        fi
+        # And the session was not harmed by any of it.
+        if grep -q 'ending the session: session complete' "$bd/client.log"; then
+          printf '  ✓ and the session ran its course\n'
+        else
+          printf '  ✗ the session did not survive the background check\n'
+          tail -6 "$bd/client.log" | sed 's/^/      /'
+          fail=1
+        fi
+      fi
+      kill "$bd_host" 2>/dev/null || true
+      wait "$bd_host" 2>/dev/null || true
+      bd_host=""
+      # **And nothing at all is said when nobody asked for it**, which is the
+      # default: a host that mentioned somebody's wallpaper every session
+      # would be a host teaching them to ignore its output.
+      if grep -q 'backdrop' "$term_a/host.log" 2>/dev/null; then
+        printf '  ✗ a host nobody asked said something about the background anyway\n'
+        fail=1
+      else
+        printf '  ✓ and a host nobody asked says nothing about it at all\n'
+      fi
+      rm -rf "$bd"
 
       # **A session that asks to be allowed more, while it runs.**
       #

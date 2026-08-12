@@ -528,6 +528,7 @@ dependencies = [
  "esper-decode",
  "esper-dialog",
  "esper-discovery",
+ "esper-display-lock",
  "esper-encode",
  "esper-files",
  "esper-input",
@@ -554,6 +555,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "x11rb",
 ]
 
 [[package]]

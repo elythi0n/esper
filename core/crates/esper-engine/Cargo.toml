@@ -57,6 +57,14 @@ tracing-subscriber.workspace = true
 # X11 capture is a Linux backend and a Linux dependency. The engine builds on
 # Windows and macOS without it, which is the point of keeping backends in
 # their own crates.
+# **A test that plays the desktop's part.** `backdrop_keeper.rs` paints a
+# wallpaper, publishes it and holds it — which needs an X connection of its
+# own, because no tool on a bare machine leaves a background pixmap behind.
+# Both are already in this workspace; neither reaches the shipped binary.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+x11rb.workspace = true
+esper-display-lock.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 esper-capture-x11.workspace = true
 esper-present-x11.workspace = true

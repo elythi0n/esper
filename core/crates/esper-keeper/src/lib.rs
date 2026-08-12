@@ -89,6 +89,26 @@ pub enum Undo {
         /// What a person would call it.
         what: String,
     },
+    /// Put the desktop's own background back on the root window.
+    ///
+    /// The third thing in this list that outlives the process, and the mildest
+    /// of the three: somebody left looking at a plain colour where their
+    /// wallpaper was has lost nothing but the wallpaper. It is here for the
+    /// same reason as the others — a host that dies must not leave a change
+    /// nobody asked for — and because the way out is one request that only
+    /// something still running can make.
+    Backdrop {
+        /// The pixmap the desktop published as its background, as it was found.
+        ///
+        /// **The desktop's, not ours.** It belongs to whatever draws the
+        /// wallpaper, so a desktop that has since gone leaves an id nothing
+        /// owns and the server refuses it — which is reported rather than
+        /// hidden, because the alternative is a plain root and no line saying
+        /// why.
+        pixmap: u32,
+        /// What a person would call it.
+        what: String,
+    },
 }
 
 impl Undo {
@@ -96,7 +116,9 @@ impl Undo {
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
-            Self::Crtc { what, .. } | Self::Slave { what, .. } => what.clone(),
+            Self::Crtc { what, .. } | Self::Slave { what, .. } | Self::Backdrop { what, .. } => {
+                what.clone()
+            }
         }
     }
 }

@@ -313,6 +313,32 @@ pub static SETTINGS: &[Setting] = &[
                 this is on.",
     },
     Setting {
+        key: "host.plain_background",
+        kind: Kind::Flag,
+        // **Bandwidth, not privacy — and off, because it is somebody's
+        // desktop.** A desktop is windows over a background; the windows are
+        // what the far end came for, and a photograph behind them is 63% of a
+        // keyframe at 1280x720 with a tenth of the screen covered, 48% with a
+        // quarter, 25% with half (measured in
+        // `esper-encode/tests/background_cost.rs`).
+        //
+        // It lands on the **first picture** and on every keyframe after a
+        // change of size, because capture is damage-driven and a still
+        // background is sent once and never again. Which is exactly where
+        // this product measured its worst behaviour: a link whose buffer
+        // could not hold one keyframe showed no picture at all.
+        //
+        // Off because the person at the machine watches their own wallpaper
+        // go black for the session. And it only works where the desktop has
+        // *published* its background pixmap — a background nothing can put
+        // back is one this may not take away.
+        default: Value::Flag(false),
+        about: "Make this machine's desktop background plain while a session runs, which \
+                makes the first picture and every keyframe smaller. Only where the desktop \
+                published a background that can be put back; the wallpaper returns when the \
+                session ends.",
+    },
+    Setting {
         key: "host.allow_asking",
         kind: Kind::Flag,
         // **On, because the alternative is worse in practice.** A session that

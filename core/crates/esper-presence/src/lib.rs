@@ -190,6 +190,19 @@ pub struct Blanking {
     pub undo: Vec<esper_keeper::Undo>,
 }
 
+/// A desktop background about to be made plain, and how to put it back.
+///
+/// The same shape as [`Blanking`] and for the same reason: the plan is made by
+/// the backend that can read the desktop, and the change is made by a caller
+/// that has already handed the undo to something which will outlive it.
+#[derive(Debug, Clone)]
+pub struct Backdrop {
+    /// What a person would call what is about to change.
+    pub what: String,
+    /// How to put it back, for whoever has to.
+    pub undo: Vec<esper_keeper::Undo>,
+}
+
 /// What the indicator is saying.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watching {
