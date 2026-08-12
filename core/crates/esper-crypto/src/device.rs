@@ -82,6 +82,55 @@ impl Pairing {
     }
 }
 
+/// When a session with one device ends, whether this machine locks its screen.
+///
+/// **A per-device answer to a host-wide setting.** `host.lock_after_session`
+/// is right for a machine's ordinary devices and wrong for the one that is
+/// not: a laptop connecting to its owner's own desktop should not lock it
+/// under them, and a helper's machine should always leave it locked. Absent
+/// means the host's rule decides, which is what every device did before this
+/// existed.
+///
+/// Here rather than in the config for the reason the whole device record is:
+/// config is what this machine does, the device list is who it trusts, and
+/// only one of them is safe to copy between machines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockAfter {
+    /// Only when nobody at this machine was asked to allow the session.
+    Unattended,
+    /// Whatever happened.
+    Always,
+    /// Not at all.
+    Never,
+}
+
+impl LockAfter {
+    /// Every value there is, in the order a listing should show them.
+    ///
+    /// Exists so help text and a word parser cannot fall behind the enum:
+    /// adding a value without adding it here is a compile error at the
+    /// exhaustive match in [`LockAfter::word`].
+    pub const ALL: [Self; 3] = [Self::Unattended, Self::Always, Self::Never];
+
+    /// The word this goes by — in the file, on a command line, and in the
+    /// host's own setting, which are deliberately the same three words.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Unattended => "unattended",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+
+    /// From that word, or `None` if it is not one of them.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.word() == word)
+    }
+}
+
 /// A device this machine has paired with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
@@ -141,6 +190,14 @@ pub struct Device {
     /// somebody sets one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unattended_when: Option<esper_clock::Schedule>,
+    /// Whether a session with this device leaves this machine's screen locked.
+    ///
+    /// `None` means `host.lock_after_session` decides, which is what every
+    /// device did before this existed — absent from a store written before it
+    /// and not written out when absent, so a file from either version reads
+    /// the same until somebody sets one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_after: Option<LockAfter>,
     /// The groups this device is in, for applying a policy to several at once.
     ///
     /// # Why a label on the device rather than a file of its own
@@ -194,6 +251,7 @@ impl Device {
             unattended_when: None,
             groups: Vec::new(),
             last_mac: None,
+            lock_after: None,
         }
     }
 
@@ -641,6 +699,48 @@ mod key_bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every value survives its own word, and a typo is not a value.**
+    ///
+    /// The three words are shared with `host.lock_after_session` and with the
+    /// command that sets this, so a value that round-tripped through only two
+    /// of the three would be a setting that reads back as something else.
+    #[test]
+    fn a_lock_after_answer_survives_its_own_word() {
+        for value in LockAfter::ALL {
+            assert_eq!(LockAfter::from_word(value.word()), Some(value));
+        }
+        for not_one in ["", "Always", "sometimes", "unattended ", "never!"] {
+            assert_eq!(
+                LockAfter::from_word(not_one),
+                None,
+                "{not_one:?} is not one of them"
+            );
+        }
+    }
+
+    /// **A device that has no answer of its own writes no field**, so a store
+    /// from before this existed and one from after it read the same until
+    /// somebody sets one.
+    #[test]
+    fn a_device_without_an_answer_is_written_as_it_always_was() {
+        let mut device = Device::new(key(1), "elythion".to_owned(), 0);
+        let plain = serde_json::to_string(&device).expect("serialises");
+        assert!(
+            !plain.contains("lock_after"),
+            "an unset answer must not appear in the file: {plain}"
+        );
+
+        device.lock_after = Some(LockAfter::Never);
+        let set = serde_json::to_string(&device).expect("serialises");
+        assert!(set.contains("\"lock_after\":\"never\""), "{set}");
+
+        // And it comes back as what it was, through the file.
+        let back: Device = serde_json::from_str(&set).expect("parses");
+        assert_eq!(back.lock_after, Some(LockAfter::Never));
+        let old: Device = serde_json::from_str(&plain).expect("parses");
+        assert_eq!(old.lock_after, None);
+    }
 
     /// A real Ed25519 public key, derived deterministically from a seed.
     ///

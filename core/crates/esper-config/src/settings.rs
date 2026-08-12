@@ -226,7 +226,8 @@ pub static SETTINGS: &[Setting] = &[
         default: Value::Text(Cow::Borrowed("unattended")),
         about: "Lock this machine when a session ends: `unattended` locks only when nobody \
                 here was asked to allow it, `always` locks whatever happened, `never` does \
-                not. The panic key always locks, whatever this says.",
+                not. One device can be set apart from the rest with `lock-after`. The panic \
+                key always locks, whatever this says.",
     },
     Setting {
         key: "host.monitor",

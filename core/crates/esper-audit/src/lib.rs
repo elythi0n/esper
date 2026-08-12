@@ -127,6 +127,17 @@ pub enum Event {
         /// Why, in a few words: who or what decided.
         how: String,
     },
+    /// Whether a session with one device leaves this machine locked was
+    /// changed by somebody at this machine.
+    ///
+    /// **Recorded because it is a security setting, even though it changes no
+    /// access at all.** "Somebody set this machine never to lock after that
+    /// device's sessions" is exactly the line an investigation wants and
+    /// nothing else in this log would carry it.
+    LockAfterChanged {
+        /// The word it was set to, or `None` for "whatever the host decides".
+        after: Option<String>,
+    },
     /// What a device may do was changed by somebody at this machine.
     ///
     /// The whole new set, not the difference: a log line saying "control was
@@ -406,6 +417,7 @@ impl Event {
             Self::Revoked { .. } => "revoked",
             Self::SessionNarrowed { .. } => "session_narrowed",
             Self::SessionAsked { .. } => "session_asked",
+            Self::LockAfterChanged { .. } => "lock_after_changed",
             Self::PermissionsChanged { .. } => "permissions_changed",
             Self::SessionOpened { .. } => "session_opened",
             Self::Locked { .. } => "locked",
@@ -446,6 +458,10 @@ impl Event {
                 n => format!("revoked, ending {n} sessions"),
             },
             Self::PermissionsChanged { granted } => format!("may now {}", names(granted)),
+            Self::LockAfterChanged { after } => match after {
+                Some(word) => format!("sessions with it now leave this screen: {word}"),
+                None => "sessions with it now follow this host's own locking rule".to_owned(),
+            },
             Self::SessionNarrowed { granted } => {
                 format!("a live session was narrowed to {}", names(granted))
             }

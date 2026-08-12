@@ -58,6 +58,12 @@ pub fn list() -> Result<(), String> {
         if !device.groups.is_empty() {
             println!("      in   {}", device.groups.join(", "));
         }
+        // **Only when it is set.** Every device without one follows the
+        // host's rule, and a line saying so on every entry would bury the one
+        // device that does not.
+        if let Some(after) = device.lock_after {
+            println!("      lock {} when a session with it ends", after.word());
+        }
         if device.pairing.is_once() {
             any_once = true;
             println!("      for  {}", device.pairing.describe(now));
@@ -433,6 +439,116 @@ pub fn schedule(args: &[String]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Set whether a session with a device leaves this machine's screen locked.
+///
+/// **A per-device answer to `host.lock_after_session`**, for the device the
+/// host-wide rule is wrong about: a laptop connecting to its owner's own
+/// desktop should not lock it under them, and a helper's machine should always
+/// leave it locked.
+///
+/// Takes a group as well as a fingerprint, like every other per-device change
+/// here, and resolves every key before writing any of them.
+///
+/// # Errors
+///
+/// If no device or group matches, if the word is not one of the four, or if
+/// the store cannot be written.
+pub fn lock_after(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err(lock_after_usage());
+    }
+    let (mut store, dropped) = paths::devices()?;
+    for line in &dropped {
+        eprintln!("  · {line}");
+    }
+    let (whose, rest) = whose(&store, args)?;
+    let [word] = rest else {
+        return Err(lock_after_usage());
+    };
+    let said = word.trim().to_ascii_lowercase();
+    // **"default" is a value somebody sets, not the absence of one.** Taking
+    // the answer off has to be as easy as giving it, or a person who changes
+    // their mind edits the file by hand.
+    let wanted = if matches!(said.as_str(), "default" | "host" | "clear" | "none") {
+        None
+    } else {
+        Some(
+            esper_crypto::LockAfter::from_word(&said)
+                .ok_or_else(|| format!("{said:?} is not one of them.\n\n{}", lock_after_usage()))?,
+        )
+    };
+
+    let mut changed: Vec<(String, [u8; 32])> = Vec::new();
+    for key in whose.keys() {
+        let Some(device) = store.get_mut(key) else {
+            return Err("a device disappeared between finding it and changing it".to_owned());
+        };
+        device.lock_after = wanted;
+        changed.push((device.name.clone(), *key));
+    }
+    paths::save_devices(&store)?;
+    let Some((name, _)) = changed.first().cloned() else {
+        return Err("no device to change".to_owned());
+    };
+    if let Whose::Group(group, _) = &whose {
+        println!();
+        println!(
+            "  set        {} device(s) in {group:?}: {}",
+            changed.len(),
+            changed
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    // **One entry per device**, for the reason a permission change writes one:
+    // an auditor asking about a machine needs the answer for that machine
+    // rather than the name of a group somebody has since changed.
+    for (_, each) in &changed {
+        record(
+            each,
+            Event::LockAfterChanged {
+                after: wanted.map(|a| a.word().to_owned()),
+            },
+        );
+    }
+
+    match wanted {
+        Some(after) => println!(
+            "  lock       {after_word} when a session with {name} ends",
+            after_word = after.word()
+        ),
+        None => println!("  lock       whatever this host is set to, for {name}"),
+    }
+    println!(
+        "  host       host.lock_after_session is {:?}, which every other device follows",
+        crate::settings::text("host.lock_after_session")
+    );
+    Ok(())
+}
+
+/// How to use the lock-after command.
+///
+/// Public for the reason the schedule one is: `--help` is answered centrally.
+#[must_use]
+pub fn lock_after_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} lock-after <fingerprint> <always|never|unattended|default>\n\
+         \n\
+         Whether this machine locks its screen when a session with that device\n\
+         ends. Without this, every device follows host.lock_after_session.\n\
+         \n\
+         \x20 always        lock however the session was allowed\n\
+         \x20 never         leave the screen as the session left it\n\
+         \x20 unattended    lock only when nobody here was asked about it\n\
+         \x20 default       take the answer off; follow this host's rule\n\
+         \n\
+         The panic key always locks, whatever any of this says.\n"
+    )
 }
 
 /// How to use the schedule command.

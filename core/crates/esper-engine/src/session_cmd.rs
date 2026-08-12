@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use esper_audit::{Entry, Event, Log};
 use esper_capture::gate::Policy;
-use esper_crypto::DeviceStore;
+use esper_crypto::{DeviceStore, LockAfter};
 use esper_encode::budget::Budget;
 use esper_encode::encoder::{EncodeError, EncoderConfig, VideoEncoder};
 use esper_encode::openh264::OpenH264;
@@ -963,6 +963,9 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                 }
             };
             let from = session.remote_address();
+            // Taken before the session is moved into `serve_one`, because the
+            // rule for locking afterwards is this device's to answer.
+            let peer = *session.peer_key();
             println!("  · {from} connected");
             // Who this host is serving, for anybody watching it. Taken here
             // because the session is about to be moved into `serve_one`.
@@ -1001,10 +1004,8 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             // **However it ended**, including badly: a session that dropped
             // because the network went away left the screen exactly as
             // readable as one that closed politely.
-            lock_after_session(
-                LockAfter::from_settings(),
-                policy.how_the_last_one_was_allowed(),
-            );
+            let (rule, decided) = lock_rule_for(&peer);
+            lock_after_session(rule, decided, policy.how_the_last_one_was_allowed());
             if o.once {
                 break Ok(());
             }
@@ -1261,31 +1262,64 @@ async fn wait_for_press(
     }
 }
 
-/// When this machine locks itself after a session.
+/// Which of two rules decided whether to lock, for the host to say so.
+///
+/// **Because a per-device answer that took effect silently would be one
+/// nobody could tell from the host's own rule**, and the two are set in
+/// different places by different commands. A person who set one device never
+/// to lock and finds the screen locked needs to know which rule they are
+/// arguing with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LockAfter {
-    /// Only when nobody here was asked to allow the session.
-    Unattended,
-    /// Whatever happened.
-    Always,
-    /// Not at all.
-    Never,
+enum Decided {
+    /// The device's own `lock_after`.
+    ByTheDevice,
+    /// `host.lock_after_session`, which is every other device's answer.
+    ByTheHost,
 }
 
-impl LockAfter {
-    /// From `host.lock_after_session`.
-    ///
-    /// An unknown word cannot reach here — the setting is a choice, so a typo
-    /// is refused rather than defaulted — which is why anything unrecognised
-    /// falls to the shipping rule rather than to `Never`. A misreading that
-    /// silently stopped locking would be a misreading nobody could see.
-    fn from_settings() -> Self {
-        match crate::settings::text("host.lock_after_session").as_str() {
-            "always" => Self::Always,
-            "never" => Self::Never,
-            _ => Self::Unattended,
+impl Decided {
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::ByTheDevice => "this device",
+            Self::ByTheHost => "this host",
         }
     }
+}
+
+/// The host's own rule, from `host.lock_after_session`.
+///
+/// An unknown word cannot reach here — the setting is a choice, so a typo is
+/// refused rather than defaulted — which is why anything unrecognised falls to
+/// the shipping rule rather than to `Never`. A misreading that silently
+/// stopped locking would be a misreading nobody could see.
+fn lock_rule_here() -> LockAfter {
+    LockAfter::from_word(&crate::settings::text("host.lock_after_session"))
+        .unwrap_or(LockAfter::Unattended)
+}
+
+/// Which of the two rules applies, and which one it was.
+///
+/// Pure, so the precedence is testable without a device list and a config
+/// file: **the device's answer wins where it has one**, which is the whole
+/// feature, and a rule that silently went the other way would look exactly
+/// like a machine whose setting nobody had noticed.
+const fn lock_rule(theirs: Option<LockAfter>, host: LockAfter) -> (LockAfter, Decided) {
+    match theirs {
+        Some(rule) => (rule, Decided::ByTheDevice),
+        None => (host, Decided::ByTheHost),
+    }
+}
+
+/// Which rule applies to a session with this device, and which one it was.
+///
+/// **The store is read here rather than remembered from the session's start**:
+/// somebody may have changed their mind while it ran, and the answer wanted is
+/// the one in force when the screen is about to be left.
+fn lock_rule_for(peer: &[u8; 32]) -> (LockAfter, Decided) {
+    let theirs = paths::devices()
+        .ok()
+        .and_then(|(store, _)| store.get(peer).and_then(|d| d.lock_after));
+    lock_rule(theirs, lock_rule_here())
 }
 
 /// Whether to lock the screen now that a session has ended.
@@ -1346,8 +1380,23 @@ fn has_a_display() -> bool {
 }
 
 /// Lock the screen after a session, if this machine should.
-fn lock_after_session(after: LockAfter, allowed: Option<crate::consent::Allowed>) {
+fn lock_after_session(
+    after: LockAfter,
+    decided: Decided,
+    allowed: Option<crate::consent::Allowed>,
+) {
     if !lock_now(after, allowed, has_a_display()) {
+        // **Said only when a device's own answer is what decided.** The host's
+        // rule not locking is the ordinary case, and a line about it after
+        // every session would be a line nobody reads. A device set apart from
+        // the rest is worth one.
+        if decided == Decided::ByTheDevice {
+            println!(
+                "  · not locking the screen: {} is set to {}",
+                decided.describe(),
+                after.word()
+            );
+        }
         return;
     }
     // **Only as far as the display this host was serving.** Nobody asked for
@@ -1360,11 +1409,21 @@ fn lock_after_session(after: LockAfter, allowed: Option<crate::consent::Allowed>
     // The panic key keeps the full reach, and correctly: somebody standing at
     // the machine has asked for it all to stop.
     match esper_presence::lock_reaching(esper_presence::Reach::OnlyThisDisplay) {
-        Ok(how) => println!("  · locked the screen with {how}"),
+        Ok(how) => println!(
+            "  · locked the screen with {how} ({} asked for it)",
+            decided.describe()
+        ),
         // Said, not swallowed, for the same reason the panic key says it:
         // somebody who believes their screen is locked and is wrong is worse
         // off than somebody who has been told.
-        Err(e) => println!("  · ⚠ COULD NOT LOCK THE SCREEN AFTER THE SESSION: {e}"),
+        // The rule is named here as well as on the way out, so a machine
+        // with no locker still says which of the two decided it should have
+        // locked — otherwise the one line a person sees when it matters is
+        // the one that does not say why.
+        Err(e) => println!(
+            "  · ⚠ COULD NOT LOCK THE SCREEN AFTER THE SESSION ({} asked for it): {e}",
+            decided.describe()
+        ),
     }
 }
 
@@ -5902,6 +5961,30 @@ mod tests {
                 assert!(
                     !lock_now(after, how, false),
                     "{after:?} with {how:?} tried to lock a machine with no screen"
+                );
+            }
+        }
+    }
+
+    /// **A device's own answer wins, and the host is told which decided.**
+    ///
+    /// The whole of the per-device setting is this precedence. A rule that
+    /// silently went the other way would look exactly like a machine whose
+    /// setting nobody had noticed — which is why the answer carries where it
+    /// came from and the host says it.
+    #[test]
+    fn a_devices_own_answer_beats_the_hosts_rule() {
+        for host in LockAfter::ALL {
+            assert_eq!(
+                lock_rule(None, host),
+                (host, Decided::ByTheHost),
+                "a device with no answer of its own must follow the host"
+            );
+            for theirs in LockAfter::ALL {
+                assert_eq!(
+                    lock_rule(Some(theirs), host),
+                    (theirs, Decided::ByTheDevice),
+                    "the device said {theirs:?} and the host said {host:?}"
                 );
             }
         }

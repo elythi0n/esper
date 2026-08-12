@@ -333,6 +333,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("lock-after") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match devices_cmd::lock_after(&rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{} lock-after: {e}", net::me());
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("schedule") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             match devices_cmd::schedule(&rest) {
@@ -450,6 +460,7 @@ fn usage_for(command: &str) -> Option<String> {
         "wake" => Some(wake_cmd::usage()),
         "screenshot" => Some(screenshot_cmd::usage()),
         "schedule" => Some(devices_cmd::schedule_usage()),
+        "lock-after" => Some(devices_cmd::lock_after_usage()),
         _ => None,
     }
 }
@@ -480,6 +491,7 @@ fn print_help() {
            \x20          dangerous one without being asked)\n  \
            revoke     take a permission away\n  \
            schedule   when a device may connect unattended, in local time\n  \
+           lock-after whether a session with a device leaves this screen locked\n  \
            keep       make a one-session pairing last\n  \
            forget     unpair a device entirely\n  \
            invite     offer somebody a way in: one link, through your broker\n  \

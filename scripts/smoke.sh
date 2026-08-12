@@ -395,7 +395,7 @@ cleanup_terminal() {
              "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}" \
              "${seat_host:-}" "${switch_x:-}" "${lk_host:-}" "${wk_listener:-}" \
              "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}" \
-             "${mk_host:-}" "${mk_client:-}" "${na_host:-}"; do
+             "${mk_host:-}" "${mk_client:-}" "${na_host:-}" "${la_host:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -4500,6 +4500,130 @@ PYLISTEN
       elif [ -n "${DISPLAY:-}" ]; then
         printf '  — skipped the asking checks: needs `script` for a host with a terminal\n'
       fi
+
+      # **One device set apart from the host's rule about locking.**
+      #
+      # `host.lock_after_session` is right for a machine's ordinary devices
+      # and wrong for the one that is not: a laptop connecting to its owner's
+      # own desktop should not lock it under them. What is checked is the
+      # whole path — the command writes it, the listing shows it, the trail
+      # records it, and a real session's end obeys it and says which of the
+      # two rules decided.
+      echo "  — a device with its own answer about locking the screen"
+      la=$(mktemp -d)
+      cp -a "$term_a/." "$la/" 2>/dev/null || true
+      : > "$la/sessions.log"
+      sed -i '/host.lock_after_session/d' "$la/config.toml" 2>/dev/null || true
+      # The host says always, so the device's `never` is the only thing that
+      # can stop it: a check where both rules agree proves nothing.
+      printf 'host.lock_after_session = "always"\n' >> "$la/config.toml"
+      ESPER_HOME="$la" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+      la_said=$(ESPER_HOME="$la" "$BIN/esper-engine" lock-after "$fp" never 2>&1 || true)
+      if printf '%s' "$la_said" | grep -q 'never when a session' &&
+         printf '%s' "$la_said" | grep -q 'lock_after_session is "always"'; then
+        printf '  ✓ a device can be set apart from the host rule, and both are said\n'
+      else
+        printf '  ✗ setting one device apart did not say what it did\n'
+        printf '%s\n' "$la_said" | sed 's/^/      /'
+        fail=1
+      fi
+      if ESPER_HOME="$la" "$BIN/esper-engine" devices | grep -q 'lock never when a session'; then
+        printf '  ✓ and the device list shows it\n'
+      else
+        printf '  ✗ a setting that does not appear in the device list is one nobody can check\n'
+        ESPER_HOME="$la" "$BIN/esper-engine" devices | sed 's/^/      /' | head -8
+        fail=1
+      fi
+      if grep -q '"event":"lock_after_changed"' "$la/sessions.log" 2>/dev/null &&
+         grep -q '"after":"never"' "$la/sessions.log" 2>/dev/null; then
+        printf '  ✓ and the trail records the change\n'
+      else
+        printf '  ✗ the trail does not record a change to a security setting\n'
+        { grep -o '"event":"[a-z_]*"' "$la/sessions.log" || true; } | tail -3 | sed 's/^/      /'
+        fail=1
+      fi
+
+      ESPER_HOME="$la" timeout 60 "$BIN/esper-engine" host \
+        --listen 127.0.0.1:0 --no-mdns > "$la/host.log" 2>&1 &
+      la_host=$!
+      la_addr=""
+      for _ in $(seq 1 150); do
+        if grep -q '^  consent ' "$la/host.log" 2>/dev/null; then
+          la_addr=$( { awk '/^  listening/{print $2}' "$la/host.log" 2>/dev/null || true; } | head -1)
+          [ -n "$la_addr" ] && break
+        fi
+        sleep 0.1
+      done
+      if [ -z "$la_addr" ]; then
+        printf '  ✗ the host for the locking check never started\n'
+        sed 's/^/      /' "$la/host.log"
+        fail=1
+      else
+        env -u XAUTHORITY ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
+          connect "$la_addr" --seconds 2 > "$la/client.log" 2>&1 || true
+        held=""
+        for _ in $(seq 1 100); do
+          grep -q 'not locking the screen' "$la/host.log" 2>/dev/null && { held=yes; break; }
+          sleep 0.1
+        done
+        if [ -n "$held" ] && grep -q 'this device is set to never' "$la/host.log"; then
+          printf '  ✓ and a session with it leaves the screen alone, naming the rule\n'
+        else
+          printf '  ✗ the device rule did not reach the end of a session\n'
+          { grep -m4 '  · ' "$la/host.log" || true; } | sed 's/^/      /'
+          fail=1
+        fi
+        # **And it did not lock anyway.** The line above is what the host
+        # says; this is that it did not then do the opposite.
+        if ! grep -q 'locked the screen with\|COULD NOT LOCK' "$la/host.log"; then
+          printf '  ✓ and it did not reach for a locker at all\n'
+        else
+          printf '  ✗ it said it was not locking and then tried to\n'
+          { grep -m2 'lock' "$la/host.log" || true; } | sed 's/^/      /'
+          fail=1
+        fi
+      fi
+      kill "$la_host" 2>/dev/null || true
+      wait "$la_host" 2>/dev/null || true
+      la_host=""
+
+      # **And taking the answer off puts the device back on the host's rule**,
+      # which is the half that makes it a setting rather than a trapdoor.
+      ESPER_HOME="$la" "$BIN/esper-engine" lock-after "$fp" default >/dev/null 2>&1 || true
+      ESPER_HOME="$la" timeout 60 "$BIN/esper-engine" host \
+        --listen 127.0.0.1:0 --no-mdns > "$la/host2.log" 2>&1 &
+      la_host=$!
+      la_addr=""
+      for _ in $(seq 1 150); do
+        if grep -q '^  consent ' "$la/host2.log" 2>/dev/null; then
+          la_addr=$( { awk '/^  listening/{print $2}' "$la/host2.log" 2>/dev/null || true; } | head -1)
+          [ -n "$la_addr" ] && break
+        fi
+        sleep 0.1
+      done
+      if [ -n "$la_addr" ]; then
+        env -u XAUTHORITY ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
+          connect "$la_addr" --seconds 2 > "$la/client2.log" 2>&1 || true
+        back=""
+        for _ in $(seq 1 100); do
+          grep -q 'this host asked for it' "$la/host2.log" 2>/dev/null && { back=yes; break; }
+          sleep 0.1
+        done
+        if [ -n "$back" ]; then
+          printf '  ✓ and with the answer taken off, the host rule decides again\n'
+        else
+          printf '  ✗ the device kept its own answer after it was taken off\n'
+          { grep -m4 '  · ' "$la/host2.log" || true; } | sed 's/^/      /'
+          fail=1
+        fi
+      else
+        printf '  ✗ the second host for the locking check never started\n'
+        fail=1
+      fi
+      kill "$la_host" 2>/dev/null || true
+      wait "$la_host" 2>/dev/null || true
+      la_host=""
+      rm -rf "$la"
 
       echo "  — revoking a device that is connected right now"
       { printf 'echo holding\n'; sleep 15; } | \

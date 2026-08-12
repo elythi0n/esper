@@ -13,7 +13,7 @@ pub mod pairing;
 mod wordlist;
 
 pub use code::{CODE_LEN, CodeError, PairingCode};
-pub use device::{Device, DeviceStore, Pairing, StoreError};
+pub use device::{Device, DeviceStore, LockAfter, Pairing, StoreError};
 pub use esper_proto::Permission;
 pub use fingerprint::Fingerprint;
 pub use identity::{Identity, IdentityError, KEY_LEN};
