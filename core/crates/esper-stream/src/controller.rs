@@ -1967,6 +1967,21 @@ impl ControllerStream {
         }
     }
 
+    /// Pin how long this stream waits for the rest of a frame, or let it be
+    /// worked out again.
+    ///
+    /// See [`crate::Jitter::pin`]. The value comes from the machine's own
+    /// config, which this crate does not read.
+    pub const fn pin_buffer(&mut self, wait: Option<std::time::Duration>) {
+        self.jitter.pin(wait);
+    }
+
+    /// The wait somebody pinned, for a session that wants to say so.
+    #[must_use]
+    pub const fn pinned_buffer(&self) -> Option<std::time::Duration> {
+        self.jitter.pinned()
+    }
+
     /// What the host has said this session may now do, if it has said so.
     ///
     /// Taken rather than read, so a caller that acts on it cannot act twice —

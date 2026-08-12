@@ -61,7 +61,11 @@ impl Kind {
                 Ok(Value::Whole(n))
             }
             Self::WholeOrNone { least, most } => {
-                if text.eq_ignore_ascii_case("none") {
+                // **Both words mean the same thing**: this machine works it
+                // out. `none` is what the file has always accepted and `auto`
+                // is what the design documents call it — a person who writes
+                // the word the document taught them should not get an error.
+                if text.eq_ignore_ascii_case("none") || text.eq_ignore_ascii_case("auto") {
                     return Ok(Value::Nothing);
                 }
                 Self::Whole { least, most }.read(text)
@@ -111,7 +115,7 @@ impl Kind {
             Self::Flag => "true or false".to_owned(),
             Self::Whole { least, most } => format!("a whole number, {least} to {most}"),
             Self::WholeOrNone { least, most } => {
-                format!("a whole number, {least} to {most}, or none")
+                format!("a whole number, {least} to {most}, or auto")
             }
             Self::Cores => "a number of cores, such as 1.5".to_owned(),
             Self::Address => "an address, as host:port".to_owned(),
@@ -439,6 +443,41 @@ pub static SETTINGS: &[Setting] = &[
         default: Value::Flag(true),
         about: "Pace this machine's video at the rate the viewer measures the link at, rather \
                 than at whatever the congestion window allows. Off falls back to plain Cubic.",
+    },
+    Setting {
+        key: "session.buffer",
+        // Five to two thousand: below a frame interval at any framerate this
+        // product reaches, and above the widest wait the adaptive rule will
+        // ever choose by itself. Somebody pinning it is allowed outside what
+        // `auto` would pick — that is what an override is for — and not
+        // outside what a number of milliseconds can sensibly mean.
+        kind: Kind::WholeOrNone {
+            least: 5,
+            most: 2000,
+        },
+        // **`auto` is right almost always, which is not always.**
+        //
+        // The wait is how long a controller gives the rest of a frame before
+        // deciding it is as complete as it is going to get, and it is derived
+        // from the framerate and widened to what the link has shown. That rule
+        // was measured into existence — a link whose frames take longer than
+        // the gap between frames had every keyframe cut into pieces and
+        // discarded, and a session showed nothing at all.
+        //
+        // The override is for the two cases a rule cannot cover: somebody on a
+        // LAN who wants the shortest wait there is and will accept a torn
+        // frame for it, and somebody whose link this rule reads wrongly. A
+        // pinned wait is the answer rather than a floor — the adaptation would
+        // otherwise widen it back on exactly the link it was pinned for.
+        //
+        // It was promised in `capture-and-codec.md` and did not exist: no
+        // setting, no plumbing, no caller. A promise a product does not keep
+        // is worse than a feature it does not have.
+        default: Value::Nothing,
+        about: "How long this viewer waits for the rest of a frame, in milliseconds. `none` \
+                — or `auto`, which means the same — derives it from the framerate and widens \
+                it to what the link has shown, which is right almost always. A number pins \
+                it: shorter means less latency and more torn frames, longer the opposite.",
     },
     Setting {
         key: "session.idle_timeout",

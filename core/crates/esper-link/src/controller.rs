@@ -521,6 +521,20 @@ impl ControllerLink {
         self.stream.take_permissions()
     }
 
+    /// Pin how long this session waits for the rest of a frame.
+    ///
+    /// See [`esper_stream::Jitter::pin`]: `None` works it out from the
+    /// framerate and what the link has shown, which is right almost always.
+    pub const fn pin_buffer(&mut self, wait: Option<std::time::Duration>) {
+        self.stream.pin_buffer(wait);
+    }
+
+    /// The wait somebody pinned, if they pinned one.
+    #[must_use]
+    pub const fn pinned_buffer(&self) -> Option<std::time::Duration> {
+        self.stream.pinned_buffer()
+    }
+
     /// Ask somebody at the host to allow this session one more thing.
     ///
     /// **Sent rather than queued**, like the recording notice and for a

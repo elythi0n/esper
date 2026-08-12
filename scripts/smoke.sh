@@ -4288,6 +4288,45 @@ PYLISTEN
         rm -rf "$seen"
       fi
 
+      # **A viewer that pins how long it waits for the rest of a frame.**
+      #
+      # `session.buffer` was promised in `capture-and-codec.md` and did not
+      # exist: no setting, no plumbing, no caller. What is checked is the whole
+      # path — the number is read from this machine's config, reaches the
+      # stream before a frame is assembled, and is named both when the session
+      # opens and in the summary that reports the deadlines it fired against.
+      echo "  — a viewer that pins its own frame wait"
+      cb=$(mktemp -d)
+      cp -a "$term_b/." "$cb/" 2>/dev/null || true
+      printf 'session.buffer = 45\n' >> "$cb/config.toml"
+      env -u XAUTHORITY ESPER_HOME="$cb" timeout 60 "$BIN/esper-engine" \
+        connect "$host_addr" --seconds 3 > "$cb/client.log" 2>&1 || true
+      if grep -q 'buffer     pinned to 45 ms by session.buffer' "$cb/client.log"; then
+        printf '  ✓ a pinned frame wait is read from the config and said out loud\n'
+      else
+        printf '  ✗ session.buffer did not reach the session\n'
+        { grep -m3 -i 'buffer' "$cb/client.log" || true; } | sed 's/^/      /'
+        fail=1
+      fi
+      # **And the summary names it**, because a pinned wait is the first thing
+      # to suspect when a session reports firing a great many deadlines.
+      if grep -q 'against a wait pinned at 45 ms' "$cb/client.log"; then
+        printf '  ✓ and the summary says the deadlines were measured against it\n'
+      else
+        printf '  ✗ the summary did not say the wait had been pinned\n'
+        { grep -m2 'jitter' "$cb/client.log" || true; } | sed 's/^/      /'
+        fail=1
+      fi
+      # And a viewer that pinned nothing says nothing about it: `auto` is the
+      # default and a line per session about a number nobody chose is noise.
+      if grep -q 'buffer     pinned' "$term_b/first.log" 2>/dev/null; then
+        printf '  ✗ a viewer nobody pinned reported a pinned buffer anyway\n'
+        fail=1
+      else
+        printf '  ✓ and a viewer that pinned nothing says nothing about it\n'
+      fi
+      rm -rf "$cb"
+
       # **The desktop background, plain for the length of a session.**
       #
       # Bandwidth rather than privacy: a photograph behind the windows is 63%

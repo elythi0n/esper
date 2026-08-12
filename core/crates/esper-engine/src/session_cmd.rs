@@ -1374,6 +1374,17 @@ const fn lock_now(
     }
 }
 
+/// The frame wait this machine's owner pinned, if they pinned one.
+///
+/// **Read here rather than in the stream**, which is a library and does not
+/// know what a machine's config says — the same division every other tunable
+/// in this tree has. Out of range is refused by the settings table rather than
+/// clamped here, so a number somebody typed does what they typed or tells them
+/// why not.
+fn pinned_buffer() -> Option<Duration> {
+    crate::settings::whole("session.buffer").map(Duration::from_millis)
+}
+
 /// Whether this machine has a screen somebody could read.
 fn has_a_display() -> bool {
     std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -4903,6 +4914,19 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         println!("  decoder    sandboxed — {}", worker.report().describe());
         let mut link =
             link.with_decoder(Box::new(worker) as Box<dyn esper_decode::decoder::VideoDecoder>);
+        // **Pinned before a single frame is assembled**, if this machine's
+        // owner pinned it. `auto` derives the wait from the framerate and
+        // widens it to what the link has shown, which is right almost always
+        // — and the override exists because "almost" is not "always". Said out
+        // loud, because a wait somebody chose is a wait they will want to see
+        // in force.
+        if let Some(pinned) = pinned_buffer() {
+            link.pin_buffer(Some(pinned));
+            println!(
+                "  buffer     pinned to {} ms by session.buffer, not worked out",
+                pinned.as_millis()
+            );
+        }
 
         // **The monitor a person asked for, asked for once the session is up.**
         // It cannot go in the connection: which monitors exist is something
@@ -5795,10 +5819,18 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // gap past it means frames are being abandoned for packets that were
         // merely late.
         println!(
-            "  jitter     {:.1} ms interarrival, worst gap {:.0} ms, {} deadline(s) fired",
+            "  jitter     {:.1} ms interarrival, worst gap {:.0} ms, {} deadline(s) fired{}",
             link.jitter_ms(),
             jitter.worst_gap.as_secs_f64() * 1000.0,
-            jitter.deadlines
+            jitter.deadlines,
+            // **Named in the summary as well as at the start.** A pinned wait
+            // is the first thing to suspect when the deadlines fired a great
+            // many times, and the line that reports them should say whether
+            // the number they were measured against was chosen or derived.
+            match link.pinned_buffer() {
+                Some(pinned) => format!(", against a wait pinned at {} ms", pinned.as_millis()),
+                None => String::new(),
+            }
         );
         // **Why the picture was smaller than the screen.** A session that
         // stepped down and never said so leaves somebody comparing a blurry

@@ -135,6 +135,15 @@ pub struct JitterStats {
 /// The deadline policy for one stream.
 #[derive(Debug)]
 pub struct Jitter {
+    /// A wait somebody pinned, which is used instead of every rule below.
+    ///
+    /// **The override `capture-and-codec.md` §3 promises**, and for a long
+    /// time promised on paper only: `auto` is right almost always and the
+    /// override exists because "almost" is not "always". A person on a LAN who
+    /// wants the shortest possible wait, or on a link whose behaviour this
+    /// module reads wrongly, can say so — and then nothing here argues with
+    /// them, including the adaptation, which would otherwise widen it back.
+    pinned: Option<Duration>,
     /// Two frame intervals at the announced framerate: the healthy-link
     /// number, and the floor under everything below.
     from_fps: Duration,
@@ -158,6 +167,7 @@ impl Jitter {
     #[must_use]
     pub fn new(max_fps: u16, clock_hz: u32) -> Self {
         Self {
+            pinned: None,
             from_fps: derive_wait(max_fps),
             clock_hz: clock_hz.max(1),
             opened_at: None,
@@ -167,6 +177,21 @@ impl Jitter {
             evidence_at: 0,
             stats: JitterStats::default(),
         }
+    }
+
+    /// Pin the wait, or let it be worked out again.
+    ///
+    /// Taken as a value rather than read from a setting here, because this
+    /// crate is a library and what a machine's config says is the engine's
+    /// business — the same division every other tunable in this tree has.
+    pub const fn pin(&mut self, wait: Option<Duration>) {
+        self.pinned = wait;
+    }
+
+    /// The wait somebody pinned, if they pinned one.
+    #[must_use]
+    pub const fn pinned(&self) -> Option<Duration> {
+        self.pinned
     }
 
     /// The deadline in force.
@@ -185,6 +210,13 @@ impl Jitter {
     /// frames; what abandons a keyframe is how long its own datagrams take.
     #[must_use]
     pub fn wait(&self) -> Duration {
+        // **A pinned wait is the answer, not a floor.** Somebody who pinned it
+        // wants that number: taking the larger of theirs and the link's
+        // evidence would quietly widen it back on exactly the link they
+        // pinned it for.
+        if let Some(pinned) = self.pinned {
+            return pinned;
+        }
         let shown = self
             .evidence
             .iter()
@@ -387,6 +419,55 @@ mod tests {
         assert_eq!(derive_wait(240), MIN_WAIT);
         // Zero is not a framerate, and must not divide by itself.
         assert_eq!(derive_wait(0), MAX_WAIT);
+    }
+
+    /// **A pinned wait is the answer, not a floor.**
+    ///
+    /// The rule this replaces takes the larger of the framerate's wait and the
+    /// link's evidence, and both would widen a pinned number back — on
+    /// exactly the link somebody pinned it for.
+    #[test]
+    fn a_pinned_wait_is_used_instead_of_every_rule() {
+        let mut jitter = Jitter::new(30, 90_000);
+        let derived = jitter.wait();
+        assert_eq!(derived, derive_wait(30));
+
+        // Shorter than the framerate would ask for.
+        jitter.pin(Some(Duration::from_millis(7)));
+        assert_eq!(jitter.wait(), Duration::from_millis(7));
+        assert_eq!(jitter.pinned(), Some(Duration::from_millis(7)));
+
+        // And the adaptation does not argue with it: evidence of a slow link
+        // is exactly what would otherwise widen the wait.
+        let now = Instant::now();
+        jitter.arrived(now, 0, false);
+        jitter.arrived(now + Duration::from_millis(300), 0, true);
+        jitter.fired(now + Duration::from_millis(300));
+        assert_eq!(
+            jitter.wait(),
+            Duration::from_millis(7),
+            "a slow link widened a wait somebody pinned"
+        );
+
+        // Longer than the rule's own ceiling, which is also allowed: the
+        // override exists for the cases the rule cannot cover.
+        jitter.pin(Some(Duration::from_millis(1500)));
+        assert_eq!(jitter.wait(), Duration::from_millis(1500));
+
+        // And unpinning gives the rule back.
+        //
+        // **What it learned while pinned is measured against the pinned
+        // deadline**, which is the honest inference and not the link's speed:
+        // a frame abandoned at seven milliseconds says "longer than seven",
+        // not "three hundred". So the rule comes back knowing what a short
+        // deadline could show it, which is the framerate's own answer.
+        jitter.pin(None);
+        assert!(
+            jitter.wait() >= derived,
+            "the rule should be in charge again: {:?}",
+            jitter.wait()
+        );
+        assert_eq!(jitter.pinned(), None);
     }
 
     #[test]
