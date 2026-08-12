@@ -30,6 +30,48 @@ pub struct Monitor {
     pub height: u32,
 }
 
+/// A switch that stops injection at once, from anywhere.
+///
+/// **The panic key's half of a promise this product has made since Phase 5**:
+/// the key is handled "before input dispatch", so a controller cannot swallow
+/// it. What was true was that the press ended the session. What was not is
+/// that injection stopped when the key went down — the session's teardown
+/// aborts the task that injects, an abort lands at that task's next await
+/// point, and messages already queued could be applied *after* somebody at the
+/// machine had asked for everything to stop.
+///
+/// A flag rather than a channel, because what has to be quick is the **check**:
+/// it happens before every message, and nothing here may wait. What releases a
+/// key still held is the dispatcher being dropped, which is the same path that
+/// has always released it.
+#[derive(Debug, Clone, Default)]
+pub struct Stopped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Stopped {
+    /// Nothing stopped yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stop. Nothing after this is injected.
+    ///
+    /// Named for the grep rather than for the prose: `check-reached.py`
+    /// requires this to be called from production code, because the wiring
+    /// between a panic press and this switch is the whole feature and cannot
+    /// be tested — the rest of what a panic does is lock the screen of
+    /// whoever is running the tests.
+    pub fn stop_now(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether injection has been stopped.
+    #[must_use]
+    pub fn is_stopped(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// Applies a controller's input to a sink, or does not.
 #[derive(Debug)]
 pub struct Dispatcher {
@@ -37,18 +79,30 @@ pub struct Dispatcher {
     monitors: Vec<Monitor>,
     /// Whether this peer holds `control`.
     allowed: bool,
+    /// Whether somebody at this machine has stopped all of it.
+    stopped: Stopped,
     injected: u64,
     refused: u64,
 }
 
 impl Dispatcher {
     /// A dispatcher for a peer that may or may not drive this machine.
+    ///
+    /// `stopped` is shared with whoever can decide that nothing more may be
+    /// injected — at the host, that is the panic key. A caller with nothing to
+    /// stop it from passes a switch of its own that nobody else holds.
     #[must_use]
-    pub fn new(sink: Box<dyn InputSink>, monitors: Vec<Monitor>, allowed: bool) -> Self {
+    pub fn new(
+        sink: Box<dyn InputSink>,
+        monitors: Vec<Monitor>,
+        allowed: bool,
+        stopped: Stopped,
+    ) -> Self {
         Self {
             sink,
             monitors,
             allowed,
+            stopped,
             injected: 0,
             refused: 0,
         }
@@ -92,6 +146,18 @@ impl Dispatcher {
     /// controller end its own session by sending one — and worse, would end a
     /// legitimate one over a key that happens not to exist here.
     pub fn apply(&mut self, message: &InputMessage) -> Result<(), InputError> {
+        // **Before the permission, before the bounds, before anything.** This
+        // is what "handled before input dispatch" means for the panic key: the
+        // press stops injection here, at the last point before a message
+        // reaches the machine, rather than when whatever holds this task gets
+        // round to unwinding.
+        if self.stopped.is_stopped() {
+            self.refused = self.refused.saturating_add(1);
+            return Err(InputError::Backend {
+                backend: self.sink.backend(),
+                detail: "somebody at this machine stopped the input".to_owned(),
+            });
+        }
         if !self.allowed {
             self.refused = self.refused.saturating_add(1);
             return Err(InputError::Backend {
@@ -195,7 +261,71 @@ mod tests {
     }
 
     fn dispatcher(allowed: bool) -> Dispatcher {
-        Dispatcher::new(Box::new(NullSink::new()), monitors(), allowed)
+        Dispatcher::new(
+            Box::new(NullSink::new()),
+            monitors(),
+            allowed,
+            Stopped::new(),
+        )
+    }
+
+    /// **Nothing is injected after the stop, however much is queued.**
+    ///
+    /// The panic key's guarantee, at the last point before a message reaches
+    /// the machine. It used to be delivered by the session's teardown aborting
+    /// the task that injects — and an abort lands at that task's next await,
+    /// so a queue of messages could be applied after somebody had asked for
+    /// everything to stop.
+    #[test]
+    fn nothing_is_injected_after_somebody_stops_it() {
+        let stop = Stopped::new();
+        let mut d = Dispatcher::new(Box::new(NullSink::new()), monitors(), true, stop.clone());
+        for _ in 0..3 {
+            d.apply(&InputMessage::Key(KeyEvent {
+                usage: 0x04,
+                pressed: true,
+            }))
+            .expect("a session with control injects");
+        }
+        assert_eq!(d.counts(), (3, 0));
+
+        stop.stop_now();
+        // A hundred, because the thing being tested is that a *queue* cannot
+        // outlive the press: one refusal could be luck of the scheduler.
+        for _ in 0..100 {
+            assert!(
+                d.apply(&InputMessage::Key(KeyEvent {
+                    usage: 0x04,
+                    pressed: true,
+                }))
+                .is_err(),
+                "a message was injected after the input was stopped"
+            );
+        }
+        assert_eq!(
+            d.counts(),
+            (3, 100),
+            "everything after the stop must be refused and counted"
+        );
+    }
+
+    /// **The switch is shared, so it does not matter which copy is thrown.**
+    /// A session's keyboard may be opened halfway through it, and the press
+    /// arrives somewhere else entirely.
+    #[test]
+    fn a_stop_thrown_on_one_copy_stops_the_dispatcher() {
+        let stop = Stopped::new();
+        let elsewhere = stop.clone();
+        let mut d = Dispatcher::new(Box::new(NullSink::new()), monitors(), true, stop);
+        assert!(!elsewhere.is_stopped());
+        elsewhere.stop_now();
+        assert!(
+            d.apply(&InputMessage::Key(KeyEvent {
+                usage: 0x04,
+                pressed: true,
+            }))
+            .is_err()
+        );
     }
 
     /// **A device without `control` gets nothing injected.** Not a clamped
@@ -449,6 +579,7 @@ mod tests {
                 height: 1080,
             }],
             true,
+            Stopped::new(),
         );
         let middle = InputMessage::Pointer(PointerMove {
             monitor: 1,

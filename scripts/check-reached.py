@@ -117,6 +117,16 @@ MUST_BE_CALLED = {
         "permanent unattended access and printed a success line -- while "
         "security.md said it required confirmation at the host"
     ),
+    "stop_now": (
+        "what a panic press throws to stop injection. The press has ended the "
+        "session since Phase 5 and the product's own security document said it "
+        "was 'handled before input dispatch' — which was true of the session "
+        "and not of the injecting: the teardown aborts the task that injects, "
+        "an abort lands at that task's next await, and a queue of messages "
+        "could be applied after somebody had asked for everything to stop. "
+        "The wiring cannot be tested, because the rest of a panic locks the "
+        "screen of whoever is running the tests, so it is required here"
+    ),
     "release_all": (
         "what stops a key being left held down on somebody else's machine when "
         "a session ends however it ends"

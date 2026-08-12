@@ -49,7 +49,7 @@ pub struct Floating {
     pub undo: Vec<Undo>,
 }
 
-pub use dispatch::{Dispatcher, Monitor};
+pub use dispatch::{Dispatcher, Monitor, Stopped};
 pub use held::Held;
 pub use hid::{Evdev, evdev_for_usage, usage_for_evdev};
 pub use null::{NullSink, Recorded};

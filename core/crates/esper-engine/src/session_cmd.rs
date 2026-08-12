@@ -2370,6 +2370,11 @@ async fn serve_session(
     // changed", and had no caller.
     let (layout, layout_now) = tokio::sync::watch::channel(monitors_from(&config));
 
+    // **What the panic key stops, held where the panic can reach it.** One
+    // switch per session: the dispatcher a session opens with and one somebody
+    // allows halfway through are the same session's keyboard, and a press has
+    // to stop whichever of them exists.
+    let stop_injecting = esper_input::Stopped::new();
     // Set when the grant said control and the machine cannot deliver it.
     let mut cannot_inject = false;
     let input = if may_control {
@@ -2382,6 +2387,7 @@ async fn serve_session(
                 chosen.sink,
                 layout_now.borrow().clone(),
                 true,
+                stop_injecting.clone(),
             ))
         } else {
             // **Said out loud, and said to the end that needs to hear it.**
@@ -2740,6 +2746,7 @@ async fn serve_session(
             pointer,
             watch: watch.as_ref(),
             live: live.clone(),
+            stop_injecting: stop_injecting.clone(),
             input: Arc::clone(&input),
             watching: esper_presence::Watching {
                 recording: false,
@@ -3179,6 +3186,13 @@ struct Attending<'a> {
     watch: Option<&'a crate::cursor_task::CursorWatch>,
     /// What this session's device may do, as it changes.
     live: crate::permits::Live,
+    /// What stops injection, for the panic key to throw.
+    ///
+    /// **Held here because the press arrives here.** The dispatcher itself
+    /// lives in the task that injects, and by the time a press is read there
+    /// is nothing in this loop holding it — so what the loop holds is the
+    /// switch.
+    stop_injecting: esper_input::Stopped,
     /// Where an injector goes if somebody here allows control mid-session.
     ///
     /// The other end of [`ExtraStreams::input`]. Empty for a session that
@@ -3802,6 +3816,11 @@ async fn serve(
                 break;
             }
             Turn::Pressed(esper_presence::HostEvent::Panic) => {
+                // **First, before the session is even closed.** Everything
+                // else here takes a moment — a message to the far end, a
+                // locker to spawn, a task to unwind — and injection is the one
+                // thing that must not happen during any of them.
+                attending.stop_injecting.stop_now();
                 media.close(esper_proto::Reason::STOPPED_AT_HOST);
                 ours = Some(esper_proto::Reason::STOPPED_AT_HOST);
                 // **The whole action, here.** Whoever takes the press does
@@ -4049,6 +4068,7 @@ async fn serve(
                     let needs_a_keyboard =
                         wanted == Permission::Control && !attending.watching.controlling;
                     let screens = attending.layout.borrow().clone();
+                    let stop = attending.stop_injecting.clone();
                     asking = Some(tokio::task::spawn_blocking(move || {
                         // The device record, read here because the answer
                         // depends on what the store says now and a session's
@@ -4085,7 +4105,12 @@ async fn serve(
                                     "this host has nothing it can inject input with",
                                 );
                             }
-                            Some(esper_input::Dispatcher::new(chosen.sink, screens, true))
+                            Some(esper_input::Dispatcher::new(
+                                chosen.sink,
+                                screens,
+                                true,
+                                stop.clone(),
+                            ))
                         } else {
                             None
                         };
