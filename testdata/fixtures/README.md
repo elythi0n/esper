@@ -1,7 +1,10 @@
-# Shared wire fixtures
+# Shared fixtures
 
-Each `.cbor` file is one complete frame — a big-endian `u32` length followed by
-the CBOR payload — as it appears on the wire.
+Two kinds live here, for the same reason: Esper is two implementations of one
+product, and anything both halves read has to be read the same way.
+
+**Wire fixtures** (`.cbor`). Each file is one complete frame — a big-endian
+`u32` length followed by the CBOR payload — as it appears on the wire.
 
 **Both language implementations must decode every fixture to the same value, and
 re-encode that value to byte-identical output.** The Rust side checks this in
@@ -14,6 +17,23 @@ message: Go's canonical CBOR sorts map keys, ciborium emits struct fields in
 declaration order, and the two produced different bytes for the same `Hello`.
 Without a byte-level check that would have surfaced as a mysterious interop
 failure months later.
+
+**Store fixtures** (`.json`). `device_store.json` is a device store as
+`esper-crypto` writes one, and `device_fingerprints.json` is the fingerprint
+derived from each of sixteen keys. Rust checks them in
+`core/crates/esper-crypto/tests/store_fixtures.rs`; Go in
+`internal/devices/devices_test.go`.
+
+The store is the file that says who a machine trusts, and the two halves read
+it from opposite sides — Rust writes and enforces, Go shows. A disagreement
+about it is a device listed that cannot connect, or one hidden that can. The
+fingerprint fixture exists because the fingerprint is what two people read to
+each other to confirm they mean the same device: a domain separator or word out
+of step renders one key as two codes.
+
+Regenerate a store fixture with
+
+    ESPER_WRITE_FIXTURES=1 cargo test -p esper-crypto --test store_fixtures
 
 ## Adding a fixture
 

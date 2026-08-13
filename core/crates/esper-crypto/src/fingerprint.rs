@@ -4,6 +4,14 @@ use sha2::{Digest, Sha256};
 
 use crate::wordlist::{FINGERPRINT_WORDS, WORDS};
 
+/// What this digest is *for*, mixed in before the key.
+///
+/// Domain separation: this digest must never collide with any other use of
+/// SHA-256 over the same key material elsewhere in the protocol. Named rather
+/// than written inline because the Go side derives the same fingerprint, and
+/// `scripts/check-vocabularies.py` holds the two separators to each other.
+pub const DOMAIN: &[u8] = b"esper-device-fingerprint-v1";
+
 /// A device fingerprint: 64 bits derived from a public key, rendered as eight
 /// words.
 ///
@@ -29,9 +37,7 @@ impl Fingerprint {
     #[must_use]
     pub fn of(public_key: &[u8]) -> Self {
         let mut h = Sha256::new();
-        // Domain separation: this digest must never collide with any other use
-        // of SHA-256 over the same key material elsewhere in the protocol.
-        h.update(b"esper-device-fingerprint-v1");
+        h.update(DOMAIN);
         h.update(public_key);
         let digest = h.finalize();
 

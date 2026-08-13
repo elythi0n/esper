@@ -1395,6 +1395,16 @@ except OSError:
           printf '  ✗ a rebinding-shaped request answered %s\n' "$rebound"
           fail=1
         fi
+        # **Which devices are paired**, which is the one answer here that does
+        # not come from the engine.
+        listed=$(curl -s -H "Authorization: Bearer $api_token" \
+          "http://127.0.0.1:$api_port/devices" || true)
+        if printf '%s' "$listed" | grep -q '"devices"'; then
+          printf '  ✓ and it answers which devices are paired\n'
+        else
+          printf '  ✗ the device list is not answered: %s\n' "$(printf '%s' "$listed" | head -c 120)"
+          fail=1
+        fi
         # And the mode of the token file, which is the whole of who can ask.
         mode=$(stat -c '%a' "$term_a/api.token" 2>/dev/null || echo "?")
         if [ "$mode" = "600" ]; then
@@ -1406,6 +1416,117 @@ except OSError:
       fi
       kill "$api_pid" 2>/dev/null || true
       api_pid=""
+
+      # **The device list with no engine at all.**
+      #
+      # This is the case the device list exists for and the one every other
+      # check here misses, because they all run with an engine up. A machine
+      # nobody is connected to has no engine running, and that is precisely
+      # when somebody opens the device list: to pick something to connect to.
+      #
+      # The engine is made unreachable rather than stopped, so the API has to
+      # cope with it never arriving — which is also what a broken install
+      # looks like, and the one somebody most needs an answer from.
+      echo "  — the device list is answered with no engine running"
+      no_engine=$(mktemp -d)
+      # A device store copied in rather than paired: pairing needs two engines
+      # and this check is about there being none. The committed fixture is used
+      # rather than a store written here, so a reader that quietly stopped
+      # parsing shows up as a list with nothing in it.
+      cp "$PWD/testdata/fixtures/device_store.json" "$no_engine/devices.json"
+      chmod 600 "$no_engine/devices.json"
+      ne_port=$((26000 + (RANDOM % 2000)))
+      # The engine is made unfindable the two ways the supervisor looks for it:
+      # beside its own binary, then on PATH. So `esper` is copied somewhere on
+      # its own and PATH is emptied — which is also what a partial install
+      # looks like, and the case somebody most needs an answer in.
+      mkdir -p "$no_engine/bin"
+      cp "$BIN/esper" "$no_engine/bin/esper"
+      env -u PATH ESPER_HOME="$no_engine" \
+        timeout 30 "$no_engine/bin/esper" api --listen "127.0.0.1:$ne_port" \
+        > "$no_engine/api.log" 2>&1 &
+      ne_pid=$!
+      ne_up=""
+      for _ in $(seq 1 100); do
+        grep -q "listening" "$no_engine/api.log" 2>/dev/null && ne_up=yes && break
+        sleep 0.1
+      done
+      ne_token=$( { cat "$no_engine/api.token" 2>/dev/null || true; } | tr -d '\n')
+      if [ -z "$ne_up" ] || [ -z "$ne_token" ]; then
+        printf '  ✗ the API did not start without an engine, so the device list is unreachable\n'
+        sed 's/^/      /' "$no_engine/api.log" 2>/dev/null | head -8
+        fail=1
+      else
+        printf '  ✓ the API listens even though the engine did not start\n'
+        if grep -q 'the engine did not start' "$no_engine/api.log"; then
+          printf '  ✓ and said so, rather than looking healthy\n'
+        else
+          printf '  ✗ a degraded API started quietly\n'
+          sed 's/^/      /' "$no_engine/api.log" | head -8
+          fail=1
+        fi
+        ne_body=$(curl -s -H "Authorization: Bearer $ne_token" \
+          "http://127.0.0.1:$ne_port/devices" || true)
+        # Three devices, by the names the fixture holds.
+        if printf '%s' "$ne_body" | grep -q '"elythion"' \
+           && printf '%s' "$ne_body" | grep -q '"rack"' \
+           && printf '%s' "$ne_body" | grep -q '"laptop"'; then
+          printf '  ✓ and every paired device is listed, read from the store\n'
+        else
+          printf '  ✗ the device list is wrong with no engine: %s\n' \
+            "$(printf '%s' "$ne_body" | head -c 200)"
+          fail=1
+        fi
+        # The fingerprint is derived here, not stored, and it is what somebody
+        # reads out loud — so a device listed without one is a device nobody
+        # can confirm.
+        #
+        # **The shape is asserted, not the presence of the field.** Checking for
+        # `"fingerprint"` and `"words"` passed with the derivation replaced by an
+        # empty value, because an empty one still renders both names — with
+        # `"hex":""` and `"words":null`. That is the same vacuous check twice in
+        # one day, so this requires sixteen hex characters and eight actual
+        # words. The values themselves are held to the Rust side by
+        # `testdata/fixtures/device_fingerprints.json`, which is where a literal
+        # belongs; repeating one here would be a second place to update.
+        eight='"[a-z]+","[a-z]+","[a-z]+","[a-z]+","[a-z]+","[a-z]+","[a-z]+","[a-z]+"'
+        if printf '%s' "$ne_body" \
+          | grep -qE "\"fingerprint\":\{\"hex\":\"[0-9a-f]{16}\",\"words\":\[$eight\]\}"; then
+          printf '  ✓ and each carries the fingerprint somebody reads out\n'
+        else
+          printf '  ✗ a device was listed without a fingerprint to compare: %s\n' \
+            "$(printf '%s' "$ne_body" | grep -oE '"fingerprint":\{[^}]*\}' | head -c 160)"
+          fail=1
+        fi
+        # And the engine-backed answers say they are unavailable rather than
+        # answering zeroes, because a diagnostic screen full of zeroes reads
+        # as a measurement.
+        ne_status=$(curl -s -o /dev/null -w '%{http_code}' \
+          -H "Authorization: Bearer $ne_token" \
+          "http://127.0.0.1:$ne_port/status" || true)
+        if [ "$ne_status" = "502" ]; then
+          printf '  ✓ and what only the engine knows is reported unavailable, not as zero\n'
+        else
+          printf '  ✗ status answered %s with no engine running\n' "$ne_status"
+          fail=1
+        fi
+        # A broken store must not read as an empty one: a device list that
+        # looks empty invites somebody to pair everything again.
+        printf '{"version": 99, "devices": {}}' > "$no_engine/devices.json"
+        ne_broken=$(curl -s -o /dev/null -w '%{http_code}' \
+          -H "Authorization: Bearer $ne_token" \
+          "http://127.0.0.1:$ne_port/devices" || true)
+        if [ "$ne_broken" = "500" ]; then
+          printf '  ✓ and a store this build cannot read is a failure, not an empty list\n'
+        else
+          printf '  ✗ an unreadable store answered %s\n' "$ne_broken"
+          fail=1
+        fi
+      fi
+      kill "$ne_pid" 2>/dev/null || true
+      ne_pid=""
+      rm -rf "$no_engine"
+
       # **Binding off loopback takes saying so.** A mistyped address must not
       # put what happened on this machine on somebody's office network.
       if out=$(ESPER_HOME="$term_a" timeout 10 "$BIN/esper" api --listen "0.0.0.0:$api_port" 2>&1); then

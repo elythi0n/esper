@@ -281,6 +281,8 @@ jobs:
         run: python3 ./scripts/check-host-decides.py
       - name: every setting is read, and every setting read is declared
         run: python3 ./scripts/check-settings-kept.py
+      - name: both halves use the same words for the same things
+        run: python3 ./scripts/check-vocabularies.py
       - name: the clock agrees with an independent implementation
         run: python3 ./scripts/check-clock.py
 

@@ -18,7 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/elythi0n/esper/internal/devices"
 	"github.com/elythi0n/esper/internal/engine"
+	"github.com/elythi0n/esper/internal/home"
 	"github.com/elythi0n/esper/internal/proto"
 	"github.com/elythi0n/esper/internal/server"
 )
@@ -360,20 +362,49 @@ func cmdAPI(args []string) int {
 		return 1
 	}
 
-	sup, err := engine.New(engine.Options{Log: logToStderr})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
-		return 1
-	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if err := sup.Start(ctx, proto.NewHello(proto.RoleController, nil, hostname(), version)); err != nil {
-		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
-		return 1
-	}
-	defer func() { _ = sup.Stop() }()
 
-	api, err := server.New(server.Options{Addr: addr, Token: token, Engine: sup, Exposed: exposed})
+	// **The API listens even if the engine will not run.**
+	//
+	// Most of what it answers comes from a running engine, but not all: which
+	// devices are paired is read from the store, and that is exactly the
+	// answer somebody needs when nothing is connected — or when the install is
+	// broken and they are working out why. An API that refused to listen
+	// because the engine would not start would be a control plane that cannot
+	// tell you what is wrong with it.
+	//
+	// Both failures are the same failure to a caller — no engine — so both
+	// take the same path: say so loudly, keep serving what does not need one,
+	// and report the rest as an outage rather than as zeroes.
+	var asking server.Engine
+	var engineTrouble error
+	sup, err := engine.New(engine.Options{Log: logToStderr})
+	switch {
+	case err != nil:
+		engineTrouble = err
+		asking = engine.Missing(err)
+	default:
+		defer func() { _ = sup.Stop() }()
+		asking = sup
+		if started := sup.Start(
+			ctx, proto.NewHello(proto.RoleController, nil, hostname(), version),
+		); started != nil {
+			engineTrouble = started
+			asking = engine.Missing(started)
+		}
+	}
+
+	api, err := server.New(server.Options{
+		Addr:  addr,
+		Token: token,
+		// Passed rather than left to the API to resolve, so the token and the
+		// device store are read out of the same home this command already
+		// decided on.
+		Store:   devices.PathIn(home),
+		Engine:  asking,
+		Exposed: exposed,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
 		return 1
@@ -385,6 +416,13 @@ func cmdAPI(args []string) int {
 	fmt.Printf("  token      %s/%s (mode 0600)\n", home, server.TokenFile)
 	fmt.Println("  answers    what this machine can do, which devices are paired,")
 	fmt.Println("             and what has happened on it")
+	if engineTrouble != nil {
+		fmt.Println()
+		fmt.Printf("  ⚠ the engine did not start: %v\n", engineTrouble)
+		fmt.Println("    Which devices are paired is still answered — it is read from the")
+		fmt.Println("    store. What this machine can do, and what has happened on it, are")
+		fmt.Println("    not: those come from the engine, and will report it as not running.")
+	}
 	if exposed {
 		// **Said loudly, every time.** Somebody who exposed this deliberately
 		// still deserves to see what they exposed, and somebody reading a log
@@ -408,20 +446,9 @@ func cmdAPI(args []string) int {
 
 // esperHome is where this machine's Esper state lives.
 //
-// The same rule the engine uses — `$ESPER_HOME`, else `$HOME/.esper` — because
-// two answers to "where is the token" is one too many. It is not created here:
-// a token belongs beside a device store that pairing made, and a home that
-// does not exist yet is a machine that has not been paired.
-func esperHome() (string, error) {
-	if set := os.Getenv("ESPER_HOME"); set != "" {
-		return set, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("finding your home directory: %w", err)
-	}
-	return filepath.Join(home, ".esper"), nil
-}
+// The rule itself lives in `internal/home`, because two answers to "where is
+// the token" is one too many and the device store has to reach the same one.
+func esperHome() (string, error) { return home.Dir() }
 
 func apiUsage() string {
 	return "usage: esper api [--listen <addr>] [--exposed]\n\n" +

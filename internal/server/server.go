@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elythi0n/esper/internal/devices"
+	"github.com/elythi0n/esper/internal/home"
 	"github.com/elythi0n/esper/internal/proto"
 )
 
@@ -42,6 +44,8 @@ type Server struct {
 	http  *http.Server
 	// events is where session lines are published for the SSE stream.
 	events *fanout
+	// store is the device store's path, re-read on every request.
+	store string
 }
 
 // Options are what a caller decides.
@@ -52,6 +56,14 @@ type Options struct {
 	Token Token
 	// Engine to ask.
 	Engine Engine
+	// Store is the device store to read, or empty for this machine's own.
+	//
+	// A path rather than a loaded list, because it is **re-read on every
+	// request**. The engine re-reads the same file while it runs, which is
+	// what makes a revocation reach a session already in progress; an API
+	// holding a copy from start-up would be the one place in the product that
+	// still believed a device was trusted.
+	Store string
 	// Exposed must be set to bind anywhere but loopback.
 	//
 	// **A separate switch from the address**, deliberately: somebody who
@@ -91,11 +103,26 @@ func New(o Options) (*Server, error) {
 			addr,
 		)
 	}
-	s := &Server{engine: o.Engine, token: o.Token, bound: addr, events: newFanout()}
+	store := o.Store
+	if store == "" {
+		dir, err := home.Dir()
+		if err != nil {
+			return nil, fmt.Errorf("finding the device store: %w", err)
+		}
+		store = devices.PathIn(dir)
+	}
+	s := &Server{
+		engine: o.Engine,
+		token:  o.Token,
+		bound:  addr,
+		events: newFanout(),
+		store:  store,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.guard(s.health))
 	mux.HandleFunc("GET /status", s.guard(s.status))
 	mux.HandleFunc("GET /sessions", s.guard(s.sessions))
+	mux.HandleFunc("GET /devices", s.guard(s.devices))
 	mux.HandleFunc("GET /events", s.guard(s.stream))
 	s.http = &http.Server{
 		Addr:    addr,
@@ -230,6 +257,56 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, happenings)
+}
+
+// listed is a device as this API reports it: the record the store holds, plus
+// what a person needs that the file does not spell out.
+//
+// Derived rather than stored, so nothing here can disagree with the file.
+type listed struct {
+	devices.Device
+	// Fingerprint is what somebody reads out to confirm the device is the one
+	// they think it is.
+	Fingerprint devices.Fingerprint `json:"fingerprint"`
+	// AdmitsASession says whether the pairing would still let this device in.
+	// A one-session invitation that has been spent or has lapsed is still in
+	// the store and still worth showing — as something to clear out.
+	AdmitsASession bool `json:"admits_a_session"`
+}
+
+// devices answers which devices this machine trusts.
+//
+// # Why this one is not asked of the engine
+//
+// Every other answer here comes from a running engine. This one cannot: a
+// machine with nothing connected has no engine, and that is exactly when
+// somebody opens the device list — to pick something to connect to. So it is
+// read from the store, which is the file the engine reads too.
+func (s *Server) devices(w http.ResponseWriter, _ *http.Request) {
+	list, err := devices.Load(s.store)
+	if err != nil {
+		// **Not an empty list.** A device list that looks empty invites
+		// somebody to pair everything again rather than to look at the file
+		// that is wrong, so the failure says which file and what about it.
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	now := uint64(time.Now().Unix()) //nolint:gosec // Unix seconds, after 1970
+	out := make([]listed, 0, len(list))
+	for _, device := range list {
+		out = append(out, listed{
+			Device:         device,
+			Fingerprint:    device.Fingerprint(),
+			AdmitsASession: device.Pairing.Admits(now),
+		})
+	}
+	writeJSON(w, map[string]any{
+		"devices": out,
+		// Which file this came from. With `ESPER_HOME` set there is more than
+		// one possible answer, and "why is my device not listed" is otherwise
+		// unanswerable from the outside.
+		"read_from": s.store,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, body any) {

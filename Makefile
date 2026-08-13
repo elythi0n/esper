@@ -97,6 +97,17 @@ check-host-decides:
 check-settings:
 	@python3 ./scripts/check-settings-kept.py
 
+## Verify Rust and Go use the same words for the same things
+##
+## Esper is two implementations of one product, and where both halves name
+## something they name it twice. A permission Rust knows and Go does not makes
+## a sound trust store read as a broken one; the other way round shows a
+## device holding something nothing enforces. A fingerprint word or domain
+## separator out of step renders one key as two codes people then compare.
+.PHONY: check-vocabularies
+check-vocabularies:
+	@python3 ./scripts/check-vocabularies.py
+
 ## Check the clock against Python's own timezone handling
 ##
 ## `esper-clock` reads the machine's timezone database itself, and a parser
@@ -366,7 +377,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-trail check-host-decides check-settings fmt-check lint test build smoke
+ci: check-isolation check-reached check-trail check-host-decides check-settings check-vocabularies fmt-check lint test build smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

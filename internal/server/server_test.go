@@ -45,8 +45,12 @@ func serverForTest(t *testing.T) (*Server, Token) {
 		t.Fatalf("a token: %v", err)
 	}
 	s, err := New(Options{
-		Addr:   "127.0.0.1:8687",
-		Token:  token,
+		Addr:  "127.0.0.1:8687",
+		Token: token,
+		// A store of this test's own. Left empty it would resolve to the
+		// machine's real one, and a test suite that reads the operator's trust
+		// store is a test suite nobody should run.
+		Store:  filepath.Join(t.TempDir(), "devices.json"),
 		Engine: &answers{running: true, status: &proto.Status{Engine: "test"}},
 	})
 	if err != nil {
