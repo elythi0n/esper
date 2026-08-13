@@ -258,6 +258,32 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 ./scripts/check-reached.py
 
+  # The rest of the checks that hold this product to what it says about itself.
+  #
+  # Three of these ran only under `make ci` on somebody's own machine, which is
+  # a gate that stops running the day a contribution comes from anywhere else.
+  # A toolchain because the clock check builds its subject: it generates a set
+  # of instants with Python's own timezone handling and runs the Rust one
+  # against them, which is the whole point — a parser checked only against
+  # bytes it wrote is checked against its own misunderstandings.
+  rules:
+    name: the rules this product states are checked
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: the session trail stays on this machine
+        run: python3 ./scripts/check-trail-stays.py
+      - name: the decisions a host makes alone never cross the wire
+        run: python3 ./scripts/check-host-decides.py
+      - name: every setting is read, and every setting read is declared
+        run: python3 ./scripts/check-settings-kept.py
+      - name: the clock agrees with an independent implementation
+        run: python3 ./scripts/check-clock.py
+
   # Both halves are built by different toolchains from one VERSION file. If they
   # disagree about the release or the protocol, the seam is broken in a way no
   # unit test catches — each half passes its own suite.

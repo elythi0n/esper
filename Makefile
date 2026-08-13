@@ -86,6 +86,17 @@ check-trail:
 check-host-decides:
 	@python3 ./scripts/check-host-decides.py
 
+## Verify every setting is read, and every setting read is declared
+##
+## Twice a setting has been a promise this product did not keep: `audit.retain`
+## with a prune that had no caller, and `session.buffer` promised in a design
+## document with no setting at all. A key nothing reads is a switch that does
+## nothing; a key read but not declared is a typo that takes the default for
+## ever with nothing saying why.
+.PHONY: check-settings
+check-settings:
+	@python3 ./scripts/check-settings-kept.py
+
 ## Check the clock against Python's own timezone handling
 ##
 ## `esper-clock` reads the machine's timezone database itself, and a parser
@@ -355,7 +366,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-trail check-host-decides fmt-check lint test build smoke
+ci: check-isolation check-reached check-trail check-host-decides check-settings fmt-check lint test build smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full
