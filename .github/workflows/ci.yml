@@ -283,8 +283,34 @@ jobs:
         run: python3 ./scripts/check-settings-kept.py
       - name: both halves use the same words for the same things
         run: python3 ./scripts/check-vocabularies.py
+      - name: unsafe appears only where FFI needs it
+        run: python3 ./scripts/check-unsafe-inventory.py
+      - name: the Windows scan-code table is derived, not transcribed
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xkb-data
+          python3 ./scripts/check-scancodes.py
       - name: the clock agrees with an independent implementation
         run: python3 ./scripts/check-clock.py
+
+  # The other two platforms, type-checked. Not a build: the twelve crates that
+  # build C are checked on their own runners, and macOS cannot be linked
+  # anywhere but a Mac. This catches the one thing that broke before — a
+  # Linux-only `use` in a crate nobody thought was Linux-only — and it caught
+  # two more the day it was written.
+  other-platforms:
+    name: windows and macOS still type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu, aarch64-apple-darwin
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: a Linux-only use would fail here
+        run: ./scripts/check-other-platforms.sh
 
   # Both halves are built by different toolchains from one VERSION file. If they
   # disagree about the release or the protocol, the seam is broken in a way no

@@ -1046,19 +1046,6 @@ async fn wait_for_cursor(
     }
 }
 
-/// Wait for `SIGUSR1`, or for ever when it could not be listened for.
-///
-/// The same shape as [`wait_for_press`] and for the same reason: a `select!`
-/// branch needs a future either way.
-async fn wait_for_usr1(signal: Option<&mut tokio::signal::unix::Signal>) {
-    match signal {
-        Some(s) => {
-            s.recv().await;
-        }
-        None => std::future::pending().await,
-    }
-}
-
 /// Whether the picture stops, given the two separate reasons it might.
 ///
 /// **One function because both reasons are live at once**, and the first
@@ -3612,17 +3599,13 @@ async fn serve(
     // One per session, dropped with it. `signal` may be called more than once
     // and every stream receives, so this does not have to be threaded down
     // from the host's own start.
-    let mut usr1 =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                // Said, not swallowed: a host whose pause signal is unavailable
-                // still works, and somebody who tried it would otherwise be left
-                // wondering which end was broken.
-                eprintln!("      · `kill -USR1` will not hold this session: {e}");
-                None
-            }
-        };
+    let (mut held_by_signal, no_signal) = crate::hold::Hold::listen();
+    if let Some(why) = no_signal {
+        // Said, not swallowed: a host whose pause signal is unavailable still
+        // works, and somebody who tried it would otherwise be left wondering
+        // which end was broken.
+        eprintln!("      · {why}");
+    }
     // **The bound on `unattended` applies to a session already running, not
     // only to one arriving.**
     //
@@ -3651,7 +3634,7 @@ async fn serve(
             // `kill -USR1` is the trigger a script and a machine without a
             // screen both have. One `Turn`, so there is one place that decides
             // what pausing means.
-            () = wait_for_usr1(usr1.as_mut()) => {
+            () = held_by_signal.wait() => {
                 Turn::Pressed(esper_presence::HostEvent::Pause)
             }
             () = attending.live.changed() => Turn::Permissions,

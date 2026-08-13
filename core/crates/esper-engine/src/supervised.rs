@@ -28,7 +28,17 @@
 //! extract of the audit trail. A health check somebody else can answer is not
 //! a health check.
 
-use std::io::{BufReader, BufWriter, Read, Write};
+// The framing and the handshake are facts about this channel, not about Unix
+// sockets: only `watch_from` is platform-specific, and the `not(unix)` arm
+// refuses with a reason until Windows gets its named pipe. So the helpers are
+// compiled everywhere and reached by one platform, which is what keeps them
+// honest — the same arrangement `cursor_task` and `audio_task` have.
+#![cfg_attr(not(unix), allow(dead_code))]
+
+use std::io::{Read, Write};
+// Only the Unix-socket path buffers: `handshake` takes whatever it is given.
+#[cfg(unix)]
+use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
 use esper_proto::{Alive, Command, Hello, Report, Role, read_frame, write_frame};

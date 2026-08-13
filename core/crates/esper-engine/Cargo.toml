@@ -65,6 +65,9 @@ tracing-subscriber.workspace = true
 x11rb.workspace = true
 esper-display-lock.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+esper-input-win.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 esper-capture-x11.workspace = true
 esper-present-x11.workspace = true

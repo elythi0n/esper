@@ -189,6 +189,13 @@ pub fn mac_for(ip: IpAddr) -> Option<String> {
 }
 
 /// The same, over a table's text, so it can be tested without a network.
+///
+/// **Linux, and the tests.** The columns are `/proc/net/arp`'s, so this is not
+/// a parser another platform could reuse — Windows reads its neighbour table
+/// through `GetIpNetTable2`, which is a structure rather than text. Gated
+/// rather than allowed as dead code, because off Linux it is not code waiting
+/// for a caller: it is code for a file that is not there.
+#[cfg(any(target_os = "linux", test))]
 #[must_use]
 pub fn mac_in(table: &str, ip: IpAddr) -> Option<String> {
     let wanted = ip.to_string();

@@ -137,6 +137,12 @@ pub struct Asked {
     /// hex digits is a string somebody's eye slides over. Both are here
     /// because a prompt is where the comparison happens and a command line is
     /// where the action does.
+    ///
+    /// Written on every platform and read by the prompt that draws it, which
+    /// only Linux has a backend for yet — so off Linux this is a field nothing
+    /// has reached rather than a field nobody needs. A Windows prompt reads
+    /// exactly this.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub words: String,
     /// What the session would be able to do — the clamped set, not the
     /// request, because what somebody is agreeing to is what will happen.

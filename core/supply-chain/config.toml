@@ -426,50 +426,6 @@ criteria = "safe-to-deploy"
 version = "1.7.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.windows-sys]]
-version = "0.52.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows-sys]]
-version = "0.61.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows-targets]]
-version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_aarch64_gnullvm]]
-version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_aarch64_msvc]]
-version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_i686_gnu]]
-version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_i686_gnullvm]]
-version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_i686_msvc]]
-version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_x86_64_gnu]]
-version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_x86_64_gnullvm]]
-version = "0.52.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_x86_64_msvc]]
-version = "0.52.6"
-criteria = "safe-to-deploy"
-
 [[exemptions.x11rb]]
 version = "0.14.0"
 criteria = "safe-to-deploy"

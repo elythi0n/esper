@@ -242,6 +242,14 @@ impl SafePath {
     /// The name rules and the confinement are two defences, and the point of
     /// having two is that either alone would hold. That is only knowable by
     /// handing the second one something the first would have refused.
+    ///
+    /// Nothing calls it off Unix, and that is a **gap in the Windows tests
+    /// rather than a function nobody needs**: the escape test that uses it
+    /// builds symlinks, and the Windows equivalent has to be written against
+    /// junctions, `\\?\` prefixes and the eight-three short names — all of
+    /// which reach outside a directory in ways a symlink does not. Tracked as
+    /// a Phase 6 item; until it exists this is unused there.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn unchecked(text: &str) -> Self {
         Self {
             text: text.to_owned(),

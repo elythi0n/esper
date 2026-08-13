@@ -68,6 +68,17 @@ impl HowConfined {
 /// The directory transfers happen inside.
 #[derive(Debug)]
 pub struct Vault {
+    /// The directory itself, held open.
+    ///
+    /// **Read only on Unix**, where confinement is this handle: every open
+    /// goes through it with `openat`, so the directory cannot be swapped for a
+    /// link between the check and the open. The fallback resolves paths as
+    /// text and has nothing to do with it — but the handle is still held
+    /// there, because dropping it would let the directory be replaced under a
+    /// transfer in progress, and because a `Vault` that means two different
+    /// things depending on the platform is worse than a field one platform
+    /// does not read.
+    #[cfg_attr(not(unix), allow(dead_code))]
     root: std::fs::File,
     /// Where it is, for a message to a person. **Never sent to a peer**: where
     /// a host keeps its files is the host's business.
@@ -134,7 +145,7 @@ impl Vault {
     /// **For the tests, and only for them.** A fallback nothing exercises is a
     /// fallback that does not work, and the interesting question about this
     /// one is whether it refuses everything the other refuses.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn open_as(root: &Path, how: HowConfined) -> Result<Self, FileError> {
         let mut vault = Self::open(root)?;
         vault.how = how;
@@ -665,7 +676,7 @@ mod platform {
     pub(super) fn size_of(vault: &Vault, path: &SafePath) -> Option<u64> {
         let at = within(vault, path).ok()?;
         let seen = std::fs::symlink_metadata(&at).ok()?;
-        seen.is_file().then(|| seen.len())
+        seen.is_file().then_some(seen.len())
     }
 
     pub(super) fn exists(vault: &Vault, path: &SafePath) -> bool {
@@ -764,6 +775,7 @@ mod tests {
     /// escape is a fact about the filesystem rather than about the string. So
     /// this is the other half of the defence, and it has to hold however the
     /// machine is doing it.
+    #[cfg(unix)]
     fn escapes_are_refused(vault: &Vault, outside: &Path) {
         // Something worth stealing, outside the root.
         std::fs::write(outside.join("secret"), b"the secret").expect("write");
@@ -886,9 +898,6 @@ mod tests {
         let _ = std::fs::remove_file(at);
         std::os::unix::fs::symlink(target, at).expect("symlink");
     }
-
-    #[cfg(not(unix))]
-    fn symlink(_target: &Path, _at: &Path) {}
 
     /// The kernel doing it.
     #[test]

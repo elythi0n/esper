@@ -14,7 +14,11 @@
 
 use std::time::Duration;
 
-use crate::consent::{Answer, Ask, AskAtTheHost, Asked, Console};
+use crate::consent::{AskAtTheHost, Console};
+// The trait and its vocabulary are used by the on-screen prompt, which is a
+// Linux backend for now. A Windows or macOS prompt would use exactly these.
+#[cfg(target_os = "linux")]
+use crate::consent::{Answer, Ask, Asked};
 
 /// Ask wherever somebody actually is.
 ///

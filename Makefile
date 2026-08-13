@@ -20,7 +20,10 @@ export SOURCE_DATE_EPOCH
 
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 PREFIX  ?= /usr/local
-PLATFORMS := linux/amd64 linux/arm64
+# Every platform the Go half builds for. It is pure Go with CGO off, so all of
+# these work from any of them — the Rust engine is the half that needs a cross
+# toolchain, and macOS needs Apple's SDK and therefore a Mac.
+PLATFORMS := linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64
 
 # Building as root leaves root-owned files behind that break every subsequent
 # build for your own user. Nothing in a build needs root, so refuse rather than
@@ -108,6 +111,43 @@ check-settings:
 check-vocabularies:
 	@python3 ./scripts/check-vocabularies.py
 
+## Verify unsafe appears only where FFI needs it, and every block says why
+##
+## `security-engineering.md` says `forbid(unsafe_code)` on every crate that
+## does not need FFI, and an unsafe inventory in the ones that do. The
+## workspace implements the first half by forbidding it everywhere, which made
+## the carve-out impossible rather than deliberate — `forbid` cannot be relaxed
+## at a call site. This is the second half: a crate may stop inheriting the
+## workspace lints only if it is listed with a reason, must re-declare every
+## other rule it gave up, and must carry one documented invariant per block.
+.PHONY: check-unsafe
+check-unsafe:
+	@python3 ./scripts/check-unsafe-inventory.py
+
+## Verify the Windows scan-code table is derived rather than transcribed
+##
+## A wrong entry types the wrong character on every Windows host, and there is
+## no Windows machine here to press a key on. For the AT base set an evdev code
+## *is* the scan code — `KEY_A` is 30 and set-1 `a` is 0x1E — so that half of
+## the table is derived from one nobody here wrote, and XKB's own keycode files
+## establish it. Skips where xkeyboard-config is not installed.
+.PHONY: check-scancodes
+check-scancodes:
+	@python3 ./scripts/check-scancodes.py
+
+## Verify the workspace still type-checks for Windows and macOS
+##
+## Both targets were made clean by hand once and then checked nowhere, which is
+## the same defect as a CI matrix naming a platform that has never compiled.
+## `cargo check` does not link, so no cross linker is needed — but two
+## dependencies build C, and without a cross toolchain `cc-rs` hands the host
+## compiler Windows defines and fails in ways that say nothing about our code.
+## A stub `cc`/`ar` that create the expected file and exit 0 get past them; the
+## target says so rather than pretending this is a build.
+.PHONY: check-other-platforms
+check-other-platforms:
+	@./scripts/check-other-platforms.sh
+
 ## Check the clock against Python's own timezone handling
 ##
 ## `esper-clock` reads the machine's timezone database itself, and a parser
@@ -162,6 +202,40 @@ build-dist:
 		esper          "$$(du -h $(BIN)/dist/$(BINARY) | cut -f1)" \
 		esper-engine   "$$(du -h $(BIN)/dist/esper-engine | cut -f1)" \
 		esper-broker   "$$(du -h $(BIN)/dist/esper-broker | cut -f1)"
+
+## Build real Windows binaries → ./build/win
+##
+## A genuine PE, linked on this machine, not a type-check. Needs `mingw-w64`,
+## which is what makes `aws-lc-sys`, `openh264-sys2` and `opusic-sys` compile
+## for the target — and the reason this is a separate verb from `build` is that
+## those three take a while.
+##
+## What it does not do is say the binaries *work*: nothing here has run them.
+## `esper doctor` on a Windows machine is the first thing that would.
+##
+## `--release` rather than the `dist` profile, to match what `build` does. The
+## engine comes out around 90 MB either way — the same as the Linux release
+## build, because it is the profile's debug info and not anything about the
+## platform — and 13 MB stripped, which is `build-dist`'s job.
+.PHONY: build-win
+build-win:
+	$(GUARD_ROOT)
+	@command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || { \
+		echo "no x86_64-w64-mingw32-gcc — install mingw-w64 to cross-build for Windows"; \
+		exit 1; }
+	@echo "building the engine and broker for windows/amd64..."
+	@cd $(CORE) && cargo build --release --quiet --target x86_64-pc-windows-gnu \
+		--bin esper-engine --bin esper-broker
+	@mkdir -p $(BIN)/win
+	@cp $(CORE)/target/x86_64-pc-windows-gnu/release/esper-engine.exe $(BIN)/win/
+	@cp $(CORE)/target/x86_64-pc-windows-gnu/release/esper-broker.exe $(BIN)/win/
+	@GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+		go build -trimpath -ldflags='$(LDFLAGS)' -o $(BIN)/win/$(BINARY).exe $(PKG)
+	@printf '  %-22s %s\n' \
+		esper.exe        "$$(du -h $(BIN)/win/$(BINARY).exe | cut -f1)" \
+		esper-engine.exe "$$(du -h $(BIN)/win/esper-engine.exe | cut -f1)" \
+		esper-broker.exe "$$(du -h $(BIN)/win/esper-broker.exe | cut -f1)"
+	@echo "  → $(BIN)/win/  (a build, not a test: nothing has run these)"
 
 ## Build the Go binary for every platform → ./dist
 .PHONY: build-all
@@ -377,11 +451,11 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-trail check-host-decides check-settings check-vocabularies fmt-check lint test build smoke
+ci: check-isolation check-reached check-trail check-host-decides check-settings check-vocabularies check-scancodes check-unsafe fmt-check lint test build smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full
-ci-full: ci test-race deny vet-deps miri-full fuzz
+ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz
 
 ## Install both binaries to $(PREFIX)/bin (may need sudo)
 .PHONY: install

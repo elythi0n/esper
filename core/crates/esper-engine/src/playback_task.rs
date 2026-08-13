@@ -21,6 +21,13 @@
 //! click. Ten frames of slack absorb an ordinary hiccup; beyond that, the
 //! oldest sound is worth less than the newest.
 
+// Nothing in this module runs on a platform with no sound backend for it:
+// `start` refuses and the session says so. It is still compiled everywhere,
+// which is deliberate — the thread below is generic over the trait, so it is
+// the part a new platform reuses rather than rewrites, and compiling it
+// everywhere is what keeps it honest.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 
 use esper_audio::{Format, Frame, Sink};

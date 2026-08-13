@@ -50,7 +50,21 @@ pub fn open() -> Chosen {
             Err(e) => attempts.push(format!("x11 xtest: {e}")),
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        match esper_input_win::WinInjector::open() {
+            Ok(injector) => {
+                attempts.push(format!("{}: in use", esper_input_win::BACKEND));
+                return Chosen {
+                    sink: Box::new(injector),
+                    attempts,
+                    real: true,
+                };
+            }
+            Err(e) => attempts.push(format!("{}: {e}", esper_input_win::BACKEND)),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         attempts.push("no injection backend is compiled in for this platform".to_owned());
     }

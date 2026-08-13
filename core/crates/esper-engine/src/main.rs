@@ -20,6 +20,15 @@ mod devices_cmd;
 mod discover_cmd;
 mod files_task;
 mod forward_cmd;
+// The signal that holds a session's picture, which only Unix has. Selected
+// here so the rest of the crate carries no `cfg` about it — the same shape
+// `esper-pty` uses for pseudo-terminals, and for the same reason.
+#[cfg(unix)]
+#[path = "hold/unix.rs"]
+mod hold;
+#[cfg(not(unix))]
+#[path = "hold/unsupported.rs"]
+mod hold;
 mod injector;
 mod input_source;
 mod invite_cmd;

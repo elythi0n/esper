@@ -1,0 +1,53 @@
+[package]
+name = "esper-input-win"
+description = "Injecting input on Windows through SendInput, with scan codes rather than virtual keys."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# **Deliberately not `lints.workspace = true`**, and the only crate that is not.
+#
+# The workspace sets `unsafe_code = "forbid"`, and `forbid` cannot be relaxed at
+# a call site — that is the whole point of choosing it over `deny`. `SendInput`
+# is a user32 call and there is no pure-Rust path to synthesising input on
+# Windows, so this crate cannot both inherit that and exist.
+#
+# `security-engineering.md` already drew this line: `forbid` on "every crate
+# that does not need FFI", and an **unsafe inventory** in the ones that do. So
+# the lints are declared here with `unsafe_code = "deny"` in place of `forbid`
+# and everything else copied verbatim.
+#
+# `scripts/check-unsafe-inventory.py` is what makes that safe rather than a
+# hole: it compares these tables to the workspace's in both directions, refuses
+# any other crate that stops inheriting, refuses `unsafe` anywhere but here, and
+# requires one inventory entry per block.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[dependencies]
+esper-input.workspace = true
+esper-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Only on Windows, so a Linux build neither compiles nor downloads it. 0.62 is
+# pinned deliberately, and the feature list is the smallest that names
+# what this calls — the crate is generated per feature, so an unscoped
+# dependency compiles the whole Win32 surface.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
+] }

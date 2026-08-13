@@ -19,6 +19,13 @@
 //! silence would be worse: somebody would spend an afternoon looking for the
 //! fault at the other end.
 
+// Nothing in this module runs on a platform with no sound backend for it:
+// `start` refuses and the session says so. It is still compiled everywhere,
+// which is deliberate — the thread below is generic over the trait, so it is
+// the part a new platform reuses rather than rewrites, and compiling it
+// everywhere is what keeps it honest.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
 

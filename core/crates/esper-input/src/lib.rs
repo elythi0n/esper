@@ -30,10 +30,13 @@
 
 use esper_keeper::Undo;
 
+pub mod absolute;
 pub mod dispatch;
 pub mod held;
 pub mod hid;
 pub mod null;
+pub mod set1;
+pub mod wheel;
 
 /// What detaching this machine's input would take, and how to put it back.
 ///
@@ -53,6 +56,7 @@ pub use dispatch::{Dispatcher, Monitor, Stopped};
 pub use held::Held;
 pub use hid::{Evdev, evdev_for_usage, usage_for_evdev};
 pub use null::{NullSink, Recorded};
+pub use set1::{Set1, set1_for_usage, usage_for_set1};
 
 use esper_proto::{KeyEvent, PointerButton, Scroll};
 

@@ -44,6 +44,7 @@ esper-bench = { path = "crates/esper-bench" }
 esper-clipboard = { path = "crates/esper-clipboard" }
 esper-clipboard-x11 = { path = "crates/esper-clipboard-x11" }
 esper-input = { path = "crates/esper-input" }
+esper-input-win = { path = "crates/esper-input-win" }
 esper-input-x11 = { path = "crates/esper-input-x11" }
 esper-presence = { path = "crates/esper-presence" }
 esper-dialog = { path = "crates/esper-dialog" }
