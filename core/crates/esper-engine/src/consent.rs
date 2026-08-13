@@ -474,13 +474,17 @@ pub struct AskAtTheHost {
     /// to anybody, and the far end is told that it is a standing no rather
     /// than a refusal it could try again.
     may_widen: bool,
-    /// When each device was last refused one of those questions.
+    /// When each device was last told no by a person at this machine.
     ///
-    /// **On the host rather than in the session**, because a session's own
-    /// count is reset by reconnecting and a device holding `unattended` can
-    /// reconnect without anybody being asked. A "no" that bound only the
-    /// session it was said in would bind nothing.
-    refused_more: Mutex<Vec<([u8; 32], Instant)>>,
+    /// **On the host rather than in the session, and shared by both questions
+    /// this machine asks** — may this device open a session, and may a session
+    /// already open be widened. A refusal that bound only the thing it was
+    /// said about would bind nothing: a session's own count is reset by
+    /// reconnecting, and reconnecting is free.
+    ///
+    /// It is one fact — *somebody here said no to this device* — so one place
+    /// holds it and both paths honour it.
+    refused: Mutex<Vec<([u8; 32], Instant)>>,
 }
 
 impl std::fmt::Debug for AskAtTheHost {
@@ -506,10 +510,13 @@ impl AskAtTheHost {
         self.ask.asked_at()
     }
 
-    /// When each device was last told no about being allowed more, so a
-    /// refusal survives the session it was said in.
-    fn refused_more_recently(&self, key: &[u8; 32], now: Instant) -> Option<Duration> {
-        let refused = self.refused_more.lock().ok()?;
+    /// How long is left of a refusal this device was given, if any is.
+    ///
+    /// Used by both questions: a device told no about opening a session is not
+    /// asked about again for a moment, and neither is one told no about being
+    /// allowed more.
+    fn refused_recently(&self, key: &[u8; 32], now: Instant) -> Option<Duration> {
+        let refused = self.refused.lock().ok()?;
         refused.iter().find_map(|(k, when)| {
             if k != key {
                 return None;
@@ -526,7 +533,7 @@ impl AskAtTheHost {
     /// connects to from many devices must not grow a list per key. The oldest
     /// goes, which is also the one closest to expiring.
     fn note_refusal(&self, key: [u8; 32], now: Instant) {
-        let Ok(mut refused) = self.refused_more.lock() else {
+        let Ok(mut refused) = self.refused.lock() else {
             return;
         };
         refused.retain(|(k, when)| {
@@ -607,7 +614,7 @@ impl AskAtTheHost {
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
             may_widen: true,
-            refused_more: Mutex::new(Vec::new()),
+            refused: Mutex::new(Vec::new()),
         }
     }
 
@@ -630,7 +637,7 @@ impl AskAtTheHost {
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
             may_widen: true,
-            refused_more: Mutex::new(Vec::new()),
+            refused: Mutex::new(Vec::new()),
         }
     }
 
@@ -655,7 +662,7 @@ impl AskAtTheHost {
             recent: Mutex::new(Vec::new()),
             last: Mutex::new(None),
             may_widen: true,
-            refused_more: Mutex::new(Vec::new()),
+            refused: Mutex::new(Vec::new()),
         }
     }
 
@@ -889,7 +896,7 @@ impl AskAtTheHost {
         if let Err((reason, detail)) = knocking.may_put(now) {
             return Widening::Refused(reason, detail);
         }
-        if let Some(left) = self.refused_more_recently(&device.public_key, now) {
+        if let Some(left) = self.refused_recently(&device.public_key, now) {
             // **A refusal is the host's, not the session's.** The count above
             // is per session, and a device that could reconnect would get a
             // fresh one — so a "no" that only bound the session it was said
@@ -899,7 +906,8 @@ impl AskAtTheHost {
             return Widening::Refused(
                 Reason::ASKED_ENOUGH,
                 format!(
-                    "somebody at the host said no; another question may be put in {}s",
+                    "somebody at the host said no to this device; another question may be \
+                     put in {}s",
                     left.as_secs().max(1)
                 ),
             );
@@ -1034,6 +1042,20 @@ impl Policy for AskAtTheHost {
             return Verdict::Grant(granted);
         }
 
+        // **A refusal stands for a moment, without asking again.** The
+        // question has been put to somebody and answered; putting it again
+        // because the far end reconnected would make the answer worthless and
+        // the machine unusable.
+        if let Some(left) = self.refused_recently(&key, now) {
+            return Verdict::Deny(
+                Reason::PROMPT_REFUSED,
+                format!(
+                    "somebody at the host declined this device; it may be asked about again \
+                     in {}s",
+                    left.as_secs().max(1)
+                ),
+            );
+        }
         if !self.ask.can_ask() {
             // **The reason names the thing somebody can change.** A device
             // with the permission, refused because it is half past three in
@@ -1067,10 +1089,20 @@ impl Policy for AskAtTheHost {
                 self.note(Allowed::Accepted);
                 Verdict::Grant(granted)
             }
-            Answer::No => Verdict::Deny(
-                Reason::PROMPT_REFUSED,
-                "somebody at the host declined this session".to_owned(),
-            ),
+            Answer::No => {
+                // **Remembered, or "no" means nothing.** An acceptance has
+                // been remembered since the grace window existed, so a
+                // reconnect inside it is not asked about twice — and a
+                // refusal was remembered nowhere at all, so the same
+                // reconnect put the dialog straight back up. A paired device
+                // with no permissions could make a screen unusable that way,
+                // as fast as it could open a connection.
+                self.note_refusal(key, now);
+                Verdict::Deny(
+                    Reason::PROMPT_REFUSED,
+                    "somebody at the host declined this session".to_owned(),
+                )
+            }
             Answer::Silence => Verdict::Deny(
                 Reason::PROMPT_TIMEOUT,
                 "nobody at the host answered".to_owned(),
@@ -2069,24 +2101,42 @@ mod tests {
         );
     }
 
-    /// A refusal is not remembered as an acceptance, which would be the worst
-    /// possible way round.
+    /// **A refusal is never an acceptance, and it is remembered as a
+    /// refusal.**
+    ///
+    /// The first half is the one that would be catastrophic the other way
+    /// round, and it has always held. The second half did not: a refusal was
+    /// remembered *nowhere*, so a device could reconnect and put the dialog
+    /// straight back up — as fast as it could open a connection, from a
+    /// paired device with no permissions at all. This test asserted that
+    /// behaviour ("every attempt is asked about") and so wrote the defect
+    /// down as intended.
     #[test]
-    fn a_refusal_is_not_remembered() {
+    fn a_refusal_is_never_an_acceptance_and_it_holds_for_a_moment() {
         let ask = std::sync::Arc::new(Scripted::saying(Answer::No));
         let p = policy(&ask);
         let d = device(&[Permission::View, Permission::Control]);
         for _ in 0..3 {
-            assert!(matches!(
-                p.decide(&d, &wants(&[Permission::View])),
-                Verdict::Deny(..)
-            ));
+            assert!(
+                matches!(p.decide(&d, &wants(&[Permission::View])), Verdict::Deny(..)),
+                "a refusal must never come back as a grant"
+            );
         }
         assert_eq!(
             ask.asked.load(Ordering::Relaxed),
-            3,
-            "every attempt is asked about, because none was ever allowed"
+            1,
+            "the question was put to somebody and answered; asking again because the far \
+             end reconnected makes the answer worthless"
         );
+
+        // And it is a bound rather than a ban: past the cooling-off, the
+        // question is put again, because a person's "no" was about a moment.
+        p.note_refusal(d.public_key, Instant::now() - Knocking::AGAIN_AFTER);
+        assert!(matches!(
+            p.decide(&d, &wants(&[Permission::View])),
+            Verdict::Deny(..)
+        ));
+        assert_eq!(ask.asked.load(Ordering::Relaxed), 2);
     }
 
     /// The remembered list is bounded: it is written from the network's side
