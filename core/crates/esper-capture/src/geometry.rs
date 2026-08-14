@@ -34,6 +34,39 @@ impl Rect {
         }
     }
 
+    /// A rectangle from four edges, where **right and bottom are exclusive**.
+    ///
+    /// Which is Win32's `RECT` convention and DXGI's, so this is what a
+    /// Windows backend converts through — and the conversion has three ways to
+    /// go wrong, all of which look fine on the machine somebody wrote them on:
+    ///
+    /// - **Treating the edges as inclusive** makes every rectangle a pixel too
+    ///   small in each direction. On a damage rectangle that leaves a
+    ///   one-pixel stale line down the right of everything that changed.
+    /// - **Forgetting the origin can be negative.** A monitor left of or above
+    ///   the primary one has negative desktop coordinates, and subtracting a
+    ///   larger number from a smaller one to get a `u32` width wraps to about
+    ///   four billion — which becomes an allocation.
+    /// - **Assuming the edges are in order.** An inverted rectangle is empty,
+    ///   not enormous.
+    ///
+    /// An inverted or degenerate rectangle comes back with a zero dimension,
+    /// which every consumer here already treats as nothing.
+    #[must_use]
+    pub const fn from_edges(left: i32, top: i32, right: i32, bottom: i32) -> Self {
+        // Widened before subtracting: `right - left` overflows `i32` for
+        // edges at opposite ends of the range, and a wrapped width is the
+        // allocation described above.
+        let width = (right as i64) - (left as i64);
+        let height = (bottom as i64) - (top as i64);
+        Self {
+            x: left,
+            y: top,
+            width: if width <= 0 { 0 } else { width as u32 },
+            height: if height <= 0 { 0 } else { height as u32 },
+        }
+    }
+
     /// A rectangle at the origin with a size — a whole frame, usually.
     #[must_use]
     pub const fn sized(width: u32, height: u32) -> Self {
@@ -285,6 +318,56 @@ pub fn tiles(screens: &[Rect]) -> (Rect, Vec<Rect>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn edges_are_exclusive_on_the_right_and_bottom() {
+        // Win32's convention, and DXGI's. Treating them as inclusive makes
+        // every rectangle a pixel short, which on a damage rectangle leaves a
+        // stale line down the right of everything that changed.
+        let r = Rect::from_edges(0, 0, 1920, 1080);
+        assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 1920, 1080));
+        let one = Rect::from_edges(5, 7, 6, 8);
+        assert_eq!((one.width, one.height), (1, 1), "a single pixel");
+    }
+
+    #[test]
+    fn a_negative_origin_does_not_wrap_the_width() {
+        // A monitor left of or above the primary one. Subtracting a larger
+        // number from a smaller one to get a u32 wraps to about four billion,
+        // which becomes an allocation.
+        let left = Rect::from_edges(-1920, 0, 0, 1080);
+        assert_eq!((left.x, left.width), (-1920, 1920));
+        let above = Rect::from_edges(0, -1440, 2560, 0);
+        assert_eq!((above.y, above.height), (-1440, 1440));
+        let both = Rect::from_edges(-100, -200, -50, -100);
+        assert_eq!(
+            (both.x, both.y, both.width, both.height),
+            (-100, -200, 50, 100)
+        );
+    }
+
+    #[test]
+    fn an_inverted_rectangle_is_empty_and_not_enormous() {
+        for r in [
+            Rect::from_edges(10, 10, 5, 20),
+            Rect::from_edges(10, 10, 20, 5),
+            Rect::from_edges(10, 10, 10, 10),
+            Rect::from_edges(0, 0, -1, -1),
+        ] {
+            assert!(r.is_empty(), "{r:?} should be empty");
+        }
+    }
+
+    #[test]
+    fn edges_at_the_ends_of_the_range_do_not_overflow() {
+        // `right - left` overflows i32 here, which is why the arithmetic is
+        // widened before the subtraction.
+        let huge = Rect::from_edges(i32::MIN, i32::MIN, i32::MAX, i32::MAX);
+        assert_eq!(huge.width, u32::MAX, "clamped, not wrapped");
+        assert_eq!(huge.height, u32::MAX);
+        let r = Rect::from_edges(i32::MIN, 0, 0, 1);
+        assert_eq!(r.width, 2_147_483_648);
+    }
+
     use super::*;
 
     #[test]

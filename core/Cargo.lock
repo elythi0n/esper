@@ -379,6 +379,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-capture-win"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "thiserror",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "esper-capture-x11"
 version = "0.0.0"
 dependencies = [
@@ -518,6 +528,7 @@ dependencies = [
  "esper-audit",
  "esper-buildinfo",
  "esper-capture",
+ "esper-capture-win",
  "esper-capture-x11",
  "esper-clipboard",
  "esper-clipboard-x11",

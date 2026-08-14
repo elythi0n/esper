@@ -51,6 +51,11 @@ CRATES = CORE / "crates"
 # crate -> why it cannot be written without FFI. Every entry is a claim
 # somebody can check, and the list is meant to stay very short.
 NEEDS_FFI: dict[str, str] = {
+    "esper-capture-win": (
+        "Desktop Duplication is COM. D3D11CreateDevice, AcquireNextFrame and "
+        "the staging-texture readback have no pure-Rust equivalent, and the "
+        "damage metadata is the reason this API was chosen over the newer one"
+    ),
     "esper-input-win": (
         "SendInput, GetSystemMetrics and SetProcessDpiAwarenessContext are "
         "user32 calls. There is no pure-Rust path to synthesising input on "

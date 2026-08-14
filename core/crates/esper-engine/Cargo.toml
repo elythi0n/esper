@@ -66,6 +66,7 @@ x11rb.workspace = true
 esper-display-lock.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+esper-capture-win.workspace = true
 esper-input-win.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

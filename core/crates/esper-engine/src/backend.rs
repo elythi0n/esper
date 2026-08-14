@@ -25,6 +25,8 @@ pub enum Choice {
     Auto,
     /// X11, or fail saying why.
     X11,
+    /// DXGI Desktop Duplication, or fail saying why.
+    Dxgi,
     /// The known moving pattern. Always available, never a real screen.
     Synthetic,
 }
@@ -35,9 +37,10 @@ impl Choice {
         match s {
             "auto" => Ok(Self::Auto),
             "x11" => Ok(Self::X11),
+            "dxgi" => Ok(Self::Dxgi),
             "synthetic" => Ok(Self::Synthetic),
             other => Err(format!(
-                "--backend wants auto, x11 or synthetic, got {other}"
+                "--backend wants auto, x11, dxgi or synthetic, got {other}"
             )),
         }
     }
@@ -48,6 +51,7 @@ impl fmt::Display for Choice {
         match self {
             Self::Auto => write!(f, "auto"),
             Self::X11 => write!(f, "x11"),
+            Self::Dxgi => write!(f, "dxgi"),
             Self::Synthetic => write!(f, "synthetic"),
         }
     }
@@ -117,6 +121,28 @@ pub fn open(
         }
     }
 
+    if matches!(choice, Choice::Auto | Choice::Dxgi) {
+        match open_dxgi(monitor) {
+            Ok(Some(c)) => {
+                attempts.push("dxgi: in use".to_owned());
+                return Ok(Selected {
+                    capturer: c,
+                    attempts,
+                });
+            }
+            Ok(None) => attempts.push("dxgi: not compiled in for this platform".to_owned()),
+            Err(e) => {
+                // Asking for it explicitly and not getting it is an error, for
+                // the same reason as x11: falling back hands a test pattern to
+                // somebody who said which screen they wanted.
+                if choice == Choice::Dxgi {
+                    return Err(e);
+                }
+                attempts.push(format!("dxgi: {e}"));
+            }
+        }
+    }
+
     if choice == Choice::Auto {
         attempts.push("synthetic: in use, because nothing else was available".to_owned());
     } else {
@@ -176,13 +202,25 @@ fn open_x11(_monitor: Option<MonitorId>) -> Result<Option<Box<dyn Capturer>>, Ca
     Ok(None)
 }
 
+/// `Ok(None)` when this platform has no Desktop Duplication compiled in.
+#[cfg(target_os = "windows")]
+fn open_dxgi(monitor: Option<MonitorId>) -> Result<Option<Box<dyn Capturer>>, CaptureError> {
+    let c = esper_capture_win::DxgiCapturer::open(monitor)?;
+    Ok(Some(Box::new(c)))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_dxgi(_monitor: Option<MonitorId>) -> Result<Option<Box<dyn Capturer>>, CaptureError> {
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn the_backend_names_round_trip() {
-        for c in [Choice::Auto, Choice::X11, Choice::Synthetic] {
+        for c in [Choice::Auto, Choice::X11, Choice::Dxgi, Choice::Synthetic] {
             assert_eq!(Choice::parse(&c.to_string()), Ok(c));
         }
     }
@@ -192,6 +230,7 @@ mod tests {
         let e = Choice::parse("wayland").expect_err("not a backend yet");
         assert!(e.contains("auto"), "{e}");
         assert!(e.contains("x11"), "{e}");
+        assert!(e.contains("dxgi"), "{e}");
         assert!(e.contains("synthetic"), "{e}");
     }
 
