@@ -320,6 +320,46 @@ impl Peer {
     }
 }
 
+/// A device that completes the handshake and then says nothing at all.
+///
+/// **For attacking what a host does with a connection it is not going to
+/// serve.** It is through the peer check and through the `Hello`, so the host
+/// has accepted it and is waiting for it to say what it wants — which it never
+/// will. Everything is kept in the struct because the whole point of it is to
+/// still be there: dropping it closes the connection and ends the attack.
+pub struct Silent {
+    _endpoint: Endpoint,
+    _session: Session,
+}
+
+impl Silent {
+    /// Connect, say hello, and stop.
+    pub async fn connect(home: &Home, host: &Host, host_key: [u8; 32]) -> Self {
+        let endpoint = Endpoint::bind(
+            &home.id,
+            (Ipv4Addr::LOCALHOST, 0).into(),
+            Arc::new(NoPeers),
+            Arc::new(OnlyPeer::new(host_key)),
+        )
+        .expect("an endpoint");
+        let conn = endpoint
+            .connect(host.addr)
+            .await
+            .expect("the host accepted the connection");
+        let session = Session::open(
+            conn,
+            Hello::new(Role::Controller, home.id.public_key(), "red team, quiet"),
+        )
+        .await
+        .map_err(|(e, _)| e)
+        .expect("a session");
+        Self {
+            _endpoint: endpoint,
+            _session: session,
+        }
+    }
+}
+
 /// A host paired with one device holding `permissions`, and the red team's own
 /// home — the shape every test here starts from.
 pub fn facing(what: &str, permissions: &[Permission]) -> (Home, Host, [u8; 32], Home) {

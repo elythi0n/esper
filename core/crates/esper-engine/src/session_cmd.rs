@@ -970,7 +970,7 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
             // Who this host is serving, for anybody watching it. Taken here
             // because the session is about to be moved into `serve_one`.
             doing.send_modify(|d| d.serving = session.peer_fingerprint().inline());
-            match serve_one(
+            let serving = serve_one(
                 session,
                 o,
                 parked.take(),
@@ -985,9 +985,57 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
                     capacity,
                     seen,
                 },
-            )
-            .await
-            {
+            );
+            tokio::pin!(serving);
+            // **A second device is told, not left waiting.**
+            //
+            // This host serves one interactive session at a time, and without
+            // this arm nothing accepts while one runs — so a second
+            // controller's connection sits in the endpoint's queue until it
+            // times out, with no reason ever sent. From the far end that is
+            // indistinguishable from a machine that is switched off, which is
+            // the wrong thing to conclude about a machine somebody is using.
+            //
+            // Serving one at a time is the decision, not an accident: sharing
+            // the capture backend, arbitrating one session indicator between
+            // two viewers and putting two consent prompts in front of one
+            // person are a feature with a surface of its own. What is fixed
+            // here is the silence, which was never the decision.
+            let served = loop {
+                tokio::select! {
+                    done = &mut serving => break done,
+                    other = endpoint.accept() => {
+                        // The `Hello` is built here rather than inside
+                        // `turn_away` for the same reason the session above is
+                        // opened here: nothing in this crate names a
+                        // `quinn::Connection`, because the transport's choice
+                        // of QUIC is the transport's.
+                        if let Some(Ok(conn)) = other {
+                            let hello = Hello::new(
+                                Role::Host,
+                                identity.public_key(),
+                                &net::this_device(),
+                            );
+                            // **On a task of its own, and that is not tidiness.**
+                            // Everything below is a conversation with a device
+                            // this host is not going to serve: a handshake,
+                            // and then a wait for a request that may take as
+                            // long as `REQUEST_TIMEOUT` to arrive or never
+                            // arrive at all. Awaited in this arm, that is ten
+                            // seconds during which the session actually being
+                            // served is not polled — so the cost of turning
+                            // somebody away would be paid by the person whose
+                            // session it is.
+                            tokio::spawn(async move {
+                                if let Ok(turned) = Session::open(conn, hello).await {
+                                    turn_away(turned).await;
+                                }
+                            });
+                        }
+                    }
+                }
+            };
+            match served {
                 Ok((stats, still)) => {
                     println!("  · {from} finished: {stats}");
                     parked = still;
@@ -1029,6 +1077,37 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
         let _ = tokio::time::timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
         outcome
     })
+}
+
+/// Tell a device arriving mid-session that the host is busy, and let it go.
+///
+/// The handshake is completed first so the refusal is *attributable*: a
+/// controller that got a closed socket cannot tell a busy host from a wrong
+/// address, and one that got [`Reason::HOST_IS_BUSY`] from a host whose key it
+/// recognises knows exactly what happened and that trying again is worth it.
+///
+/// Everything here is best effort. A device that goes away mid-refusal has
+/// answered the question it was asking.
+async fn turn_away(mut session: Session) {
+    let from = session.remote_address();
+    let closer = session.media_channel();
+    if let Ok((_media, mut control)) = parts(&mut session) {
+        let _ = esper_transport::authorize::refuse_session(
+            &mut control,
+            esper_proto::Reason::HOST_IS_BUSY,
+            "this host serves one session at a time and is serving another",
+        )
+        .await;
+    }
+    println!("  · {from} was turned away: already serving somebody");
+    // **The control stream goes at the end of the block above, and the refusal
+    // has to survive it.** Letting a stream go asks the peer to stop sending,
+    // which is why `refuse_session` reads the request before answering it:
+    // without that, a controller still writing its request sees its own write
+    // fail and never reads the reason at all. The linger is the other half —
+    // returning from here closes the connection, and what has not been sent
+    // goes with it.
+    closer.linger(GOODBYE).await;
 }
 
 /// Wait for something to say about the pointer, or for ever when nothing is
@@ -2008,14 +2087,21 @@ async fn serve_one(
     stopping: tokio::sync::watch::Receiver<bool>,
     machine: Machine<'_>,
 ) -> Served {
-    // **Whatever happens, the peer gets a chance to read our last word.**
-    // Every refusal and every ending here is a message on a stream, and
-    // returning from this function closes the connection — which discards
-    // what has not been sent. Held before the session is moved on, and waited
-    // on after, so none of the paths inside have to remember.
+    // **Whatever happens, the peer gets a chance to read our last word** —
+    // and this host gets on with its work while it takes it. Every refusal and
+    // every ending here is a message on a stream, and returning from this
+    // function closes the connection, which discards what has not been sent.
+    // Held before the session is moved on so none of the paths inside have to
+    // remember, and let go of on a task of its own because **a goodbye is a
+    // promise to the peer, not a reason to stop working**: waited on here it
+    // would keep the caller inside a session that has already ended, for the
+    // whole of `GOODBYE` after a session that was handed to a background task
+    // and never closes at all — and everything the caller does between
+    // sessions, accepting the next device included, would happen that much
+    // later or not at all.
     let closer = session.media_channel();
     let outcome = serve_session(session, o, parked, stopping, machine).await;
-    closer.linger(GOODBYE).await;
+    tokio::spawn(async move { closer.linger(GOODBYE).await });
     outcome
 }
 
@@ -2093,6 +2179,13 @@ async fn serve_session(
     // agreed, and the record removed when this guard drops — however it drops.
     let spent = Spent::open(device);
 
+    // **The reading this session is enforced against must not predate the one
+    // it was agreed against.** The agreement above read the store from disk;
+    // the watch is a poll, and is up to half a second behind it. Without this
+    // a permission granted moments ago is in the grant the controller was just
+    // sent and not in what the host will act on — which the device finds out
+    // by being refused the thing it was told it holds.
+    permits.reread();
     // What this device may do, re-read whenever it is asked rather than frozen
     // here. The terminal service uses it to decide whether to *keep* a shell
     // standing, which is a question about now and not about when the session

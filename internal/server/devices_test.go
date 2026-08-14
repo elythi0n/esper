@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -196,4 +198,21 @@ func TestTheDeviceListIsReReadOnEveryRequest(t *testing.T) {
 	if got := count(); got != 0 {
 		t.Fatalf("a revocation should show at once, still got %d", got)
 	}
+}
+
+// askWith is `ask` for a request with a method and a body.
+func askWith(t *testing.T, s *Server, method, path string, token Token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	r := httptest.NewRequest(method, "http://127.0.0.1:8687"+path, reader)
+	if token.String() != "" {
+		r.Header.Set("Authorization", "Bearer "+token.String())
+	}
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, r)
+	return w
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -46,6 +47,9 @@ type Server struct {
 	events *fanout
 	// store is the device store's path, re-read on every request.
 	store string
+	// writer changes the store by asking the engine to. Nothing here opens it
+	// for writing; see `internal/devices`.
+	writer devices.Writer
 }
 
 // Options are what a caller decides.
@@ -56,6 +60,13 @@ type Options struct {
 	Token Token
 	// Engine to ask.
 	Engine Engine
+	// EngineBinary is the `esper-engine` to ask when the store must change.
+	//
+	// A path rather than a running engine, because changing the store is a
+	// command run to completion — the same arrangement `esper doctor` uses.
+	// Empty means changes are refused, which is what a control plane with no
+	// engine beside it should say rather than writing the file itself.
+	EngineBinary string
 	// Store is the device store to read, or empty for this machine's own.
 	//
 	// A path rather than a loaded list, because it is **re-read on every
@@ -117,12 +128,24 @@ func New(o Options) (*Server, error) {
 		bound:  addr,
 		events: newFanout(),
 		store:  store,
+		writer: devices.Writer{
+			Engine: o.EngineBinary,
+			Home:   filepath.Dir(store),
+		},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.guard(s.health))
 	mux.HandleFunc("GET /status", s.guard(s.status))
 	mux.HandleFunc("GET /sessions", s.guard(s.sessions))
 	mux.HandleFunc("GET /devices", s.guard(s.devices))
+	// **State-changing, and guarded by exactly what the reads are.** The token
+	// is a header, which a form cannot set and a page cannot read; the `Host`
+	// check refuses a request addressed to a name, which is how a browser
+	// reaches a loopback listener. Nothing further is needed and nothing less
+	// would do.
+	mux.HandleFunc("POST /devices/{fingerprint}/grant", s.guard(s.grant))
+	mux.HandleFunc("POST /devices/{fingerprint}/revoke", s.guard(s.revoke))
+	mux.HandleFunc("DELETE /devices/{fingerprint}", s.guard(s.forget))
 	mux.HandleFunc("GET /events", s.guard(s.stream))
 	s.http = &http.Server{
 		Addr:    addr,

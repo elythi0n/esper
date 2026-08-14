@@ -93,6 +93,15 @@ const (
 	// can lock a screen. There is nothing to retry — a person has to install
 	// one.
 	NoScreenLocker Reason = 405
+	// HostIsBusy is a capability that is held rather than absent, which is why
+	// it is here and not among the authorizations: nothing about this device
+	// was decided, and the same request a minute later may well be answered.
+	//
+	// Its own code because every neighboring answer sends somebody somewhere
+	// useless — PermissionDenied to permissions they already hold,
+	// NoCaptureBackend to a host that can never serve, and saying nothing at
+	// all to a machine that looks switched off.
+	HostIsBusy Reason = 406
 	// IndicatorUnconfirmed is a host that cannot confirm its own session
 	// indicator is on screen. A capability rather than a permission: the
 	// device is allowed and the machine cannot keep the promise that being
@@ -188,6 +197,7 @@ var descriptions = map[Reason]string{
 	NoDisplay:               "no display to capture",
 	NoInputBackend:          "no input injection backend available",
 	NoScreenLocker:          "the host has no way to lock its own screen",
+	HostIsBusy:              "that machine is already in a session",
 	IndicatorUnconfirmed:    "the host cannot show that it is being watched",
 	AllTiersExhausted:       "every connection tier failed",
 	RelayFull:               "relay is at capacity",

@@ -162,7 +162,77 @@ impl Permits {
 }
 
 /// A live view of the store, updated while the host runs.
-pub type Watching = tokio::sync::watch::Receiver<Arc<Permits>>;
+#[derive(Debug, Clone)]
+pub struct Watching {
+    now: tokio::sync::watch::Receiver<Arc<Permits>>,
+    /// Where a reading taken outside the poll is published.
+    ///
+    /// Held alongside the receiver rather than kept in the polling task
+    /// because the moment a session opens is a moment worth reading at, and
+    /// only the session knows when that is — see [`Watching::reread`].
+    tell: Arc<tokio::sync::watch::Sender<Arc<Permits>>>,
+}
+
+impl Watching {
+    /// The store as of the last reading.
+    #[must_use]
+    pub fn borrow(&self) -> tokio::sync::watch::Ref<'_, Arc<Permits>> {
+        self.now.borrow()
+    }
+
+    /// The store as of the last reading, and mark it seen.
+    pub fn borrow_and_update(&mut self) -> tokio::sync::watch::Ref<'_, Arc<Permits>> {
+        self.now.borrow_and_update()
+    }
+
+    /// Wait until the reading changes.
+    ///
+    /// # Errors
+    ///
+    /// When the host has stopped reading the store.
+    pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.now.changed().await
+    }
+
+    /// Read the store **now**, rather than waiting for the next poll.
+    ///
+    /// **For the moment a session opens, which is the one moment the poll is
+    /// not good enough for.** A session is agreed against its own fresh read
+    /// of the store and then *enforced* against this reading, which is up to
+    /// [`INTERVAL`] behind it. So a permission granted a moment before the
+    /// session opened is in the agreement and not yet in the enforcement: the
+    /// host tells the device it holds `forward`, and then tells it that it is
+    /// not permitted to forward. Half a second of a host contradicting itself
+    /// to the one device in a position to notice.
+    ///
+    /// Reading here closes that window by construction rather than by being
+    /// quick about it — this reading is taken *after* the one the agreement
+    /// used, so it cannot be older than the decision it is enforcing.
+    ///
+    /// A store that cannot be read leaves the last reading in place, which is
+    /// what the poll does with the same problem and for the same reason.
+    pub fn reread(&self) {
+        let Ok(now) = Permits::load() else {
+            return;
+        };
+        publish(&self.tell, now);
+    }
+}
+
+/// Publish a reading, waking anybody waiting only if it says something new.
+///
+/// Otherwise every session watching the store is woken twice a second for as
+/// long as the host runs.
+fn publish(tell: &tokio::sync::watch::Sender<Arc<Permits>>, now: Permits) {
+    tell.send_if_modified(|held| {
+        if **held == now {
+            false
+        } else {
+            *held = Arc::new(now);
+            true
+        }
+    });
+}
 
 /// Start reading the store, and publish every change.
 ///
@@ -175,6 +245,8 @@ pub fn watch(mut stopping: tokio::sync::watch::Receiver<bool>) -> Watching {
         Permits::default()
     });
     let (tx, rx) = tokio::sync::watch::channel(Arc::new(first));
+    let tell = Arc::new(tx);
+    let polling = Arc::clone(&tell);
 
     tokio::spawn(async move {
         let mut complained = false;
@@ -186,17 +258,7 @@ pub fn watch(mut stopping: tokio::sync::watch::Receiver<bool>) -> Watching {
             match Permits::load() {
                 Ok(now) => {
                     complained = false;
-                    // `send_if_modified` so a session waiting on this is woken
-                    // only when something actually changed — twice a second
-                    // otherwise, for as long as the host runs.
-                    tx.send_if_modified(|held| {
-                        if **held == now {
-                            false
-                        } else {
-                            *held = Arc::new(now);
-                            true
-                        }
-                    });
+                    publish(&polling, now);
                 }
                 Err(e) => {
                     // Said once, and the last good reading is kept. A file
@@ -210,13 +272,13 @@ pub fn watch(mut stopping: tokio::sync::watch::Receiver<bool>) -> Watching {
             }
             // A receiver going away means no session is open and none will
             // be: the host has stopped.
-            if tx.is_closed() {
+            if polling.is_closed() {
                 return;
             }
         }
     });
 
-    rx
+    Watching { now: rx, tell }
 }
 
 /// What one session's device may do, read from the store every time it is
@@ -360,6 +422,50 @@ mod tests {
         }
     }
 
+    /// A reading taken outside the poll reaches a session that is already open.
+    ///
+    /// **The narrowing is meant to be a change made *since* the session
+    /// opened.** It was in fact a comparison against whatever the poll last
+    /// happened to see, which can predate the session — and then a permission
+    /// granted moments before the session was agreed reads as one that was
+    /// taken away, on a session that was told it holds it. Half a second of
+    /// the host refusing the device the thing it had just granted it.
+    ///
+    /// The filesystem half of this lives in the smoke suite, because
+    /// `ESPER_HOME` is the only way to point the store somewhere and setting
+    /// an environment variable is `unsafe` in this edition. What is here is
+    /// the part that decides.
+    #[test]
+    fn a_session_is_not_narrowed_by_a_reading_older_than_its_grant() {
+        let key = [1u8; KEY_LEN];
+        // The store as the poll last saw it: this device holds nothing.
+        let watching = watching(permits(&[(key, &[])]));
+        // The session was agreed against a newer store, in which it holds one.
+        let live = Live::new(watching.clone(), key, vec![Permission::Forward]);
+        assert!(
+            esper_transport::Grants::granted(&live).is_empty(),
+            "the stale reading is the situation this is about; without it the \
+             rest of this test proves nothing"
+        );
+
+        publish(&watching.tell, permits(&[(key, &[Permission::Forward])]));
+
+        assert_eq!(
+            esper_transport::Grants::granted(&live),
+            vec![Permission::Forward],
+            "a reading taken when the session opened has to reach the session"
+        );
+    }
+
+    /// A `Watching` holding one reading and nothing polling it.
+    fn watching(now: Permits) -> Watching {
+        let (tx, rx) = tokio::sync::watch::channel(Arc::new(now));
+        Watching {
+            now: rx,
+            tell: Arc::new(tx),
+        }
+    }
+
     fn invited(key: [u8; KEY_LEN], used: bool, expires_at: u64) -> Permits {
         Permits {
             devices: vec![Entry {
@@ -498,9 +604,11 @@ mod tests {
     fn what_a_person_allows_for_one_session_widens_it_and_is_not_a_narrowing() {
         use esper_transport::Grants as _;
 
-        let (_tx, rx) =
-            tokio::sync::watch::channel(Arc::new(permits(&[([1u8; 32], &[Permission::View])])));
-        let live = Live::new(rx, [1u8; 32], vec![Permission::View]);
+        let live = Live::new(
+            watching(permits(&[([1u8; 32], &[Permission::View])])),
+            [1u8; 32],
+            vec![Permission::View],
+        );
         assert_eq!(live.standing(), Standing::Unchanged);
 
         live.allow_here(Permission::Control);
@@ -524,9 +632,11 @@ mod tests {
     fn allowing_it_on_one_handle_allows_it_on_every_other() {
         use esper_transport::Grants as _;
 
-        let (_tx, rx) =
-            tokio::sync::watch::channel(Arc::new(permits(&[([1u8; 32], &[Permission::View])])));
-        let live = Live::new(rx, [1u8; 32], vec![Permission::View]);
+        let live = Live::new(
+            watching(permits(&[([1u8; 32], &[Permission::View])])),
+            [1u8; 32],
+            vec![Permission::View],
+        );
         let injecting = live.clone();
         assert!(!injecting.allows(Permission::Control));
         live.allow_here(Permission::Control);
@@ -542,13 +652,12 @@ mod tests {
     fn unpairing_takes_back_what_was_allowed_for_the_session_too() {
         use esper_transport::Grants as _;
 
-        let (tx, rx) =
-            tokio::sync::watch::channel(Arc::new(permits(&[([1u8; 32], &[Permission::View])])));
-        let live = Live::new(rx, [1u8; 32], vec![Permission::View]);
+        let store = watching(permits(&[([1u8; 32], &[Permission::View])]));
+        let live = Live::new(store.clone(), [1u8; 32], vec![Permission::View]);
         live.allow_here(Permission::Control);
         assert!(live.allows(Permission::Control));
 
-        tx.send(Arc::new(permits(&[]))).expect("a receiver is held");
+        publish(&store.tell, permits(&[]));
         assert!(live.granted().is_empty());
         assert_eq!(live.standing(), Standing::Forgotten);
     }
@@ -557,25 +666,30 @@ mod tests {
     fn a_live_view_shrinks_when_the_store_does_and_never_grows() {
         use esper_transport::Grants as _;
 
-        let (tx, rx) = tokio::sync::watch::channel(Arc::new(permits(&[(
+        let store = watching(permits(&[(
             [1u8; 32],
             &[Permission::View, Permission::Control],
-        )])));
-        let live = Live::new(rx, [1u8; 32], vec![Permission::View, Permission::Control]);
+        )]));
+        let live = Live::new(
+            store.clone(),
+            [1u8; 32],
+            vec![Permission::View, Permission::Control],
+        );
         assert_eq!(live.granted(), vec![Permission::View, Permission::Control]);
 
         // Narrowed at the machine.
-        tx.send(Arc::new(permits(&[([1u8; 32], &[Permission::View])])))
-            .expect("a receiver is held");
+        publish(&store.tell, permits(&[([1u8; 32], &[Permission::View])]));
         assert_eq!(live.granted(), vec![Permission::View]);
         assert!(!live.allows(Permission::Control));
 
         // Widened beyond what this session asked for: still what it asked for.
-        tx.send(Arc::new(permits(&[(
-            [1u8; 32],
-            &[Permission::View, Permission::Control, Permission::Terminal],
-        )])))
-        .expect("a receiver is held");
+        publish(
+            &store.tell,
+            permits(&[(
+                [1u8; 32],
+                &[Permission::View, Permission::Control, Permission::Terminal],
+            )]),
+        );
         assert_eq!(
             live.granted(),
             vec![Permission::View, Permission::Control],
@@ -583,8 +697,7 @@ mod tests {
         );
 
         // Forgotten entirely.
-        tx.send(Arc::new(Permits::default()))
-            .expect("a receiver is held");
+        publish(&store.tell, Permits::default());
         assert!(
             live.granted().is_empty(),
             "a device that is no longer paired may do nothing, not what it used to"

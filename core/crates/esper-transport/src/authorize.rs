@@ -338,6 +338,63 @@ pub async fn answer_session(
     .await
 }
 
+/// Refuse a session outright, without asking a policy anything.
+///
+/// **For refusals that are about the host rather than the device.** A host
+/// already serving somebody has nothing to decide: the device may be perfectly
+/// entitled, and the answer would be the same for any of them. Going through
+/// [`answer_session`] would mean running a policy and possibly putting a
+/// question in front of whoever is at the machine — to say no for a reason
+/// that has nothing to do with them.
+///
+/// **The request is still read, even though the answer does not depend on it.**
+/// Not reading it looks like a saved round trip and is a lost answer: the
+/// caller drops the stream when it returns, dropping it asks the peer to stop
+/// sending, and a peer that was midway through writing its request sees its
+/// own write fail rather than the reason that was sent to it. The one thing
+/// the connection existed to say is the thing that gets discarded. The request
+/// is already in flight, so reading it costs nothing that was not spent.
+///
+/// # Errors
+///
+/// If no request arrives inside `REQUEST_TIMEOUT`, or if the response cannot
+/// be sent — either of which means the peer is already gone.
+pub async fn refuse_session(
+    control: &mut Control,
+    reason: Reason,
+    detail: &str,
+) -> Result<SessionDeny, AuthorizeError> {
+    refuse_session_within(control, reason, detail, REQUEST_TIMEOUT).await
+}
+
+/// [`refuse_session`], with the wait as an argument.
+///
+/// Separate for the reason [`answer_session_within`] is: a test that proved
+/// the timeout by waiting it out is a test nobody runs.
+///
+/// # Errors
+///
+/// As [`refuse_session`].
+pub async fn refuse_session_within(
+    control: &mut Control,
+    reason: Reason,
+    detail: &str,
+    wait: Duration,
+) -> Result<SessionDeny, AuthorizeError> {
+    match tokio::time::timeout(wait, control.recv::<SessionRequest>()).await {
+        Ok(asked) => {
+            asked?;
+        }
+        Err(_) => return Err(AuthorizeError::Silent(wait)),
+    }
+    let deny = SessionDeny {
+        reason,
+        detail: detail.to_owned(),
+    };
+    control.send(&SessionResponse::Deny(deny.clone())).await?;
+    Ok(deny)
+}
+
 /// [`answer_session`], with the wait as an argument.
 ///
 /// Separate so the wait can be *tested*: a test that proved a ten-second

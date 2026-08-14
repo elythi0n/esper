@@ -127,6 +127,26 @@ impl Reason {
     /// for a permission it already holds, and there is nothing to retry: a
     /// person has to install a locker.
     pub const NO_SCREEN_LOCKER: Self = Self(405);
+    /// This host is already serving somebody, and serves one at a time.
+    ///
+    /// **A capability that is held rather than absent**, which is why it is
+    /// here and not among the authorizations: nothing about this device was
+    /// decided, and the same request a minute later may well be answered.
+    ///
+    /// Its own code because every neighbouring answer sends somebody
+    /// somewhere useless. `PERMISSION_DENIED` sends them to look at
+    /// permissions they already hold; `NO_CAPTURE_BACKEND` reads as a host
+    /// that can never serve; and *saying nothing at all* — which is what this
+    /// host did before the code existed, because the accept loop simply does
+    /// not accept while a session runs — reads as a machine that is switched
+    /// off. A controller told this can say "that machine is in use" and offer
+    /// to try again, which is the true thing and the useful one.
+    ///
+    /// **Forwards do not count.** A forwarded connection is open for as long
+    /// as somebody has a database client running, and it touches neither the
+    /// screen nor the capture backend, so it is let go of rather than held —
+    /// and a host with three forwards open is not busy.
+    pub const HOST_IS_BUSY: Self = Self(406);
     /// The host cannot confirm that its own session indicator is on screen.
     ///
     /// **A capability rather than a permission**, which is why it lives in

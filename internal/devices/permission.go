@@ -58,6 +58,37 @@ var AllPermissions = []Permission{
 	Audio, Terminal, Forward, Unattended, Record, Lock, Logoff, Reboot,
 }
 
+// Sensitive says whether granting this needs a person at the machine rather
+// than a checkbox.
+//
+// **It was written, removed for having no caller, and is back because it has
+// one.** The removal was right at the time: Rust's own `is_sensitive` shipped
+// with every reference in a test and a grant path that never consulted it, so
+// `grant <fp> unattended` wrote permanent unattended access and printed a
+// success line. A second copy of that rule with nothing consulting it would
+// have been the same defect in a second language.
+//
+// Its caller is [command], which refuses to grant any of these through the
+// local API — see [ErrHostOnly].
+func (p Permission) Sensitive() bool {
+	switch p {
+	// Removes the question a session is otherwise held up by.
+	case Unattended,
+		// Writes to this machine's filesystem.
+		FilesIn,
+		// Keeps a copy of somebody's screen after the session.
+		Record,
+		// Closes what somebody is working on.
+		Logoff,
+		// Takes the machine away, and every other session on it.
+		Reboot:
+		return true
+	case View, Control, ClipboardOut, ClipboardIn, FilesOut, Audio, Terminal, Forward, Lock:
+		return false
+	}
+	return false
+}
+
 // Known says whether this is a permission this build understands.
 func (p Permission) Known() bool {
 	for _, known := range AllPermissions {

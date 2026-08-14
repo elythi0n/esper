@@ -23,6 +23,7 @@ import (
 	"github.com/elythi0n/esper/internal/home"
 	"github.com/elythi0n/esper/internal/proto"
 	"github.com/elythi0n/esper/internal/server"
+	"github.com/elythi0n/esper/internal/service"
 )
 
 // version and buildTime are stamped at link time via
@@ -303,6 +304,17 @@ func otherBinariesOnPath(name string) []string {
 // is serving, and putting that through a logger would turn a layout into a
 // transcript.
 func cmdHost(args []string) int {
+	// **`enable` and `disable` are taken before the engine is looked for.**
+	// Turning the host on at login is a thing to do on a machine where the
+	// engine is not running, which is most of them — and asking for an engine
+	// first would refuse the command on exactly the machine somebody is
+	// setting up.
+	if len(args) > 0 {
+		switch args[0] {
+		case "enable", "disable":
+			return cmdHostService(args[0], args[1:])
+		}
+	}
 	sup, err := engine.New(engine.Options{Log: logToStderr})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "esper host: %v\n", err)
@@ -313,6 +325,48 @@ func cmdHost(args []string) int {
 	if err := sup.Supervise(context.Background(), append([]string{"host"}, args...), engine.Watch{}); err != nil {
 		fmt.Fprintf(os.Stderr, "esper host: %v\n", err)
 		return 1
+	}
+	return 0
+}
+
+// cmdHostService turns the host on or off through the machine's own service
+// manager.
+//
+// The wrapper prints every command before it runs it, so somebody on a machine
+// where this fails can finish by hand — and so the next machine does not need
+// this at all. See `internal/service`.
+func cmdHostService(verb string, rest []string) int {
+	// **The unit, on stdout, for anybody who would rather install it
+	// themselves** — and for the smoke check, because a `go:embed` of the
+	// wrong file compiles perfectly and the only way to know which file is in
+	// the binary is to ask the binary.
+	if verb == "enable" && len(rest) == 1 && rest[0] == "--show-unit" {
+		fmt.Print(service.Unit)
+		return 0
+	}
+	if len(rest) > 0 {
+		fmt.Fprintf(os.Stderr, "esper host %s takes no arguments\n", verb)
+		return 2
+	}
+	fmt.Printf("🔌 esper host %s  (%s)\n\n", verb, service.Manager)
+	report := service.Report{To: os.Stdout}
+
+	var err error
+	switch verb {
+	case "enable":
+		err = service.Enable(report)
+	case "disable":
+		err = service.Disable(report)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nesper host %s: %v\n", verb, err)
+		return 1
+	}
+	fmt.Println()
+	if verb == "enable" {
+		fmt.Println("  the host starts now and at login")
+	} else {
+		fmt.Println("  the host is stopped and will not start at login")
 	}
 	return 0
 }
@@ -379,12 +433,18 @@ func cmdAPI(args []string) int {
 	// and report the rest as an outage rather than as zeroes.
 	var asking server.Engine
 	var engineTrouble error
+	// Where the engine binary is, for the one thing that needs it even when
+	// nothing is running: changing the device store, which only the engine
+	// writes. Empty when there is none, and a change then refuses itself
+	// rather than the API opening the trust store for writing.
+	enginePath := ""
 	sup, err := engine.New(engine.Options{Log: logToStderr})
 	switch {
 	case err != nil:
 		engineTrouble = err
 		asking = engine.Missing(err)
 	default:
+		enginePath = sup.Path()
 		defer func() { _ = sup.Stop() }()
 		asking = sup
 		if started := sup.Start(
@@ -401,9 +461,10 @@ func cmdAPI(args []string) int {
 		// Passed rather than left to the API to resolve, so the token and the
 		// device store are read out of the same home this command already
 		// decided on.
-		Store:   devices.PathIn(home),
-		Engine:  asking,
-		Exposed: exposed,
+		Store:        devices.PathIn(home),
+		EngineBinary: enginePath,
+		Engine:       asking,
+		Exposed:      exposed,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
@@ -572,6 +633,8 @@ Using a machine
   forward            reach a port on a paired host, ssh -L style
   cp                 copy one file to or from a paired host
   host               serve this machine's screen to a paired device
+  host enable        start the host now and at login
+  host disable       stop it, and stop it starting at login
 
 Deciding who may
   grant              give a paired device a permission

@@ -44,7 +44,7 @@ use std::time::Duration;
 use esper_proto::{MediaMessage, Permission, StreamPurpose};
 
 mod common;
-use common::{Host, Peer, facing};
+use common::{Host, Peer, Silent, facing};
 
 /// **It cannot grant itself anything.**
 ///
@@ -374,5 +374,48 @@ async fn a_stream_that_names_no_purpose_is_dropped_and_the_session_lives() {
         host.waits_to_say("refused a clipboard stream"),
         "the session stopped serving streams after one that named no purpose: {:?}",
         host.everything()
+    );
+}
+
+/// **A device that connects and then says nothing cannot stall the session
+/// somebody else is in.**
+///
+/// A host serves one interactive session at a time and now *answers* a second
+/// device rather than leaving it in the accept queue — which means the accept
+/// loop does two things at once, and the second one talks to a stranger. Both
+/// halves of that conversation wait on the far end: a handshake, and then up
+/// to `REQUEST_TIMEOUT` for a request that may never come. Run on the same
+/// task as the live session, that is ten seconds of somebody's screen not
+/// being served, for the price of one connection and no bytes — and a paired
+/// device that repeated it would hold a session frozen for as long as it
+/// liked.
+///
+/// What is measured is the live session still being *answered*, because that
+/// is a round trip through the same loop that would have been blocked. The
+/// answer here is a refusal (headless: nobody to ask), and a refusal that
+/// arrives is the proof — what it says is another test's business.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_second_device_does_not_stall_the_session_being_served() {
+    let (_home, host, host_key, red_home) = facing("silent-second", &[Permission::View]);
+    let mut red = Peer::open(&red_home, &host, host_key, &[Permission::View]).await;
+
+    // Through the door, and then nothing.
+    let _quiet = Silent::connect(&red_home, &host, host_key).await;
+
+    // Comfortably under the ten seconds the host will wait for a request, and
+    // comfortably over a round trip on loopback.
+    const PATIENCE: Duration = Duration::from_secs(3);
+    let asked = std::time::Instant::now();
+    red.sends(&MediaMessage::Ask(esper_proto::PermissionAsk {
+        wanted: Permission::Control,
+    }))
+    .await;
+    let answer = red.next_answer(PATIENCE).await;
+
+    assert!(
+        answer.is_some(),
+        "the live session went unanswered for {:?} while the host talked to a \
+         device that said nothing — one connection is enough to freeze it",
+        asked.elapsed()
     );
 }

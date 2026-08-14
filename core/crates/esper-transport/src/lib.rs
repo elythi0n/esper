@@ -17,7 +17,7 @@ pub use auth::{AnyOf, NoPeers, OnlyPeer, PeerAuthority};
 pub use authorize::{
     Answered, AuthorizeError, GrantStoredPermissions, Policy, REQUEST_TIMEOUT, RefuseAll,
     SessionRegistry, Verdict, answer_session, answer_session_within, decide_and_clamp,
-    request_session, response,
+    refuse_session, refuse_session_within, request_session, response,
 };
 pub use backlog::{Backlog, DEFAULT_BACKLOG};
 pub use control::{Control, ControlError, FrameReader};

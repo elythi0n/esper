@@ -136,7 +136,11 @@ fi
 # not Linux, and which is why this is a check and not a gate.
 if command -v systemd-analyze >/dev/null 2>&1; then
   echo "  — checking the shipped unit files parse"
-  for unit in packaging/systemd/*.service; do
+  # **Both homes.** The user unit lives in `internal/service/` because the
+  # binary embeds it — one copy, so the file `esper host enable` writes and the
+  # file systemd is asked about cannot drift. The broker's is a system service
+  # an administrator installs, and stays in `packaging/`.
+  for unit in internal/service/*.service packaging/systemd/*.service; do
     # The verifier also resolves ExecStart, which is not installed here. That
     # one line is expected and is filtered rather than silenced wholesale.
     out=$( { systemd-analyze verify "$unit" 2>&1 || true; } \
@@ -150,6 +154,43 @@ if command -v systemd-analyze >/dev/null 2>&1; then
       fail=1
     fi
   done
+
+  # **The unit the binary would write is the unit that was just verified.**
+  # It is embedded, so the only way to be sure is to ask the binary for it —
+  # a `go:embed` of the wrong file compiles perfectly.
+  echo "  — the host's service unit, and the switch that installs it"
+  # Into a file, not into `$(...)`: command substitution strips every trailing
+  # newline, so a byte-for-byte comparison made through one can only ever say
+  # the two differ by the last one.
+  embedded=$(mktemp)
+  "$BIN/esper" host enable --show-unit > "$embedded" 2>/dev/null || true
+  if [ -s "$embedded" ] && diff -q "$embedded" internal/service/esper.service >/dev/null 2>&1; then
+    printf '  ✓ the unit the binary embeds is the one systemd verified\n'
+  else
+    printf '  ✗ the embedded unit is not the file on disk\n'
+    diff "$embedded" internal/service/esper.service 2>&1 | head -5 | sed 's/^/      /'
+    fail=1
+  fi
+  rm -f "$embedded"
+  # Disabling a host that was never enabled is a state, not a transition: a
+  # script that wants to be sure must not fail because it already was.
+  #
+  # **Asked of this account's own systemd, so it is asked carefully.** `host
+  # disable` is not a dry run — on a machine that really does run Esper as a
+  # service it would switch it off, and a suite that does that to somebody is
+  # a suite they run once. Both cases are checked for and skipped rather than
+  # worked around.
+  if ! systemctl --user show-environment >/dev/null 2>&1; then
+    printf '  · no user systemd here, so there is nothing for `host disable` to talk to\n'
+  elif systemctl --user cat esper.service >/dev/null 2>&1; then
+    printf '  · this account has an esper unit installed, so `host disable` is left alone\n'
+  elif "$BIN/esper" host disable >/dev/null 2>&1; then
+    printf '  ✓ and disabling one that is already off is not a failure\n'
+  else
+    printf '  ✗ `host disable` failed on a machine where nothing was enabled\n'
+    "$BIN/esper" host disable 2>&1 | tail -4 | sed 's/^/      /'
+    fail=1
+  fi
 fi
 
 # Esper operates no infrastructure, so a shipped binary must contain nothing
@@ -222,8 +263,24 @@ ips_in() {
     | grep -vE "$harmless_ip" | sort -u || true
 }
 
+# **What the embedded unit accounts for, and nothing else.** `esper` embeds the
+# systemd user unit, so every string in that file is a string in that binary —
+# including its `Documentation=` line, which `systemctl status` prints and
+# nothing dials.
+#
+# Taken from the unit rather than named in `doc_hosts`, and the difference
+# matters: a host in `doc_hosts` is excused in all three binaries and in any
+# code that really did dial it, where this excuses exactly the URLs that are
+# written in the file. Delete the `Documentation=` line and this excuses
+# nothing — it fails closed rather than open.
+unit_urls=$(grep -oEi '(https?|wss?|quic|ftp)://[a-z0-9-]+(\.[a-z0-9-]+)+' \
+  internal/service/esper.service | sort -u)
+
 for b in esper esper-engine esper-broker; do
   urls=$(urls_in "$BIN/$b")
+  if [ "$b" = esper ] && [ -n "$urls" ] && [ -n "$unit_urls" ]; then
+    urls=$(printf '%s\n' "$urls" | grep -vxF "$unit_urls" || true)
+  fi
   ips=$(ips_in "$BIN/$b")
 
   if [ -n "$urls" ] || [ -n "$ips" ]; then
@@ -239,6 +296,18 @@ for b in esper esper-engine esper-broker; do
     printf '  ✓ %s has no URL and no routable IP literal\n' "$b"
   fi
 done
+
+# The subtraction is a narrowing too, so it is pointed at a list holding one URL
+# the unit does mention and one it does not, and has to keep the second.
+if [ -n "$unit_urls" ]; then
+  kept=$(printf '%s\nhttps://collector.example.net\n' "$unit_urls" \
+    | grep -vxF "$unit_urls" || true)
+  check "the unit's own URLs are subtracted and no others" \
+    "$kept" "https://collector.example.net"
+else
+  printf '  ✗ the embedded unit carries no URL, so the subtraction proves nothing\n'
+  fail=1
+fi
 
 # The scan above believes only whole runs, which is a narrowing, and a narrowing
 # can quietly become a blindfold. So the same two patterns are pointed at a
@@ -964,6 +1033,15 @@ s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.clos
             fail=1
           fi
 
+          # **Granted and used back to back, on purpose.** The host agrees a
+          # session against a fresh read of the store and then enforces it
+          # against a poll half a second behind — so without a reading taken
+          # when the session opens, the two disagree and this device is refused
+          # the permission it was told, one message earlier, that it holds.
+          #
+          # A `sleep` here would turn this into a test of the poll interval.
+          # The window it exercises is only as wide as this machine is slow,
+          # which is why the deciding half is a unit test in `permits.rs`.
           ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" forward >/dev/null
 
           env ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
@@ -2310,6 +2388,61 @@ print(s.getsockname()[1]); s.close()')
       else
         printf '  ✗ the switch to a second screen did not happen\n'
         printf '%s\n' "$switched" | grep -iE 'monitor|showing' | sed 's/^/      /'
+        fail=1
+      fi
+
+      # **A second device is told, not left waiting.**
+      #
+      # This host serves one interactive session at a time, and before
+      # `HOST_IS_BUSY` existed nothing accepted while one ran — so a second
+      # controller sat in the endpoint's queue until it timed out, with no
+      # reason ever sent. From the far end that is indistinguishable from a
+      # machine that is switched off, which is the wrong thing to conclude
+      # about a machine somebody is using.
+      echo "  — a second device arriving mid-session"
+      # **The host's word for it, not the controller's.** Waiting on the
+      # controller's own output waits for it to say what it is doing; what
+      # this needs is the host saying what it has accepted, which is the
+      # thing the second device is about to collide with.
+      served_before=$( { grep -c ' connected' "$term_a/multi.log" 2>/dev/null || true; } | head -1)
+      ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" connect "$multi_addr" \
+        --seconds 12 > "$term_b/first.log" 2>&1 &
+      first_pid=$!
+      for _ in $(seq 1 300); do
+        served_now=$( { grep -c ' connected' "$term_a/multi.log" 2>/dev/null || true; } | head -1)
+        [ "${served_now:-0}" -gt "${served_before:-0}" ] && break
+        sleep 0.05
+      done
+      busy=$(ESPER_HOME="$term_b" timeout 30 "$BIN/esper-engine" connect "$multi_addr" \
+        --seconds 2 2>&1 || true)
+      # **Was there a session to be busy with?** If the first one had already
+      # finished, an idle host answering normally is the correct behaviour and
+      # this check would be measuring nothing — which is how it read the first
+      # time it was written.
+      mid_session=no
+      kill -0 "$first_pid" 2>/dev/null && mid_session=yes
+      wait "$first_pid" 2>/dev/null || true
+      if [ "$mid_session" != yes ]; then
+        printf '  ✗ the first session ended before the second arrived, so this tested nothing\n'
+        tail -3 "$term_b/first.log" 2>/dev/null | sed 's/^/      /'
+        fail=1
+      elif printf '%s' "$busy" | grep -qi 'already in a session\|serves one session at a time'; then
+        printf '  ✓ the second is told the host is busy, by name\n'
+      else
+        printf '  ✗ a second device was not told why it could not connect\n'
+        printf '%s\n' "$busy" | tail -6 | sed 's/^/      /'
+        printf '      — what the first one was doing:\n'
+        tail -8 "$term_b/first.log" 2>/dev/null | sed 's/^/      /'
+        printf '      — what the host said:\n'
+        tail -12 "$term_a/multi.log" 2>/dev/null | sed 's/^/      /'
+        fail=1
+      fi
+      # And the host said so on its own side, so somebody reading its output
+      # knows a device tried.
+      if grep -q 'was turned away' "$term_a/multi.log" 2>/dev/null; then
+        printf '  ✓ and the host recorded that somebody was turned away\n'
+      else
+        printf '  ✗ the host turned a device away without saying so\n'
         fail=1
       fi
 
