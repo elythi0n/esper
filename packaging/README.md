@@ -2,6 +2,29 @@
 
 Two things get installed, and they are not installed the same way.
 
+## The formats, and what is checked about them
+
+| | Where | Built here? |
+|---|---|---|
+| Arch | [`arch/PKGBUILD`](arch/PKGBUILD) | by `makepkg`, not by the project |
+| Debian, Ubuntu | `make package-deb` → `dist/*.deb` | **yes**, by [`../scripts/build-deb.sh`](../scripts/build-deb.sh) |
+| Fedora, RHEL | [`rpm/esper.spec`](rpm/esper.spec) | **no** — see below |
+
+All three install from one list, [`contents.tsv`](contents.tsv), through one
+script. Three package definitions describing the same software in three
+dialects is three chances to forget a file, and a package missing
+`esper-engine` installs cleanly and does nothing.
+
+`make check-packages` asks the question that survives that. The packages agree
+with the manifest by construction, so agreeing with it proves nothing — what it
+checks is that **everything the build produced is in some package**, which is
+answered from `build/` and not from the manifest.
+
+The RPM spec has never been built: this project is developed on Arch, which has
+no `rpmbuild`. Its `%files` list is the one place a format forces the manifest
+to be written twice, so that list is compared against the manifest rather than
+trusted. Building it on a Fedora runner is a release-checklist item.
+
 | | Who runs it | How |
 |---|---|---|
 | **The engine** on your own machine | you | a **user** service — [`systemd/esper.service`](systemd/esper.service) |

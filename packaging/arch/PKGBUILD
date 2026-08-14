@@ -1,0 +1,70 @@
+# Maintainer: elythi0n <https://github.com/elythi0n/esper>
+
+# **A split package, because the two halves are installed by different people.**
+# Somebody puts `esper` on the machine they want to reach. An operator puts
+# `esper-broker` on a server, and almost never wants the engine there as well —
+# a broker is a machine that introduces other machines, not one anybody
+# connects to. Two packages out of one build is the Arch way of saying that.
+
+pkgbase=esper
+pkgname=('esper' 'esper-broker')
+pkgver=0.0.0
+pkgrel=1
+pkgdesc='Secure remote desktop and terminal, with no operated infrastructure'
+arch=('x86_64' 'aarch64')
+url='https://github.com/elythi0n/esper'
+license=('MIT')
+makedepends=('go' 'rust' 'cmake' 'nasm' 'git')
+options=('!debug' '!strip' '!lto')
+
+# Built from the tree this file sits in.
+#
+# There is no `source=()` and no checksum, and that is the point: this PKGBUILD
+# is shipped *inside* the repository, so what it builds is the checkout you are
+# holding rather than something fetched over the network and verified against a
+# number in the same file that fetched it. Packaging for the AUR points `source`
+# at a release tarball and this becomes an ordinary PKGBUILD.
+
+_root() {
+  # `startdir` is `packaging/arch`; the tree is two levels up.
+  printf '%s\n' "$startdir/../.."
+}
+
+prepare() {
+  cd "$(_root)"
+  # The version the binaries stamp themselves with comes from this file, so a
+  # package saying 0.0.0 and a binary saying something else cannot happen.
+  local stated
+  stated=$(tr -d 'v \n' < VERSION)
+  if [ "$stated" != "$pkgver" ]; then
+    echo "VERSION says $stated and pkgver says $pkgver — they must agree" >&2
+    return 1
+  fi
+}
+
+build() {
+  cd "$(_root)"
+  # Reproducible: `makepkg` sets SOURCE_DATE_EPOCH, and the Makefile stamps
+  # both halves from it.
+  make build
+}
+
+check() {
+  cd "$(_root)"
+  make test
+}
+
+package_esper() {
+  pkgdesc='Secure remote desktop and terminal, with no operated infrastructure'
+  depends=('systemd')
+  optdepends=('nasm: only needed to build')
+  cd "$(_root)"
+  ./scripts/package-files.sh esper "$pkgdir" arch build
+}
+
+package_esper-broker() {
+  pkgdesc='Introduces two Esper peers to each other; holds no session keys'
+  depends=('systemd')
+  cd "$(_root)"
+  ./scripts/package-files.sh esper-broker "$pkgdir" arch build
+}

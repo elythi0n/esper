@@ -1,0 +1,219 @@
+# Nothing here has ever run. The repository has no remote, so no workflow in
+# this tree has executed — see the note at the bottom of the file.
+
+name: Release
+
+# **Only a tag, and only a person can make one.** No schedule, no
+# `workflow_dispatch` on a branch, nothing that produces a release as a side
+# effect of merging. A release is a decision, and the trigger should make that
+# hard to do by accident.
+on:
+  push:
+    tags: ['v*']
+
+# Refuse to build the same tag twice concurrently. Two runs racing to attach
+# assets to one release is how a release ends up with half of one build and
+# half of another.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # **The tag and the tree have to agree before anything is built.** A tag that
+  # says v1.2.0 on a tree whose VERSION says v1.1.0 produces binaries that
+  # report the wrong release for ever, and the mistake is invisible until
+  # somebody files a bug against a version that was never built.
+  agree:
+    name: the tag and the tree agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: VERSION matches the tag
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          stated=$(tr -d ' \n' < VERSION)
+          if [ "$tag" != "$stated" ]; then
+            echo "::error::tag $tag and VERSION $stated disagree"
+            exit 1
+          fi
+          echo "both say $tag"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: the changelog says something about it
+        run: make check-changelog
+
+      # What a stranger downloads, checked before anything is built from it.
+      - name: the source tarball is what it should be
+        run: make check-published
+
+  # The suite, on the three platforms, exactly as CI runs it. A release must
+  # not be the first time something is discovered — but it must also not be
+  # possible to tag a commit whose CI never finished.
+  suite:
+    name: suite (${{ matrix.os }})
+    needs: agree
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: nasm
+        uses: ilammy/setup-nasm@v1
+      - run: make test
+
+  # **Reproducibility is checked on the machine that publishes.** Doing it
+  # anywhere else proves something about that other machine.
+  reproducible:
+    name: the build does not depend on where it happened
+    needs: agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: nasm
+        uses: ilammy/setup-nasm@v1
+      - run: make check-reproducible-full
+
+  build:
+    name: build (${{ matrix.os }})
+    needs: [suite, reproducible]
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: nasm
+        uses: ilammy/setup-nasm@v1
+
+      # SOURCE_DATE_EPOCH from the tagged commit, not from the clock. Two runs
+      # of this workflow on the same tag must produce the same bytes, and a
+      # wall clock guarantees they do not.
+      - name: pin the build time to the commit
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+
+      - name: build
+        shell: bash
+        run: make build-dist
+
+      # macOS is the only one that can produce a universal binary, and it is
+      # the only place Apple's SDK exists.
+      - name: universal macOS binary
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "not yet implemented: lipo the two darwin builds together"
+          echo "::warning::macOS artifacts are per-architecture until this exists"
+
+      - name: packages
+        if: runner.os == 'Linux'
+        run: make package-deb dist-source
+
+      - name: checksums
+        shell: bash
+        run: |
+          cd build/dist
+          shasum -a 256 * > "SHA256SUMS.${{ runner.os }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esper-${{ runner.os }}
+          path: |
+            build/dist/*
+            dist/*
+          if-no-files-found: error
+
+  # **Nothing here publishes.** The artifacts are gathered, their checksums are
+  # collected into one file, and a person takes it from there: signing happens
+  # with a key that is not on a build server, and attaching assets to a release
+  # is a deliberate act. A workflow that could publish on its own is a workflow
+  # whose compromise publishes on its own.
+  gather:
+    name: gather, and stop
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: one checksum file over everything
+        run: |
+          cd artifacts
+          find . -type f -not -name 'SHA256SUMS*' -print0 \
+            | sort -z \
+            | xargs -0 shasum -a 256 > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esper-release
+          path: artifacts
+          if-no-files-found: error
+
+      - name: what is left for a person to do
+        run: |
+          cat <<'MSG'
+          Downloaded artifacts are built and checksummed. Still to do, by hand:
+
+            1. Verify at least one binary reproduces locally from the source
+               tarball.
+            2. Sign SHA256SUMS with the offline key.
+            3. Create the release and attach the artifacts, SHA256SUMS and the
+               signature.
+            4. Run the "on real machines" section of docs/releasing.md.
+
+          See docs/releasing.md.
+          MSG
+
+# ── Never run ────────────────────────────────────────────────────────────────
+#
+# This file has never executed. The repository has no remote, so no workflow in
+# this tree has ever run, and a matrix that names three operating systems is a
+# statement of intent rather than of fact until it has.
+#
+# It is written now because the alternative is writing it during a release,
+# which is the worst moment to be finding out what a workflow file does. Expect
+# the first run to fail on something small — an action version, a shell
+# difference on Windows, a path. The release checklist in docs/releasing.md is
+# the authority on what a release actually requires; this automates the parts
+# of it that a machine should do, and deliberately stops before the parts a
+# person should.

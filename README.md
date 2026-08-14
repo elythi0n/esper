@@ -95,6 +95,44 @@ Three binaries come out:
 | `esper-engine` | The realtime engine: capture, encode, transport, input |
 | `esper-broker` | A stateless introducer and blind relay, run by you |
 
+## Installing
+
+No release has been tagged yet, so there is nothing to download. Building the
+packages from a checkout works today:
+
+```sh
+make package-deb                 # → dist/*.deb
+sudo dpkg -i dist/esper_*.deb    # esper and the engine
+```
+
+Arch has a `PKGBUILD` and Fedora a `.spec` in [`packaging/`](packaging/), and
+`esper-broker` is a **separate package** everywhere — a machine that introduces
+other machines has no reason to carry the engine.
+
+Then, on the machine you want to reach:
+
+```sh
+esper host enable    # start now and at login, through systemd --user
+```
+
+`make install` puts the binaries under `/usr/local` instead, if you would
+rather not use a package.
+
+### Checking what you downloaded
+
+Esper's builds are **reproducible**: given the source tarball for a release and
+the toolchain it names, you get the published binary back, byte for byte. That
+is the only way the claim that no infrastructure of ours is in the path can be
+checked by somebody who does not trust us — the code is readable, and a binary
+is not. `make check-reproducible` is the same check the project runs on itself;
+[`docs/releasing.md`](docs/releasing.md) says what it covers and what it does
+not.
+
+**Esper never checks for updates.** A client that asks a server whether it is
+current tells that server that this machine exists, what it runs and roughly
+where it is, on a schedule. That is a census. Updates come from your package
+manager or from you.
+
 ## How it is put together
 
 The **engine is Rust** — a hard-realtime pipeline with a per-frame budget of a

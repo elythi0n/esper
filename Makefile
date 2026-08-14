@@ -20,6 +20,31 @@ export SOURCE_DATE_EPOCH
 
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 PREFIX  ?= /usr/local
+
+# **Where the build happened must not be in what the build produced.**
+# `SOURCE_DATE_EPOCH` above handles *when*; these handle *where*, and both were
+# measured rather than assumed — a binary built from this checkout and one
+# built from `git archive` of the same commit came out with different hashes
+# until these were added. `make check-reproducible` is the measurement.
+#
+# Go stamps the VCS state of the tree it was built in: the revision, the commit
+# time, and a module version derived from them. A release tarball has no `.git`
+# and so cannot produce them, which means nobody downloading the source could
+# ever reproduce a binary built from a checkout. The commit is not put back as
+# an ldflag on purpose — `VERSION` and the tag identify a release, and anything
+# else would be one more input a reproducer has to be told.
+GOFLAGS_REPRO := -trimpath -buildvcs=false
+
+# rustc records the directory it was invoked in, and it survives `strip` — that
+# was checked, because removing the symbols looks like it should be enough and
+# is not. Two prefixes: the workspace, which differs between a checkout and an
+# unpacked tarball, and the registry, which differs between one person's home
+# directory and another's.
+CARGO_HOME ?= $(HOME)/.cargo
+RUSTFLAGS  := --remap-path-prefix=$(CURDIR)/$(CORE)=/esper \
+              --remap-path-prefix=$(CARGO_HOME)/registry=/cargo/registry
+export RUSTFLAGS
+
 # Every platform the Go half builds for. It is pure Go with CGO off, so all of
 # these work from any of them — the Rust engine is the half that needs a cross
 # toolchain, and macOS needs Apple's SDK and therefore a Mac.
@@ -164,13 +189,23 @@ check-clock:
 .PHONY: build
 build: build-rust build-go
 
+## Print the RUSTFLAGS this Makefile builds with
+##
+## Cargo counts `RUSTFLAGS` as part of what it is building, so running `cargo`
+## by hand without these compiles everything a second time into a cache of its
+## own. `export RUSTFLAGS="$$(make -s print-rustflags)"` in a shell where you
+## use cargo directly, and the two share one.
+.PHONY: print-rustflags
+print-rustflags:
+	@printf '%s\n' '$(RUSTFLAGS)'
+
 ## Build the Go control plane → ./build/esper
 .PHONY: build-go
 build-go:
 	$(GUARD_ROOT)
 	@echo "building $(BINARY) $(VERSION)..."
 	@mkdir -p $(BIN)
-	@go build -trimpath -ldflags='$(LDFLAGS)' -o $(BIN)/$(BINARY) $(PKG)
+	@go build $(GOFLAGS_REPRO) -ldflags='$(LDFLAGS)' -o $(BIN)/$(BINARY) $(PKG)
 	@echo "  → $(BIN)/$(BINARY)"
 
 ## Build the Rust engine and broker → ./build
@@ -197,7 +232,7 @@ build-dist:
 	@mkdir -p $(BIN)/dist
 	@cp $(CORE)/target/dist/esper-engine $(BIN)/dist/
 	@cp $(CORE)/target/dist/esper-broker $(BIN)/dist/
-	@go build -trimpath -ldflags='$(LDFLAGS)' -o $(BIN)/dist/$(BINARY) $(PKG)
+	@go build $(GOFLAGS_REPRO) -ldflags='$(LDFLAGS)' -o $(BIN)/dist/$(BINARY) $(PKG)
 	@printf '  %-20s %s\n' \
 		esper          "$$(du -h $(BIN)/dist/$(BINARY) | cut -f1)" \
 		esper-engine   "$$(du -h $(BIN)/dist/esper-engine | cut -f1)" \
@@ -230,7 +265,7 @@ build-win:
 	@cp $(CORE)/target/x86_64-pc-windows-gnu/release/esper-engine.exe $(BIN)/win/
 	@cp $(CORE)/target/x86_64-pc-windows-gnu/release/esper-broker.exe $(BIN)/win/
 	@GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-		go build -trimpath -ldflags='$(LDFLAGS)' -o $(BIN)/win/$(BINARY).exe $(PKG)
+		go build $(GOFLAGS_REPRO) -ldflags='$(LDFLAGS)' -o $(BIN)/win/$(BINARY).exe $(PKG)
 	@printf '  %-22s %s\n' \
 		esper.exe        "$$(du -h $(BIN)/win/$(BINARY).exe | cut -f1)" \
 		esper-engine.exe "$$(du -h $(BIN)/win/esper-engine.exe | cut -f1)" \
@@ -247,9 +282,81 @@ build-all:
 		out=$(DIST)/$(BINARY)-$$os-$$arch; \
 		echo "building $$out..."; \
 		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
-			go build -trimpath -ldflags='$(LDFLAGS)' -o $$out $(PKG) || exit 1; \
+			go build $(GOFLAGS_REPRO) -ldflags='$(LDFLAGS)' -o $$out $(PKG) || exit 1; \
 	done
 	@echo "done → $(DIST)/"
+
+## Build the Linux packages → ./dist
+##
+## Only the formats this machine can actually produce, which is the `.deb`s —
+## the Arch packaging is a PKGBUILD for `makepkg` to drive and the RPM spec is
+## for `rpmbuild`, and neither of those is a thing to reimplement here. See
+## `packaging/`.
+.PHONY: package-deb
+package-deb: build
+	$(GUARD_ROOT)
+	@mkdir -p $(DIST)
+	@./scripts/build-deb.sh esper $(DIST) $(BIN)
+	@./scripts/build-deb.sh esper-broker $(DIST) $(BIN)
+
+## Verify the changelog says something about the version being released
+##
+## Only bites once `VERSION` names a real release: while it is v0.0.0 there is
+## nothing to have written about.
+.PHONY: check-changelog
+check-changelog:
+	@./scripts/check-changelog.sh
+
+## Build the control plane for every platform it claims, and check what came out
+##
+## `PLATFORMS` was a list nothing asserted. Building is cheap with CGO off, so
+## this builds all five and reads each file back — a `GOARCH` the toolchain
+## ignored would otherwise compile perfectly.
+.PHONY: check-cross
+check-cross:
+	@./scripts/check-cross.sh
+
+## Produce the release source tarball → ./dist
+##
+## Tracked files only, reproducibly. This is what a stranger downloads and what
+## a distribution builds from — see `check-published`.
+.PHONY: dist-source
+dist-source:
+	@mkdir -p $(DIST)
+	@./scripts/dist-source.sh $(DIST)
+
+## Verify the artifact a stranger downloads, not the tree it came from
+##
+## The isolation rule is enforced against the working copy, and the working
+## copy is not what is published. This unpacks the tarball and asks again —
+## and plants a violation in it, because the branch of the isolation check that
+## has no git to ask had never run.
+.PHONY: check-published
+check-published:
+	@./scripts/check-published.sh
+
+## Verify every built binary is in a package, in every format
+##
+## Three package definitions describing the same software is three chances to
+## forget a file. They install from one manifest so they cannot disagree with
+## each other — this asks the question that survives that, which is whether the
+## manifest itself has kept up with the build.
+.PHONY: check-packages
+check-packages:
+	@./scripts/check-packages.sh
+
+## Verify a build does not depend on where it happened
+##
+## The Go half only: seconds, and it catches the whole class. See
+## `check-reproducible-full` for the engine.
+.PHONY: check-reproducible
+check-reproducible:
+	@./scripts/check-reproducible.sh
+
+## The same, including the engine — two cold release builds, twenty minutes
+.PHONY: check-reproducible-full
+check-reproducible-full:
+	@./scripts/check-reproducible.sh --with-engine
 
 ## Run every test, both languages
 .PHONY: test
@@ -451,11 +558,11 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-trail check-host-decides check-settings check-vocabularies check-scancodes check-unsafe fmt-check lint test build smoke
+ci: check-isolation check-reached check-trail check-host-decides check-settings check-vocabularies check-scancodes check-unsafe fmt-check lint test build check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full
-ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz
+ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz check-reproducible-full
 
 ## Install both binaries to $(PREFIX)/bin (may need sudo)
 .PHONY: install

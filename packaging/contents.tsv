@@ -1,0 +1,27 @@
+# What each package installs, once, for every packaging format.
+#
+# **This file decides and the built package reports.** Three package
+# definitions describing the same software in three dialects is three chances
+# to forget a file, and a package missing `esper-engine` installs cleanly and
+# does nothing. So the definitions are written in the idiom a packager for that
+# distribution expects to read, and `scripts/check-packages.sh` builds them and
+# compares what came out against this.
+#
+# Paths are not written here because they are not the same on every
+# distribution — a licence goes to `/usr/share/licenses` on Arch and
+# `/usr/share/doc/<pkg>/copyright` on Debian. What is written here is the
+# *kind* of thing, and the checker holds the one mapping from kind to path.
+#
+#   bin          an executable                → /usr/bin/<name>
+#   unit-user    a systemd user service       → /usr/lib/systemd/user/<name>
+#   unit-system  a systemd system service     → /usr/lib/systemd/system/<name>
+#   licence      the licence text             → wherever the distribution puts it
+#
+# package	kind	name
+esper	bin	esper
+esper	bin	esper-engine
+esper	unit-user	esper.service
+esper	licence	LICENSE
+esper-broker	bin	esper-broker
+esper-broker	unit-system	esper-broker.service
+esper-broker	licence	LICENSE
