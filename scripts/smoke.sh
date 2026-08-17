@@ -2367,6 +2367,33 @@ print(s.getsockname()[1]); s.close()')
         fail=1
       fi
 
+      # **A progress display must not become somebody's log file.** The
+      # transfer now draws a bar with carriage returns, and a bar written into
+      # a pipe is thousands of lines of them — which is how a script's output
+      # stops being readable. So it is drawn only when stderr is a terminal,
+      # and this asserts the *absence*: the capture above went to a pipe.
+      if printf '%s' "$pushed" | grep -q $'\r'; then
+        printf '  ✗ the progress bar was drawn into a pipe\n'
+        fail=1
+      else
+        printf '  ✓ and drew no progress bar into a pipe, only into a terminal\n'
+      fi
+
+      # And the same command on a real terminal *does* draw one, or the check
+      # above passes on a transfer that never reports anything at all.
+      if command -v script >/dev/null 2>&1; then
+        onatty=$(cd "$cp_work" && ESPER_HOME="$term_b" timeout 90 script -q -c \
+          "env ESPER_HOME=$term_b $cp_bin cp report.bin $cp_addr:reports/again.bin" \
+          /dev/null 2>&1 || true)
+        if printf '%s' "$onatty" | grep -qE '\[=* *\] +[0-9]+%'; then
+          printf '  ✓ and does draw one on a terminal, so the silence above is a choice\n'
+        else
+          printf '  ✗ no progress bar on a terminal either, so nothing reports progress\n'
+          printf '%s\n' "$onatty" | tail -4 | sed 's/^/      /'
+          fail=1
+        fi
+      fi
+
       # And back the other way, into a directory that names it after the source.
       mkdir -p "$cp_work/down"
       pulled=$(cd "$cp_work/down" && ESPER_HOME="$term_b" timeout 90 \
@@ -2533,6 +2560,39 @@ print(s.getsockname()[1]); s.close()')
       # reason ever sent. From the far end that is indistinguishable from a
       # machine that is switched off, which is the wrong thing to conclude
       # about a machine somebody is using.
+      # **Saying something to the person at the other machine.**
+      #
+      # During a support call the two people are often on a telephone; when
+      # they are not, the alternative to this is the helper typing into the
+      # *host's* own applications to talk to them.
+      #
+      # Driven through a pty, because the controller only reads its own stdin
+      # when that stdin is a terminal — a reader competing for a pipe would
+      # take bytes belonging to whatever was on the other end of it. `script`
+      # gives it one and forwards this pipe into it.
+      if command -v script >/dev/null 2>&1; then
+        echo "  — saying something to the other machine"
+        printf 'is the printer on?\n' | ESPER_HOME="$term_b" timeout 60 script -q -c \
+          "env ESPER_HOME=$term_b $BIN/esper-engine connect $multi_addr --seconds 4" \
+          /dev/null > "$term_b/chat.log" 2>&1 || true
+        if grep -q 'they say   is the printer on?' "$term_a/multi.log" 2>/dev/null; then
+          printf '  ✓ what one side typed reached the other\n'
+        else
+          printf '  ✗ nothing typed reached the host\n'
+          tail -4 "$term_b/chat.log" 2>/dev/null | sed 's/^/      /'
+          fail=1
+        fi
+        # **And it is written nowhere.** The trail records what a session did;
+        # a conversation is not that, and a password typed into it must not
+        # survive in a file the other side can read.
+        if grep -q 'printer' "$term_a/sessions.log" 2>/dev/null; then
+          printf '  ✗ what was said was written into the audit trail\n'
+          fail=1
+        else
+          printf '  ✓ and was written nowhere: not in the trail, not on disk\n'
+        fi
+      fi
+
       echo "  — a second device arriving mid-session"
       # **The host's word for it, not the controller's.** Waiting on the
       # controller's own output waits for it to say what it is doing; what

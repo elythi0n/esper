@@ -376,7 +376,32 @@ async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result
         eprintln!("  resuming   from {from} bytes in");
     }
     sending.resume_at(from).map_err(|e| e.to_string())?;
-    crate::files_task::push(stream, &mut sending).await?;
+
+    // **A figure that moves, and a way to stop.** A ten-gigabyte copy used to
+    // print one line when it started and one when it finished, so the only
+    // way to tell a slow transfer from a stuck one was to watch the network.
+    //
+    // On one line, rewritten, and only when this is a terminal: a progress
+    // line written into a log or a pipe is thousands of lines of carriage
+    // returns, which is how a script's output becomes unreadable.
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let stop = crate::files_task::stop_on_interrupt();
+    let mut report = |sent: u64, total: u64| {
+        if interactive {
+            eprint!("\r  sending    {}", progress_bar(sent, total));
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        }
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::files_task::Going::Stop
+        } else {
+            crate::files_task::Going::On
+        }
+    };
+    let pushed = crate::files_task::push_reporting(stream, &mut sending, &mut report).await;
+    if interactive {
+        eprintln!();
+    }
+    pushed?;
 
     match stream.recv::<FileMessage>().await {
         Ok(FileMessage::Done(end)) if end.is_stored() => {
@@ -638,4 +663,73 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::progress_bar;
+
+    /// **The two ends, and the middle.** A bar is the kind of thing that is
+    /// obviously right and divides by zero on an empty file.
+    #[test]
+    fn a_bar_covers_both_ends_and_an_empty_file() {
+        assert!(progress_bar(0, 1000).contains("  0%"));
+        assert!(progress_bar(500, 1000).contains(" 50%"));
+        assert!(progress_bar(1000, 1000).contains("100%"));
+        // An empty file is finished the moment it starts, and dividing by its
+        // size is the only way this could panic.
+        assert!(progress_bar(0, 0).contains("100%"));
+    }
+
+    /// **It never says more than all of it**, however the numbers arrive. A
+    /// resumed transfer counts bytes it did not send this time, and a bar
+    /// that read 130% would be the first thing anybody noticed.
+    #[test]
+    fn it_never_reports_more_than_the_whole_file() {
+        let over = progress_bar(1300, 1000);
+        assert!(over.contains("100%"), "{over}");
+        // And the bar itself does not grow past its width.
+        let bars = over.chars().filter(|c| *c == '=').count();
+        assert!(bars <= 24, "the bar was {bars} wide");
+    }
+
+    /// Every line is the same length, or the display jitters as it counts.
+    #[test]
+    fn the_bar_is_a_fixed_width() {
+        let a = progress_bar(1, 1_000_000);
+        let b = progress_bar(999_999, 1_000_000);
+        let width = |s: &str| s.chars().take_while(|c| *c != ']').count();
+        assert_eq!(width(&a), width(&b));
+    }
+}
+
+/// One line of progress: a bar, a percentage and the bytes.
+///
+/// Fixed width so the line does not jitter as the numbers grow, and drawn
+/// with a carriage return by the caller rather than a newline.
+fn progress_bar(sent: u64, total: u64) -> String {
+    const WIDE: u64 = 24;
+    // A total of zero is an empty file, which is finished the moment it
+    // starts — and dividing by it would be the only way this could panic.
+    let filled = if total == 0 {
+        WIDE
+    } else {
+        sent.saturating_mul(WIDE) / total.max(1)
+    };
+    let filled = filled.min(WIDE) as usize;
+    let percent = if total == 0 {
+        100
+    } else {
+        sent.saturating_mul(100) / total.max(1)
+    };
+    format!(
+        "[{}{}] {:>3}%  {} of {} bytes",
+        "=".repeat(filled),
+        " ".repeat(WIDE as usize - filled),
+        percent.min(100),
+        sent,
+        total
+    )
 }

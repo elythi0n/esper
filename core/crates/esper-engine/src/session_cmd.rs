@@ -1110,6 +1110,37 @@ async fn turn_away(mut session: Session) {
     closer.linger(GOODBYE).await;
 }
 
+/// Lines typed at the controller's own terminal, if it has one.
+///
+/// `None` when stdin is not a terminal, which is the case in a script and in
+/// every test — a reader there would take bytes belonging to whatever is
+/// piping in.
+///
+/// A blocking read on its own thread rather than async stdin: this is one
+/// thread doing nothing, and `tokio`'s stdin is itself a blocking read on a
+/// pool thread with more machinery around it.
+fn read_keys_if_interactive() -> Option<std::sync::mpsc::Receiver<String>> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return None;
+    }
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {
+                    if send.send(line.clone()).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    Some(recv)
+}
+
 /// Wait for something to say about the pointer, or for ever when nothing is
 /// watching it.
 ///
@@ -2931,6 +2962,8 @@ async fn serve_session(
         parked,
         stopping,
         Attending {
+            sound,
+            may_have_sound: granted.contains(&Permission::Audio),
             indicator,
             presses,
             pointer,
@@ -2952,10 +2985,10 @@ async fn serve_session(
         },
     )
     .await;
-    // **Dropped here, with the session.** The thread stops, the capture
-    // subprocess is killed and the sound stops — a session that ended and left
-    // a capture running would be recording somebody's machine for nothing.
-    drop(sound);
+    // The sound went into `serve` with the session and was dropped when it
+    // returned — the thread stops, the capture subprocess is killed. A
+    // session that ended and left a capture running would be recording
+    // somebody's machine for nothing.
     drop(watch);
     // **The screens come back before the indicator goes down**, so a person
     // watching their own machine sees it light up rather than sitting dark for
@@ -3368,6 +3401,22 @@ struct Machine<'a> {
 }
 
 struct Attending<'a> {
+    /// The sound this session is sending, if any, and the means to start it
+    /// again.
+    ///
+    /// Owned here rather than by the caller because **the control stream is
+    /// read in `serve`**, and starting or stopping sound mid-session is a
+    /// message on it. The caller starts it, because whether it started is one
+    /// of the things the opening grant has to say; from then on it belongs to
+    /// the loop that can be asked about it.
+    sound: Option<crate::audio_task::Sending>,
+    /// Whether this session was granted the sound at all.
+    ///
+    /// A request to start it on a session without the permission is not
+    /// refused — it is not honoured, and the controller learns that from the
+    /// announcement it does not get. Refusing would tell a device what it
+    /// does not hold, one question at a time.
+    may_have_sound: bool,
     /// The session indicator and the panic key.
     indicator: Option<&'a crate::presence_task::Indicator>,
     /// Presses of the panic key, taken one at a time.
@@ -4347,6 +4396,66 @@ async fn serve(
                     }));
                     continue;
                 }
+                // **The sound is the session's, not the stream's.** The
+                // capture is a thread this function owns, so this is the
+                // only place that can start or stop it — and it is handled
+                // before the forward below because the pipeline has nothing
+                // to do with it.
+                // **Shown, and written nowhere.** The audit trail records what
+                // a session *did* — what was granted, what was refused, when
+                // it ended. A conversation is not that, and a support call
+                // where somebody typed a password into the chat should not
+                // leave it in a file the helper can read afterwards.
+                if let MediaMessage::Say(said) = &message {
+                    println!("      they say   {}", said.text);
+                    continue;
+                }
+                if let MediaMessage::Sound(wanted) = &message {
+                    match (wanted.wanted, attending.sound.is_some()) {
+                        (true, false) if attending.may_have_sound => {
+                            match crate::audio_task::start(&media) {
+                                Ok(sending) => {
+                                    println!("      sound      started, at the viewer's request");
+                                    // Announced, because a controller cannot
+                                    // build a decoder for a stream it was not
+                                    // told about — and the packets are
+                                    // already on their way.
+                                    // Straight down the control stream: the
+                                    // channel to the controller belongs to
+                                    // the sending thread, and this is the
+                                    // side of the session that already holds
+                                    // the stream.
+                                    if control
+                                        .send(&MediaMessage::Audio(sending.config()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                    attending.sound = Some(sending);
+                                }
+                                // Not refused: a host with no sound server is
+                                // the ordinary case on a server, and the
+                                // controller learns it from the announcement
+                                // that does not arrive.
+                                Err(e) => {
+                                    println!("      sound      asked for, and not available: {e}")
+                                }
+                            }
+                        }
+                        (false, true) => {
+                            // Dropping the handle stops the thread and kills
+                            // the capture subprocess.
+                            attending.sound = None;
+                            println!("      sound      stopped, at the viewer's request");
+                        }
+                        // Asking for what is already the case, or for sound
+                        // this session was never granted. Neither is an error
+                        // and neither is worth a line of output.
+                        _ => {}
+                    }
+                    continue;
+                }
                 if to_pipeline.send(message).is_err() {
                     break;
                 }
@@ -5214,9 +5323,54 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         /// The longest a keystroke may sit in the loop before it is sent.
         const INPUT_POLL: Duration = Duration::from_millis(10);
         let mut last_arrival = tokio::time::Instant::now();
+        // **A way to ask, for a viewer with no window.** The sound can be
+        // started and stopped mid-session, and until there is a viewer with
+        // controls on it the only surface a person has is the terminal they
+        // typed `esper connect` into. One letter and Enter.
+        //
+        // Only when stdin is a terminal: `--seconds` in a script has its
+        // stdin pointed at something else, and a reader competing for it
+        // would take bytes that belong to whatever else is on the other end.
+        let keys = read_keys_if_interactive();
+        let mut sound_wanted = !o.no_audio;
+
         loop {
             if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
                 break;
+            }
+            // Checked rather than awaited: this loop already wakes at least
+            // once a second, and putting stdin in the wait would mean
+            // restructuring the one await this loop is built around for a
+            // keystroke nobody presses twice a second.
+            if let Some(keys) = keys.as_ref() {
+                while let Ok(line) = keys.try_recv() {
+                    match line.trim() {
+                        "m" | "mute" | "sound" => {
+                            sound_wanted = !sound_wanted;
+                            match link.want_sound(sound_wanted).await {
+                                Ok(()) => println!(
+                                    "  sound      {}",
+                                    if sound_wanted {
+                                        "asked for"
+                                    } else {
+                                        "asked to stop"
+                                    }
+                                ),
+                                Err(e) => println!("  sound      could not ask: {e}"),
+                            }
+                        }
+                        "" => {}
+                        // Anything else is something to say. This is not a
+                        // chat window; it is a way to talk to the person at
+                        // the other machine without typing into their own
+                        // applications, which is what a helper otherwise
+                        // ends up doing.
+                        text => match link.say(text).await {
+                            Ok(()) => println!("  you say    {text}"),
+                            Err(e) => println!("  not sent   {e}"),
+                        },
+                    }
+                }
             }
             // As long as the stream will let us, and no longer.
             let mut wait = link
@@ -5248,6 +5402,9 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     // keeping — and both are said out loud, because a viewer
                     // that silently changes size, or silently does not, looks
                     // like a fault either way.
+                    for said in link.take_said() {
+                        println!("  they say   {said}");
+                    }
                     if let Some(announced) = link.take_announcement() {
                         // **Four different things arrive as one message**, and
                         // a viewer that said the same sentence for all of them

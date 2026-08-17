@@ -498,3 +498,125 @@ fn the_derived_layout_is_in_the_pictures_pixels_not_the_desktops() {
     );
     assert!(first.intersect(&second).is_none());
 }
+
+/// **A viewer may ask for the sound, and the video stream is not what
+/// answers.**
+///
+/// The capture is a thread the *session* owns; `HostStream` has no handle on
+/// it. So the stream accepts the message and does nothing, and the session
+/// acts on it — the alternative being a handle on the sound threaded into the
+/// video stream so that one match arm could use it.
+///
+/// Accepting it here is what matters: an arm that refused would make the
+/// feature unreachable however well the session handled it. And the direction
+/// table has to allow it first, or this arm is never reached at all.
+#[test]
+fn a_request_for_the_sound_is_accepted_and_left_to_the_session() {
+    let mut host = host_around(two());
+    let asked = MediaMessage::Sound(esper_proto::SoundWanted { wanted: true });
+
+    assert!(
+        asked.may_be_sent_by(Role::Controller),
+        "the direction table refuses it, so the host would never see one"
+    );
+    assert!(
+        !asked.may_be_sent_by(Role::Host),
+        "a host asking its viewer to start the sound would be deciding about a \
+         room it cannot see"
+    );
+    assert!(
+        matches!(host.handle(&asked), Ok(esper_stream::Handled::Nothing)),
+        "the host refused a request for its own sound"
+    );
+}
+
+/// **The sound keeps its identity across a reconnect, and never wears a
+/// screen's.**
+///
+/// A resumed session restarts the capture — the thread and its subprocess
+/// went with the transport — and the controller has to carry on decoding the
+/// same stream rather than treating it as a new one. What makes that work is
+/// the SSRC being *derived* rather than random, so the second capture
+/// announces the identity the first one had.
+///
+/// Two things have to hold, and neither was checked:
+///
+/// - it is **stable**, or a reconnect is a new stream and the viewer's
+///   decoder starts again with a gap;
+/// - it **collides with no screen**, or audio datagrams and video datagrams
+///   for some monitor are indistinguishable — and the monitor it collided
+///   with would be the one nobody has, until somebody plugs it in.
+#[test]
+fn the_sound_keeps_one_identity_and_never_a_screen_s() {
+    let sound = esper_stream::audio_ssrc();
+    assert_eq!(
+        sound,
+        esper_stream::audio_ssrc(),
+        "the sound's identity changed between two calls, so a reconnect would be a \
+         new stream to the viewer"
+    );
+
+    // Far more monitors than any machine has, because the cost of checking is
+    // nothing and the failure would appear only on the machine that had that
+    // many.
+    for monitor in 0..1024u32 {
+        assert_ne!(
+            sound,
+            esper_stream::ssrc_for(monitor),
+            "the sound has the same identity as monitor {monitor}: its datagrams and \
+             that screen's would be one stream"
+        );
+    }
+}
+
+/// **Growing and shrinking the served set mid-session, which the tracker
+/// recorded as refused.**
+///
+/// Re-pointing to a set of the *same* size was known to work. A set of a
+/// different size makes the picture a different shape, which is the case that
+/// was believed to be rejected — so it is asked of the code rather than of the
+/// note: one screen, then two, then one again, with the announced size having
+/// to change each time.
+///
+/// It works, and the belief was stale. What is genuinely missing is a way for
+/// a person to *choose* a screen they were not shown at the start, which is a
+/// picker and belongs with the viewer — the protocol and the host were never
+/// the obstacle.
+#[test]
+fn the_served_set_can_grow_and_shrink_mid_session() {
+    let mut host = host_around(two());
+    let mut sink = RecordingSink::default();
+    let _ = until_it_says_something(&mut host, &mut sink);
+
+    // One screen.
+    host.handle(&MediaMessage::Select(MonitorSelect::just(0)))
+        .expect("one screen is a set");
+    let one = host.config();
+    assert_eq!(one.serving.len(), 1);
+
+    // Grown to two, which is a different shape.
+    host.handle(&MediaMessage::Select(MonitorSelect {
+        monitors: vec![0, 1],
+    }))
+    .expect("growing the set mid-session");
+    let both = host.config();
+    assert_eq!(both.serving, vec![0, 1], "the host did not grow the set");
+    assert_ne!(
+        (both.width, both.height),
+        (one.width, one.height),
+        "two screens produced the same picture size as one, so this proved nothing \
+         about a size change"
+    );
+
+    // And shrunk again, which is the direction that would leave a viewer
+    // decoding a picture larger than the one being sent.
+    host.handle(&MediaMessage::Select(MonitorSelect::just(0)))
+        .expect("shrinking the set mid-session");
+    let back = host.config();
+    assert_eq!(back.serving, vec![0], "the host did not shrink the set");
+    assert_eq!(
+        (back.width, back.height),
+        (one.width, one.height),
+        "shrinking did not restore the size one screen had"
+    );
+}

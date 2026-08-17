@@ -336,6 +336,28 @@ impl ControllerLink {
         Ok(())
     }
 
+    /// Ask the host to start or stop sending its sound.
+    ///
+    /// **A request about the room this viewer is in**, which is the one thing
+    /// the host cannot see. A session that was granted the sound can turn it
+    /// off and on again without reconnecting — the alternative was closing the
+    /// session and opening another without the permission, which is a new
+    /// consent prompt, a new keyframe, and one session recorded as two.
+    ///
+    /// Not answered directly: a host that may not send sound, or has none,
+    /// simply does not start it, and what the viewer sees is the announcement
+    /// that does or does not arrive.
+    ///
+    /// # Errors
+    ///
+    /// If the control stream will not carry the request.
+    pub async fn want_sound(&mut self, wanted: bool) -> Result<(), LinkError> {
+        self.control
+            .send(&MediaMessage::Sound(esper_proto::SoundWanted { wanted }))
+            .await?;
+        Ok(())
+    }
+
     /// Tell the host whether this side is recording the session.
     ///
     /// **Sent rather than queued**, unlike every other thing this side says:
@@ -509,6 +531,34 @@ impl ControllerLink {
     #[must_use]
     pub fn take_paused(&mut self) -> Option<bool> {
         self.stream.take_paused()
+    }
+
+    /// Anything the other end has typed since this was last called.
+    ///
+    /// See [`esper_stream::ControllerStream::take_said`].
+    pub fn take_said(&mut self) -> Vec<String> {
+        self.stream.take_said()
+    }
+
+    /// Say something to the other end.
+    ///
+    /// Refused before it is sent if it is not something to show a person —
+    /// too long, or carrying control characters. See [`esper_proto::Said`].
+    ///
+    /// # Errors
+    ///
+    /// If the text is not showable, or the control stream will not carry it.
+    pub async fn say(&mut self, text: &str) -> Result<(), LinkError> {
+        let said = esper_proto::Said {
+            text: text.to_owned(),
+        };
+        if !said.is_well_formed() {
+            return Err(LinkError::Stream(esper_stream::StreamError::Malformed {
+                what: "something to say: it is empty, too long, or has control characters in it",
+            }));
+        }
+        self.control.send(&MediaMessage::Say(said)).await?;
+        Ok(())
     }
 
     /// What the host has said this session may now do, if it has said so.

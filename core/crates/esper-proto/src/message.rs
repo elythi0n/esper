@@ -2330,6 +2330,84 @@ pub enum MediaMessage {
     Ask(PermissionAsk),
     /// What somebody at the host said to that. Host to controller.
     Answer(PermissionAnswer),
+    /// Whether the viewer wants the sound at all. Controller to host.
+    ///
+    /// **The protocol has always announced sound separately from the picture;
+    /// what was missing was somewhere to ask.** A viewer who did not want it
+    /// could say so at connect time and not afterwards, so somebody who
+    /// walked into an open-plan office had one lever: close the session and
+    /// open another without the `audio` permission. That is a different
+    /// session — a new consent prompt, a new keyframe, and a gap in the audit
+    /// trail where one session became two.
+    ///
+    /// A **request**, not a command. A host that was never granted `audio`,
+    /// or that has no sound server, does not start it; the answer is the
+    /// [`MediaMessage::Audio`] announcement that does or does not follow.
+    /// Asking for sound a session may not have is not an error and is not
+    /// refused — it is answered by silence, the same way it is answered when
+    /// the machine has no sound card.
+    Sound(SoundWanted),
+    /// Something a person typed. Either direction.
+    ///
+    /// **One of two messages that either end may send**, and the only one
+    /// carrying words a person wrote. During a support call the two people
+    /// are often on a telephone; when they are not, the alternative to this
+    /// is the helper typing into the *host's* own applications, which is
+    /// putting text into somebody's machine to talk to them.
+    ///
+    /// It goes on the control stream because it is a session-level thing that
+    /// happens a handful of times, and it is [`Said`] rather than a bare
+    /// string so the bound and the refusal of control characters live with
+    /// the type.
+    Say(Said),
+}
+
+/// The longest thing anybody may say in one message.
+///
+/// Two thousand characters is a long paragraph and far more than anybody
+/// types into a session. It is a bound rather than a feature: the text is
+/// peer-supplied and reaches a terminal, and an unbounded string on a control
+/// stream is a way to spend a host's memory a message at a time.
+pub const MAX_SAID: usize = 2000;
+
+/// Something a person typed, for the person at the other end.
+///
+/// **Never persisted off the machine that received it.** It is not written to
+/// the audit trail and not written to disk: the trail records what a session
+/// *did* — what was granted, what was refused, when it ended — and a
+/// conversation is not that. A support call where the customer typed a
+/// password into the chat window should not leave it in a file the helper can
+/// read afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Said {
+    /// What was typed.
+    pub text: String,
+}
+
+impl Said {
+    /// Whether this is something to show a person.
+    ///
+    /// **Control characters are refused rather than stripped.** The text goes
+    /// to a terminal, where an escape sequence can move the cursor, recolour
+    /// the screen or — on some terminals — put characters into the reader's
+    /// own input. Stripping them would mean showing a message the sender did
+    /// not send; refusing means the sender is told, which is the honest
+    /// answer for something a person typed by hand.
+    ///
+    /// A newline is not excepted. A message is a line.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.text.is_empty()
+            && self.text.chars().count() <= MAX_SAID
+            && !self.text.chars().any(char::is_control)
+    }
+}
+
+/// Whether the viewer wants the host's sound. See [`MediaMessage::Sound`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoundWanted {
+    /// True to start it, false to stop it.
+    pub wanted: bool,
 }
 
 impl MediaMessage {
@@ -2376,6 +2454,8 @@ impl MediaMessage {
             // A boolean is within bounds by being one.
             Self::Paused(_) => true,
             Self::Recording(_) => true,
+            Self::Sound(_) => true,
+            Self::Say(s) => s.is_well_formed(),
         }
     }
 
@@ -2398,6 +2478,8 @@ impl MediaMessage {
             Self::Paused(_) => "a pause",
             Self::Recording(_) => "a recording notice",
             Self::Audio(_) => "an audio config",
+            Self::Sound(_) => "a request for the sound to start or stop",
+            Self::Say(_) => "something somebody typed",
         }
     }
 
@@ -2437,15 +2519,99 @@ impl MediaMessage {
             | Self::Keyframe(_)
             | Self::Report(_)
             | Self::Recording(_)
-            | Self::Ask(_) => {
+            | Self::Ask(_)
+            // **The viewer's own ears.** Whether a controller wants to hear
+            // the host is a decision about the room the *controller* is in,
+            // which is the one thing the host cannot see.
+            | Self::Sound(_) => {
                 matches!(role, Role::Controller)
             }
+            // **The only message either side may send.** A conversation with
+            // one direction is not one, and both ends have a person who might
+            // be the one to speak first.
+            Self::Say(_) => true,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// **What may be shown to a person, and what may not.**
+    ///
+    /// The text is peer-supplied and reaches a terminal, where an escape
+    /// sequence can move the cursor, recolour the screen or on some terminals
+    /// put characters into the reader's own input. Refused rather than
+    /// stripped: stripping shows a message the sender did not send, and the
+    /// sender is the one who can fix it.
+    #[test]
+    fn something_said_is_bounded_and_carries_no_control_characters() {
+        use super::{MAX_SAID, Said};
+
+        let fine = Said {
+            text: "can you open the terminal?".to_owned(),
+        };
+        assert!(fine.is_well_formed());
+
+        // Nothing to show.
+        assert!(
+            !Said {
+                text: String::new()
+            }
+            .is_well_formed()
+        );
+
+        // An escape sequence, which is the whole reason for the rule.
+        assert!(
+            !Said {
+                text: "\u{1b}[2Jgone".to_owned()
+            }
+            .is_well_formed(),
+            "an escape sequence would reach a terminal"
+        );
+        // A newline is a control character and a message is a line.
+        assert!(
+            !Said {
+                text: "two\nlines".to_owned()
+            }
+            .is_well_formed()
+        );
+
+        // The bound, either side of it.
+        assert!(
+            Said {
+                text: "a".repeat(MAX_SAID)
+            }
+            .is_well_formed()
+        );
+        assert!(
+            !Said {
+                text: "a".repeat(MAX_SAID + 1)
+            }
+            .is_well_formed(),
+            "an unbounded string on a control stream spends a host's memory"
+        );
+        // Counted in characters, not bytes, or the bound moves with the
+        // language somebody is typing.
+        assert!(
+            Said {
+                text: "é".repeat(MAX_SAID)
+            }
+            .is_well_formed(),
+            "the bound must be characters, not bytes"
+        );
+    }
+
+    /// Either end may speak, which is what makes it a conversation.
+    #[test]
+    fn either_end_may_say_something() {
+        use super::{MediaMessage, Role, Said};
+        let said = MediaMessage::Say(Said {
+            text: "hello".to_owned(),
+        });
+        assert!(said.may_be_sent_by(Role::Host));
+        assert!(said.may_be_sent_by(Role::Controller));
+    }
 
     /// **A narrowing must never be discardable, and that is why it has no
     /// validation rule.**
@@ -3089,6 +3255,9 @@ mod media_tests {
             MediaMessage::Keyframe(KeyframeRequest {
                 reason: KeyframeReason::Joined,
             }),
+            // Whether a viewer wants to hear the host is a decision about the
+            // room the viewer is in, which the host cannot see.
+            MediaMessage::Sound(SoundWanted { wanted: false }),
         ] {
             assert!(
                 from_controller.may_be_sent_by(Role::Controller),

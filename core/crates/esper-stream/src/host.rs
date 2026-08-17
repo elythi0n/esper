@@ -718,6 +718,17 @@ impl HostStream {
             // a config would be telling the host what its own screen is, and
             // a controller describing the pointer would be describing a
             // pointer it does not have.
+            // **Accepted here and acted on elsewhere.** Whether the sound
+            // runs is not a property of the video stream: the capture is a
+            // thread the *session* owns, and this type has no way to reach
+            // it. So this arm says the message is legitimate and does
+            // nothing, which is the honest division — the alternative is
+            // giving the stream a handle on the sound so that one match arm
+            // can use it.
+            MediaMessage::Sound(_) => Ok(Handled::Nothing),
+            // Words for a person, not instructions for a video stream. The
+            // session prints them; this type has no terminal.
+            MediaMessage::Say(_) => Ok(Handled::Nothing),
             MediaMessage::Cursor(_) => Err(StreamError::WrongDirection {
                 role: Role::Controller,
                 what: message.name(),
@@ -837,6 +848,7 @@ const fn fidelity_of(sharpness: esper_proto::Sharpness) -> esper_pipeline::Fidel
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     /// **The commonest case must not be the degenerate one.** Monitor 0 used

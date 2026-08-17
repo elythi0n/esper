@@ -361,17 +361,73 @@ async fn give(control: &mut Control, files: &Files, want: FileWant) {
 
 /// Read a file out onto the stream.
 pub async fn push(control: &mut Control, sending: &mut Sending) -> Result<(), String> {
+    push_reporting(control, sending, &mut |_, _| Going::On).await
+}
+
+/// Whether a transfer should keep going.
+///
+/// Returned by the progress callback, so **the same call that is told how far
+/// it has got is the one that can stop it**. A separate cancellation channel
+/// would be a second thing to poll in a loop whose whole job is to not stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Going {
+    /// Keep sending.
+    On,
+    /// Stop, and say so to the far end.
+    Stop,
+}
+
+/// How often to report, in bytes.
+///
+/// **Not every chunk.** `AT_A_TIME` is small enough that a large file is tens
+/// of thousands of chunks, and a progress line per chunk is a progress line
+/// nobody can read and a lock nobody needs. Every quarter of a mebibyte is
+/// about four reports a second on a slow link and forty on a fast one, which
+/// is the range a person reads as "moving".
+const REPORT_EVERY: u64 = 256 * 1024;
+
+/// Push a file, reporting how far it has got and stopping when asked.
+///
+/// `progress` is called with the bytes sent so far and the total, and its
+/// answer decides whether to carry on. A transfer stopped this way ends the
+/// stream rather than the session: the far end sees a short file and says so,
+/// which is what it already does for a link that broke.
+///
+/// # Errors
+///
+/// If the file cannot be read or the stream will not take the bytes.
+pub async fn push_reporting(
+    control: &mut Control,
+    sending: &mut Sending,
+    progress: &mut (dyn FnMut(u64, u64) -> Going + Send),
+) -> Result<(), String> {
     // Asked for here rather than at the stream's opening, because this is the
     // point where a lot of bytes are about to be queued.
     let _ = control.set_priority(BACKGROUND);
     let mut buffer = vec![0u8; AT_A_TIME];
+    let total = sending.bytes();
+    let mut sent = sending.sent();
+    let mut last_reported = sent;
     loop {
         let got = sending.read(&mut buffer).map_err(|e| e.to_string())?;
         if got == 0 {
+            // **The last report is always made**, whatever the interval says.
+            // A transfer that finished on 99% and never said so is a progress
+            // display that looks stuck at the moment it is done.
+            progress(total, total);
             return Ok(());
         }
         let piece = buffer.get(..got).unwrap_or_default();
         control.send_raw(piece).await.map_err(|e| e.to_string())?;
+        sent = sent.saturating_add(got as u64);
+        if sent.saturating_sub(last_reported) >= REPORT_EVERY {
+            last_reported = sent;
+            if progress(sent, total) == Going::Stop {
+                return Err(format!(
+                    "stopped after {sent} of {total} bytes, at this end's request"
+                ));
+            }
+        }
     }
 }
 
@@ -388,4 +444,31 @@ fn shown(raw: &str) -> String {
         );
     }
     raw.chars().take(120).collect()
+}
+
+/// A flag that becomes true when somebody presses Ctrl-C.
+///
+/// **Installed once and shared**, because a second handler would replace the
+/// first: a program that installed one per transfer would have only the last
+/// one working, and a `cp` of several files would become uninterruptible
+/// after the first.
+///
+/// The first press stops the transfer politely — the far end sees a short
+/// file and says so, which is what it already does for a link that broke. A
+/// second press is the runtime's own, and ends the process.
+pub fn stop_on_interrupt() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ASKED: OnceLock<std::sync::Arc<AtomicBool>> = OnceLock::new();
+    std::sync::Arc::clone(ASKED.get_or_init(|| {
+        let flag = std::sync::Arc::new(AtomicBool::new(false));
+        let mine = std::sync::Arc::clone(&flag);
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("\n  stopping   at your request, after the bytes already sent");
+                mine.store(true, Ordering::Relaxed);
+            }
+        });
+        flag
+    }))
 }

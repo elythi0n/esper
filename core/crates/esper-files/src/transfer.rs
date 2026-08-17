@@ -385,6 +385,22 @@ impl Sending {
     ///
     /// If the offset is past the end — a receiver claiming to hold more of a
     /// file than the file has is one this end does not humour.
+    /// How many bytes this file is, in total.
+    ///
+    /// For a caller reporting progress: the numerator is [`Self::sent`] and
+    /// this is the denominator, and taking both from the same place is what
+    /// stops a display that says 110%.
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        self.offer.bytes
+    }
+
+    /// How many have gone so far, including anything skipped by a resume.
+    #[must_use]
+    pub const fn sent(&self) -> u64 {
+        self.sent
+    }
+
     pub fn resume_at(&mut self, from: u64) -> Result<(), FileError> {
         if from > self.offer.bytes {
             return Err(FileError::Failed(format!(

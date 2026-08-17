@@ -409,6 +409,11 @@ pub struct ControllerStream {
     /// taken: a viewer that missed a pause would show a frozen picture with
     /// nothing to explain it, which is what a dead link looks like.
     paused: Option<bool>,
+    /// Anything the host's side has typed, in the order it was said.
+    ///
+    /// A queue rather than a slot, because two sentences sent quickly are
+    /// two sentences and a slot would show the second only.
+    said: Vec<String>,
     /// The sound the host has announced, if it has.
     ///
     /// `None` once a caller has taken it, and taken rather than reported for
@@ -637,6 +642,7 @@ impl ControllerStream {
             granted_now: None,
             answered: None,
             paused: None,
+            said: Vec::new(),
             audio: None,
             round_trip: UNKNOWN_ROUND_TRIP,
             frame_interval: frame_interval(config.max_fps),
@@ -1926,6 +1932,18 @@ impl ControllerStream {
             // first. This arm is what the union's exhaustiveness costs and
             // what it buys: the variant cannot be added to without somebody
             // deciding here what a controller does with one.
+            // A host asking its viewer to start the sound would be a host
+            // deciding what a room it cannot see should hear.
+            MediaMessage::Sound(_) => Err(StreamError::WrongDirection {
+                role: Role::Host,
+                what: message.name(),
+            }),
+            // Kept for the session to show. This type decodes pictures; who
+            // reads a sentence is not its business.
+            MediaMessage::Say(said) => {
+                self.said.push(said.text.clone());
+                Ok(())
+            }
             MediaMessage::Recording(_) => Err(StreamError::Malformed {
                 what: "a recording notice from a host",
             }),
@@ -2055,6 +2073,15 @@ impl ControllerStream {
     #[must_use]
     pub fn take_paused(&mut self) -> Option<bool> {
         self.paused.take()
+    }
+
+    /// Everything the other end has typed since this was last called.
+    ///
+    /// Taken rather than read, and a queue rather than a slot: two sentences
+    /// sent quickly are two sentences, and a caller that was busy must not
+    /// lose the first.
+    pub fn take_said(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.said)
     }
 
     /// Everything the host has said about the pointer since this was last
