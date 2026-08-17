@@ -31,3 +31,13 @@ func unsupported() error {
 		ErrUnsupported,
 	)
 }
+
+// Now says there is nothing here to ask.
+//
+// Windows means a service or a scheduled task, and macOS a launch agent —
+// and on macOS that agent is the same mechanism unattended access will need,
+// with a signature attached to it. Half-wrapping either would leave a state
+// nobody could reason about.
+func Now() State {
+	return State{Why: unsupported().Error()}
+}

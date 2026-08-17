@@ -294,17 +294,34 @@ pub fn parse_invite(args: &[String]) -> Result<InviteOptions, String> {
             other => return Err(format!("unexpected argument {other:?}")),
         }
     }
-    let (Some(addr), Some(key)) = (addr, key) else {
-        // **With no broker configured, `invite` fails with an explanation and
-        // does not fall back to anyone.** That refusal is the product working
-        // correctly: there is no address for a broker anywhere in Esper, and
-        // there is no one else's server to borrow.
-        return Err(
-            "invite needs a broker you run: --via <address> --broker-key <key>.\n  \
-                    There is no default broker anywhere in Esper, and this will not use \
-                    somebody else's.\n  Start one with: esper-broker serve --listen :7443"
-                .to_owned(),
-        );
+    // **The configured broker, when the flags do not name one.**
+    //
+    // `forward`, `cp`, `screenshot` and a session all fall back to
+    // `broker.address` and `broker.key`; `invite` did not, which made it the
+    // one command that could not be driven by a machine with a broker in its
+    // settings — and made the screen that offers an invitation impossible to
+    // build without passing a pinned key through the control plane.
+    //
+    // The fallback is to *the operator's own* setting, which is not a default
+    // broker: there is still no address for one anywhere in Esper, and this
+    // still will not use anybody else's.
+    let (addr, key) = match (addr, key) {
+        (Some(addr), Some(key)) => (addr, key),
+        (given_addr, given_key) => match crate::settings::broker()? {
+            Some(via) => (given_addr.unwrap_or(via.addr), given_key.unwrap_or(via.key)),
+            None => {
+                // With no broker anywhere, `invite` fails with an explanation
+                // and does not fall back to anyone. That refusal is the
+                // product working correctly.
+                return Err(
+                    "invite needs a broker you run: --via <address> --broker-key <key>, \
+                            or broker.address and broker.key in your settings.\n  \
+                            There is no default broker anywhere in Esper, and this will not use \
+                            somebody else's.\n  Start one with: esper-broker serve --listen :7443"
+                        .to_owned(),
+                );
+            }
+        },
     };
     Ok(InviteOptions {
         via: esper_rendezvous::Via { addr, key },

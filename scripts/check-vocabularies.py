@@ -24,6 +24,13 @@ word list differ by one character, the two halves of the product render the
 same key as different codes — and the failure mode is that somebody decides
 the device is not the one they meant.
 
+**A permission, a third time.** The desktop window renders the same words, and
+a window offering a permission the store cannot hold is a control that fails
+on save; one missing a permission a device holds is a device shown with less
+power than it has. TypeScript has no enum the file has to satisfy, so nothing
+would fail — which is exactly why it is checked here rather than left to a
+type.
+
 Fixtures and unit tests catch a mismatch on both sides too. This catches it
 without running anything, and it catches the direction the fixtures cannot: a
 word added to Rust that Go has never seen, in a store no fixture holds yet.
@@ -37,14 +44,20 @@ ROOT = Path(__file__).resolve().parent.parent
 
 RUST_PERMISSION = ROOT / "core" / "crates" / "esper-proto" / "src" / "message.rs"
 RUST_DEVICE = ROOT / "core" / "crates" / "esper-crypto" / "src" / "device.rs"
+RUST_AUDIT = ROOT / "core" / "crates" / "esper-audit" / "src" / "lib.rs"
 RUST_FINGERPRINT = ROOT / "core" / "crates" / "esper-crypto" / "src" / "fingerprint.rs"
 RUST_WORDLIST = ROOT / "core" / "crates" / "esper-crypto" / "src" / "wordlist.rs"
 
 GO_PERMISSION = ROOT / "internal" / "devices" / "permission.go"
 GO_WORDLIST = ROOT / "internal" / "devices" / "wordlist.go"
 
+WEB_PERMISSION = ROOT / "web" / "src" / "api" / "permissions.ts"
+
 # `Self::View => "view",` in a `name()`/`word()` match arm.
-RUST_ARM = re.compile(r'Self::(\w+)\s*=>\s*"([a-z_]+)"')
+# An arm may carry a pattern between the variant and the arrow — the trail's
+# events are `Self::Paired { .. } => "paired"`, where a permission is a bare
+# `Self::View => "view"`. Both are one word for one thing.
+RUST_ARM = re.compile(r'Self::(\w+)(?:\s*\{[^}]*\}|\s*\([^)]*\))?\s*=>\s*"([a-z_]+)"')
 # `View Permission = "view"` or `LockAlways LockAfter = "always"`.
 GO_CONST = re.compile(r'^\s*(\w+)\s+(Permission|LockAfter)\s*=\s*"([a-z_]+)"', re.M)
 # The quoted words of a Rust or Go frozen string table.
@@ -99,22 +112,86 @@ def go_string_const(path: Path, name: str) -> str:
     return found.group(1)
 
 
-def compare(what: str, rust: list[str], go: list[str]) -> list[str]:
+def web_words() -> list[str]:
+    """The words of the `PERMISSIONS` tuple in the web bundle, in order."""
+    text = WEB_PERMISSION.read_text()
+    start = text.find("export const PERMISSIONS = [")
+    if start < 0:
+        raise SystemExit(f"{WEB_PERMISSION.name} no longer declares PERMISSIONS; this check is stale")
+    return re.findall(r'"([a-z_]+)"', text[start : text.find("] as const;", start)])
+
+
+def web_events() -> list[str]:
+    """The event words of `AUTHORISED_BY`, in order.
+
+    The window maps each of the trail's events to the permission that allowed
+    it, because "show me everything that used `terminal`" is the question
+    somebody opens an audit log with and the log answers a different one.
+    """
+    text = WEB_PERMISSION.read_text()
+    start = text.find("export const AUTHORISED_BY")
+    if start < 0:
+        raise SystemExit(f"{WEB_PERMISSION.name} no longer declares AUTHORISED_BY; this check is stale")
+    body = text[start : text.find("};", start)]
+    return re.findall(r"^\s{2}([a-z_]+):", body, re.M)
+
+
+def web_authorising_permissions() -> list[str]:
+    """Which permissions `AUTHORISED_BY` names, so none is invented."""
+    text = WEB_PERMISSION.read_text()
+    start = text.find("export const AUTHORISED_BY")
+    body = text[start : text.find("};", start)]
+    return sorted({m for m in re.findall(r':\s*"([a-z_]+)"', body)})
+
+
+def web_sensitive() -> list[str]:
+    """The words of the `SENSITIVE` set, which decides which switches cannot move."""
+    text = WEB_PERMISSION.read_text()
+    start = text.find("export const SENSITIVE")
+    if start < 0:
+        raise SystemExit(f"{WEB_PERMISSION.name} no longer declares SENSITIVE; this check is stale")
+    return re.findall(r'"([a-z_]+)"', text[start : text.find("]);", start)])
+
+
+def go_sensitive() -> list[str]:
+    """The wire words Go's `Sensitive` returns true for.
+
+    Read from the true arm of its switch and translated through the const
+    block, because the arm names identifiers and everything else in this
+    check speaks the words that go in the file.
+    """
+    text = GO_PERMISSION.read_text()
+    word_of = {name: word for name, kind, word in GO_CONST.findall(text) if kind == "Permission"}
+    start = text.find("func (p Permission) Sensitive() bool {")
+    if start < 0:
+        raise SystemExit("permission.go no longer declares Sensitive; this check is stale")
+    # The arm that returns true is the list; the one after it is the rest.
+    first = text.find("case ", start)
+    end = text.find("return true", first)
+    if first < 0 or end < 0:
+        raise SystemExit("permission.go's Sensitive is no longer a switch with a true arm; this check is stale")
+    found = [word_of[name] for name in re.findall(r"\b([A-Z]\w+)\b", text[first:end]) if name in word_of]
+    if not found:
+        raise SystemExit("permission.go's Sensitive named no permission this check could read; it is stale")
+    return found
+
+
+def compare(what: str, rust: list[str], go: list[str], left: str = "Rust", right: str = "Go") -> list[str]:
     """Complain about every way two lists of words can differ."""
     problems = []
     for missing in [w for w in rust if w not in go]:
         problems.append(
-            f"{what}: Rust has {missing!r} and Go does not. A store holding it would read "
+            f"{what}: {left} has {missing!r} and {right} does not. A store holding it would read "
             f"as a broken trust store on a machine where nothing is wrong"
         )
     for extra in [w for w in go if w not in rust]:
         problems.append(
-            f"{what}: Go has {extra!r} and Rust does not. Go would show something the "
+            f"{what}: {right} has {extra!r} and {left} does not. {right} would show something the "
             f"other half of the product does not enforce"
         )
     if not problems and rust != go:
         problems.append(
-            f"{what}: the same words in a different order — Rust {rust}, Go {go}. "
+            f"{what}: the same words in a different order — {left} {rust}, {right} {go}. "
             f"Order is what a listing and a fixture are compared in"
         )
     return problems
@@ -128,6 +205,29 @@ def main() -> int:
     permissions_go = go_words("Permission")
     problems += compare("permissions", permissions_rust, permissions_go)
     counted.append(f"{len(permissions_rust)} permissions")
+
+    problems += compare("permissions", permissions_rust, web_words(), "Rust", "the window")
+
+    # And which of them the host keeps to itself, because the window draws a
+    # switch that cannot move for exactly these and a disagreement is either
+    # a control that always fails or one that offers what the API refuses.
+    problems += compare("host-only permissions", go_sensitive(), web_sensitive(), "Go", "the window")
+
+    # Every event the trail records, against the window's map from event to
+    # the permission that authorised it. An event added in Rust and not there
+    # is a filter that silently hides lines; one there and not in Rust is a
+    # filter that can never match.
+    events_rust = rust_arms(RUST_AUDIT, "pub const fn tag(&self) -> &'static str {")
+    problems += compare("trail events", events_rust, web_events(), "Rust", "the window")
+    counted.append(f"{len(events_rust)} trail events")
+
+    # And the permissions that map names must be permissions, not new words.
+    invented = sorted(set(web_authorising_permissions()) - set(permissions_rust))
+    if invented:
+        problems.append(
+            "the window authorises trail events with words that are not permissions: "
+            + ", ".join(invented)
+        )
 
     lock_rust = rust_arms(RUST_DEVICE, "pub const fn word(self) -> &'static str {")
     lock_go = go_words("LockAfter")
@@ -171,7 +271,7 @@ def main() -> int:
         return 1
 
     print("  " + ", ".join(counted))
-    print("  ✓ Rust and Go use the same words for the same things")
+    print("  ✓ Rust, Go and the window use the same words for the same things")
     return 0
 
 

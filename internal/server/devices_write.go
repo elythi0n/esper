@@ -34,6 +34,16 @@ func (s *Server) forget(w http.ResponseWriter, r *http.Request) {
 	s.change(w, r, devices.Forget)
 }
 
+// keepDevice turns a one-session pairing into a lasting one.
+//
+// The Devices screen has shown `once` and `spent` since it was written and
+// could do nothing about either — the only way to make a pairing last was
+// `esper keep` in a terminal, which is the thing this window exists to stop
+// being necessary.
+func (s *Server) keepDevice(w http.ResponseWriter, r *http.Request) {
+	s.change(w, r, devices.Keep)
+}
+
 // change asks the engine to change one device, then reports the device as the
 // store now has it.
 //
@@ -45,7 +55,7 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, what devices.Cha
 	fingerprint := r.PathValue("fingerprint")
 
 	var wanted whatToChange
-	if what != devices.Forget {
+	if what != devices.Forget && what != devices.Keep {
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&wanted); err != nil {
 			http.Error(w, "the body should be {\"permissions\": [...]}: "+err.Error(),
 				http.StatusBadRequest)

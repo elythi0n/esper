@@ -30,11 +30,27 @@ const LISTEN: Duration = Duration::from_secs(3);
 #[derive(Debug, Clone, Copy)]
 pub struct DiscoverOptions {
     pub seconds: u64,
+    /// One line per device, tab separated, for a program rather than a person.
+    ///
+    /// # Why not JSON
+    ///
+    /// Nothing in this workspace parses or writes JSON, and adding a crate to
+    /// print four fields would be a dependency bought for a convenience.
+    /// Tab-separated is *unambiguous here* rather than merely shorter: a
+    /// fingerprint is hex, an address is an address, and neither can contain
+    /// a tab or a newline — so a reader splits on the first three tabs and
+    /// whatever remains is the name, however a peer chose to spell it. A JSON
+    /// writer of our own would need string escaping, which is the part that
+    /// gets one case wrong.
+    pub porcelain: bool,
 }
 
 impl Default for DiscoverOptions {
     fn default() -> Self {
-        Self { seconds: 3 }
+        Self {
+            seconds: 3,
+            porcelain: false,
+        }
     }
 }
 
@@ -51,6 +67,10 @@ pub fn parse(args: &[String]) -> Result<DiscoverOptions, String> {
                     .parse()
                     .map_err(|_| "--seconds wants a number".to_owned())?;
                 i += 2;
+            }
+            "--porcelain" => {
+                o.porcelain = true;
+                i += 1;
             }
             other => return Err(format!("unknown flag {other}")),
         }
@@ -70,8 +90,10 @@ pub fn run(o: &DiscoverOptions) -> Result<(), String> {
             .await
             .map_err(|e| format!("looking for devices: {e}"))?;
 
-        println!("🔎 looking for Esper devices on this network");
-        println!();
+        if !o.porcelain {
+            println!("🔎 looking for Esper devices on this network");
+            println!();
+        }
 
         let how_long = if o.seconds == 0 {
             LISTEN
@@ -110,6 +132,28 @@ pub fn run(o: &DiscoverOptions) -> Result<(), String> {
             .filter(|f| !paired.iter().any(|p| p.is_same(f)))
             .cloned()
             .collect();
+
+        if o.porcelain {
+            // One line per device, and **the fingerprint is on every line**.
+            // The human listing prints a name and an address for a paired
+            // device, which is all a person needs and not enough for a
+            // program: two machines may share a name, and only the
+            // fingerprint says which device this is.
+            for f in &paired {
+                let fp = f.fingerprint.as_deref().unwrap_or("");
+                let name = store
+                    .iter()
+                    .find(|d| Some(Fingerprint::of(&d.public_key).hex()) == f.fingerprint)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| f.device.clone());
+                println!("paired\t{fp}\t{}\t{name}", f.address);
+            }
+            for f in &candidates {
+                let fp = f.fingerprint.as_deref().unwrap_or("");
+                println!("candidate\t{fp}\t{}\t{}", f.address, f.device);
+            }
+            return Ok(());
+        }
 
         if found.is_empty() {
             println!("  nothing found");

@@ -18,6 +18,15 @@ const (
 	Revoke
 	// Forget removes the device entirely.
 	Forget
+	// Keep turns a one-session pairing into a lasting one.
+	//
+	// **A grant of a different kind, and it takes no permissions.** What it
+	// changes is not what a device may do but how long it may keep doing it:
+	// a pairing made for one session is spent when that session ends, and
+	// this is the only way to say "actually, stay". The Devices screen has
+	// shown `once` and `spent` since it was written and could do nothing
+	// about either.
+	Keep
 )
 
 // The engine's own subcommand for each.
@@ -29,6 +38,8 @@ func (c Change) verb() string {
 		return "revoke"
 	case Forget:
 		return "forget"
+	case Keep:
+		return "keep"
 	}
 	return ""
 }
@@ -77,11 +88,12 @@ func command(what Change, fingerprint string, perms []Permission) ([]string, err
 		)
 	}
 
-	if what == Forget {
+	// The two that name a device and nothing else.
+	if what == Forget || what == Keep {
 		if len(perms) != 0 {
-			return nil, errors.New("forgetting a device does not take permissions")
+			return nil, fmt.Errorf("%s does not take permissions", what.verb())
 		}
-		return []string{"forget", fingerprint}, nil
+		return []string{what.verb(), fingerprint}, nil
 	}
 
 	if len(perms) == 0 {

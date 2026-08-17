@@ -210,3 +210,29 @@ func TestAHomeOfNothingIsRefused(t *testing.T) {
 		t.Fatalf("a request with a real home was refused: %v", err)
 	}
 }
+
+// TestKeepNamesADeviceAndNothingElse — `keep` changes how long a pairing
+// lasts, not what the device may do, so permissions are a caller's mistake
+// rather than something to ignore.
+func TestKeepNamesADeviceAndNothingElse(t *testing.T) {
+	t.Parallel()
+	const fp = "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+
+	args, err := command(Keep, fp[:FingerprintHex], nil)
+	if err != nil {
+		t.Fatalf("keep: %v", err)
+	}
+	if len(args) != 2 || args[0] != "keep" || args[1] != fp[:FingerprintHex] {
+		t.Errorf("keep should be `keep <fingerprint>`, got %v", args)
+	}
+
+	if _, err := command(Keep, fp[:FingerprintHex], []Permission{View}); err == nil {
+		t.Error("keep with permissions should be refused, not quietly obeyed")
+	}
+
+	// And the fingerprint check applies to it like everything else: whatever
+	// reaches this becomes an argument to the engine.
+	if _, err := command(Keep, "nonsense", nil); !errors.Is(err, ErrNoSuchDevice) {
+		t.Errorf("keep should refuse a fingerprint that is not one, got %v", err)
+	}
+}

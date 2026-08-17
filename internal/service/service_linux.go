@@ -87,6 +87,36 @@ func Disable(r Report) error {
 	return nil
 }
 
+// Now says what systemd currently thinks of the host.
+//
+// Asked rather than remembered: the unit can be enabled, started and stopped
+// by anything on the machine — `systemctl` in a terminal, a distribution
+// package, a reboot — and a control plane keeping its own copy of the answer
+// would be wrong the first time somebody used the tool that owns it.
+//
+// A failed `systemctl` is a "no", not an error: the question is whether the
+// host is on, and a manager that will not answer is a machine where it is
+// not.
+func Now() State {
+	if err := haveSystemctl(); err != nil {
+		return State{Why: err.Error()}
+	}
+	return State{
+		Managed: true,
+		Enabled: systemctlSays("is-enabled"),
+		Active:  systemctlSays("is-active"),
+	}
+}
+
+// systemctlSays runs one of systemd's yes/no questions.
+func systemctlSays(question string) bool {
+	// `is-enabled` and `is-active` answer with an exit status, and print a
+	// word on stdout that is not always the one the status means — so the
+	// status is what is read.
+	cmd := exec.Command("systemctl", "--user", question, unitName) // #nosec G204 -- fixed arguments
+	return cmd.Run() == nil
+}
+
 func haveSystemctl() error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return fmt.Errorf(

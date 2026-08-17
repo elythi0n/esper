@@ -56,6 +56,24 @@ var ErrUnsupported = errors.New("no service manager is wired up for this platfor
 // Where the unit is installed, relative to the user's config directory.
 const unitName = "esper.service"
 
+// State is what the machine's service manager says about the host.
+//
+// Both halves, because they answer different questions and can disagree:
+// **Enabled** is "it starts at login", **Active** is "it is running now". A
+// machine where the second is true and the first is not has a host that will
+// be gone after a reboot, and a screen that showed one switch would be
+// telling somebody something they will find out the hard way.
+type State struct {
+	// Managed is whether there is a service manager here with an arm in this
+	// package. False on a platform we do not wrap, and then nothing else in
+	// this struct means anything.
+	Managed bool
+	Enabled bool
+	Active  bool
+	// Why, when Managed is false: which manager would be needed.
+	Why string
+}
+
 // Report is where a wrapper says what it is doing.
 //
 // Every command is written here before it runs, so the person watching can do

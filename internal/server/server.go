@@ -34,6 +34,27 @@ type Engine interface {
 	Running() bool
 }
 
+// Explainer is an engine that can say *why* it is not running.
+//
+// Optional, and asked for by assertion rather than added to Engine, because
+// not every caller has an answer: a control plane handed an engine it did
+// not start knows only that there isn't one. "The engine is not running" on
+// a screen tells somebody what they can already see; what they need is the
+// thing it said on the way out.
+type Explainer interface {
+	Why() error
+}
+
+// Restarter is an engine this process started and can start again.
+//
+// Also optional, and for a sharper reason: **only the process holding the
+// supervisor can restart it.** A control plane that attached to an engine
+// somebody else started must not offer a button that cannot work, so the
+// route is present only when the engine can actually do it.
+type Restarter interface {
+	Restart() error
+}
+
 // Server is the local API.
 type Server struct {
 	engine Engine
@@ -50,6 +71,11 @@ type Server struct {
 	// writer changes the store by asking the engine to. Nothing here opens it
 	// for writing; see `internal/devices`.
 	writer devices.Writer
+	// pairing is the one code this machine may be showing. See pairing.go.
+	pairing pairing
+	// The one invitation this machine may be offering, held for the same
+	// reason a pairing offer is: the engine waits at the broker.
+	inviting inviting
 }
 
 // Options are what a caller decides.
@@ -136,8 +162,13 @@ func New(o Options) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.guard(s.health))
 	mux.HandleFunc("GET /status", s.guard(s.status))
+	mux.HandleFunc("POST /engine/restart", s.guard(s.restartEngine))
+	mux.HandleFunc("GET /identity", s.guard(s.machineIdentity))
+	mux.HandleFunc("GET /host", s.guard(s.hostState))
+	mux.HandleFunc("POST /host", s.guard(s.setHost))
 	mux.HandleFunc("GET /sessions", s.guard(s.sessions))
 	mux.HandleFunc("GET /devices", s.guard(s.devices))
+	mux.HandleFunc("GET /devices/reachable", s.guard(s.devicesReachable))
 	// **State-changing, and guarded by exactly what the reads are.** The token
 	// is a header, which a form cannot set and a page cannot read; the `Host`
 	// check refuses a request addressed to a name, which is how a browser
@@ -146,7 +177,19 @@ func New(o Options) (*Server, error) {
 	mux.HandleFunc("POST /devices/{fingerprint}/grant", s.guard(s.grant))
 	mux.HandleFunc("POST /devices/{fingerprint}/revoke", s.guard(s.revoke))
 	mux.HandleFunc("DELETE /devices/{fingerprint}", s.guard(s.forget))
+	mux.HandleFunc("POST /devices/{fingerprint}/keep", s.guard(s.keepDevice))
 	mux.HandleFunc("GET /events", s.guard(s.stream))
+
+	// Pairing, in both directions, so it is something a window can do rather
+	// than something a person is sent to a terminal for.
+	mux.HandleFunc("POST /pair/offer", s.guard(s.pairOffer))
+	mux.HandleFunc("GET /pair/offer", s.guard(s.pairState))
+	mux.HandleFunc("DELETE /pair/offer", s.guard(s.pairCancel))
+	mux.HandleFunc("POST /pair/join", s.guard(s.pairJoin))
+	mux.HandleFunc("POST /pair/accept", s.guard(s.pairAccept))
+	mux.HandleFunc("POST /invite", s.guard(s.inviteOffer))
+	mux.HandleFunc("GET /invite", s.guard(s.inviteState))
+	mux.HandleFunc("DELETE /invite", s.guard(s.inviteCancel))
 	s.http = &http.Server{
 		Addr:    addr,
 		Handler: mux,
@@ -251,8 +294,50 @@ func (s *Server) addressedCorrectly(r *http.Request) bool {
 	return err == nil && bound == ip.String()
 }
 
+// health says whether there is an engine, and when there is not, why.
+//
+// The reason travels with the fact because every screen that shows one wants
+// the other, and because the alternative — a second request to find out — is
+// a second thing to get wrong at exactly the moment something already has.
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]any{"running": s.engine.Running()})
+	running := s.engine.Running()
+	answer := map[string]any{"running": running}
+
+	if !running {
+		if explains, ok := s.engine.(Explainer); ok {
+			if why := explains.Why(); why != nil {
+				answer["why"] = why.Error()
+			}
+		}
+	}
+	// Advertised whether or not it is needed, so a screen can decide what to
+	// offer before anything has gone wrong.
+	_, restartable := s.engine.(Restarter)
+	answer["restartable"] = restartable
+
+	writeJSON(w, answer)
+}
+
+// restartEngine starts the engine again, for a screen offering the one thing
+// that fixes a crash.
+//
+// A 501 rather than a 404 when this control plane does not own the engine:
+// the route exists, and the honest answer is that this process cannot do it.
+func (s *Server) restartEngine(w http.ResponseWriter, r *http.Request) {
+	restarts, ok := s.engine.(Restarter)
+	if !ok {
+		http.Error(w,
+			"this control plane did not start the engine, so it cannot start it again",
+			http.StatusNotImplemented)
+		return
+	}
+	// No context: the engine's life belongs to whatever owns the supervisor,
+	// and a request's context ends when the request does.
+	if err := restarts.Restart(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {

@@ -21,7 +21,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/elythi0n/esper/internal/proto"
@@ -39,6 +41,9 @@ var (
 
 	// ErrNotRunning means an operation needed a live engine and there was none.
 	ErrNotRunning = errors.New("engine is not running")
+
+	// ErrStopped means an engine that was running ended without being asked.
+	ErrStopped = errors.New("the engine stopped on its own")
 )
 
 // binaryName is the engine executable, without a platform extension.
@@ -58,6 +63,24 @@ type Supervisor struct {
 	stdout  io.ReadCloser
 	hello   *proto.Hello
 	running bool
+	// asked means this side ended it, so the reaper below knows an exit is
+	// the shutdown finishing rather than a crash.
+	asked bool
+	// reaped carries the one Wait for the running process. One waiter,
+	// because calling Wait twice on an exec.Cmd is an error, and both the
+	// reaper and a caller stopping the engine need the result.
+	reaped chan error
+	// said is the last few lines the engine wrote to stderr, kept so a crash
+	// can be quoted rather than merely counted.
+	said []string
+	// trouble is why there is no engine, when it stopped on its own.
+	trouble error
+	// greet is what was said at the handshake, kept so a restart can say it
+	// again without the caller having to hold on to it.
+	greet proto.Hello
+	// life is the context the engine was first started with, which is the
+	// one that bounds the *process*. See Restart.
+	life context.Context
 }
 
 // Options configures a Supervisor.
@@ -169,8 +192,11 @@ func (s *Supervisor) Start(ctx context.Context, local proto.Hello) error {
 		return fmt.Errorf("starting %s: %w", s.path, err)
 	}
 	s.cmd, s.stdin, s.stdout, s.running = cmd, stdin, stdout, true
+	s.asked, s.trouble, s.said, s.greet, s.life = false, nil, nil, local, ctx
+	s.reaped = make(chan error, 1)
 	s.log("engine started: %s (pid %d)", s.path, cmd.Process.Pid)
 	go s.relay(stderr)
+	go s.reap(cmd, s.reaped)
 
 	remote, err := s.handshake(local)
 	if err != nil {
@@ -196,12 +222,172 @@ func (s *Supervisor) relay(stderr io.Reader) {
 		if line == "" {
 			continue
 		}
+		s.keep(line)
 		s.log("engine: %s", line)
 	}
 }
 
 // maxLogLine bounds one relayed line.
 const maxLogLine = 16 * 1024
+
+// keepLast is how many of the engine's own words to remember.
+//
+// The same count the supervising loop keeps, and for the same reason: a Rust
+// panic is a message, a location and sometimes a note about a backtrace, and
+// the interesting part of any crash is at the end.
+const keepLast = 10
+
+// keep remembers one line of the engine's stderr.
+func (s *Supervisor) keep(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.said = append(s.said, line)
+	if len(s.said) > keepLast {
+		s.said = s.said[len(s.said)-keepLast:]
+	}
+}
+
+// reap waits for the process and records that there is no longer an engine.
+//
+// # Why this exists
+//
+// Without it `running` was set true at Start and false only at Stop, so a
+// **crashed engine still reported itself as running** — for as long as the
+// process that started it stayed up. Every question then failed on a broken
+// pipe with a different sentence, and nothing anywhere could say the one
+// true thing: the engine is gone, and here is what it said on the way out.
+//
+// One waiter, because `Wait` may only be called once; whoever stops the
+// engine reads the same result from the channel.
+func (s *Supervisor) reap(cmd *exec.Cmd, out chan<- error) {
+	err := cmd.Wait()
+	out <- err
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cmd != cmd {
+		// A later Start has already replaced it; this is an old process
+		// finishing and says nothing about the engine that is running now.
+		return
+	}
+	if s.asked {
+		// The shutdown finishing, which stopLocked is already handling.
+		return
+	}
+	s.running = false
+	s.cmd, s.stdin, s.stdout, s.hello = nil, nil, nil, nil
+	s.trouble = fmt.Errorf("%w: %s%s", ErrStopped, exitReason(err), s.lastWordsFor(err))
+	s.log("the engine ended on its own: %v", s.trouble)
+}
+
+// exitReason turns a Wait error into a sentence.
+func exitReason(err error) string {
+	if err == nil {
+		return "it exited"
+	}
+	return err.Error()
+}
+
+// lastWordsFor appends the engine's last words when they might be the reason.
+//
+// # Why they are sometimes withheld
+//
+// The engine says plenty on its way through an ordinary life — a codec
+// warning, a device note — and the last of it is whatever happened to be
+// most recent, not necessarily anything to do with the end. Quoted next to
+// "signal: killed" it reads as a cause, and the first thing this printed in
+// anger was a harmless OpenH264 warning presented as the reason a process
+// somebody else had killed had died.
+//
+// So the cut is **who ended it**. A signal from outside — killed, terminated,
+// interrupted, hung up — is something that happened *to* the engine, and its
+// last words are unrelated by construction. Anything else is the engine
+// ending itself: a non-zero exit, or a fault signal it raised by breaking.
+// Those are exactly the cases where the last line is the panic.
+func (s *Supervisor) lastWordsFor(err error) string {
+	if !itsOwnDoing(err) {
+		return ""
+	}
+	for i := len(s.said) - 1; i >= 0; i-- {
+		if strings.TrimSpace(s.said[i]) != "" {
+			return ", last: " + s.said[i]
+		}
+	}
+	return ""
+}
+
+// itsOwnDoing says whether the engine ended itself.
+func itsOwnDoing(err error) bool {
+	if err == nil {
+		// It exited cleanly, which is its own doing and says nothing useful.
+		return false
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return true
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() {
+		// An exit status of its own choosing.
+		return true
+	}
+	switch status.Signal() {
+	case syscall.SIGKILL, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT:
+		return false
+	default:
+		// SIGSEGV, SIGABRT and their relatives: the engine broke, and the
+		// line before it is the one somebody needs.
+		return true
+	}
+}
+
+// Why says why there is no engine, or nil when one is running.
+//
+// The reason a caller wants this rather than `Running`: a screen that says
+// "the engine is not running" and stops there has told somebody the thing
+// they can already see. What they need is what it said as it went.
+func (s *Supervisor) Why() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		return nil
+	}
+	if s.trouble != nil {
+		return s.trouble
+	}
+	return ErrNotRunning
+}
+
+// Restart stops whatever is there and starts a new engine.
+//
+// It greets the new process with what the old one was greeted with, so a
+// caller does not have to keep hold of a Hello to be able to recover.
+//
+// # Why this takes no context
+//
+// It took the caller's, and that was wrong in the way that only shows up
+// when you run it: `Start` binds the process to its context, the caller with
+// a reason to restart an engine is an HTTP handler, and a handler's context
+// is cancelled the moment it answers. The new engine started, handshook, and
+// was killed a millisecond later — leaving a control plane reporting a crash
+// it had just caused. **The engine's life belongs to the process that owns
+// it**, which is the context the first Start was given, and that is the one
+// used here whoever asks.
+func (s *Supervisor) Restart() error {
+	s.mu.Lock()
+	greeting, life := s.greet, s.life
+	s.mu.Unlock()
+	if life == nil {
+		return fmt.Errorf("%w: it was never started from here", ErrNotRunning)
+	}
+	if greeting.Engine == "" {
+		greeting = s.greeting()
+	}
+	if err := s.Stop(); err != nil {
+		return err
+	}
+	return s.Start(life, greeting)
+}
 
 // handshake sends our Hello and validates the engine's reply.
 func (s *Supervisor) handshake(local proto.Hello) (proto.Hello, error) {
@@ -347,14 +533,15 @@ func (s *Supervisor) stopLocked() error {
 	if !s.running {
 		return nil
 	}
-	s.running = false
+	s.running, s.asked = false, true
 	if s.stdin != nil {
 		_ = s.stdin.Close()
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		cmd := s.cmd
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
+		// **The reaper owns the Wait.** Calling it twice on one command is an
+		// error, and the reaper has to be there anyway so that a crash is
+		// noticed while nobody is stopping anything.
+		cmd, done := s.cmd, s.reaped
 		select {
 		case <-done:
 		case <-time.After(s.grace):
@@ -363,7 +550,10 @@ func (s *Supervisor) stopLocked() error {
 			<-done
 		}
 	}
-	s.cmd, s.stdin, s.stdout, s.hello = nil, nil, nil, nil
+	s.cmd, s.stdin, s.stdout, s.hello, s.reaped = nil, nil, nil, nil, nil
+	s.trouble = nil
+	// `life` is deliberately kept: it is the owning process's context, not
+	// this run's, and a restart after a stop needs it.
 	s.log("engine stopped")
 	return nil
 }

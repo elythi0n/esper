@@ -351,3 +351,193 @@ func TestEngineOutputIsRelayedWithItsOrigin(t *testing.T) {
 		}
 	}
 }
+
+// TestACrashIsNoticed is the bug this reaper exists for.
+//
+// `running` used to be set at Start and cleared only at Stop, so an engine
+// that died went on reporting itself as running for as long as the process
+// that started it stayed up. Every question then failed on a broken pipe
+// with a different sentence, and nothing could say the one true thing.
+func TestACrashIsNoticed(t *testing.T) {
+	s, err := New(Options{Path: engineBinary(t)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := s.Start(ctx, controlPlaneHello()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	if !s.Running() {
+		t.Fatal("a started engine should be running")
+	}
+	if s.Why() != nil {
+		t.Errorf("a running engine has no trouble, got %v", s.Why())
+	}
+
+	s.mu.Lock()
+	pid := s.cmd.Process.Pid
+	s.mu.Unlock()
+	if err := exec.Command("kill", "-9", itoa(pid)).Run(); err != nil {
+		t.Skipf("could not kill the process on this platform: %v", err)
+	}
+
+	if !eventually(2*time.Second, func() bool { return !s.Running() }) {
+		t.Fatal("a killed engine still reports itself as running")
+	}
+	trouble := s.Why()
+	if trouble == nil {
+		t.Fatal("an engine that died should say so")
+	}
+	if !errors.Is(trouble, ErrStopped) {
+		t.Errorf("the reason should be that it stopped on its own, got %v", trouble)
+	}
+	if !contains(trouble.Error(), "killed") && !contains(trouble.Error(), "signal") {
+		t.Errorf("the reason should name how it ended, got %q", trouble)
+	}
+	// **And it should not blame the engine's last words.** A SIGKILL is
+	// something that happened to the engine; whatever it said most recently
+	// is unrelated by construction, and the first time this printed in anger
+	// it offered a harmless codec warning as the reason.
+	if contains(trouble.Error(), "last:") {
+		t.Errorf("a killed engine's last words are not the reason: %q", trouble)
+	}
+}
+
+// TestWhoEndedItDecidesWhetherItsWordsAreQuoted is that cut, stated on its
+// own. A process that broke has a reason in its last line; a process
+// somebody stopped does not.
+func TestWhoEndedItDecidesWhetherItsWordsAreQuoted(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		why    string
+		script string
+		quoted bool
+	}{
+		{"a non-zero exit of its own choosing", "echo 'the config is nonsense' >&2; exit 3", true},
+		{"a fault it raised by breaking", "echo 'thread panicked at src/main.rs:12' >&2; kill -ABRT $$", true},
+		{"stopped from outside", "echo 'a routine warning' >&2; sleep 0.2; kill -KILL $$", false},
+		{"asked to stop from outside", "echo 'a routine warning' >&2; sleep 0.2; kill -TERM $$", false},
+	} {
+		s := &Supervisor{log: func(string, ...any) {}}
+		cmd := exec.Command(script(t, c.script))
+		var out strings.Builder
+		cmd.Stderr = &out
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("%s: start: %v", c.why, err)
+		}
+		err := cmd.Wait()
+		s.said = splitLines(out.String())
+		if got := s.lastWordsFor(err) != ""; got != c.quoted {
+			t.Errorf("%s: quoted = %v, wanted %v (said %q, err %v)", c.why, got, c.quoted, s.said, err)
+		}
+	}
+}
+
+func splitLines(s string) []string {
+	var kept []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			kept = append(kept, line)
+		}
+	}
+	return kept
+}
+
+// TestRestartBringsItBack — the whole point of noticing is being able to
+// offer the one thing that fixes it.
+func TestRestartBringsItBack(t *testing.T) {
+	s, err := New(Options{Path: engineBinary(t)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.Start(ctx, controlPlaneHello()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	s.mu.Lock()
+	first := s.cmd.Process.Pid
+	s.mu.Unlock()
+	if err := exec.Command("kill", "-9", itoa(first)).Run(); err != nil {
+		t.Skipf("could not kill the process on this platform: %v", err)
+	}
+	if !eventually(2*time.Second, func() bool { return !s.Running() }) {
+		t.Fatal("the crash was not noticed")
+	}
+
+	// No Hello is passed: a caller recovering from a crash should not have to
+	// have kept one.
+	if err := s.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if !s.Running() {
+		t.Fatal("the engine should be running again")
+	}
+	if s.Why() != nil {
+		t.Errorf("and it should have nothing to complain about, got %v", s.Why())
+	}
+	s.mu.Lock()
+	second := s.cmd.Process.Pid
+	s.mu.Unlock()
+	if second == first {
+		t.Error("Restart should have started a new process")
+	}
+	if s.Hello() == nil {
+		t.Error("the new engine should have been greeted")
+	}
+
+	// **And it must still be there a moment later.** Restart took the
+	// caller's context once, and the caller with a reason to restart an
+	// engine is an HTTP handler whose context ends when it answers: the new
+	// engine was killed a millisecond after it handshook, and the control
+	// plane reported a crash it had caused itself.
+	time.Sleep(300 * time.Millisecond)
+	if !s.Running() {
+		t.Fatalf("the engine did not survive its own restart: %v", s.Why())
+	}
+}
+
+// TestARestartOutlivesWhoAskedForIt states that trap on its own, in the
+// shape the API actually uses: a context that is cancelled immediately.
+func TestARestartOutlivesWhoAskedForIt(t *testing.T) {
+	s, err := New(Options{Path: engineBinary(t)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	life, endLife := context.WithCancel(context.Background())
+	defer endLife()
+	if err := s.Start(life, controlPlaneHello()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Stop() })
+
+	if err := s.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	// Long enough that a process bound to something already finished would
+	// be gone, and short enough that nobody minds.
+	time.Sleep(300 * time.Millisecond)
+	if !s.Running() {
+		t.Errorf("the engine died with the request that restarted it: %v", s.Why())
+	}
+}
+
+// eventually polls until the condition holds or the patience runs out.
+//
+// Polled rather than slept: the reaper runs on a goroutine of its own, and a
+// fixed sleep would either be flaky or slow, depending which way it was wrong.
+func eventually(patience time.Duration, holds func() bool) bool {
+	deadline := time.Now().Add(patience)
+	for time.Now().Before(deadline) {
+		if holds() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return holds()
+}
