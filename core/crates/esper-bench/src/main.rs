@@ -31,6 +31,7 @@
 //! esper-bench --check base.json     fail on a regression against it
 //! ```
 
+mod legible;
 mod machine;
 mod scenario;
 mod target;
@@ -67,6 +68,56 @@ fn main() -> ExitCode {
     if args.iter().any(|a| a == "--sweep") {
         println!("{}\n", machine::describe());
         return match sweep() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("esper-bench: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // **Whether text at a rung can be read**, which the ladder promises and
+    // nothing measured. A characterisation like the two above: it prints the
+    // recognition rate at every resolution rung and asserts nothing, because
+    // where the floor *should* be is a decision and this is the evidence for
+    // making it.
+    if args.iter().any(|a| a == "--legibility") {
+        println!("{}\n", machine::describe());
+        return match legibility() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("esper-bench: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // **What each rung of the CPU ladder actually costs**, which decides
+    // whether stepping down it is graceful or a cliff.
+    if args.iter().any(|a| a == "--ladder") {
+        println!("{}\n", machine::describe());
+        return match ladder() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("esper-bench: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // **A soak, which is the only measurement here that takes longer than a
+    // coffee.** Everything else runs for seconds; a leak, a drift or a slow
+    // degradation is invisible at that length by definition.
+    if let Some(mins) = after("--soak", &args) {
+        println!("{}\n", machine::describe());
+        let minutes: u64 = match mins.parse() {
+            Ok(m) => m,
+            Err(_) => {
+                eprintln!("esper-bench: --soak takes a number of minutes");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match soak(minutes) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("esper-bench: {e}");
@@ -399,6 +450,220 @@ fn after(flag: &str, args: &[String]) -> Option<String> {
     args.get(at + 1).cloned()
 }
 
+/// Print whether text survives each resolution rung.
+///
+/// **The ladder says "never below a legibility floor" and the floor is a
+/// number of pixels.** This is what that number buys: the share of characters
+/// on a page of text that can still be told apart from the other ninety-four,
+/// after the scaler alone and after the scaler and the codec.
+///
+/// It carries its own guards, because a recognition rate is exactly the kind
+/// of number that can be produced by a broken measurement and believed. Full
+/// resolution has to score near one — if it does not, the metric is wrong
+/// rather than the codec. And a page of noise has to score near chance, or the
+/// matcher is agreeing with itself.
+fn legibility() -> Result<(), String> {
+    const FROM: (u32, u32) = (1920, 1080);
+    // **The product's own rungs**, not a list of round numbers. Measuring a
+    // resolution the ladder never selects says nothing about the ladder — and
+    // the first version of this measured 720, which is not a rung, and spent
+    // an afternoon explaining an anomaly at a size no session ever uses.
+    let rungs = esper_stream::RUNGS;
+
+    let coarse = esper_encode::budget::Fidelity::Coarse.qp_range();
+    let balanced = esper_encode::budget::Fidelity::Balanced.qp_range();
+
+    println!("  Characters correctly told apart, out of the 95 printable ones.");
+    println!("  A page of terminal text at 1920x1080, through each rung.\n");
+    println!(
+        "  {:>9}  {:>10}  {:>12}  {:>12}",
+        "long edge", "scaled", "balanced qp", "coarse qp"
+    );
+    println!(
+        "  {:>9}  {:>10}  {:>12}  {:>12}",
+        "---------", "------", "-----------", "---------"
+    );
+
+    for &edge in rungs {
+        let b = legible::at_rung(FROM, edge, balanced).map_err(|e| e.to_string())?;
+        let c = legible::at_rung(FROM, edge, coarse).map_err(|e| e.to_string())?;
+        println!(
+            "  {:>9}  {:>9.0}%  {:>11.0}%  {:>11.0}%",
+            b.long_edge,
+            b.scaled * 100.0,
+            b.coded * 100.0,
+            c.coded * 100.0
+        );
+    }
+
+    println!("\n  A reading session at full resolution — a page of text with somebody");
+    println!("  typing into it, thirty frames a second for four seconds.\n");
+    println!(
+        "  {:>10}  {:>12}  {:>10}  {:>9}",
+        "sharpness", "steady rate", "keyframe", "legible"
+    );
+    println!(
+        "  {:>10}  {:>12}  {:>10}  {:>9}",
+        "---------", "-----------", "--------", "-------"
+    );
+    for (name, f) in [
+        ("sharp", esper_encode::budget::Fidelity::High),
+        ("balanced", esper_encode::budget::Fidelity::Balanced),
+        ("soft", esper_encode::budget::Fidelity::Coarse),
+    ] {
+        let r = legible::reading_session(FROM, f.qp_range(), 30, 4).map_err(|e| e.to_string())?;
+        println!(
+            "  {name:>10}  {:>9.0} kbit  {:>7.0} kB  {:>8.0}%",
+            r.kbit,
+            r.keyframe_kbytes,
+            r.legible * 100.0
+        );
+    }
+
+    println!("\n  Guards, so the numbers above mean something:");
+    let control = legible::at_rung(FROM, FROM.0, balanced).map_err(|e| e.to_string())?;
+    println!(
+        "    full resolution, unscaled:  {:.0}%  (must be near 100, or the metric is broken)",
+        control.scaled * 100.0
+    );
+    let chance = legible::against_noise(FROM).map_err(|e| e.to_string())?;
+    println!(
+        "    a page of noise:            {:.0}%  (must be near 1, which is chance over 95)",
+        chance * 100.0
+    );
+    Ok(())
+}
+
+/// Print what each rung of the CPU governor's ladder costs.
+///
+/// **Graceful degradation is a claim about the *steps*, not the rungs.** A
+/// ladder can be perfectly ordered and still lurch, if one step halves the
+/// bill and the next takes a tenth off it. And it can fail the other way: the
+/// rung below "full size, coarse" is "three quarters the size, less coarse",
+/// which trades a quantiser step for a resolution step — and whether that is
+/// cheaper is a measurement, not a reading of the table.
+fn ladder() -> Result<(), String> {
+    let steps = scenario::ladder_cost((1920, 1080)).map_err(|e| e.to_string())?;
+    println!("  Every rung of the CPU ladder, on screen-like content at 1080p.\n");
+    println!(
+        "  {:>4}  {:>5}  {:>11}  {:>10}  {:>11}  {:>8}  {:>9}",
+        "rung", "fps", "size", "quantiser", "cpu / frame", "cpu / s", "rate"
+    );
+    println!(
+        "  {:>4}  {:>5}  {:>11}  {:>10}  {:>11}  {:>8}  {:>9}",
+        "----", "-----", "-----------", "---------", "-----------", "-------", "----"
+    );
+    // **Judged on CPU, because that is what this ladder is for.** The
+    // governor spends these rungs when the *processor* runs short; the
+    // bitrate is worth printing beside them and is not the thing that has to
+    // descend. Judging a CPU ladder by its bitrate is how a rung that trades
+    // pixels for quality reads as a defect when it is a deliberate trade.
+    let mut previous: Option<f64> = None;
+    let mut climbs = Vec::new();
+    for s in &steps {
+        // What the rung costs a second: one frame's encode, times its own
+        // frame rate. A rung that halves the frame rate halves the bill even
+        // if every frame costs exactly what it did.
+        let per_second = s.ms * f64::from(s.fps) / 1000.0;
+        if previous.is_some_and(|was| per_second > was * 1.02) {
+            climbs.push(s.index);
+        }
+        println!(
+            "  {:>4}  {:>5}  {:>11}  {:>10}  {:>8.2} ms  {:>7.2}  {:>4.0} kbit",
+            s.index,
+            s.fps,
+            format!("{}x{}", s.width, s.height),
+            format!("{:?}", s.fidelity),
+            s.ms,
+            per_second,
+            s.kbit
+        );
+        previous = Some(per_second);
+    }
+    println!("\n  cpu / s is a share of one core: 1.00 is a core fully spent on encoding.");
+    if climbs.is_empty() {
+        println!("  Every step down the ladder costs less processor than the one above it.");
+    } else {
+        println!(
+            "  ⚠ rungs {climbs:?} cost MORE processor than the rung above them: stepping \
+             down there is a cliff in the wrong direction."
+        );
+    }
+    Ok(())
+}
+
+/// Run a long session and report whether it got worse.
+///
+/// **Three things a short run cannot see**, and the report names each rather
+/// than producing one verdict: memory that grows, a frame rate that sags, and
+/// a bitrate that creeps. The screens are plugged and unplugged throughout,
+/// because rebuilding every buffer in the pipeline is the most disruptive
+/// thing that happens to it and doing it once only proves it does not crash.
+///
+/// It asserts nothing. What counts as drift over eight hours is a judgement
+/// somebody makes from the table, and a threshold invented here would be one
+/// more number nobody measured.
+fn soak(minutes: u64) -> Result<(), String> {
+    println!("  A session for {minutes} minute(s), with its screens changing every ten seconds.\n");
+    println!(
+        "  {:>7}  {:>8}  {:>10}  {:>10}  {:>8}",
+        "minute", "frames", "rate", "resident", "screens"
+    );
+    println!(
+        "  {:>7}  {:>8}  {:>10}  {:>10}  {:>8}",
+        "------", "------", "----", "--------", "-------"
+    );
+    let mut first: Option<(u64, f64, f64)> = None;
+    let mut last: Option<(u64, f64, f64)> = None;
+    scenario::soak(minutes, |m| {
+        println!(
+            "  {:>7}  {:>8}  {:>5.0} kbit  {:>7.1} MiB  {:>8}",
+            m.minute, m.frames, m.kbit, m.rss_mib, m.replugs
+        );
+        let point = (m.frames, m.kbit, m.rss_mib);
+        if first.is_none() {
+            first = Some(point);
+        }
+        last = Some(point);
+    })
+    .map_err(|e| e.to_string())?;
+
+    if let (Some(a), Some(b)) = (first, last) {
+        println!("\n  First minute against last:");
+        println!(
+            "    frames    {:>8} → {:<8}  {:+.0}%",
+            a.0,
+            b.0,
+            percent(a.0 as f64, b.0 as f64)
+        );
+        println!(
+            "    rate      {:>8.0} → {:<8.0}  {:+.0}%",
+            a.1,
+            b.1,
+            percent(a.1, b.1)
+        );
+        println!(
+            "    resident  {:>8.1} → {:<8.1}  {:+.0}%",
+            a.2,
+            b.2,
+            percent(a.2, b.2)
+        );
+        println!(
+            "\n  Resident memory is the leak check and the other two are the drift check.\n  \
+             Eight hours is what the target asks for; this ran {minutes}."
+        );
+    }
+    Ok(())
+}
+
+/// Change from one number to another, as a percentage.
+fn percent(from: f64, to: f64) -> f64 {
+    if from.abs() < f64::EPSILON {
+        return 0.0;
+    }
+    (to - from) / from * 100.0
+}
+
 fn usage() -> String {
     let mut out = String::from(
         "usage: esper-bench [--json <file>] [--check <file>]\n\
@@ -410,6 +675,9 @@ fn usage() -> String {
          \x20 --check <file>   fail if anything is worse than that baseline\n\
          \x20 --curve          print what each quantiser rung buys, and assert nothing\n\
          \x20 --sweep          print the whole rate-distortion curve, to place the rungs\n\
+         \x20 --legibility     print whether text can still be read at each rung\n\
+         \x20 --ladder         print what each rung of the CPU ladder costs\n\
+         \x20 --soak <minutes> run a session that long, moving its screens about\n\
          \n\
          A target that is not met is reported and does not fail. A measurement\n\
          worse than the baseline does fail, because that is a change somebody\n\

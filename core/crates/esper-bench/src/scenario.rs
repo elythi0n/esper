@@ -586,3 +586,228 @@ fn luma_error(want: &I420, got: &I420) -> (f64, u64) {
     }
     (sum, n)
 }
+
+/// What one rung of the CPU governor's ladder actually costs.
+#[derive(Debug, Clone, Copy)]
+pub struct LadderStep {
+    /// Where it sits on the ladder, from the top.
+    pub index: usize,
+    pub fps: u32,
+    pub width: u32,
+    pub height: u32,
+    pub fidelity: esper_encode::budget::Fidelity,
+    /// Bits per second at that rung's own frame rate.
+    pub kbit: f64,
+    /// One frame's encode time.
+    pub ms: f64,
+}
+
+/// Measure every rung of the ladder, so "graceful, not a cliff" is a number.
+///
+/// # Why this is not obvious from reading the ladder
+///
+/// The rungs trade three different things — frames, quantiser and pixels — and
+/// one of them trades *back*: the rung below "full size, coarsely quantised"
+/// is "three quarters the size, quantised less coarsely". Whether that is
+/// cheaper depends on how much a quantiser step is worth against a resolution
+/// step, which is a property of the encoder and the content and not of the
+/// table. A ladder whose steps are not monotonically cheaper has rungs the
+/// governor can step *down* onto and get a bigger bill, which is the
+/// definition of a cliff in the wrong direction.
+///
+/// Measured at each rung's own frame rate, because that is what the rung
+/// means: a rung that halves the frame rate halves the bill even if every
+/// frame costs the same.
+///
+/// # Errors
+///
+/// If the encoder or the capturer will not start.
+pub fn ladder_cost(native: (u32, u32)) -> Result<Vec<LadderStep>, BenchError> {
+    let mut out = Vec::new();
+    for (index, level) in esper_encode::budget::LADDER.iter().enumerate() {
+        let (w, h) = level.size(native.0, native.1);
+        let mut capturer = SyntheticCapturer::new(w, h, 1_000_000)
+            .map_err(BenchError::Pattern)?
+            .with_motion(Motion::Screen);
+        let config = EncoderConfig {
+            width: w,
+            height: h,
+            fps: level.fps,
+            qp: Some(level.fidelity.qp_range()),
+            // **No periodic keyframe inside the measurement.** The interval is
+            // in *seconds*, so the same run length at a different frame rate
+            // puts a different number of keyframes in the window — and a
+            // keyframe is worth hundreds of ordinary frames. The first attempt
+            // at this measured three rungs as costing *more* than the rung
+            // above them, which was entirely where the keyframes happened to
+            // fall.
+            keyframe_interval: Duration::from_secs(3600),
+            ..encoder_config(w, h)
+        };
+        let mut encoder = OpenH264::new(&config)?;
+        let mut picture = I420::new(w, h).map_err(|e| BenchError::Failed(e.to_string()))?;
+
+        let mut warm = esper_encode::encoder::EncodeStats::default();
+        let mut bytes = 0u64;
+        let mut frames = 0u64;
+        for n in 0..WARM_UP + FRAMES {
+            let frame = next(&mut capturer)?;
+            esper_color::convert::whole_frame(&frame, space(), &mut picture)
+                .map_err(|e| BenchError::Failed(e.to_string()))?;
+            let encoded = encoder.encode(&picture, n == 0)?;
+            if n < WARM_UP {
+                warm = encoder.stats();
+                continue;
+            }
+            bytes = bytes.saturating_add(encoded.len() as u64);
+            frames = frames.saturating_add(1);
+        }
+        let seconds = frames as f64 / f64::from(level.fps.max(1));
+        let stats = encoder.stats();
+        let counted = stats.frames.saturating_sub(warm.frames);
+        out.push(LadderStep {
+            index,
+            fps: level.fps,
+            width: w,
+            height: h,
+            fidelity: level.fidelity,
+            kbit: if seconds > 0.0 {
+                bytes as f64 * 8.0 / 1000.0 / seconds
+            } else {
+                0.0
+            },
+            ms: if counted == 0 {
+                0.0
+            } else {
+                stats.spent.saturating_sub(warm.spent).as_secs_f64() * 1000.0 / counted as f64
+            },
+        });
+    }
+    Ok(out)
+}
+
+/// One minute of a soak, so drift shows up as a trend rather than a total.
+#[derive(Debug, Clone, Copy)]
+pub struct SoakMinute {
+    pub minute: u64,
+    pub frames: u64,
+    pub kbit: f64,
+    /// Resident memory at the end of the minute, in mebibytes.
+    pub rss_mib: f64,
+    /// Screens plugged, unplugged or moved so far.
+    pub replugs: u64,
+}
+
+/// Resident memory now, on Linux, in mebibytes.
+///
+/// From `/proc/self/statm`, whose second field is resident pages. Absent
+/// elsewhere, and reported as zero rather than guessed at — a leak check that
+/// invented a number would be worse than one that admitted it had none.
+fn resident_mib() -> f64 {
+    let Ok(text) = std::fs::read_to_string("/proc/self/statm") else {
+        return 0.0;
+    };
+    let Some(pages) = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|p| p.parse::<u64>().ok())
+    else {
+        return 0.0;
+    };
+    // 4 KiB pages: the only size any of this project's targets uses.
+    pages as f64 * 4096.0 / (1024.0 * 1024.0)
+}
+
+/// Run a session for a long time, moving its screens about, and watch for
+/// drift.
+///
+/// # What a soak is for, and what a test is not
+///
+/// Every other measurement here runs for seconds. What that cannot see is a
+/// leak, a counter that wraps, a clock that drifts, or a session that is
+/// slightly worse after an hour than it was after a minute — and those are
+/// exactly the failures of a product whose whole point is being reachable when
+/// nobody is watching.
+///
+/// **The display configuration changes throughout**, because the instrument
+/// for it existed and had only ever been used for one-off tests. A monitor
+/// unplugged mid-session is the single most disruptive thing that can happen
+/// to a capture pipeline — every buffer is the wrong size at once — and doing
+/// it once proves it does not crash. Doing it two hundred times proves it does
+/// not accumulate.
+///
+/// # Errors
+///
+/// If the pipeline stops, which is the thing this is looking for.
+pub fn soak(minutes: u64, mut each_minute: impl FnMut(SoakMinute)) -> Result<(), BenchError> {
+    const W: u32 = 1920;
+    const H: u32 = 1080;
+    // Often enough to accumulate, rarely enough that the session spends most
+    // of its time actually running: every ten seconds at thirty frames.
+    const REPLUG_EVERY_FRAMES: u64 = 300;
+
+    // **The capturer's own plug and unplug schedule, not a capturer swapped
+    // underneath the pipeline.** Replacing it would exercise a path no real
+    // backend takes; scheduling the events is what the instrument was built
+    // for, and it is the same code a display genuinely changing would run.
+    let mut capturer = SyntheticCapturer::new(W, H, FPS)
+        .map_err(BenchError::Pattern)?
+        .with_motion(Motion::Screen);
+    let events = minutes.saturating_mul(60) * u64::from(FPS) / REPLUG_EVERY_FRAMES;
+    for n in 0..events.max(1) {
+        let at = n
+            .saturating_mul(REPLUG_EVERY_FRAMES)
+            .saturating_add(REPLUG_EVERY_FRAMES);
+        // Alternating, so the pipeline is rebuilt in both directions rather
+        // than only ever growing.
+        if n % 2 == 0 {
+            capturer = capturer.with_plug_at(at, 1280, 1024);
+        } else {
+            capturer = capturer.with_unplug_at(at, esper_capture::capturer::MonitorId(1));
+        }
+    }
+    let mut pipeline = Pipeline::new(
+        Box::new(capturer),
+        &encoder_for,
+        Budget::of(100.0),
+        Policy {
+            max_fps: FPS,
+            ..Policy::default()
+        },
+    )
+    .map_err(|e| BenchError::Pipeline(e.to_string()))?
+    .with_ceiling(Ceiling::none());
+
+    let started = Instant::now();
+    let ends = started + Duration::from_secs(minutes.saturating_mul(60));
+    let mut minute_ends = started + Duration::from_secs(60);
+    let mut before = *pipeline.stats();
+    let mut minute_started = started;
+    let mut minute = 0u64;
+    // How many screen changes the capturer has been told to make by now.
+    let replugs_per_minute = u64::from(FPS) * 60 / REPLUG_EVERY_FRAMES;
+
+    while Instant::now() < ends {
+        pipeline
+            .step(Duration::from_millis(100))
+            .map_err(|e| BenchError::Pipeline(e.to_string()))?;
+
+        let now = Instant::now();
+        if now >= minute_ends {
+            minute = minute.saturating_add(1);
+            let stats = *pipeline.stats();
+            let over = now.duration_since(minute_started).as_secs_f64().max(0.001);
+            each_minute(SoakMinute {
+                minute,
+                frames: stats.frames_encoded.saturating_sub(before.frames_encoded),
+                kbit: (stats.bytes.saturating_sub(before.bytes)) as f64 * 8.0 / 1000.0 / over,
+                rss_mib: resident_mib(),
+                replugs: minute.saturating_mul(replugs_per_minute),
+            });
+            before = stats;
+            minute_started = now;
+            minute_ends = now + Duration::from_secs(60);
+        }
+    }
+    Ok(())
+}

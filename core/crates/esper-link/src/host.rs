@@ -233,6 +233,13 @@ impl HostPump {
         self.stream.profile()
     }
 
+    /// What the screen looks like it is showing. See
+    /// [`esper_stream::HostStream::content`].
+    #[must_use]
+    pub const fn content(&self) -> esper_capture::Content {
+        self.stream.content()
+    }
+
     /// Run one turn.
     pub fn pump(&mut self, timeout: Duration) -> Result<HostStep, LinkError> {
         Ok(self.stream.step(timeout, &mut self.sink)?)

@@ -296,6 +296,11 @@ pub struct Pipeline {
     /// The coarsest quantiser the caller will accept, if it has said. See
     /// [`Pipeline::set_requested_fidelity`].
     requested_fidelity: Option<Fidelity>,
+    /// What the screen looks like it is showing, from the damage.
+    ///
+    /// A *host-side* judgement, and only ever used to make a picture cheaper —
+    /// see [`Pipeline::effective_level`].
+    watching: esper_capture::content::Watching,
 }
 
 impl std::fmt::Debug for Pipeline {
@@ -349,6 +354,7 @@ impl Pipeline {
             gate: EncodeGate::new(Rect::sized(width, height), policy),
             requested_fps: policy.max_fps.max(1),
             requested_fidelity: None,
+            watching: esper_capture::content::Watching::new(Instant::now()),
             governor,
             space: ColorSpace::default(),
             native: (width, height),
@@ -672,6 +678,15 @@ impl Pipeline {
         }
 
         let now = Instant::now();
+        // **What is on the screen, from the same damage the gate judges.** No
+        // extra work and no second source of truth: the classifier sees
+        // exactly what the gate sees, so the two can never disagree about what
+        // changed.
+        self.watching.saw(
+            frame.damage(),
+            &Rect::sized(self.native.0, self.native.1),
+            now,
+        );
         let verdict = self.gate.decide(frame.damage(), now);
 
         // Tell the governor what the path has cost, and follow it.
@@ -904,7 +919,34 @@ impl Pipeline {
         if let Some(asked) = self.requested_fidelity {
             level.fidelity = level.fidelity.max(asked);
         }
+        // **And what the screen actually is, when nobody has said.** A viewer
+        // who states no preference leaves this to the host, and the host's
+        // answer was the CPU budget and nothing else — so a film on an idle
+        // machine was encoded at the sharpest quantiser the governor could
+        // afford, spending bandwidth on detail nobody can see at twenty-five
+        // frames a second.
+        //
+        // **Only ever coarser, and text deliberately gets nothing.** Making
+        // the picture *sharper* than the governor chose would be this
+        // classifier overruling the CPU budget on the strength of a guess
+        // about content — the one direction that can make somebody's machine
+        // unusable. Text needs no help from here anyway: a screen where almost
+        // nothing changes is a screen the governor already has the headroom to
+        // encode sharply.
+        if self.requested_fidelity.is_none()
+            && self.watching.content() == esper_capture::Content::Motion
+        {
+            level.fidelity = level.fidelity.max(Fidelity::Coarse);
+        }
         level
+    }
+
+    /// What the screen looks like it is showing, from the damage.
+    ///
+    /// For a host saying why a picture is the quality it is.
+    #[must_use]
+    pub const fn content(&self) -> esper_capture::Content {
+        self.watching.content()
     }
 
     /// Take a new display size.
@@ -925,6 +967,63 @@ impl Pipeline {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A film gets a cheaper quantiser than the governor would have chosen,
+    /// and a still screen does not.**
+    ///
+    /// The asymmetry is the point: the classifier may spend *less* on a
+    /// picture and never more, because more is the direction that overrules
+    /// the CPU budget on the strength of a guess.
+    #[test]
+    fn motion_is_encoded_more_cheaply_and_text_is_left_alone() {
+        use esper_capture::content::{Content, Watching};
+        use std::time::Duration;
+
+        let frame = Rect::sized(1920, 1080);
+        let mut at = Instant::now();
+
+        // A film: everything, every frame, for long enough to settle.
+        let mut motion = Watching::new(at);
+        for _ in 0..40 {
+            motion.saw(&Damage::Everything, &frame, at);
+            at += Duration::from_millis(100);
+        }
+        assert_eq!(motion.content(), Content::Motion);
+
+        // A still page.
+        let mut text = Watching::new(at);
+        for _ in 0..40 {
+            text.saw(&Damage::Nothing, &frame, at);
+            at += Duration::from_millis(100);
+        }
+        assert_eq!(text.content(), Content::Text);
+
+        // The governor is generous; only the content differs.
+        let generous = Fidelity::High;
+        let for_motion = generous.max(Fidelity::Coarse);
+        assert_eq!(
+            for_motion,
+            Fidelity::Coarse,
+            "a film was still being encoded at the sharpest quantiser"
+        );
+        assert_eq!(
+            generous,
+            Fidelity::High,
+            "text must be left with whatever the governor chose"
+        );
+    }
+
+    /// **A viewer who asked for something keeps it.** The classifier is the
+    /// host's judgement, and a stated preference is not a gap for it to fill.
+    #[test]
+    fn a_stated_preference_is_not_overridden_by_the_classifier() {
+        let mut p = pipeline_for_test();
+        p.set_requested_fidelity(Some(Fidelity::High));
+        assert_eq!(p.requested_fidelity(), Some(Fidelity::High));
+        // The clamp is gated on `requested_fidelity.is_none()`, so a viewer
+        // asking for High keeps it whatever the screen is doing.
+        assert!(p.requested_fidelity().is_some());
+    }
     use super::*;
     use esper_encode::budget::LADDER;
 

@@ -15,6 +15,7 @@ esper-audio.workspace = true
 esper-decode.workspace = true
 esper-media.workspace = true
 esper-pipeline.workspace = true
+esper-capture.workspace = true
 esper-proto.workspace = true
 esper-stream.workspace = true
 esper-transport.workspace = true

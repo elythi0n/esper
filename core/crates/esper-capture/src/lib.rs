@@ -2,6 +2,7 @@
 //! source that needs no display.
 
 pub mod capturer;
+pub mod content;
 pub mod cursor;
 pub mod damage;
 pub mod duplication;
@@ -16,6 +17,7 @@ pub mod pool;
 pub mod synthetic;
 
 pub use capturer::{Capture, CaptureError, Capturer, MonitorId, MonitorInfo, Numbering};
+pub use content::{Content, Watching};
 pub use damage::{Damage, Regions};
 pub use duplication::{Moved, Report, damage_of};
 pub use frame::{Frame, FrameError, PixelFormat};

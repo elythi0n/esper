@@ -3452,6 +3452,7 @@ async fn serve(
         // of output, exactly like a session that is soft because this machine
         // is struggling.
         let mut said = pump.profile();
+        let mut seen_content = pump.content();
         loop {
             // **Held: nothing captured, nothing encoded, nothing sent.**
             //
@@ -3585,6 +3586,19 @@ async fn serve(
                         esper_proto::Profile::Motion => "watching motion: a softer picture will do",
                     }
                 );
+            }
+
+            // **And what this machine makes of the screen itself.** Said
+            // separately from the line above, and only when it changes,
+            // because the two can disagree and both be right: somebody
+            // reading a slideshow says they are reading and their screen is
+            // mostly still. When the viewer states no preference this is what
+            // decides whether the picture is worth spending detail on, so an
+            // operator wondering why a session went soft should be able to
+            // read the reason rather than infer it.
+            if pump.content() != seen_content {
+                seen_content = pump.content();
+                println!("      the screen looks like {}", seen_content.describe());
             }
 
             // **The governor changes the encode size, and the controller has
@@ -5915,6 +5929,18 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             println!(
                 "  link       asked for {edge} pixels on the long edge: frames were being lost"
             );
+            // **And whether that is still a picture somebody can read.** The
+            // bottom rung keeps a session alive on a link that would otherwise
+            // carry nothing, and it is measured at 6% of characters still
+            // legible — so a viewer squinting at it should be told that the
+            // text is gone rather than left to conclude their machine is at
+            // fault. See `esper_stream::LEGIBLE_LONG_EDGE`.
+            if !esper_stream::text_is_legible_at(edge) {
+                println!(
+                    "             ⚠ text is not readable at this size — the link would not \
+                     carry a bigger picture"
+                );
+            }
         }
         // **And why it was less smooth.** A queue filling is invisible from
         // this end except as latency, and a viewer told nothing would put a

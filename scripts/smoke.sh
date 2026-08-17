@@ -1922,6 +1922,69 @@ print(s.getsockname()[1]); s.close()')
         fi
       fi
 
+      # **A link that dies mid-frame and comes back.**
+      #
+      # Loss that never stops is one question and a transient is another: what
+      # a session does about two bad seconds on an otherwise fine link is the
+      # whole of how fast it comes back, and a permanently lossy link cannot
+      # ask it. The relay can black the link out entirely for a window, and
+      # until now nothing ran it that way.
+      #
+      # **Judged against a clean run of the same length, not against a
+      # number.** How many pictures arrive depends on how loaded this machine
+      # is. What load does not change is the *share* a two-second outage costs
+      # out of eight: a session that recovers loses about a quarter of them,
+      # and a session that died at the outage and never came back loses three.
+      if command -v python3 >/dev/null 2>&1; then
+        echo "  — a link that dies mid-session and comes back"
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+          timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          --max-resolution 640 --fps 15 > "$term_a/outage.log" 2>&1 &
+        outage_host=$!
+        outage_addr=""
+        for _ in $(seq 1 100); do
+          outage_addr=$( { awk '/listening/{print $2}' "$term_a/outage.log" 2>/dev/null || true; } | head -1)
+          [ -n "$outage_addr" ] && break
+          sleep 0.1
+        done
+
+        pictures_through() {
+          # $1: extra relay arguments. Prints how many pictures were shown.
+          port=$(python3 -c 'import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1]); s.close()')
+          # shellcheck disable=SC2086
+          python3 scripts/flaky-link.py --listen "127.0.0.1:$port" --to "$outage_addr" \
+            --seed 11 $1 > "$term_b/outage-relay.log" 2>&1 &
+          rp=$!
+          sleep 0.5
+          got=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "127.0.0.1:$port" --seconds 8 2>&1 || true)
+          kill "$rp" 2>/dev/null || true
+          printf '%s' "$got" | awk '/^  pictures /{n=$2} END{print n+0}'
+        }
+
+        if [ -z "$outage_addr" ]; then
+          printf '  ✗ the host never said what it was listening on\n'
+          fail=1
+        else
+          clean=$(pictures_through "")
+          broken=$(pictures_through "--loss 100 --loss-from 2 --loss-for 2")
+          kill "$outage_host" 2>/dev/null || true
+          outage_host=""
+          # Half: comfortably above the three-quarters a dead session loses and
+          # comfortably below the quarter a recovering one does.
+          if [ "${clean:-0}" -gt 0 ] && [ "$((broken * 2))" -gt "$clean" ]; then
+            printf '  ✓ %s pictures against %s on a clean link: the session came back\n' \
+              "$broken" "$clean"
+          else
+            printf '  ✗ %s pictures against %s clean: the session did not survive the outage\n' \
+              "${broken:-no}" "${clean:-no}"
+            fail=1
+          fi
+        fi
+      fi
+
       # **A flag nobody can find out about is a flag nobody has.** Every
       # option `connect` takes was documented in a doc comment in the Rust
       # source and nowhere a person would look — `--profile` among them, which

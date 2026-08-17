@@ -117,6 +117,17 @@ fn build(config: &EncoderConfig) -> Result<Inner, EncodeError> {
         // guaranteeing a bitrate — see the module documentation.
         .skip_frames(false)
         // Main profile: the design's ceiling, decodable by every webview.
+        //
+        // **And 4:4:4 chroma is not available here, which is worth stating
+        // where somebody would come looking.** Text mode wants it — chroma
+        // subsampling is what puts colour fringes on the edges of coloured
+        // glyphs — and openh264 cannot do it. `PRO_HIGH444` exists in the
+        // upstream profile enum, which is the H.264 specification's list and
+        // not a statement about this encoder: `encoder_ext.cpp` refuses any
+        // profile that is not Baseline, Main or High, and all three are 4:2:0.
+        // So it is not a setting anybody has missed. It waits for a hardware
+        // encoder or a different codec, and until then the lever text mode
+        // actually has is the quantiser.
         .profile(Profile::Main)
         .level(Level::Level_4_0)
         // **Quality mode, not bitrate mode**, and this is the single most

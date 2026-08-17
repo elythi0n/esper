@@ -65,7 +65,42 @@ pub enum Decoded {
 /// Coarse rungs, because each step has to be worth the reconfiguration it
 /// costs the encoder, and because a ladder with many rungs spends its time
 /// between them.
-const RUNGS: &[u32] = &[1920, 1280, 960, 640, 480, 320];
+pub const RUNGS: &[u32] = &[1920, 1280, 960, 640, 480, 320];
+
+/// The smallest rung at which text can still be read.
+///
+/// **Measured, not chosen.** The ladder's stated promise is that it never
+/// degrades "below a legibility floor", and until this was measured the floor
+/// was the bottom rung — a number of pixels, which is not a claim about
+/// reading. `esper-bench --legibility` puts a page of terminal text through
+/// each rung and counts how many of the ninety-five printable characters can
+/// still be told apart from the other ninety-four:
+///
+/// | long edge | scaler alone | with the coarse quantiser |
+/// |---|---|---|
+/// | 640 | 100% | 99% |
+/// | 480 | 97% | 92% |
+/// | 320 | 39% | **6%** |
+///
+/// So **320 is not a legibility floor**. It is a *survival* rung, and worth
+/// keeping as one: a session at 320 is a session, and a ladder that refused to
+/// go there would hand somebody a dead window instead of a poor picture. What
+/// was wrong was calling it legible. Below this constant the product says that
+/// text can no longer be read, rather than leaving somebody to conclude their
+/// machine is broken.
+pub const LEGIBLE_LONG_EDGE: u32 = 480;
+
+/// Whether text at this size can still be read.
+///
+/// # Why a function for one comparison
+///
+/// So that the *rule* has one home and a test, rather than a `<` written
+/// wherever somebody needed it — the comparison is easy and getting it
+/// backwards is easier.
+#[must_use]
+pub const fn text_is_legible_at(long_edge: u32) -> bool {
+    long_edge >= LEGIBLE_LONG_EDGE
+}
 
 /// The smallest frame whose arrival says anything about the link.
 ///
@@ -2031,6 +2066,31 @@ impl ControllerStream {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The floor is where the measurement put it, and it is a real rung.**
+    /// A legibility floor that fell between two rungs would never be reached,
+    /// and one below the bottom rung would never bite — either way the
+    /// constant would read as a promise and do nothing.
+    #[test]
+    fn the_legibility_floor_is_a_rung_the_ladder_can_stop_on() {
+        assert!(
+            RUNGS.contains(&LEGIBLE_LONG_EDGE),
+            "the floor {LEGIBLE_LONG_EDGE} is not one of {RUNGS:?}"
+        );
+        assert!(
+            RUNGS.iter().any(|r| *r < LEGIBLE_LONG_EDGE),
+            "no rung is below the floor, so it can never be reported"
+        );
+    }
+
+    /// And the comparison is the way round it reads.
+    #[test]
+    fn text_is_legible_at_the_floor_and_not_below_it() {
+        assert!(text_is_legible_at(LEGIBLE_LONG_EDGE));
+        assert!(text_is_legible_at(1920));
+        assert!(!text_is_legible_at(LEGIBLE_LONG_EDGE - 1));
+        assert!(!text_is_legible_at(320));
+    }
     use std::time::Duration;
 
     use super::*;

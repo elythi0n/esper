@@ -267,6 +267,17 @@ impl HostStream {
         self.asked_fidelity
     }
 
+    /// What the screen looks like it is showing, from the damage.
+    ///
+    /// The host's own reading, and separate from [`Self::profile`], which is
+    /// what the *viewer* said it was doing. The two answer different questions
+    /// and either can be right when they disagree: a person watching a
+    /// slideshow is reading, and their screen is mostly still.
+    #[must_use]
+    pub const fn content(&self) -> esper_capture::Content {
+        self.pipeline.content()
+    }
+
     /// What the controller has asked the picture to be capped at, if
     /// anything.
     ///
