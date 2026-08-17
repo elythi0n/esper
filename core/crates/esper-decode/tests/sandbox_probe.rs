@@ -92,6 +92,38 @@ fn the_probe_entry_point() {
     run_probe(&which);
 }
 
+/// **Audit mode does not produce a sandbox, and the worker refuses one.**
+///
+/// `ESPER_SANDBOX_AUDIT` turns the seccomp filter from killing into logging,
+/// which exists so a missing syscall can be found on an unfamiliar system. It
+/// is documented as making the jail permissive, and the danger is obvious: a
+/// switch that quietly leaves attacker-controlled H.264 reaching a large C
+/// parser with no filter in front of it, set once for debugging and forgotten.
+///
+/// It does not do that, and nothing proved it until now. `SandboxedDecoder`
+/// reads the child's report and **refuses to start** when it is not enforcing,
+/// so the variable makes the decoder unavailable rather than unsafe.
+///
+/// What this child establishes is the fact that refusal rests on: with the
+/// variable set, the sandbox applied on *this kernel* reports itself as not
+/// enforcing. That is deliberately not a test of the `if !is_enforcing()` line
+/// in the worker, which would be the same expression asked twice — it is a
+/// test of the input to it, measured from the real filter.
+///
+/// Run in a child with the variable set, because setting it in this process
+/// would leak into every other test, and `set_var` is `unsafe` in this
+/// edition besides.
+fn run_audit_mode_probe() -> ! {
+    use esper_decode::sandbox::Sandbox;
+
+    let report = Sandbox::default().apply().expect("apply the sandbox");
+    // The fact the refusal rests on, reported from the real sandbox on this
+    // kernel rather than from a constructed value.
+    println!("PROBE: ENFORCING {}", report.is_enforcing());
+    println!("PROBE: DESCRIBED {}", report.describe());
+    std::process::exit(0);
+}
+
 /// A marker separating the test harness's own output from the protocol.
 ///
 /// The child here is a **test binary**, so libtest prints "running 1 test" to
@@ -143,6 +175,9 @@ fn run_probe(which: &str) {
 
     if which == "child_loop" {
         run_child_loop();
+    }
+    if which == "audit_mode_is_refused" {
+        run_audit_mode_probe();
     }
 
     let report = Sandbox::default().apply().expect("apply the sandbox");
@@ -446,5 +481,62 @@ fn the_sandboxed_decoder_cannot_allocate_past_its_limit() {
     assert!(
         out.said("PROBE: ALLOCATION REFUSED") || out.killed_by_seccomp(),
         "expected the allocation to be refused, got {out:?}"
+    );
+}
+
+/// The sandbox cannot be turned off by setting the audit variable.
+///
+/// See [`run_audit_mode_probe`]. The child is spawned with the variable set,
+/// and has to report a refusal rather than a working decoder.
+#[test]
+fn audit_mode_makes_the_decoder_refuse_rather_than_run_unsandboxed() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let exe = std::env::current_exe().expect("the test binary's own path");
+    let out = Command::new(exe)
+        .args(["--exact", "the_probe_entry_point", "--nocapture"])
+        .env(PROBE, "audit_mode_is_refused")
+        .env(esper_decode::sandbox::AUDIT_ENV, "1")
+        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn the probe");
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = out.status.signal();
+
+    assert!(
+        said.contains("PROBE: ENFORCING"),
+        "the probe did not run, so this proved nothing:\n{said}"
+    );
+    assert!(
+        said.contains("PROBE: ENFORCING false"),
+        "with audit mode set the sandbox still reported itself as enforcing, so the \
+         worker would start and attacker-controlled H.264 would reach the parser \
+         behind a filter that only logs:\n{said}"
+    );
+    // And the report has to say so in words, because that string is what a
+    // person sees when their decoder will not start.
+    assert!(
+        said.contains("AUDIT ONLY"),
+        "the report did not name audit mode as the reason:\n{said}"
+    );
+
+    // **And the same probe without the variable is enforcing**, or the
+    // assertion above passes on a kernel where the sandbox never works and
+    // says nothing about audit mode at all.
+    let exe = std::env::current_exe().expect("the test binary's own path");
+    let clean = Command::new(exe)
+        .args(["--exact", "the_probe_entry_point", "--nocapture"])
+        .env(PROBE, "audit_mode_is_refused")
+        .env_remove(esper_decode::sandbox::AUDIT_ENV)
+        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn the probe");
+    let clean_said = String::from_utf8_lossy(&clean.stdout).into_owned();
+    assert!(
+        clean_said.contains("PROBE: ENFORCING true"),
+        "without audit mode the sandbox is not enforcing either, so the check above \
+         is measuring a broken sandbox rather than the variable:\n{clean_said}"
     );
 }

@@ -161,7 +161,13 @@ func displayOrDash(s string) string {
 // cmdDoctor answers "why doesn't it work". Failure in this product has a dozen
 // causes, so the diagnostic grows with each phase; today it covers the seam
 // between the control plane and the engine, which is the only moving part.
-func cmdDoctor(_ []string) int {
+func cmdDoctor(args []string) int {
+	deep := false
+	for _, a := range args {
+		if a == "--session" {
+			deep = true
+		}
+	}
 	fmt.Println("🩺  esper doctor")
 	fmt.Println()
 
@@ -215,29 +221,10 @@ func cmdDoctor(_ []string) int {
 	// and not driven is a machine somebody can still read a log on. Reported,
 	// and not counted against readiness.
 	_ = capability("input   ", status.Input)
+	fmt.Printf("  paired   %d device(s)\n", status.Paired)
 	fmt.Println()
 
-	fmt.Println("Reaching this machine")
-	if status.MDNS {
-		fmt.Println("  network   announcing itself on the local network")
-	} else {
-		fmt.Println("  network   not announcing itself (discovery.mdns is off)")
-	}
-	if len(status.Overlays) == 0 {
-		fmt.Println("  private   none — no WireGuard, Tailscale or other overlay found")
-	} else {
-		fmt.Printf("  private   %s\n", strings.Join(status.Overlays, ", "))
-	}
-	if status.Broker == nil {
-		// Not a fault. There is no default broker anywhere in Esper, and
-		// saying so is the honest report rather than a warning about a
-		// missing setting.
-		fmt.Println("  broker    none configured — the broker tiers do not exist here")
-	} else {
-		fmt.Printf("  broker    %s\n", *status.Broker)
-	}
-	fmt.Printf("  paired    %d device(s)\n", status.Paired)
-	fmt.Println()
+	reachTiers(status)
 
 	// A second `esper` earlier on PATH is the fault that makes every other
 	// answer here wrong, and it is invisible until somebody notices the
@@ -257,8 +244,73 @@ func cmdDoctor(_ []string) int {
 		fmt.Println("   the above.")
 		return 1
 	}
+	if deep {
+		// The engine this process started holds the control socket; the self
+		// test starts its own, so let this one go first.
+		_ = sup.Stop()
+		return selfTest(sup.Path())
+	}
 	fmt.Println("✓ ready")
+	fmt.Println()
+	fmt.Println("  `esper doctor --session` holds a real session with itself — pairing,")
+	fmt.Println("  transport, capture, encode and decode — and times it. A few seconds.")
 	return 0
+}
+
+// reachTiers says which rungs of the connectivity ladder exist on this
+// machine, and which therefore do not.
+//
+// **The lines above say what was found; this says what it means.** A person
+// reading "no overlay found" and "no broker configured" has two facts and
+// still has to know the ladder to work out that this machine can only be
+// reached from its own network. Saying so is the whole job of a diagnostic —
+// and an unavailable rung is not a fault, so each says *how* to have it rather
+// than being marked wrong.
+//
+// The order is the order they are tried, which is the order `esper connect`
+// walks: an address you typed, this network, where it was last time, a private
+// network you already run, an introduction.
+func reachTiers(status *proto.Status) {
+	fmt.Println("Ways in, in the order they are tried")
+
+	tier := func(name, detail string, have bool, without string) {
+		if have {
+			fmt.Printf("  ✓ %-10s %s\n", name, detail)
+			return
+		}
+		fmt.Printf("  · %-10s unavailable — %s\n", name, without)
+	}
+
+	// Always available: it needs nothing of this machine but a socket, which
+	// is why it is the rung everything else is a fallback from.
+	tier("given", "an address somebody types always works, if it routes", true, "")
+	tier("lan", "found by asking this network", status.MDNS,
+		"discovery.mdns is off, so this machine answers no broadcast")
+	// Remembered is a property of the *controller's* store, not of this
+	// machine — a host cannot know whether somebody else remembers it.
+	fmt.Printf("  · %-10s %s\n", "remembered",
+		"decided by the controller, which is where the address is kept")
+	tier("overlay", strings.Join(status.Overlays, ", "), len(status.Overlays) > 0,
+		"no WireGuard, Tailscale or other overlay interface on this machine")
+	tier("broker", brokerOf(status), status.Broker != nil,
+		"none configured, and Esper ships no default: run one, or be reachable another way")
+
+	if !status.MDNS && len(status.Overlays) == 0 && status.Broker == nil {
+		fmt.Println()
+		fmt.Println("⚠  the only way in is an address somebody already knows. That is a")
+		fmt.Println("   working setup on a fixed address and nothing else — there is no")
+		fmt.Println("   rung left if this machine moves.")
+	}
+	fmt.Println()
+}
+
+// brokerOf is the configured broker, for a line that only prints when there is
+// one.
+func brokerOf(status *proto.Status) string {
+	if status.Broker == nil {
+		return ""
+	}
+	return *status.Broker
 }
 
 // capability prints one line and says whether it was available.

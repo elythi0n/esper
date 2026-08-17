@@ -14,8 +14,29 @@ use esper_crypto::{DeviceStore, Identity};
 /// possible — and two engines on one machine is how a session can be tried
 /// before there are two machines to try it on.
 pub fn home() -> Result<PathBuf, String> {
-    if let Ok(dir) = std::env::var("ESPER_HOME") {
-        return Ok(PathBuf::from(dir));
+    match std::env::var("ESPER_HOME") {
+        // **Set to nothing is refused, not treated as unset.** An empty value
+        // makes every path below it relative, so the identity key and the
+        // device list land in whatever directory the process happened to
+        // start in — a fresh identity, nobody paired, and a trust store
+        // somewhere nobody will look for it.
+        //
+        // Falling back to `$HOME/.esper` would be worse than refusing.
+        // Somebody who set the variable at all plainly meant an isolated
+        // home, and quietly using the *real* one instead is the dangerous
+        // half of the two wrong answers: a test, a packaging script or a
+        // service unit with an unset variable in it would write to the
+        // machine owner's own store.
+        Ok(dir) if dir.trim().is_empty() => {
+            return Err(
+                "ESPER_HOME is set to nothing. Unset it to use the default, or give it a \
+                 directory — an empty value would put this machine's identity key and its \
+                 paired-device list in the current working directory"
+                    .to_owned(),
+            );
+        }
+        Ok(dir) => return Ok(PathBuf::from(dir)),
+        Err(_) => {}
     }
     let home =
         std::env::var("HOME").map_err(|_| "neither ESPER_HOME nor HOME is set".to_owned())?;

@@ -125,6 +125,15 @@ check-host-decides:
 check-settings:
 	@python3 ./scripts/check-settings-kept.py
 
+## Verify no setting invites a secret, and the device store is not config
+##
+## A warning at startup is the wrong instrument: by the time a private key is
+## in `config.toml` it has been written to a file and very likely committed.
+## What can be prevented is the setting that invited it.
+.PHONY: check-config
+check-config:
+	@python3 ./scripts/check-config-holds-no-secrets.py
+
 ## Verify Rust and Go use the same words for the same things
 ##
 ## Esper is two implementations of one product, and where both halves name
@@ -558,7 +567,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-trail check-host-decides check-settings check-vocabularies check-scancodes check-unsafe fmt-check lint test build check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-unsafe fmt-check lint test build check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

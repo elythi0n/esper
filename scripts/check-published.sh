@@ -89,6 +89,14 @@ if (cd "$tree" && go build -trimpath -buildvcs=false -o /dev/null ./cmd/esper 2>
 else
   bad "the unpacked tarball does not build"
   sed 's/^/      /' "$work/build.err" | head -10
+  # **The commonest cause by far, and it has been twice.** The tarball is
+  # built from what git tracks, so a new file that has not been added is
+  # missing from it — and the build failure names the symbol, not the reason.
+  untracked=$(git ls-files --others --exclude-standard 2>/dev/null | head -5)
+  if [ -n "$untracked" ]; then
+    printf '      — these are not tracked, so they are not in the tarball:\n'
+    printf '%s\n' "$untracked" | sed 's/^/        /'
+  fi
 fi
 
 # The manifests the packaging reads have to survive the export too — the

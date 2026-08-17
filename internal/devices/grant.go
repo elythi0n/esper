@@ -163,6 +163,15 @@ func (w Writer) Change(ctx context.Context, what Change, fingerprint string, per
 	if w.Engine == "" {
 		return errors.New("no engine to ask: the device store is only written by one")
 	}
+	// **An empty home is refused rather than passed on.** `ESPER_HOME=` makes
+	// every path the engine resolves relative, so the store it wrote would be
+	// in whatever directory this process started in — and the answer read back
+	// afterwards would come from the real store, which the write never
+	// touched. The engine refuses it too; this refuses it before spawning a
+	// process to be told so.
+	if strings.TrimSpace(w.Home) == "" {
+		return errors.New("no home to write in: the device store has to be somewhere")
+	}
 	// An argv rather than a shell, so a fingerprint is an argument and can
 	// never be a command however it is spelled — and it is checked above
 	// besides.

@@ -125,6 +125,48 @@ else
   fail=1
 fi
 
+# **The ladder, said as a ladder.** Reporting "no overlay" and "no broker"
+# leaves a person holding two facts and still needing to know the ladder to
+# work out that this machine is reachable from its own network and nowhere
+# else. An unavailable rung is not a fault, so each says how to have it.
+if printf '%s' "$out" | grep -q 'Ways in, in the order they are tried' &&
+  printf '%s' "$out" | grep -q 'broker.*unavailable'; then
+  printf '  ✓ doctor names every way in, and why the missing ones are missing\n'
+else
+  printf '  ✗ doctor did not report the connectivity tiers\n'
+  printf '%s\n' "$out" | sed 's/^/      /'
+  fail=1
+fi
+
+# **A real session with itself, which is the only line here that tests the
+# path rather than a capability.** Every other answer can be right on a
+# machine where a session still does not work.
+#
+# With a display, because a screen session needs one — and the host confirms
+# its own on-screen indicator before sending a picture, so this exercises that
+# too. Skipped where there is none rather than reported as a fault.
+if [ -n "${DISPLAY:-}" ]; then
+  echo "  — a real session with itself"
+  self=$(timeout 180 "$BIN/esper" doctor --session 2>/dev/null || true)
+  if printf '%s' "$self" | grep -q 'can hold a session with itself'; then
+    printf '  ✓ %s\n' "$(printf '%s' "$self" | grep -oE 'session   [0-9]+ picture.*' | head -1)"
+  else
+    printf '  ✗ the machine could not hold a session with itself\n'
+    printf '%s\n' "$self" | tail -8 | sed 's/^/      /'
+    fail=1
+  fi
+  # **And it left nothing behind.** It pairs two throwaway identities, and a
+  # diagnostic that leaked a temporary device store into somebody's home
+  # directory would be worse than no diagnostic.
+  strays=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'esper-doctor-*' 2>/dev/null | wc -l)
+  if [ "$strays" = "0" ]; then
+    printf '  ✓ and deleted both temporary identities afterwards\n'
+  else
+    printf '  ✗ it left %s temporary identity directories behind\n' "$strays"
+    fail=1
+  fi
+fi
+
 # The shipped unit files, checked by systemd rather than by reading them.
 #
 # A unit that has stopped parsing, or a directive in the wrong section, is
@@ -191,6 +233,35 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     "$BIN/esper" host disable 2>&1 | tail -4 | sed 's/^/      /'
     fail=1
   fi
+fi
+
+# **A home of nothing is refused, rather than becoming the working directory.**
+#
+# `ESPER_HOME=` is not the same as unset: every path below it becomes relative,
+# so the identity key and the paired-device list land wherever the process
+# happened to start. Falling back to the default would be worse than refusing —
+# somebody who set the variable at all meant an isolated home, and quietly
+# using the machine owner's real store instead is the dangerous half of the two
+# wrong answers.
+#
+# Through the built binary, because this is about what a process does with its
+# environment and a unit test supplies its own.
+echo "  — a home of nothing"
+empty_home=$(env ESPER_HOME= "$BIN/esper-engine" devices 2>&1 || true)
+if printf '%s' "$empty_home" | grep -q 'ESPER_HOME is set to nothing'; then
+  printf '  ✓ an empty ESPER_HOME is refused, and says what it would have done\n'
+else
+  printf '  ✗ an empty ESPER_HOME was accepted\n'
+  printf '%s\n' "$empty_home" | head -3 | sed 's/^/      /'
+  fail=1
+fi
+# And unset is still the default rather than an error, or the check above has
+# broken the ordinary case to pass itself.
+if env -u ESPER_HOME HOME="$(mktemp -d)" "$BIN/esper-engine" devices >/dev/null 2>&1; then
+  printf '  ✓ and an unset one still means the default home\n'
+else
+  printf '  ✗ unsetting ESPER_HOME broke the default home\n'
+  fail=1
 fi
 
 # Esper operates no infrastructure, so a shipped binary must contain nothing

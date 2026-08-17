@@ -186,3 +186,27 @@ func TestAWriterWithNoEngineSaysSo(t *testing.T) {
 		t.Fatalf("expected a refusal naming why, got %v", err)
 	}
 }
+
+// **A home of nothing is refused before a process is spawned.** `ESPER_HOME=`
+// makes every path the engine resolves relative, so a write would land in
+// whatever directory this process started in while the read afterwards came
+// from the real store — a change that reports success and did nothing where
+// anybody would look.
+func TestAHomeOfNothingIsRefused(t *testing.T) {
+	for _, home := range []string{"", "   "} {
+		w := Writer{Engine: "/bin/true", Home: home}
+		err := w.Change(context.Background(), Grant, "0123456789abcdef", []Permission{View})
+		if err == nil {
+			t.Fatalf("a home of %q was accepted", home)
+		}
+		if !strings.Contains(err.Error(), "has to be somewhere") {
+			t.Errorf("a home of %q was refused for the wrong reason: %v", home, err)
+		}
+	}
+	// And the same request with a home is not refused, or the test above
+	// passes for any reason at all.
+	w := Writer{Engine: "/bin/true", Home: t.TempDir()}
+	if err := w.Change(context.Background(), Grant, "0123456789abcdef", []Permission{View}); err != nil {
+		t.Fatalf("a request with a real home was refused: %v", err)
+	}
+}
