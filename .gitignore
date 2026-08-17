@@ -27,3 +27,8 @@ esper-*.tar.gz
 
 # handshake spike: throwaway, deleted when its ADR lands
 /core/spikes/*/target/
+
+# the web bundle, copied in by `make app`
+/cmd/esper-app/dist/*
+!/cmd/esper-app/dist/index.html
+__pycache__/

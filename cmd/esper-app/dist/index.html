@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Esper</title>
+    <!--
+      Theme and motion are applied before the bundle loads, by a script the
+      build injects — see `src/lib/first-paint.ts`, which is where the rule
+      lives. It is injected rather than written here so that the running
+      application and the first paint cannot disagree about what the theme is.
+    -->
+    <script type="module" crossorigin src="/assets/index-9INIOzEl.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-loKU4Osk.css">
+    <script>(function () {
+  try {
+    var d = document.documentElement.dataset;
+    var resolve = function resolveTheme(stored) {
+  var asked = stored;
+  if (asked === "dark" || asked === "light" || asked === "hc") return asked;
+  if (typeof matchMedia === "function" && matchMedia("(prefers-contrast: more)").matches) return "hc";
+  return "dark";
+};
+    d.theme = resolve(localStorage.getItem("esper.theme"));
+    var m = localStorage.getItem("esper.motion");
+    if (m === "reduced" || m === "full") d.motion = m;
+  } catch (e) {}
+})();</script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

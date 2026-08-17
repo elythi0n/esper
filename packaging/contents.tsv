@@ -17,6 +17,12 @@
 #   unit-system  a systemd system service     → /usr/lib/systemd/system/<name>
 #   licence      the licence text             → wherever the distribution puts it
 #
+# A binary the build produces and **no package installs on purpose** goes in
+# the `not-packaged` list below with the reason. Without it, the only way to
+# satisfy the "everything built is packaged" check is to package something
+# before it should ship — which is the check pushing a decision rather than
+# holding one.
+#
 # package	kind	name
 esper	bin	esper
 esper	bin	esper-engine
@@ -25,3 +31,8 @@ esper	licence	LICENSE
 esper-broker	bin	esper-broker
 esper-broker	unit-system	esper-broker.service
 esper-broker	licence	LICENSE
+
+# Built on purpose, packaged on purpose later.
+#
+# package	kind	name	why
+-	not-packaged	esper-app	The viewer is not built, and a distribution package called a remote desktop that cannot show you one is a promise the software does not keep. Decided 2026-09-10; it installs with `make install-app` in the meantime.

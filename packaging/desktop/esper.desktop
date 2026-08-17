@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Esper
+GenericName=Remote Desktop
+Comment=Secure remote desktop and terminal, with no operated infrastructure
+Exec=esper-app %u
+Icon=esper
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;vnc;rdp;screen;
+StartupWMClass=Esper
+StartupNotify=true
+MimeType=x-scheme-handler/esper;

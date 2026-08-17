@@ -155,4 +155,28 @@ Written down rather than left to be discovered.
   accepts the file.
 - **Nothing is notarized**, and macOS packaging is not built here at all.
 - **No release has ever been tagged**, so this checklist has not been run end
-  to end. The first release is also the first test of this document.
+  to end. What *has* been run is a dry run of every step this machine can do —
+  see below.
+
+## The dry run, 2026-09-10
+
+Every step that does not need a tag, a signing key or another operating system,
+run on a development machine, with what happened written down. Two findings,
+and the second is the reason to do this before a release rather than during
+one.
+
+| Step | |
+|---|---|
+| `make check-changelog` | ✅ |
+| `make check-published` | ❌ **the tarball is built from what git tracks**, and a working tree with uncommitted work produces a tarball that does not compile. It says exactly which files are missing, which is the check doing its job. |
+| `make check-packages` | ❌ then ✅ — it required *every built binary* to be in a package, and `esper-app` is built and deliberately not packaged until the viewer exists. Fixed by letting `packaging/contents.tsv` decline a binary **with a reason**, so the check holds that decision instead of forcing the opposite one. |
+| `make dist-source` | ✅ |
+| `make build-all` | ✅ linux amd64/arm64, darwin amd64/arm64 |
+| `make build-win` | ✅ real PE binaries, 61s |
+| `make package-deb` | ✅ — and it fails with `Text file busy` if an `esper-engine` is running, which is worth knowing before a release rather than during one |
+| `sha256sum` over `dist/` | ✅ |
+
+**What this cannot rehearse**, and remains exactly as untested as before:
+signing (the key is offline), the three "on real machines" steps, and every
+step after the tag. `make ci-full` was not part of the dry run either — it runs
+miri and the fuzzers and is measured in tens of minutes.

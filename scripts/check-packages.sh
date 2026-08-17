@@ -38,9 +38,17 @@ fi
 packaged=$(awk -F'\t' '$1 !~ /^#/ && $2 == "bin" { print $3 }' packaging/contents.tsv \
   | LC_ALL=C sort -u)
 
+# **Built on purpose and packaged on purpose later.** A binary here is one the
+# manifest names with a reason, so the check holds a decision instead of
+# forcing one: the alternative was to ship the window in distribution packages
+# before its viewer exists, to satisfy a rule.
+declined=$(awk -F'\t' '$1 !~ /^#/ && $2 == "not-packaged" { print $3 }' packaging/contents.tsv \
+  | LC_ALL=C sort -u)
+
 missing=$(comm -23 <(printf '%s\n' "$built") <(printf '%s\n' "$packaged") || true)
+missing=$(comm -23 <(printf '%s\n' "$missing" | sed '/^$/d') <(printf '%s\n' "$declined") || true)
 if [ -z "$missing" ]; then
-  ok "every binary in $BIN/ is named by a package ($(printf '%s\n' "$built" | wc -l) of them)"
+  ok "every binary in $BIN/ is named by a package, or declined with a reason ($(printf '%s\n' "$built" | wc -l) of them)"
 else
   bad "built and packaged by nothing: $(printf '%s' "$missing" | tr '\n' ' ')"
 fi

@@ -2,8 +2,11 @@
 
 > Secure, private remote desktop. No account, no password, no server.
 
-🚧 **Early development.** Linux hosts work end to end; Windows and macOS
-hosts, the desktop app and the control-plane CLI do not exist yet.
+🚧 **Early development.** Linux hosts work end to end, and there is a
+desktop window — but **it cannot show you a screen yet**: the viewer is the
+one part not built, so today the window pairs devices, shows what has
+happened, and manages this machine, while looking at a remote screen is
+`esper connect`. Windows and macOS hosts do not exist.
 
 ---
 
@@ -57,8 +60,10 @@ persistent trust between two machines that belong to the same person.
 | Port forwarding | ✅ `ssh -L` and `ssh -W` shapes |
 | Screen, video and input | ✅ Linux, X11 |
 | Finding a host: LAN, a private network you already run, remembered address, your own broker | ✅ |
+| Control plane: CLI, device store, local API | ✅ |
+| Desktop window: devices, pairing, activity, settings | ✅ |
+| The viewer — a remote screen inside the window | ⏳ the one thing missing |
 | Windows and macOS hosts | ⏳ |
-| Desktop app, control-plane CLI | ⏳ |
 
 ## Building
 
@@ -87,13 +92,14 @@ make ci         # everything CI runs
 make help       # list targets
 ```
 
-Three binaries come out:
+Four binaries come out:
 
 | Binary | Role |
 |---|---|
-| `esper` | The control plane: CLI, device store, engine supervisor |
+| `esper` | The control plane: CLI, device store, engine supervisor, local API |
 | `esper-engine` | The realtime engine: capture, encode, transport, input |
 | `esper-broker` | A stateless introducer and blind relay, run by you |
+| `esper-app` | The window. `make build-app` builds it; it needs a webview (`webkit2gtk-4.1` on Linux) |
 
 ## Installing
 
@@ -133,6 +139,91 @@ current tells that server that this machine exists, what it runs and roughly
 where it is, on a schedule. That is a census. Updates come from your package
 manager or from you.
 
+## Your first connection
+
+Two machines. Call the one you want to reach **there**, and the one you are
+sitting at **here**.
+
+**1. There: let it be reached.**
+
+```sh
+esper host enable          # starts now, and at login, via systemd --user
+```
+
+On a machine nobody logs into, add `sudo loginctl enable-linger $USER` — without
+it systemd stops user services when your last session ends, which looks exactly
+like Esper crashing whenever you disconnect. `esper host enable` says so if it
+is missing.
+
+**2. There: offer a code.**
+
+```sh
+esper pair --listen 7645
+```
+
+It prints a code, the address to use, and **eight words**. The words are not
+decoration: a code proves the same code was typed at both ends, and only the
+words prove the machine at the other end is the one you meant. Read them
+aloud.
+
+**3. Here: use it.**
+
+```sh
+esper pair <there>:7645 --code XXXX-XXXX
+```
+
+Both ends print the same eight words. If they do not match, something is
+between you — stop.
+
+**4. Here: do something with it.**
+
+```sh
+esper devices              # what you have paired, and what each may do
+esper terminal <name>      # a shell there
+esper connect <name>       # its screen
+esper forward <name> 5432  # its loopback port 5432, on yours
+```
+
+That is the whole of it. There is no account, nothing was registered, and no
+server of ours was involved at any point.
+
+### Somebody who is not on your network
+
+If neither machine can reach the other, the two need somewhere to meet, and
+Esper has no such place — so you run one:
+
+```sh
+esper broker serve --listen :7443     # on a machine both can reach
+```
+
+It prints a key. Put the address and that key in `~/.esper/config.toml` as
+`broker.address` and `broker.key`, then:
+
+```sh
+esper invite --for "Dad"
+```
+
+That prints **one link**, and it is the whole exchange: they paste it into
+`esper join`, or click it if they have the window installed. The link is the
+secret — anybody holding it can pair with you until it expires — so send it
+the way you would send a password, and it lapses on its own.
+
+## The window
+
+```sh
+make build-app             # needs a webview: webkit2gtk-4.1 on Linux
+make install-app           # → ~/.local/bin, plus a desktop entry
+```
+
+Opening it is the whole setup: it **starts its own control plane** if nothing
+is already listening, so there is no second thing to run in a terminal. It
+pairs devices, shows what has happened on the machine, turns serving on and
+off, and opens `esper://` invitation links.
+
+It is **deliberately not in the distribution packages yet**, because the
+viewer is not built and a package called "remote desktop" that cannot show
+you one would be a promise the software does not keep.
+
 ## How it is put together
 
 The **engine is Rust** — a hard-realtime pipeline with a per-frame budget of a
@@ -169,7 +260,9 @@ endpoint it could phone home to.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md), and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for how disagreements are expected to
+go.
 
 ## License
 

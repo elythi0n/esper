@@ -4,6 +4,12 @@ DIST    := dist
 MODULE  := github.com/elythi0n/esper
 PKG     := ./cmd/esper
 CORE    := core
+WEB     := web
+# Wails needs these or it compiles a stub that refuses to run — "Wails
+# applications will not build without the correct build tags", at start-up
+# rather than at compile time, which is a thing to find out once.
+# `webkit2_41` because 4.0 is gone from current distributions.
+APP_TAGS := desktop,production,webkit2_41
 
 # Effective version — read from the VERSION file if present, else v0.0.0.
 # The Rust build script reads the same file, so the Go and Rust halves can never
@@ -217,6 +223,70 @@ build-go:
 	@go build $(GOFLAGS_REPRO) -ldflags='$(LDFLAGS)' -o $(BIN)/$(BINARY) $(PKG)
 	@echo "  → $(BIN)/$(BINARY)"
 
+## Build the desktop window → ./build/esper-app
+##
+## The web bundle is built first and **copied** into the command's directory,
+## because `go:embed` reaches down and never sideways. A placeholder
+## index.html is committed there so `go build ./...` works in a checkout
+## where the bundle has never been built — it says so on screen rather than
+## opening a blank window.
+.PHONY: build-app
+build-app:
+	$(GUARD_ROOT)
+	@echo "building the window $(VERSION)..."
+	@cd $(WEB) && pnpm install --frozen-lockfile --silent && pnpm build >/dev/null
+	@rm -rf cmd/esper-app/dist
+	@cp -r $(WEB)/dist cmd/esper-app/dist
+	@mkdir -p $(BIN)
+	@go build $(GOFLAGS_REPRO) -tags '$(APP_TAGS)' -ldflags='$(LDFLAGS)' -o $(BIN)/esper-app ./cmd/esper-app
+	@git checkout -- cmd/esper-app/dist/index.html 2>/dev/null || true
+	@echo "  → $(BIN)/esper-app"
+
+## Everything the web bundle is held to: tokens, contrast, motion, inventory
+.PHONY: check-web
+check-web:
+	$(GUARD_ROOT)
+	@cd $(WEB) && pnpm install --frozen-lockfile --silent && pnpm check
+
+## Measure how long the window takes to be usable, and hold it to a second
+##
+## The number the Phase 11 exit criterion names. Measured rather than
+## estimated: the page reports its first paint and the window turns that into
+## a duration from `exec`. Two arrangements — a control plane already
+## listening, and the window starting its own, which is what opening the
+## application actually does. Needs `make build build-app` first.
+.PHONY: check-coldstart
+check-coldstart:
+	@./scripts/check-coldstart.sh
+
+## Verify the link model does what it claims: one queue, or a scheduler
+##
+## The difference between a FIFO and a fair queue is a claim about numbers, and
+## a shaper nobody measured is an opinion. It has earned this once already: the
+## first fair queue handed out *twice* the rate, because a departure assigned
+## on arrival cannot let a later arrival overtake — which is the entire
+## behaviour a scheduler exists for.
+.PHONY: check-shaper
+check-shaper:
+	@python3 ./scripts/flaky-link.py --self-test
+
+## Verify what the desktop asks for reaches the built window
+##
+## Reduced motion and high contrast, neither of which is a preference about
+## looks: somebody who set them asked their operating system for them
+## everywhere. Not the /design toggles, which prove the override — this proves
+## the chain a person actually uses, `gtk-enable-animations` and
+## `gtk-theme-name` → WebKitGTK → the media queries → the tokens.
+##
+## It has earned its place twice. Putting the reduced-motion block inside a
+## layer leaves the query matching and every duration untouched; and merely
+## opening the Settings screen used to write the theme default as though
+## somebody had chosen it, which disabled the contrast setting for ever.
+## Needs `make build-app` first.
+.PHONY: check-desktop
+check-desktop:
+	@./scripts/check-desktop.sh
+
 ## Build the Rust engine and broker → ./build
 .PHONY: build-rust
 build-rust:
@@ -324,6 +394,22 @@ check-changelog:
 .PHONY: check-cross
 check-cross:
 	@./scripts/check-cross.sh
+
+## Build the Arch package(s) with makepkg → ./dist
+##
+## A thin wrapper, deliberately. The PKGBUILD is the packaging — `makepkg` is
+## what an Arch user already knows how to drive, and a Make target that
+## reimplemented any of it would be a second answer to "what does the package
+## contain". This only puts the result where the other formats put theirs.
+.PHONY: pkg
+pkg:
+	$(GUARD_ROOT)
+	@command -v makepkg >/dev/null || { echo "makepkg is not installed — this target is for Arch"; exit 1; }
+	@mkdir -p dist
+	@cd packaging/arch && makepkg -f --noconfirm
+	@mv packaging/arch/*.pkg.tar.* dist/ 2>/dev/null || true
+	@echo "  → dist/"
+	@ls -1 dist/*.pkg.tar.* 2>/dev/null || true
 
 ## Produce the release source tarball → ./dist
 ##
@@ -567,7 +653,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-unsafe fmt-check lint test build check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-unsafe fmt-check lint test build check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full
@@ -595,6 +681,28 @@ install-only:
 	done
 	@echo "installed → $(DESTDIR)$(PREFIX)/bin/"
 
+## Install the desktop window to ~/.local (no sudo)
+##
+## Apart from `install-user` because the window is apart from the rest: it
+## needs a webview at runtime, and a headless machine that only wants
+## `esper` and the engine should not be made to carry one. Installs the
+## binary and the .desktop entry, so it appears in the launcher.
+.PHONY: install-app
+install-app: build-app
+	@install -Dm755 $(BIN)/esper-app $(HOME)/.local/bin/esper-app
+	@install -Dm644 packaging/desktop/esper.desktop $(HOME)/.local/share/applications/esper.desktop
+	@# **The scheme handler needs the database rebuilt to exist.** The entry
+	@# declares `x-scheme-handler/esper`; until this runs, `xdg-open` on an
+	@# invitation link finds nothing and the deep link silently does nothing.
+	@-command -v update-desktop-database >/dev/null 2>&1 && \
+		update-desktop-database $(HOME)/.local/share/applications >/dev/null 2>&1
+	@echo "installed → $(HOME)/.local/bin/esper-app"
+	@echo "           $(HOME)/.local/share/applications/esper.desktop"
+	@echo "           esper:// links now open this window"
+	@case ":$$PATH:" in *":$(HOME)/.local/bin:"*) ;; \
+		*) echo ""; echo "warning: $(HOME)/.local/bin is not on \$$PATH — add it to your shell rc";; \
+	esac
+
 ## Install to ~/.local/bin (no sudo)
 .PHONY: install-user
 install-user: build
@@ -612,6 +720,44 @@ uninstall:
 	@rm -f $(DESTDIR)$(PREFIX)/bin/$(BINARY) \
 	       $(DESTDIR)$(PREFIX)/bin/esper-engine \
 	       $(DESTDIR)$(PREFIX)/bin/esper-broker
+
+## Remove everything Esper installed for this user, including the service
+##
+## **Binaries are the easy half.** What is left behind otherwise is the part
+## that keeps running: a systemd user unit that starts the host at login, an
+## autostart entry that opens the window, and a desktop entry that still
+## claims the `esper://` scheme. An uninstall that removed only the programs
+## would leave a machine that fails at every login instead of one that has
+## stopped serving.
+##
+## **The home is not touched.** `~/.esper` holds the identity key and the
+## device store: deleting them un-pairs this machine from every other one,
+## silently and unrecoverably, and that is not what "uninstall" asks for. The
+## path is printed so somebody can decide for themselves.
+.PHONY: uninstall-user
+uninstall-user:
+	@echo "stopping the host, if it is on..."
+	@-command -v systemctl >/dev/null 2>&1 && { \
+		systemctl --user disable --now esper.service >/dev/null 2>&1; \
+		rm -f $(HOME)/.config/systemd/user/esper.service; \
+		systemctl --user daemon-reload >/dev/null 2>&1; \
+		echo "  removed    the systemd user unit"; \
+	}
+	@rm -f $(HOME)/.config/autostart/esper.desktop && echo "  removed    the autostart entry"
+	@rm -f $(HOME)/.local/share/applications/esper.desktop && echo "  removed    the desktop entry"
+	@-command -v update-desktop-database >/dev/null 2>&1 && \
+		update-desktop-database $(HOME)/.local/share/applications >/dev/null 2>&1
+	@for b in $(BINARY) esper-engine esper-broker esper-app; do \
+		rm -f $(HOME)/.local/bin/$$b; \
+	done
+	@echo "  removed    the binaries from $(HOME)/.local/bin"
+	@echo ""
+	@echo "  Left alone: $(HOME)/.esper"
+	@echo "  It holds this machine's identity key and which devices it trusts."
+	@echo "  Deleting it un-pairs this machine from every other one, and no"
+	@echo "  uninstall should decide that for you:"
+	@echo ""
+	@echo "      rm -rf $(HOME)/.esper"
 
 ## Remove build artifacts
 .PHONY: clean
