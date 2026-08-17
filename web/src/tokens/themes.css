@@ -1,0 +1,150 @@
+/*
+  Themes — overrides of the value layer, in a layer.
+
+  Not a second `@theme`. Tailwind emits its `@theme` variables into `@layer
+  theme`, and these rules go into the same layer *after* it, so they win by
+  source order and lose to nothing that a component might write — a component
+  cannot accidentally out-rank a theme, because components are not in this
+  layer at all.
+
+  Every override here redefines `--sem-*` (the value layer). Nothing redefines
+  `--color-*`: those are the namespace, and the namespace does not change with
+  the theme. Only what it points at does.
+*/
+@layer theme {
+  /*
+    ── Light ───────────────────────────────────────────────────────────
+    Ink on bone. The three surfaces still separate by lightness, but upward:
+    a raised thing is paler than the paper it sits on.
+  */
+  [data-theme="light"] {
+    --sem-surface-0: var(--bone);
+    --sem-surface-1: var(--n-10);
+    --sem-surface-2: var(--paper);
+
+    --sem-text: var(--ink);
+    --sem-text-2: var(--n-3);
+    --sem-text-3: var(--n-4);
+    /* n-5, not n-6: disabled is watched at 3:1 on bone, and n-6 read at 2.7. */
+    --sem-text-disabled: var(--n-5);
+
+    --sem-border: var(--n-8);
+    --sem-border-strong: var(--n-5);
+
+    --sem-focus: var(--focus-on-light);
+    --sem-selection: color-mix(in oklch, var(--ink) 16%, transparent);
+
+    --sem-ok: var(--ok-on-light);
+    --sem-ok-fg: var(--paper);
+    --sem-ok-soft: color-mix(in oklch, var(--ok-on-light) 12%, transparent);
+    --sem-warn: var(--warn-on-light);
+    --sem-warn-fg: var(--paper);
+    --sem-warn-soft: color-mix(in oklch, var(--warn-on-light) 12%, transparent);
+    --sem-danger: var(--danger-on-light);
+    --sem-danger-fg: var(--paper);
+    --sem-danger-soft: color-mix(in oklch, var(--danger-on-light) 12%, transparent);
+    --sem-info: var(--info-on-light);
+    --sem-info-fg: var(--paper);
+    --sem-info-soft: color-mix(in oklch, var(--info-on-light) 12%, transparent);
+
+    --sem-signal: var(--signal-on-light);
+    /* Ink, not paper: paper on amber measured 3.9, and an amber badge with
+       dark text is also how amber is read everywhere else. */
+    --sem-signal-fg: var(--ink);
+
+    --sem-shadow-1: 0 1px 2px oklch(0.2 0.01 286 / 0.12);
+    --sem-shadow-2: 0 4px 12px oklch(0.2 0.01 286 / 0.14);
+    --sem-shadow-3: 0 12px 32px oklch(0.2 0.01 286 / 0.18);
+
+    color-scheme: light;
+  }
+
+  /*
+    ── High contrast ───────────────────────────────────────────────────
+    A theme, not a fourth palette. What changes is what contrast *means*:
+
+    - text pairs clear AAA, not AA;
+    - the hairline is gone — `--sem-border` *is* the strong border, so every
+      plane edge is a boundary somebody can find;
+    - soft tints are gone — a 14% wash carries no information at this bar,
+      so a callout gets a border in its own colour instead;
+    - the focus ring is 3px;
+    - elevation is a ring, because a shadow is not a separation this theme
+      can rely on.
+
+    Dark-based, because the dark palette already has the lightness room and
+    because the session is dark whatever the theme.
+  */
+  [data-theme="hc"] {
+    --sem-surface-0: var(--pitch);
+    --sem-surface-1: var(--n-0);
+    --sem-surface-2: var(--n-1);
+
+    --sem-text: var(--n-10);
+    --sem-text-2: var(--n-9);
+    --sem-text-3: var(--n-8);
+    --sem-text-disabled: var(--n-7);
+
+    --sem-border: var(--n-7);
+    --sem-border-strong: var(--n-8);
+
+    --sem-focus: oklch(0.85 0.10 235);
+    --sem-focus-width: 3px;
+    --sem-selection: color-mix(in oklch, var(--n-10) 30%, transparent);
+
+    /* Lifted until each clears 7:1 on every surface it appears on. */
+    --sem-ok: oklch(0.88 0.07 var(--hue-ok));
+    --sem-ok-fg: var(--pitch);
+    --sem-ok-soft: transparent;
+    --sem-warn: oklch(0.90 0.07 var(--hue-warn));
+    --sem-warn-fg: var(--pitch);
+    --sem-warn-soft: transparent;
+    --sem-danger: oklch(0.86 0.07 var(--hue-danger));
+    --sem-danger-fg: var(--pitch);
+    --sem-danger-soft: transparent;
+    --sem-info: oklch(0.88 0.07 var(--hue-info));
+    --sem-info-fg: var(--pitch);
+    --sem-info-soft: transparent;
+
+    --sem-signal: oklch(0.88 0.15 78);
+    --sem-signal-fg: var(--pitch);
+
+    --sem-shadow-1: 0 0 0 1px var(--n-7);
+    --sem-shadow-2: 0 0 0 1px var(--n-8);
+    --sem-shadow-3: 0 0 0 2px var(--n-8);
+
+    --soft-border-width: 1px;
+
+    color-scheme: dark;
+  }
+
+  /*
+    ── Session ─────────────────────────────────────────────────────────
+    The viewer is the one screen where the UI is not the content. A session
+    root is dark whatever the document's theme (the colours come from
+    semantic.css, whose value layer names `[data-session]` directly), and on
+    top of that it changes what *time* means:
+
+    - `--dur-fast` is the ceiling. Anything on screen at the same time as
+      video may give press and hover feedback and nothing longer, because a
+      remote desktop is a latency instrument and motion in the chrome is
+      motion the user has to decide is not the remote machine stuttering.
+    - the video surface never transitions: `--dur-video` is zero and is the
+      only duration that surface may use.
+    - the chrome parks on its own layers, above the toast layer, so a
+      session is interruptible by nothing.
+    - the chrome hides after `--session-chrome-hide`. That number is a
+      product decision, and a product decision lives here rather than as a
+      literal in a timer somewhere in the JavaScript.
+
+    Layer tokens are not redefined: `--z-session-*` exist in the namespace
+    for every theme, so a component can name them anywhere.
+  */
+  [data-session] {
+    --dur-base: var(--dur-fast);
+    --dur-slow: var(--dur-fast);
+    --dur-graph: var(--dur-fast);
+    --dur-video: 0ms;
+    --session-chrome-hide: 3000ms;
+  }
+}

@@ -1,0 +1,95 @@
+/*
+  Primitives — raw OKLCH and pixels. Layer one of three.
+
+  Nothing in the UI may reference these. They are the palette the semantic
+  layer is *made from*, and they generate no Tailwind utility: `bg-n-9` does
+  not exist, on purpose, so a component cannot reach past the semantic layer
+  and pick a lightness that suits one screen. Only `semantic.css` reads this
+  file.
+
+  These are authored for this product, not copied. The structure — a neutral
+  ramp, a bone, four semantic hues held to low chroma, one warm signal — is
+  inherited. The values are solved against what Esper actually shows: chrome
+  around somebody else's dark desktop, a pairing code read across a room, HUD
+  numbers that must not move. Every lightness below is checked against the
+  pairings in scripts/check-contrast.mjs rather than chosen by eye; a number
+  nobody can justify to that script does not belong here.
+
+  OKLCH throughout. Hue 286 for the neutrals (a whisper of cool, so the near
+  black reads as a surface and not a hole), hue 87 for the bone.
+*/
+:root {
+  /* Neutral ramp, dark to light. Chroma is barely there. */
+  --n-0: oklch(0.13 0.006 286);
+  --n-1: oklch(0.17 0.006 286);
+  --n-2: oklch(0.215 0.006 286);
+  --n-3: oklch(0.27 0.006 286);
+  --n-4: oklch(0.36 0.006 286);
+  /* 0.52, not 0.50: the strong border has to clear 3:1 on the top surface. */
+  --n-5: oklch(0.52 0.006 286);
+  --n-6: oklch(0.64 0.006 286);
+  --n-7: oklch(0.76 0.006 286);
+  --n-8: oklch(0.86 0.006 286);
+  --n-9: oklch(0.93 0.006 286);
+  --n-10: oklch(0.975 0.004 286);
+
+  /* Bone. The text colour in dark, the paper in light. */
+  --bone: oklch(0.93 0.012 87);
+  --bone-deep: oklch(0.88 0.014 87);
+  --paper: oklch(0.985 0.005 87);
+  --ink: oklch(0.16 0.008 286);
+  --pitch: oklch(0 0 0);
+
+  /*
+    Semantic hues, chroma held to 0.07 — enough to carry meaning, not enough
+    to be decoration. Each hue has a lightness for dark surfaces and one for
+    light, because a green that reads on near-black is a pastel on paper.
+  */
+  --hue-ok: 150;
+  --hue-warn: 80;
+  --hue-danger: 25;
+  --hue-info: 250;
+
+  /*
+    The dark lightnesses are solved against the tone's *own soft fill* over
+    the top surface, which is the hardest pairing each has to survive: the
+    tint lifts the background a little, and 0.78 lost by two hundredths.
+  */
+  --ok-on-dark: oklch(0.82 0.07 var(--hue-ok));
+  --ok-on-light: oklch(0.46 0.07 var(--hue-ok));
+  --warn-on-dark: oklch(0.84 0.07 var(--hue-warn));
+  --warn-on-light: oklch(0.48 0.07 var(--hue-warn));
+  --danger-on-dark: oklch(0.81 0.07 var(--hue-danger));
+  --danger-on-light: oklch(0.48 0.07 var(--hue-danger));
+  --info-on-dark: oklch(0.82 0.07 var(--hue-info));
+  --info-on-light: oklch(0.48 0.07 var(--hue-info));
+
+  /*
+    The signal. The one saturated thing the system has, for the one element on
+    a view that deserves attention — a relayed session, a hot path. Warm amber,
+    and allowed a chroma the semantic tones are not, because it is the
+    exception that lets everything else stay quiet.
+  */
+  --signal-on-dark: oklch(0.80 0.15 75);
+  --signal-on-light: oklch(0.60 0.15 70);
+
+  /*
+    Focus. Deliberately not the accent — the accent is the text colour, and a
+    focus ring in the text colour on a danger button is invisible. A cool,
+    restrained blue that reads against every surface in every theme.
+  */
+  --focus-on-dark: oklch(0.72 0.09 235);
+  --focus-on-light: oklch(0.50 0.10 235);
+
+  /* Pixels. The 4px rhythm every gap is a multiple of. */
+  --px-1: 4px;
+  --px-2: 8px;
+  --px-3: 12px;
+  --px-4: 16px;
+  --px-5: 20px;
+  --px-6: 24px;
+  --px-8: 32px;
+  --px-10: 40px;
+  --px-12: 48px;
+  --px-16: 64px;
+}

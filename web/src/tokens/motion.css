@@ -1,0 +1,105 @@
+/*
+  Motion — durations by purpose, and the two ways to turn it all off.
+
+  This file is the source of truth. `src/motion.ts` is generated from it by
+  scripts/gen-motion.mjs for the animations the animation library drives; it
+  is not edited by hand, and CI regenerates it and fails if it differs. One set
+  of numbers.
+
+  Durations are assigned by *purpose*, never by taste. A component does not
+  pick 150ms because it looks right; it picks `--dur-fast` because what it is
+  doing is micro-feedback, and if that ever needs to be 100ms it changes here
+  and everywhere at once.
+*/
+:root {
+  /* State that must not appear to move at all. */
+  --dur-instant: 0ms;
+  /* Micro-feedback: hover, press, focus, a toggle. */
+  --dur-fast: 120ms;
+  /* A state change: a row arriving, a panel switching. */
+  --dur-base: 200ms;
+  /* Something entering the screen: a dialog, a drawer, a popover. */
+  --dur-slow: 320ms;
+  /* Spatial re-layout of a large canvas. Inherited; no use here yet. */
+  --dur-graph: 600ms;
+
+  /*
+    The video surface's own duration. Zero in a session (themes.css) and zero
+    here too, because there is no context in which the picture of somebody
+    else's screen should ease into place: the frame that arrives is the frame
+    that is shown.
+  */
+  --dur-video: 0ms;
+
+  /*
+    How long the session chrome waits before retracting. A product decision,
+    so it is a token and not a literal in a timer. Read by the chrome's timer
+    through getComputedStyle, which is what keeps JavaScript and CSS agreeing.
+  */
+  --session-chrome-hide: 3000ms;
+
+  /*
+    The two named motions. `arrive`: a new item rises 6px and fades in, so it
+    arrives rather than appears; it leaves 4px upward, faster. `overlay`: opens
+    from 0.97 scale, from where it was invoked and not from the screen centre.
+    The distances are tokens because the generator carries them into motion.ts.
+  */
+  --arrive-rise: 6px;
+  --arrive-leave: 4px;
+  --overlay-from: 0.97;
+}
+
+/*
+  Reduced motion, two ways in, one place out.
+
+  The OS setting, and the override on /design — so every animation can be
+  re-run with motion off and its fallback *confirmed*, rather than assumed
+  honoured. Both end here: every duration token to zero.
+
+  **Deliberately outside every layer.** Tailwind's layers and the theme layer
+  all lose to an unlayered rule, which is the point: nothing a component or a
+  theme writes can turn motion back on.
+
+  The second block is the sweep. Animations that never read the tokens at all
+  — a third-party keyframe, a library spring — are cut to a hundredth of a
+  millisecond with one iteration, and smooth scrolling is turned off. It is
+  0.01ms and not 0 because some libraries treat a zero duration as "no
+  animation was configured" and fall back to their own default.
+*/
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+    --dur-graph: 0ms;
+    --arrive-rise: 0px;
+    --arrive-leave: 0px;
+    --overlay-from: 1;
+  }
+  :root:not([data-motion="full"]) *,
+  :root:not([data-motion="full"]) *::before,
+  :root:not([data-motion="full"]) *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+[data-motion="reduced"] {
+  --dur-fast: 0ms;
+  --dur-base: 0ms;
+  --dur-slow: 0ms;
+  --dur-graph: 0ms;
+  --arrive-rise: 0px;
+  --arrive-leave: 0px;
+  --overlay-from: 1;
+}
+[data-motion="reduced"] *,
+[data-motion="reduced"] *::before,
+[data-motion="reduced"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}

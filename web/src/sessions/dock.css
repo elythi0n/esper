@@ -1,0 +1,97 @@
+/*
+  The dock, in Esper's tokens.
+
+  dockview ships several themes and none of them is imported: `--dv-*` is its
+  public theming surface and every value below is ours, so the workspace reads
+  as this product rather than as the vendor default. The one rule that matters
+  is the same one the rest of the system keeps — no colour, radius or duration
+  is written here that is not a token.
+
+  # Why the tab strip does not auto-hide
+
+  The design system says session chrome retracts after `--session-chrome-hide`.
+  That rule is about chrome laid *over* somebody's desktop. A tab strip is not
+  that: it is how you get to the other session, and chrome you need in order
+  to navigate is chrome that has to be there. What still auto-hides is the
+  HUD, which sits over the picture.
+*/
+/*
+  dockview's own mechanics stylesheet. Imported here, once, beside the theme
+  that overrides it — and *outside* `@layer components`, because a layered
+  import would put a vendor stylesheet on the same layer as our components
+  and let load order decide which wins.
+*/
+@import "dockview-react/dist/styles/dockview.css" layer(vendor);
+
+@layer vendor, components;
+
+@layer components {
+  .dockview-theme-esper {
+    --dv-background-color: var(--color-video);
+    --dv-group-view-background-color: var(--color-video);
+    --dv-paneview-active-outline-color: var(--color-focus);
+
+    /* The strip. `--topbar-h` would be too tall for a tab; a row plus its
+       padding is the dense figure the rest of the product uses. */
+    --dv-tabs-and-actions-container-background-color: var(--color-surface-0);
+    --dv-tabs-and-actions-container-height: 36px;
+    --dv-tabs-and-actions-container-font-size: var(--text-sm);
+    --dv-tab-font-size: var(--text-sm);
+    --dv-tab-divider-color: transparent;
+    --dv-separator-border: var(--color-border);
+    --dv-paneview-header-border-color: var(--color-border);
+    --dv-tab-border-radius: 0;
+    --dv-border-radius: var(--radius-sm);
+    --dv-tab-close-icon-size: var(--icon-sm);
+
+    /* Active group: the visible tab is the canvas lifted out of the strip. */
+    --dv-activegroup-visiblepanel-tab-background-color: var(--color-surface-1);
+    --dv-activegroup-visiblepanel-tab-color: var(--color-text);
+    --dv-activegroup-hiddenpanel-tab-background-color: var(--color-surface-0);
+    --dv-activegroup-hiddenpanel-tab-color: var(--color-text-3);
+    /* Inactive group: the same shape, quieter, so "focused here" still reads. */
+    --dv-inactivegroup-visiblepanel-tab-background-color: var(--color-surface-1);
+    --dv-inactivegroup-visiblepanel-tab-color: var(--color-text-2);
+    --dv-inactivegroup-hiddenpanel-tab-background-color: var(--color-surface-0);
+    --dv-inactivegroup-hiddenpanel-tab-color: var(--color-text-3);
+
+    --dv-icon-hover-background-color: var(--color-surface-2);
+    --dv-active-sash-color: var(--color-focus);
+    --dv-separator-active-border: var(--color-focus);
+    --dv-drag-over-background-color: var(--color-selection);
+    --dv-drag-over-border-color: var(--color-focus);
+    --dv-floating-box-shadow: var(--shadow-3);
+    --dv-scrollbar-background-color: var(--color-border);
+    --dv-tabs-container-scrollbar-color: var(--color-border);
+    --dv-transition-duration: var(--dur-fast);
+    --dv-active-sash-transition-duration: var(--dur-fast);
+  }
+
+  /*
+    The active tab is marked by a bar on its top edge, which is the same
+    "you are here" mark the sidebar's rail uses — one idea, two places,
+    rather than a filled pill competing with the picture below it.
+  */
+  .dockview-theme-esper .dv-active-group .tab.active-tab::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    inset-block-start: 0;
+    block-size: 2px;
+    background: var(--color-text);
+  }
+
+  .dockview-theme-esper .tab {
+    position: relative;
+    transition: background-color var(--dur-fast) var(--ease);
+  }
+
+  .dockview-theme-esper .tab:not(.active-tab):hover {
+    background: var(--color-surface-1);
+  }
+
+  /* The strip sits on a hairline, so the picture below it has an edge. */
+  .dockview-theme-esper .dv-tabs-and-actions-container {
+    border-block-end: 1px solid var(--color-border);
+  }
+}

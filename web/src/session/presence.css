@@ -1,0 +1,59 @@
+/*
+  The presence indicator. Held to presence.contract.ts by scripts/check-presence.mjs.
+
+  This is the one stylesheet outside the token files that is allowed raw
+  colour, and the exemption is the point rather than a convenience: the
+  indicator is *unthemeable by design*. A theme that could recolour it could
+  hide it, so its two tones are written here as literals and reference no
+  theme token. The lint names this file and says why.
+
+  Nothing here transitions or animates, and `!important` is used on purpose
+  — the reduced-motion sweep and every component rule lose to it. An indicator
+  that fades in is invisible for as long as the fade takes.
+*/
+@layer components {
+  .presence {
+    /* Fixed to the viewport, top trailing corner, above every session layer. */
+    position: fixed;
+    inset-block-start: var(--px-3);
+    inset-inline-end: var(--px-3);
+    z-index: var(--z-session-hud);
+
+    /* Never smaller than the contract's floor. */
+    min-width: 28px;
+    min-height: 28px;
+    box-sizing: border-box;
+
+    display: inline-flex;
+    align-items: center;
+    gap: var(--px-2);
+    padding-inline: var(--px-2);
+    border-radius: var(--radius-full);
+
+    /* Two tones, so it contrasts with any picture behind it. */
+    background: oklch(0.13 0 0);
+    color: oklch(0.93 0 0);
+    box-shadow: 0 0 0 2px oklch(0.93 0 0);
+
+    font: 500 12px/1 var(--font-mono);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+
+    /* The prohibitions. */
+    opacity: 1 !important;
+    animation: none !important;
+    transition: none !important;
+    pointer-events: none;
+  }
+
+  /* The dot: a filled circle in the ring colour, the one glyph that survives any size. */
+  .presence::before {
+    content: "";
+    inline-size: 8px;
+    block-size: 8px;
+    border-radius: var(--radius-full);
+    background: oklch(0.93 0 0);
+    flex: none;
+  }
+}

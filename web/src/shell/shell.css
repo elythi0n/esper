@@ -1,0 +1,789 @@
+/*
+  The app shell: a sidebar that collapses to an icon rail, a topbar that stays
+  put, a page body that is the only thing that scrolls, and a status strip.
+
+  Structure carried over from an earlier design system; every value re-authored
+  against this product's tokens, and nothing here writes a colour, a duration
+  or a width that is not one.
+
+  # Container queries, not media queries
+
+  The shell asks how wide *it* is, not how wide the display is. This is a
+  desktop application: a window dragged to half a screen should get the
+  compact shell whether or not the monitor is large, and a media query cannot
+  answer that. It also means the gate can show the narrow arrangement beside
+  the wide one instead of describing it. The widths are the breakpoint tokens,
+  and the discipline lint holds `@container` to them exactly as it holds
+  `@media`.
+
+  `container-type: inline-size` also makes the shell the containing block for
+  the fixed bars in the narrow arrangement, so a shell inside a box on the
+  gate keeps its bars inside that box.
+*/
+@layer components {
+  /*
+    The frame carries the container, and `.shell` inside it does the layout.
+    They are two elements because **a container query cannot style its own
+    container**: with the query on `.shell`, `@container shell (…) { .shell
+    { flex-direction: column } }` matches a shell nested inside a shell,
+    which is nothing. Found by measuring the narrow arrangement and seeing
+    the bars laid out as columns.
+  */
+  .shell-frame {
+    container: shell / inline-size;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    /*
+      The page scrolls in .page-body and nowhere else. Without this a hit
+      area on a control at the bottom edge extends the document by a few
+      pixels and the whole window grows a scrollbar.
+    */
+    overflow: clip;
+    background: var(--color-surface-0);
+    color: var(--color-text);
+  }
+
+  .shell {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+  }
+
+  /* ── Alarm ─────────────────────────────────────────────────────────── */
+  /*
+    A band for a condition of the machine, above the shell and across all of
+    it — the sidebar included, because what it says is no less true there.
+
+    Its own row rather than something laid over the topbar: a band that
+    covered chrome would take away the navigation at exactly the moment
+    somebody wants to go and look at something else.
+  */
+  .alarm {
+    flex-shrink: 0;
+    background: var(--color-warn-soft);
+    color: var(--color-warn);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .alarm[data-tone="danger"] {
+    background: var(--color-danger-soft);
+    color: var(--color-danger);
+  }
+
+  .alarm-inner {
+    display: flex;
+    min-height: var(--topbar-h);
+    align-items: center;
+    gap: var(--px-3);
+    padding: var(--px-2) var(--page-gutter);
+  }
+
+  /*
+    The sentence, and it never wraps.
+
+    It was a flexible box beside a flexible detail, so the machine's own
+    words — which are long, and unbounded — squeezed "The engine on this
+    machine has stopped" into three lines while the reason ran on beside it.
+    **What has to survive a narrow window is the sentence**, so the sentence
+    does not shrink and the detail is the only thing that yields.
+  */
+  .alarm-said {
+    margin: 0;
+    flex-shrink: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    white-space: nowrap;
+  }
+
+  /*
+    The machine's own words. Monospaced because they are output, and given
+    the room that is left rather than a share of it — a reason nobody can
+    read is worse than no reason, and the sentence beside it is the part
+    that has to survive a narrow window.
+  */
+  .alarm-detail {
+    margin: 0;
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-3);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .alarm-action {
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .shell-main {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ───────────────────────────────────────────────────────── */
+  /*
+    Grouped destinations under mono labels, 30px rows, and the active item
+    marked by a bar on the rail's edge rather than a filled pill — the quieter
+    mark says "you are here" without competing with the content.
+
+    The width transition is a transition between two token widths, which is
+    not the thing the layout rule bans: nothing here is a hand-written
+    keyframe guessing at a size the browser already knows.
+  */
+  .sidebar {
+    --sidebar-pad: var(--px-3);
+    position: relative;
+    display: flex;
+    width: var(--sidebar-w);
+    flex-shrink: 0;
+    flex-direction: column;
+    padding: 0 var(--sidebar-pad);
+    border-right: 1px solid var(--color-border);
+    background: var(--color-surface-1);
+    transition:
+      width var(--dur-base) var(--ease),
+      padding var(--dur-base) var(--ease);
+  }
+
+  .sidebar[data-collapsed="true"] {
+    width: var(--sidebar-rail-w);
+    /*
+      **And a narrower gutter.** Keeping the expanded padding left a 48px
+      rail with 24px of room in it, so every icon sat in a box half the
+      width of its own row and the hover state looked squeezed. The rail's
+      gutter is the difference between the rail and the target it holds.
+    */
+    padding: 0 var(--px-1);
+    /* The empty rail is a target: a click on nothing in particular opens it. */
+    cursor: pointer;
+  }
+
+  /*
+    The same height as the topbar, and full-bleed across the sidebar — the
+    negative margins cancel the side padding — so its hairline meets the
+    topbar's at the divider and the two run as one line.
+  */
+  .sidebar-brand {
+    position: relative;
+    display: flex;
+    height: var(--topbar-h);
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--px-2);
+    margin: 0 calc(-1 * var(--sidebar-pad)) var(--px-2);
+    /* The mark is absolute, so the row only has to place the control. */
+    padding: 0 var(--px-2) 0 var(--px-4);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .sidebar[data-collapsed="true"] .sidebar-brand {
+    justify-content: center;
+    margin-inline: calc(-1 * var(--px-1));
+    padding: 0;
+  }
+
+  /*
+    The mark is taken out of the flow rather than sized down.
+
+    It has to stay mounted through the collapse so its letters can leave one
+    at a time, and an `<svg>` with an auto width keeps ~50px of it whatever
+    is drawn inside — which pushed the collapse control clean out of a 48px
+    rail. Absolute, so what it occupies is nothing and only what it *paints*
+    changes.
+  */
+  .sidebar-wordmark {
+    position: absolute;
+    height: 9px;
+    left: var(--px-4);
+    top: 50%;
+    translate: 0 -50%;
+    pointer-events: none;
+  }
+
+  .sidebar[data-collapsed="true"] .sidebar-wordmark {
+    left: var(--px-2);
+  }
+
+  .sidebar-nav {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    margin: 0 calc(-1 * var(--sidebar-pad));
+    padding: 0 var(--sidebar-pad);
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .sidebar-group {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .sidebar-group + .sidebar-group {
+    margin-top: var(--px-2);
+  }
+
+  .sidebar-group-label {
+    margin: 0;
+    padding: var(--px-3) var(--px-3) var(--px-1);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-text-3);
+    white-space: nowrap;
+  }
+
+  .sidebar-group:first-child .sidebar-group-label {
+    padding-top: var(--px-1);
+  }
+
+  .navitem {
+    position: relative;
+    display: flex;
+    height: var(--control-h);
+    align-items: center;
+    gap: var(--px-2);
+    padding: 0 var(--px-3);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-2);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color var(--dur-fast) var(--ease),
+      color var(--dur-fast) var(--ease);
+  }
+
+  .navitem:hover {
+    color: var(--color-text);
+    background: var(--color-surface-2);
+  }
+
+  .navitem[aria-current="page"] {
+    color: var(--color-text);
+  }
+
+  /*
+    The bar sits on the rail's edge, outside the row's padding, so a column of
+    items reads as one rail with one mark on it.
+  */
+  .navitem[aria-current="page"]::before {
+    content: "";
+    position: absolute;
+    left: calc(-1 * var(--sidebar-pad));
+    top: var(--px-2);
+    bottom: var(--px-2);
+    width: 2px;
+    border-radius: 0 1px 1px 0;
+    background: var(--color-text);
+  }
+
+  .navitem-icon {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--color-text-3);
+    transition: color var(--dur-fast) var(--ease);
+  }
+
+  .navitem:hover .navitem-icon,
+  .navitem[aria-current="page"] .navitem-icon {
+    color: var(--color-text);
+  }
+
+  .navitem-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Something is happening behind this destination. The signal, on one element. */
+  .navitem-dot {
+    margin-left: auto;
+    width: 6px;
+    height: 6px;
+    flex-shrink: 0;
+    border-radius: var(--radius-full);
+    background: var(--color-signal);
+  }
+
+  /* Collapsed: icons only, groups told apart by a hairline, the dot on the corner. */
+  .sidebar[data-collapsed="true"] .sidebar-group-label {
+    display: none;
+  }
+
+  .sidebar[data-collapsed="true"] .sidebar-group + .sidebar-group {
+    margin-top: var(--px-1);
+    padding-top: var(--px-1);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .sidebar[data-collapsed="true"] .navitem {
+    justify-content: center;
+    /* A square target, not a squeezed row: the rail minus its gutter. */
+    width: calc(var(--sidebar-rail-w) - 2 * var(--px-1));
+    height: calc(var(--sidebar-rail-w) - 2 * var(--px-1));
+    padding: 0;
+  }
+
+  .sidebar[data-collapsed="true"] .navitem-label {
+    display: none;
+  }
+
+  .sidebar[data-collapsed="true"] .navitem-dot {
+    position: absolute;
+    top: var(--px-1);
+    right: var(--px-2);
+    margin: 0;
+    box-shadow: 0 0 0 2px var(--color-surface-1);
+  }
+
+  /* The brand block's mirror: the same full-bleed trick, the strip's height. */
+  .sidebar-foot {
+    display: flex;
+    height: var(--footbar-h);
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--px-2);
+    margin: auto calc(-1 * var(--sidebar-pad)) 0;
+    padding: 0 var(--px-2) 0 var(--px-4);
+    border-top: 1px solid var(--color-border);
+    color: var(--color-text-3);
+    font-size: var(--text-xs);
+  }
+
+  .sidebar[data-collapsed="true"] .sidebar-foot {
+    justify-content: center;
+    margin-inline: calc(-1 * var(--px-1));
+    padding: 0;
+  }
+
+  .sidebar[data-collapsed="true"] .sidebar-version {
+    display: none;
+  }
+
+  /* ── Topbar ────────────────────────────────────────────────────────── */
+  /*
+    Raised with the sidebar, so the brand block and the topbar read as one
+    band of chrome over the plain canvas below.
+  */
+  /*
+    **The bar spans the window, and its content sits at the window's edges.**
+
+    It was on the body's measure for a while, so the title lined up with the
+    first row of content — which reads well until the window is wide, and
+    then the title is adrift somewhere near the middle of a bar with nothing
+    else in it and the action that belongs in the corner is not in one. The
+    rule that holds at every width: **chrome belongs to the window, content
+    has a measure.** Where you look for the page's name and where you look
+    for its one action are corners, not positions relative to a paragraph.
+  */
+  .topbar {
+    display: flex;
+    height: var(--topbar-h);
+    flex-shrink: 0;
+    align-items: center;
+    gap: var(--px-4);
+    padding: 0 var(--page-gutter);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-1);
+    transition:
+      border-color var(--dur-fast) var(--ease),
+      box-shadow var(--dur-fast) var(--ease);
+  }
+
+  /*
+    The boundary appears when there is something behind it.
+
+    The bar never moves and never hides — what was reported as "the top bar
+    goes missing when I scroll" was content sliding *under* a bar that looked
+    identical whether or not anything was behind it, which leaves the eye
+    nothing to read the difference from. Scrolled: the hairline strengthens
+    and takes the smallest shadow. At the top: a plain hairline, because a
+    shadow with nothing behind it is a bar pretending to float.
+
+    `:has(+ …)` rather than a class the screens have to remember, so this is
+    true of every screen that puts a page body after its topbar and cannot be
+    forgotten on a new one. The page body sets `data-scrolled` itself.
+  */
+  .topbar:has(+ .page-body[data-scrolled="true"]) {
+    border-bottom-color: var(--color-border-strong);
+    box-shadow: var(--shadow-1);
+  }
+
+  .topbar-heading {
+    min-width: 0;
+    margin-right: auto;
+  }
+
+  .page-title {
+    margin: 0;
+    font-size: var(--text-lg);
+    line-height: 1.2;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .page-subtitle {
+    margin: 2px 0 0;
+    max-width: 52ch;
+    overflow: hidden;
+    color: var(--color-text-3);
+    font-size: var(--text-xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .page-actions {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: var(--px-2);
+  }
+
+  /* ── Page body ─────────────────────────────────────────────────────── */
+  /*
+    The scroll container under the topbar. Its definite height is what lets a
+    table fill the window and stop at it.
+
+    Positioned, so an absolutely positioned helper inside — a Radix
+    visually-hidden native control, for one — is contained by this scroll box.
+    Without it such a helper's containing block is the viewport, it sits at its
+    static position far down the page, and the window grows a scrollbar for
+    something nobody can see.
+  */
+  .page-body {
+    /*
+      A container too, so a screen's own grid asks how wide the body is
+      rather than how wide the display is. A two-column card grid inside a
+      shell squeezed to half a window should be one column, and the viewport
+      has no opinion about that.
+    */
+    container: page / inline-size;
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    flex-direction: column;
+    overflow-y: auto;
+    padding: var(--px-5) var(--page-gutter) var(--px-12);
+  }
+
+  /*
+    Everything in a screen is capped at the measure, **and starts at the
+    gutter**.
+
+    The cap is what a wide display needs: a row 2500px across with a name at
+    one end and a button at the other is not a row anybody reads. Centring
+    that cap is the part that was wrong — it put the page's title in the
+    window's corner and the first line of its content 276px to the right of
+    it, measured at 1920, and a title that does not sit above the thing it
+    names is not a title. One left edge for the bar, the column and the
+    status strip; the room a wide window has goes to the right of the
+    content, where it reads as room.
+  */
+  .page-body > * {
+    flex-shrink: 0;
+    width: 100%;
+    max-width: var(--page-measure);
+  }
+
+  /*
+    A screen that is *only* an empty state gets the height to centre in.
+    Without this the mark and its sentence sit under the heading at the top
+    of a tall blank page, which is the arrangement that reads as unfinished.
+  */
+  .page-body > [data-grow="true"] {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  /*
+    And it gets the *width*, because there is no column yet to belong to.
+    The measure exists to stop a row spanning a wide display; a mark and one
+    sentence are neither, and centring them on a column that has nothing in
+    it puts them off to one side of an otherwise empty window.
+  */
+  .page-body > [data-empty="true"] {
+    max-width: none;
+  }
+
+  /*
+    Fill mode, for a screen that is one table: the body stops scrolling and
+    stops padding, and the child owns what is left — its rows are then the
+    only thing that scrolls.
+  */
+  .page-body[data-fill="true"] {
+    padding: 0;
+    overflow: hidden;
+  }
+
+  /* Fill mode is for a screen that *is* a table, so it takes the window. */
+  .page-body[data-fill="true"] > * {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-width: none;
+  }
+
+  /* ── Status strip ──────────────────────────────────────────────────── */
+  /* Counts and small utilities: the least attention-expensive place for
+     something that is always mildly relevant. */
+  .statusbar {
+    display: flex;
+    height: var(--footbar-h);
+    flex-shrink: 0;
+    align-items: center;
+    gap: var(--px-4);
+    padding: 0 var(--page-gutter);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-surface-1);
+    color: var(--color-text-3);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .statusbar-spacer {
+    margin-left: auto;
+  }
+
+  /* ── Narrow: the search trigger loses its words ────────────────────── */
+  @container shell (max-width: 1024px) {
+    .topbar-search-label,
+    .topbar-search-kbd {
+      display: none;
+    }
+  }
+
+  @container shell (max-width: 720px) {
+    .page-body {
+      padding: var(--px-4) var(--px-4) var(--px-10);
+    }
+  }
+
+  /*
+    ── Narrowest: the native pattern, not a squeezed desktop ────────────
+    A strip across the top (the brand) and a tab bar across the bottom (the
+    destinations), with the screen between them. Tabs always show icon and
+    label, and each is at least a tap target tall.
+
+    Done with `display: contents` and `order` rather than by pinning two bars
+    to the edges. Pinning was the first attempt and was wrong twice over: the
+    tab bar is inside the sidebar in the DOM, so an absolute one is bounded
+    by the strip it is nested in rather than by the shell, and a fixed one
+    depends on the query container also being a containing block, which is a
+    spec corner to be relying on. Dissolving the sidebar's box makes the
+    brand, the screen and the tab bar three ordinary rows of one column —
+    no containing block to reason about, and the screen still scrolls in
+    `.page-body` and nowhere else. The bars carry their own background and
+    hairline, since the box that used to hold them is gone.
+  */
+  @container shell (max-width: 640px) {
+    /*
+      The band stacks instead of holding one line.
+
+      `.alarm-said` never wraps, on purpose — the machine's own words are
+      long and unbounded and used to squeeze the sentence into three lines.
+      But "never wraps" plus a button beside it is a 560px minimum, and this
+      window can be 380px wide: the band stopped shrinking and the *whole
+      page* grew a horizontal scrollbar, which `check-overflow` found on the
+      gate. So at this width the sentence is allowed to wrap and the action
+      takes its own row, which is the ordinary answer and keeps the rule
+      where it was earned — a long detail still never pushes the sentence
+      around.
+    */
+    .alarm-inner {
+      flex-wrap: wrap;
+    }
+
+    .alarm-said {
+      white-space: normal;
+    }
+
+    .alarm-action {
+      margin-left: 0;
+      flex-basis: 100%;
+    }
+
+    .shell {
+      flex-direction: column;
+    }
+
+    .sidebar,
+    .sidebar[data-collapsed="true"] {
+      display: contents;
+    }
+
+    .sidebar-brand {
+      order: 0;
+      height: auto;
+      min-height: var(--topbar-h);
+      margin: 0;
+      padding: env(safe-area-inset-top) var(--px-4) 0;
+      border-bottom: 1px solid var(--color-border);
+      background: var(--color-surface-1);
+    }
+
+    .sidebar[data-collapsed="true"] .sidebar-brand {
+      justify-content: flex-start;
+      padding: env(safe-area-inset-top) var(--px-4) 0;
+    }
+
+    /* No collapse control on a phone: there is no rail to collapse to. */
+    .sidebar-collapse {
+      display: none;
+    }
+
+    .shell-main {
+      order: 1;
+    }
+
+    .sidebar-nav,
+    .sidebar[data-collapsed="true"] .sidebar-nav {
+      order: 2;
+      /* A column flex would otherwise squeeze the tab bar below a tap
+         target to give the screen more room. The screen scrolls; the bar
+         does not. */
+      flex: 0 0 auto;
+      flex-direction: row;
+      justify-content: space-around;
+      gap: 0;
+      margin: 0;
+      padding: var(--px-1) var(--px-1) max(var(--px-1), env(safe-area-inset-bottom));
+      border-top: 1px solid var(--color-border);
+      background: var(--color-surface-1);
+      overflow: visible;
+    }
+
+    .sidebar-group {
+      display: contents;
+    }
+
+    /* A destination that does not earn a thumb-sized tab is not on the bar. */
+    .sidebar-group-label,
+    .navitem[data-compact="false"] {
+      display: none;
+    }
+
+    .navitem,
+    .sidebar[data-collapsed="true"] .navitem {
+      flex: 1;
+      flex-direction: column;
+      justify-content: center;
+      gap: 3px;
+      height: auto;
+      min-height: var(--tap-min);
+      padding: var(--px-1) 2px;
+      font-size: var(--text-xs);
+      text-align: center;
+      white-space: normal;
+    }
+
+    .sidebar[data-collapsed="true"] .navitem-label {
+      display: block;
+    }
+
+    .navitem[aria-current="page"]::before {
+      display: none;
+    }
+
+    .navitem-dot,
+    .sidebar[data-collapsed="true"] .navitem-dot {
+      position: absolute;
+      top: var(--px-1);
+      right: calc(50% - 14px);
+      margin: 0;
+      box-shadow: none;
+    }
+
+    /* The version belongs on a screen, not on a phone's chrome. */
+    .sidebar-foot {
+      display: none;
+    }
+
+    .topbar {
+      height: auto;
+      flex-wrap: wrap;
+      row-gap: var(--px-2);
+      padding-top: var(--px-2);
+      padding-bottom: var(--px-2);
+    }
+
+    /*
+      Actions take a row of their own and wrap, rather than pushing the bar
+      wider than the phone: a sideways scroll on the chrome is never right.
+    */
+    .page-actions {
+      flex: 1 0 100%;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .page-subtitle {
+      display: none;
+    }
+
+    .statusbar {
+      display: none;
+    }
+  }
+
+  /*
+    ── The window's own title bar ─────────────────────────────────────────
+    The window is frameless, so this replaces the system's. It is above
+    everything for the life of the window, which is the argument for 32px
+    and one hairline and nothing else.
+  */
+  .titlebar {
+    display: flex;
+    height: 32px;
+    flex-shrink: 0;
+    align-items: center;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-1);
+    /* The whole bar drags; the controls on it opt out below. */
+    --wails-draggable: drag;
+    user-select: none;
+  }
+
+  /*
+    Anything a pointer acts on opts out — the property inherits, so without
+    this a click on a menu would start dragging the window instead.
+  */
+  .titlebar .no-drag,
+  .titlebar button,
+  .titlebar a {
+    --wails-draggable: no-drag;
+  }
+
+  /*
+    ── Inside the native window ───────────────────────────────────────────
+    The window has no system chrome, so the topbar and the brand block are
+    the drag region. The property inherits, so everything a pointer can act
+    on inside them opts back out. Inert until a shell sets `data-desktop`.
+  */
+  /*
+    Superseded by `.titlebar`, which is the drag region now. Making the
+    topbar draggable as well was right when the window had system chrome and
+    is wrong with a bar of its own: a screen's own header is full of things
+    to click, and every one of them would have had to opt out.
+  */
+  html[data-desktop="true"] .shell-frame {
+    --wails-draggable: no-drag;
+  }
+}

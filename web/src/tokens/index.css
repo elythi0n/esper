@@ -1,0 +1,121 @@
+/*
+  The stylesheet, in the order the layers depend on each other.
+
+  primitives → tailwind (which emits the @theme namespace into its theme layer)
+  → semantic values → theme overrides → motion, whose reduced-motion block is
+  unlayered on purpose and therefore outranks all of the above.
+*/
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource-variable/jetbrains-mono";
+@import "./primitive.css";
+@import "tailwindcss";
+@import "./semantic.css";
+@import "./themes.css";
+@import "./motion.css";
+@import "../components/keyframes.css";
+@import "../session/presence.css";
+
+@layer base {
+  html {
+    background: var(--color-surface-0);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+    letter-spacing: var(--text-base--letter-spacing);
+    /*
+      Neither `-webkit-font-smoothing: antialiased` nor
+      `text-rendering: optimizeLegibility` is set, and both were.
+
+      `antialiased` is a macOS-era hack that forces *grayscale* rendering,
+      which on a Linux desktop means turning subpixel antialiasing off in a
+      window that could have used it; `optimizeLegibility` is discouraged for
+      body text. Both are removed on those grounds.
+
+      **Neither removal is claimed to be measurable here.** The desktop
+      window renders slightly softer than the browser — the same screen, 4%
+      more lit pixels at a lower mean luminance, glyphs spread over more and
+      dimmer pixels — and taking these two out changed the numbers by
+      nothing at all. That difference is WebKitGTK's rasteriser against
+      Chromium's, and a virtual framebuffer has no subpixel geometry to
+      render to, so this rig cannot tell whether the change helps on real
+      glass. It is the right default either way; it is not a fix anybody
+      measured.
+    */
+    font-variant-numeric: tabular-nums;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    background: var(--color-selection);
+  }
+
+  /*
+    One focus treatment, everywhere, never removed. `:focus-visible` so a
+    mouse click does not draw it and a Tab does. The width is a token because
+    high contrast makes it 3px; the colour is deliberately not the accent so a
+    focused danger button is still legible.
+  */
+  :focus-visible {
+    outline: var(--focus-width) solid var(--color-focus);
+    outline-offset: var(--focus-offset);
+    border-radius: inherit;
+  }
+
+  /*
+    Anything smaller than the tap minimum gets a hit area that is not. Applied
+    to the controls the system has, so a 30px button is a 44px target.
+  */
+  [data-tap-min] {
+    position: relative;
+  }
+  [data-tap-min]::after {
+    content: "";
+    position: absolute;
+    inset: 50% auto auto 50%;
+    width: max(100%, var(--tap-min));
+    height: max(100%, var(--tap-min));
+    translate: -50% -50%;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+  }
+
+  h1, h2, h3, h4 {
+    font-weight: 500;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  /* Anything clickable says so. Disabled controls do not. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="radio"]:not(:disabled),
+  [role="option"],
+  label[for],
+  summary {
+    cursor: pointer;
+  }
+
+  /* Scrollbars, thin and quiet, on every surface. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border-strong) transparent;
+  }
+
+  code, kbd, pre, samp {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
