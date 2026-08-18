@@ -14,7 +14,14 @@ import { IDLE, showTheScreen, type ViewerState } from "./video";
  * same state with the next step in it, which is what the content rules ask
  * of every failure in this product.
  */
-export function RemoteScreen({ device }: { device?: string | undefined }) {
+export function RemoteScreen({
+  device,
+  onState,
+}: {
+  device?: string | undefined;
+  /** What the surface knows, for a HUD that wants to say it. */
+  onState?: ((state: ViewerState) => void) | undefined;
+}) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [state, setState] = useState<ViewerState>(IDLE);
   const [socket, setSocket] = useState<string | null>(null);
@@ -36,12 +43,34 @@ export function RemoteScreen({ device }: { device?: string | undefined }) {
     };
   }, []);
 
+  // The callback is held in a ref so a parent that passes an inline function
+  // does not tear the session down and start it again on every render — which
+  // would mean a new decoder, a new keyframe wait, and a picture that flickers
+  // whenever anything above it changed.
+  const report = useRef(onState);
+  report.current = onState;
+
   useEffect(() => {
     if (!canvas.current) return undefined;
-    return showTheScreen(canvas.current, { onState: setState });
+    return showTheScreen(canvas.current, {
+      onState: (next) => {
+        setState(next);
+        report.current?.(next);
+      },
+    });
   }, []);
 
   const playing = state.status === "playing";
+  /*
+    A session that ended keeps its last picture and says so over it.
+
+    Not a blank canvas: the last frame is the most recent true thing about
+    that machine, and clearing it throws away information to make room for a
+    message. Not silence either — a still picture with no explanation is
+    exactly what a frozen session looks like, which is the failure this
+    product's reconnect rules are written against.
+  */
+  const ended = state.status === "ended" && state.pictures > 0;
   return (
     <div className="absolute inset-0 grid place-items-center bg-video [transition-duration:var(--dur-video)]">
       {/*
@@ -53,9 +82,19 @@ export function RemoteScreen({ device }: { device?: string | undefined }) {
       <canvas
         ref={canvas}
         aria-label={device ? `The screen of ${device}` : "The remote screen"}
-        className={playing ? "h-full w-full object-contain" : "sr-only"}
+        className={playing || ended ? "h-full w-full object-contain" : "sr-only"}
       />
-      {!playing && (
+      {ended && (
+        <div
+          role="status"
+          className="absolute inset-x-0 bottom-0 flex justify-center p-4"
+        >
+          <p className="rounded-md border border-border bg-surface-1/95 px-4 py-2 text-sm text-text">
+            The session ended. This is the last picture it sent.
+          </p>
+        </div>
+      )}
+      {!playing && !ended && (
         <div className="flex max-w-[var(--measure)] flex-col items-center gap-3 px-8 text-center">
           <Key>{state.status === "failed" ? "No picture" : "Waiting for a session"}</Key>
           <p className="text-sm text-text-2">

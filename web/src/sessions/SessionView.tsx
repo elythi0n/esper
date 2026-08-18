@@ -6,6 +6,7 @@ import { durationMs } from "@/lib/theme";
 import { Figure } from "@/screens/parts";
 import { Presence } from "@/session/chrome";
 import { RemoteScreen } from "@/session/RemoteScreen";
+import { IDLE, type ViewerState } from "@/session/video";
 import { cn } from "@/lib/cn";
 
 /**
@@ -20,6 +21,7 @@ import { cn } from "@/lib/cn";
 export function SessionView({ fingerprint, name }: { fingerprint: string; name: string }) {
   const root = useRef<HTMLDivElement>(null);
   const [hidden, setHidden] = useState(false);
+  const [picture, setPicture] = useState<ViewerState>(IDLE);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const arm = () => {
@@ -43,7 +45,7 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
         arm();
       }}
     >
-      <RemoteScreen device={name} />
+      <RemoteScreen device={name} onState={setPicture} />
 
       {/* The HUD, over the picture, retracting. */}
       <div
@@ -57,6 +59,19 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
       >
         <Figure className="text-xs text-text-3" value={fingerprint.slice(0, 8)} />
         <span className="min-w-0 flex-1 truncate text-sm text-text">{name}</span>
+        {/*
+          What the window itself is doing, from the surface that is doing it.
+          Not the link — there is no link here yet — so it says the two things
+          it can honestly know: how often this canvas changed, and how long a
+          picture took to get from the engine onto it. Tabular and still, like
+          every other readout in this product.
+        */}
+        {picture.pictures > 0 && (
+          <span className="flex shrink-0 items-center gap-3 text-xs text-text-3">
+            <Figure value={picture.fps} unit="fps" className="text-xs" />
+            {picture.hopMs !== null && <Figure value={Math.round(picture.hopMs)} unit="ms" className="text-xs" />}
+          </span>
+        )}
         <div className="flex shrink-0 items-center gap-1">
           <Tooltip label="Switch screen">
             <Button variant="ghost" size="sm" aria-label="Switch screen" className="px-1.5" disabled>

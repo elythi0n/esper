@@ -251,6 +251,60 @@ mod tests {
         assert_eq!(viewer.frames(), 0);
     }
 
+    /// A monitor switch, or a rung that moves the size, brings new parameter
+    /// sets — and a decoder configured for the old ones produces nothing and
+    /// says nothing about why. The format has two record kinds for exactly
+    /// this, and this is the test that they are both used.
+    #[test]
+    fn a_new_parameter_set_reconfigures_the_window() {
+        let sink = Shared::default();
+        let mut viewer = Viewer::to(Box::new(sink.clone()), (1280, 720));
+        viewer.take(&[keyframe(), delta()], Duration::from_millis(0));
+
+        // The same sets again: the encoder repeats them before every keyframe,
+        // and repeating is not changing.
+        viewer.take(&[keyframe()], Duration::from_millis(33));
+        assert_eq!(
+            configurations(&sink),
+            1,
+            "a repeated parameter set is not a new one"
+        );
+
+        // A different SPS, as a different picture size produces.
+        let other = Encoded {
+            bitstream: annexb(&[
+                &[0x67, 0x4D, 0x40, 0x1F, 0x2A],
+                &[0x68, 0xEE, 0x3C],
+                &[0x65, 0x88, 0x84],
+            ]),
+            keyframe: true,
+        };
+        viewer.take(&[other], Duration::from_millis(66));
+        assert_eq!(
+            configurations(&sink),
+            2,
+            "a changed parameter set has to reconfigure the window's decoder"
+        );
+        assert_eq!(viewer.frames(), 4);
+    }
+
+    /// How many configuration records the stream holds, by walking it the way
+    /// a reader that knows only the framing would.
+    fn configurations(sink: &Shared) -> usize {
+        let out = sink.0.lock().unwrap().clone();
+        let mut at = 9;
+        let mut found = 0;
+        while at + 5 <= out.len() {
+            let kind = out[at];
+            let len = u32::from_be_bytes(out[at + 1..at + 5].try_into().unwrap()) as usize;
+            if kind == record::CONFIGURATION {
+                found += 1;
+            }
+            at += 5 + len;
+        }
+        found
+    }
+
     #[test]
     fn the_clock_is_the_session_s_own() {
         let sink = Shared::default();
@@ -258,15 +312,23 @@ mod tests {
         viewer.take(&[keyframe()], Duration::from_millis(0));
         viewer.take(&[delta()], Duration::from_micros(33_367));
         let out = sink.0.lock().unwrap().clone();
-        // The last record is a picture: kind, flags, eight bytes of time, the
-        // sample's length, then the sample — which is the NAL unit *behind its
-        // own four-byte prefix*, because that is what AVCC means.
-        let sample = 4 + 3;
-        let at = out.len() - (1 + 1 + 8 + 4 + sample);
-        assert_eq!(out[at], record::PICTURE);
+        // Walked rather than counted backwards: a record carries its own
+        // length, so a reader never has to know how big a sample was.
+        let mut at = 9;
+        let mut last = None;
+        while at + 5 <= out.len() {
+            let kind = out[at];
+            let len = u32::from_be_bytes(out[at + 1..at + 5].try_into().unwrap()) as usize;
+            if kind == record::PICTURE {
+                last = Some(at + 5);
+            }
+            at += 5 + len;
+        }
+        let body = last.expect("a picture");
         assert_eq!(
-            u64::from_be_bytes(out[at + 2..at + 10].try_into().unwrap()),
-            33_367
+            u64::from_be_bytes(out[body + 1..body + 9].try_into().unwrap()),
+            33_367,
+            "the session's own clock, as the caller gave it"
         );
     }
 }

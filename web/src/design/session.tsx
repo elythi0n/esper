@@ -87,7 +87,7 @@ export function SessionSection() {
             </div>
           </SessionChrome>
           <div className="absolute bottom-3 left-3 z-[var(--z-session-hud)]">
-            <SessionHUD stats={{ rttMs: 18, bitrateKbps: 4200, fps: 60, encoder: "h264 sw", tier: "lan" }} className="bg-surface-0/90" />
+            <SessionHUD stats={{ rttMs: 18, bitrateKbps: 4200, fps: 60, hopMs: 2, encoder: "h264 sw", tier: "lan" }} className="bg-surface-0/90" />
           </div>
           <Presence />
           <ChromeButtons />

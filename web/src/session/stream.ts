@@ -19,7 +19,7 @@
 const MAGIC = "ESPRVID\0";
 
 /** The version this reader knows. A stream that says anything else is refused. */
-export const STREAM_VERSION = 1;
+export const STREAM_VERSION = 2;
 
 const CONFIGURATION = 1;
 const PICTURE = 2;
@@ -43,10 +43,27 @@ export interface Picture {
   key: boolean;
   /** Microseconds since the session opened, which is what WebCodecs wants. */
   timestamp: number;
+  /**
+   * The engine's wall clock, in milliseconds, when this went down the socket.
+   *
+   * The one number that makes the hop this path adds measurable: subtract it
+   * from `Date.now()` when the picture is drawn and what is left is engine to
+   * window to glass — one machine, therefore one clock, even when the session
+   * itself spans two. `null` when the writer could not read a clock, which is
+   * a thing to report rather than a zero to do arithmetic with.
+   */
+  handedAt: number | null;
   data: Uint8Array;
 }
 
-export type Record = Configuration | Picture;
+/** A record from a version that knows more than this reader does. */
+export interface Unknown {
+  kind: "unknown";
+  /** What it said it was, for a line in the log and nothing else. */
+  record: number;
+}
+
+export type Record = Configuration | Picture | Unknown;
 
 export class StreamError extends Error {}
 
@@ -115,40 +132,55 @@ export async function* readViewerStream(
         continue;
       }
 
-      if (!(await have(1))) return;
-      const kind = take(1)[0];
+      // Kind, then the body's length. Reading the whole body before parsing
+      // it is what lets an unknown kind be walked past — and what keeps a
+      // half-arrived record from being mistaken for a malformed one.
+      if (!(await have(5))) return;
+      const header = take(5);
+      const kind = header[0] ?? 0;
+      const length = view(header.subarray(1)).getUint32(0);
+      if (!(await have(length))) return;
+      const body = take(length);
 
       if (kind === CONFIGURATION) {
-        if (!(await have(10))) return;
-        const fixed = view(take(10));
+        const fixed = view(body);
         const width = fixed.getUint32(0);
         const height = fixed.getUint32(4);
         const codecLength = fixed.getUint16(8);
-        if (!(await have(codecLength))) return;
-        const codec = new TextDecoder().decode(take(codecLength));
-        if (!(await have(4))) return;
-        const descriptionLength = view(take(4)).getUint32(0);
-        if (!(await have(descriptionLength))) return;
+        const codec = new TextDecoder().decode(body.subarray(10, 10 + codecLength));
+        const at = 10 + codecLength;
+        const descriptionLength = fixed.getUint32(at);
         // Copied, not a view: the buffer it came from is reused, and a
         // description handed to `configure` has to outlive this turn.
-        yield { kind: "configuration", width, height, codec, description: new Uint8Array(take(descriptionLength)) };
+        const description = new Uint8Array(body.subarray(at + 4, at + 4 + descriptionLength));
+        yield { kind: "configuration", width, height, codec, description };
         continue;
       }
 
       if (kind === PICTURE) {
-        if (!(await have(13))) return;
-        const fixed = view(take(13));
+        const fixed = view(body);
         const flags = fixed.getUint8(0);
-        // Microseconds, and a session runs far past 2^53 microseconds only
-        // after 285 years, so a Number is the honest type here.
+        // Microseconds, and a session runs past 2^53 of them only after 285
+        // years, so a Number is the honest type here.
         const timestamp = Number(fixed.getBigUint64(1));
-        const length = fixed.getUint32(9);
-        if (!(await have(length))) return;
-        yield { kind: "picture", key: (flags & FLAG_KEYFRAME) !== 0, timestamp, data: new Uint8Array(take(length)) };
+        const handed = Number(fixed.getBigUint64(9));
+        const bytes = fixed.getUint32(17);
+        yield {
+          kind: "picture",
+          key: (flags & FLAG_KEYFRAME) !== 0,
+          timestamp,
+          // Milliseconds, because that is what `Date.now()` is measured in
+          // and comparing the two is the whole purpose of carrying it.
+          handedAt: handed > 0 ? handed / 1000 : null,
+          data: new Uint8Array(body.subarray(21, 21 + bytes)),
+        };
         continue;
       }
 
-      throw new StreamError(`a record kind this window does not know: ${kind}`);
+      // A record from a later version. Walked past rather than refused —
+      // which is what the length is for, and the difference between a format
+      // that can grow and one that cannot.
+      yield { kind: "unknown", record: kind };
     }
   } finally {
     reader.releaseLock();

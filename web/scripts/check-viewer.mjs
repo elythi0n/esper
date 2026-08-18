@@ -23,6 +23,7 @@
 // Usage: node scripts/check-viewer.mjs [--url DEV_SERVER]
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { createServer as createSocketServer } from "node:net";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,14 +75,18 @@ const report = (r) => {
   const seen = {
     engine: navigator.userAgent.includes("Chrome") ? "chromium" : "webkitgtk",
     configurations: [], pictures: 0, keyframes: 0, decoded: 0, sizes: [],
-    firstRecord: null, errors: [], timestamps: [],
+    firstRecord: null, errors: [], timestamps: [], unknown: 0,
+    // The hop the stream's own clock makes measurable: engine to drawn.
+    hops: [], clocked: 0,
   };
   try {
-    const response = await fetch("/fixture.bin");
+    const response = await fetch(new URLSearchParams(location.search).get("from") ?? "/fixture.bin");
     const ctx = document.getElementById("c").getContext("2d");
+    const handed = new Map();
     let decoder = null;
     for await (const record of readViewerStream(response.body)) {
       seen.firstRecord ??= record.kind;
+      if (record.kind === "unknown") { seen.unknown++; continue; }
       if (record.kind === "configuration") {
         seen.configurations.push({ width: record.width, height: record.height, codec: record.codec, description: record.description.length });
         decoder?.close();
@@ -92,6 +97,13 @@ const report = (r) => {
             if (!seen.sizes.includes(size)) seen.sizes.push(size);
             ctx.drawImage(frame, 0, 0);
             frame.close();
+            // Measured after the draw, because a decoder that keeps up and a
+            // canvas that does not are the same session to everybody except
+            // the person watching. A fixture's pictures were handed over long
+            // ago, so this number is only meaningful for a live stream — it is
+            // reported either way and judged only where it means something.
+            const at = handed.get(frame.timestamp);
+            if (at !== undefined) seen.hops.push(Math.max(0, Date.now() - at));
           },
           error: (e) => seen.errors.push(e.name + ": " + e.message),
         });
@@ -99,6 +111,7 @@ const report = (r) => {
       } else {
         seen.pictures++;
         if (record.key) seen.keyframes++;
+        if (record.handedAt !== null) { seen.clocked++; handed.set(record.timestamp, record.handedAt); }
         if (seen.timestamps.length < 4) seen.timestamps.push(record.timestamp);
         decoder?.decode(new EncodedVideoChunk({ type: record.key ? "key" : "delta", timestamp: record.timestamp, data: record.data }));
       }
@@ -113,8 +126,22 @@ const report = (r) => {
 </script>`;
 
 const reports = [];
+/*
+  The live leg's socket, and whatever the engine has written to it.
+
+  The window's own route does the same thing — accept one connection and copy
+  it into an HTTP body — and it is deliberately the same shape here: what this
+  measures is the hop the product has, not a hop this script invented.
+*/
+const liveSocket = `/tmp/esper-check-viewer-${process.pid}.sock`;
+let engine = null;
+let liveConn = null;
+
 const server = createServer(async (req, res) => {
-  if (req.method === "POST" && req.url === "/report") {
+  // The path, without the query — the page carries which stream to read in
+  // one, and matching on the raw URL is how a page silently 404s.
+  const path = (req.url ?? "/").split("?")[0];
+  if (req.method === "POST" && path === "/report") {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     try {
@@ -125,15 +152,31 @@ const server = createServer(async (req, res) => {
     res.writeHead(204).end();
     return;
   }
-  if (req.url === "/" || req.url === "/index.html") {
+  if (path === "/" || path === "/index.html") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE);
     return;
   }
-  if (req.url === "/fixture.bin") {
+  if (path === "/live.bin") {
+    if (!liveConn) {
+      res.writeHead(503).end("no engine is sending pictures");
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" });
+    // Flushed per chunk, like the window's route: a buffered copy would add
+    // exactly the latency this leg exists to measure.
+    liveConn.on("data", (chunk) => {
+      res.write(chunk);
+      res.flushHeaders?.();
+    });
+    liveConn.on("end", () => res.end());
+    liveConn.on("error", () => res.end());
+    return;
+  }
+  if (path === "/fixture.bin") {
     res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": fixture.length }).end(fixture);
     return;
   }
-  if (req.url.startsWith("/src/") || req.url.startsWith("/@") || req.url.startsWith("/node_modules/")) {
+  if (path.startsWith("/src/") || path.startsWith("/@") || path.startsWith("/node_modules/")) {
     try {
       const upstream = await fetch(dev + req.url);
       const body = Buffer.from(await upstream.arrayBuffer());
@@ -161,6 +204,28 @@ const waitForReport = async (n, ms) => {
 const findings = [];
 const ran = [];
 
+const pad = (s, n) => String(s).padEnd(n);
+const worst = (hops) => (hops && hops.length ? Math.round(Math.max(...hops)) : null);
+const middle = (hops) => {
+  if (!hops || hops.length === 0) return null;
+  const sorted = [...hops].sort((a, b) => a - b);
+  return Math.round(sorted[Math.floor(sorted.length / 2)]);
+};
+/*
+  Only the live leg's hop is a latency.
+
+  A stream read out of a file was handed over whenever the file was written,
+  so its "hop" is the file's age — 184 seconds for the committed fixture, ten
+  for one written a moment before. Printing that as a number somebody might
+  read as a latency would be worse than printing nothing.
+*/
+const hopOf = (r) => {
+  const p50 = middle(r.hops);
+  if (p50 === null) return "—";
+  return r === live ? `${p50}ms / ${worst(r.hops)}ms` : "— (a file's age)";
+};
+
+
 /** One browser, given the page, and what it said. */
 async function drive(name, start, seconds) {
   const before = reports.length;
@@ -181,23 +246,78 @@ async function drive(name, start, seconds) {
 
 const chromium = process.env.CHROME ?? "/usr/bin/chromium";
 const profile = `/tmp/esper-viewer-${process.pid}`;
-const seen = await drive("chromium", () =>
-  spawn(chromium, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", `--user-data-dir=${profile}`, url], { stdio: "ignore" }), 40);
+const inChromium = (from) => () =>
+  spawn(chromium, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", `--user-data-dir=${profile}`, url + from], { stdio: "ignore" });
+const MINI = "/usr/lib/webkit2gtk-4.1/MiniBrowser";
+const inWebKit = (from) => () => spawn(MINI, [url + from], { stdio: "ignore", env: { ...process.env } });
+const haveWebKit = existsSync(MINI) && process.env.DISPLAY;
+
+const seen = await drive("chromium", inChromium(""), 40);
 
 // WebKitGTK: the engine the window actually ships, and the fussy one.
-const MINI = "/usr/lib/webkit2gtk-4.1/MiniBrowser";
 let webkit = null;
-if (existsSync(MINI) && process.env.DISPLAY) {
-  webkit = await drive("webkitgtk", () =>
-    spawn(MINI, [url], { stdio: "ignore", env: { ...process.env } }), 40);
+if (haveWebKit) {
+  webkit = await drive("webkitgtk", inWebKit(""), 40);
 } else {
   console.log(`    webkitgtk: skipped — ${existsSync(MINI) ? "no DISPLAY" : "MiniBrowser is not installed"}`);
 }
 
+/*
+  The live leg: the real engine, writing to a real socket, read by the page as
+  it is written.
+
+  This is the only way the hop means anything. A stream read out of a file
+  measures the age of the file — 184 seconds for the committed fixture, 10
+  seconds for one written a moment earlier — which is a number that looks like
+  a latency and is not one. Here the engine is running while the page is
+  reading, so what is measured is the thing the product has: encode, socket,
+  body, decode, draw.
+*/
+const ENGINE = join(root, "..", "build", "esper-engine");
+let live = null;
+if (existsSync(ENGINE)) {
+  const sockets = createSocketServer((conn) => {
+    liveConn = conn;
+  });
+  await new Promise((r) => sockets.listen(liveSocket, r));
+  engine = spawn(
+    ENGINE,
+    ["loopback", "--backend", "synthetic", "--size", "640x480", "--fps", "30", "--seconds", "4", "--viewer", liveSocket],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
+  // What it said, so "never dialled" can name its own cause — an engine too
+  // old to know `--viewer` is the likely one, and a silent gate would send
+  // somebody looking at sockets.
+  let complained = "";
+  engine.stderr.on("data", (chunk) => {
+    complained += String(chunk);
+  });
+  // The page asks for /live.bin only once the engine has dialled, so the
+  // route does not answer 503 to a browser that started too quickly.
+  for (let waited = 0; waited < 100 && !liveConn; waited++) await sleep(100);
+  if (!liveConn) {
+    const said = complained.trim().split("\n").slice(0, 2).join(" — ");
+    findings.push(
+      `the engine never dialled the live socket, so the hop was not measured` +
+        (said ? `: ${said}` : " (it said nothing; is it older than --viewer?)"),
+    );
+  } else {
+    live = await drive("chromium (live)", inChromium("?from=/live.bin"), 45);
+  }
+  try {
+    engine.kill();
+  } catch {
+    // It exits on its own when the seconds are up, which is the usual case.
+  }
+  sockets.close();
+} else {
+  console.log(`    live: skipped — ${ENGINE} is not built, so the hop was not measured`);
+}
+
 server.close();
 
-for (const r of [seen, webkit].filter(Boolean)) {
-  const who = r.engine;
+for (const r of [seen, webkit, live].filter(Boolean)) {
+  const who = r === live ? "the live leg" : r.engine;
   if (r.threw) findings.push(`${who}: the reader threw — ${r.threw}`);
   for (const e of r.errors ?? []) findings.push(`${who}: the decoder reported ${e}`);
   if (r.firstRecord !== "configuration") {
@@ -224,20 +344,45 @@ for (const r of [seen, webkit].filter(Boolean)) {
       `${who}: decoded ${JSON.stringify(r.sizes)}, and the stream says it is ${declared}`,
     );
   }
+  if ((r.clocked ?? 0) < (r.pictures ?? 0)) {
+    findings.push(`${who}: ${(r.pictures ?? 0) - (r.clocked ?? 0)} picture(s) arrived with no clock on them, so the hop cannot be measured`);
+  }
+  if (r === live) {
+    const p50 = middle(r.hops);
+    if (p50 === null) {
+      findings.push("the live leg measured no hop at all, so the clock in the stream is not reaching the page");
+    } else if (p50 > 2000) {
+      // Not a performance bar — a headless browser under a virtual
+      // framebuffer is not a display, and `check-frames` refuses to fail on
+      // its jitter for the same reason. This catches the *class* of bug where
+      // the number is the age of something rather than a latency.
+      findings.push(`the live leg's hop is ${p50}ms at the median, which is not a latency — something is being measured that is not the hop`);
+    }
+  }
   const ts = r.timestamps ?? [];
   if (ts.length >= 2 && !(ts[1] > ts[0])) {
     findings.push(`${who}: timestamps do not advance (${ts.join(", ")}) — WebCodecs orders on them`);
   }
 }
 
-const pad = (s, n) => String(s).padEnd(n);
-console.log(`    ${pad("engine", 12)}${pad("read", 6)}${pad("decoded", 9)}${pad("size", 9)}codec`);
-for (const r of [seen, webkit].filter(Boolean)) {
+console.log(`    ${pad("source", 13)}${pad("read", 6)}${pad("decoded", 9)}${pad("size", 9)}${pad("codec", 14)}hop p50/worst`);
+for (const r of [seen, webkit, live].filter(Boolean)) {
   console.log(
-    `    ${pad(r.engine, 12)}${pad(r.pictures ?? 0, 6)}${pad(r.decoded ?? 0, 9)}` +
-      `${pad((r.sizes ?? ["—"])[0], 9)}${(r.configurations ?? [{}])[0]?.codec ?? "—"}`,
+    `    ${pad(r === live ? "live engine" : r.engine, 13)}${pad(r.pictures ?? 0, 6)}${pad(r.decoded ?? 0, 9)}` +
+      `${pad((r.sizes ?? ["—"])[0], 9)}${pad((r.configurations ?? [{}])[0]?.codec ?? "—", 14)}${hopOf(r)}`,
   );
 }
+/*
+  The hop is *reported*, not failed on, and the reason is the rig.
+
+  A fixture's pictures were handed over whenever the fixture was made, so the
+  number here is the age of a file. Pointed at a live stream with `--stream`
+  it is the real thing — and even then a headless browser under a virtual
+  framebuffer is not a display, which is the same argument that keeps
+  `check-frames` from failing on its own jitter. What *is* failed on is a
+  picture arriving with no clock at all, because that is the format being
+  wrong rather than the machine being slow.
+*/
 
 if (ran.length === 0) findings.push("no browser ran the page, so nothing was checked");
 
@@ -246,8 +391,9 @@ if (findings.length) {
   for (const f of findings) console.error(`  ✗ viewer: ${f}`);
   process.exit(1);
 }
+const liveSaid = live ? `, and live from the engine at ${middle(live.hops)}ms from handed to drawn` : "";
 console.log(
   `  ✓ viewer: ${FIXTURE.endsWith("viewer_stream.bin") ? "the committed stream" : FIXTURE} parsed by the ` +
-    `page's own reader and decoded picture for picture in ` +
-    `${ran.join(" and ")} — ${seen.pictures} pictures, ${seen.keyframes} keyframe(s), ${seen.sizes[0]}`,
+    `page's own reader and decoded picture for picture in ${ran.join(", ")} — ${seen.pictures} pictures, ` +
+    `${seen.keyframes} keyframe(s), ${seen.sizes[0]}${liveSaid}`,
 );

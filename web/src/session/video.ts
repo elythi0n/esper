@@ -31,6 +31,27 @@ export interface ViewerState {
   codec: string | null;
   /** Why it is not playing, in a sentence somebody can act on. */
   trouble: string | null;
+  /**
+   * Pictures a second, over the last second.
+   *
+   * Counted rather than derived from the stream's timestamps: what a person
+   * sees is how often this canvas changed, and a stream can carry thirty
+   * timestamps a second into a window that drew five of them.
+   */
+  fps: number;
+  /**
+   * The hop this path adds, in milliseconds — engine to drawn.
+   *
+   * `null` until a picture arrives with a clock on it. It is always a local
+   * number even when the session is not: the clock is written by *this*
+   * machine's engine as it hands the picture over, so the far end's clock
+   * never enters it. What it does not include is everything before that —
+   * the remote capture, the encode, the link — which belong to the session
+   * rather than to the window.
+   */
+  hopMs: number | null;
+  /** The worst of the last hundred, because a mean hides a stall. */
+  worstHopMs: number | null;
 }
 
 export const IDLE: ViewerState = {
@@ -39,6 +60,9 @@ export const IDLE: ViewerState = {
   size: null,
   codec: null,
   trouble: null,
+  fps: 0,
+  hopMs: null,
+  worstHopMs: null,
 };
 
 /**
@@ -77,10 +101,37 @@ export function showTheScreen(
   const abort = new AbortController();
   const held: { decoder: VideoDecoder | null } = { decoder: null };
   let state: ViewerState = { ...IDLE };
+  let skipped = false;
 
   const say = (next: Partial<ViewerState>) => {
     state = { ...state, ...next };
     onState?.(state);
+  };
+
+  /*
+    How long each of the last hundred pictures took to arrive and be drawn,
+    and how many arrived in the last second.
+
+    A hundred is about three seconds at thirty frames, which is long enough
+    to show a stall and short enough that a stall three minutes ago is not
+    still being reported as the worst thing that ever happened.
+  */
+  const hops: number[] = [];
+  const drawnAt: number[] = [];
+  /*
+    When each picture was handed over, by its own timestamp.
+
+    A decoder is allowed to hold pictures and hand them back in order, so the
+    frame coming out is not always the chunk that went in. The timestamp is
+    the only thing that travels through it, which makes it the only honest way
+    to pair a drawn picture with when it was sent.
+  */
+  const handedFor = new Map<number, number>();
+
+  const recent = (now: number) => {
+    drawnAt.push(now);
+    while (drawnAt.length > 0 && (drawnAt[0] ?? 0) < now - 1000) drawnAt.shift();
+    return drawnAt.length;
   };
 
   const configure = (record: Configuration) => {
@@ -94,7 +145,27 @@ export function showTheScreen(
       output: (frame) => {
         ctx?.drawImage(frame, 0, 0);
         frame.close();
-        say({ status: "playing", pictures: state.pictures + 1 });
+        const now = Date.now();
+        // **Measured where the picture is drawn, not where it is decoded.**
+        // A decoder that is keeping up and a canvas that is not are the same
+        // session to everybody except the person watching it.
+        const handed = handedFor.get(frame.timestamp);
+        handedFor.delete(frame.timestamp);
+        let hop = state.hopMs;
+        let worst = state.worstHopMs;
+        if (handed !== undefined) {
+          hop = Math.max(0, now - handed);
+          hops.push(hop);
+          if (hops.length > 100) hops.shift();
+          worst = Math.max(...hops);
+        }
+        say({
+          status: "playing",
+          pictures: state.pictures + 1,
+          fps: recent(now),
+          hopMs: hop,
+          worstHopMs: worst,
+        });
       },
       error: (e) => say({ status: "failed", trouble: `${e.name}: ${e.message}` }),
     });
@@ -118,6 +189,24 @@ export function showTheScreen(
         if (record.kind === "configuration") {
           configure(record);
           continue;
+        }
+        if (record.kind !== "picture") {
+          // A record from a later engine. The stream carries lengths so this
+          // window can walk past it; saying so once is better than a silence
+          // somebody has to bisect for.
+          if (!skipped) {
+            skipped = true;
+            console.info(`the session sent a record this window does not know (${record.record})`);
+          }
+          continue;
+        }
+        if (record.handedAt !== null) {
+          handedFor.set(record.timestamp, record.handedAt);
+          // A decoder that dropped pictures would leave these behind for ever.
+          if (handedFor.size > 240) {
+            const oldest = handedFor.keys().next().value;
+            if (oldest !== undefined) handedFor.delete(oldest);
+          }
         }
         held.decoder?.decode(
           new EncodedVideoChunk({

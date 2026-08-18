@@ -20,7 +20,10 @@ failure months later.
 
 **Stream fixtures** (`.bin`). `viewer_stream.bin` is a session's pictures as
 the engine writes them for a window: a magic number, a version, and records
-carrying the `avcC` description and each access unit. Written by
+carrying the `avcC` description and each access unit. Every record states its
+own length, so a reader can walk past a kind it has never heard of — which is
+the difference between a format that can grow and one that cannot, and was
+worth a version bump on the day it was noticed rather than a year later. Written by
 `esper-media`'s `viewer_stream`, regenerated with `make viewer-fixture`, and
 read by **three** implementations — Rust checks it in
 `core/crates/esper-media/tests/viewer_fixture.rs` against a reader written

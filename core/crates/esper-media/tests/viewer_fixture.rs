@@ -116,8 +116,11 @@ enum Record {
     Picture {
         keyframe: bool,
         micros: u64,
+        handed: u64,
         bytes: Vec<u8>,
     },
+    /// A kind this reader does not know, walked past by its length.
+    Unknown { kind: u8 },
 }
 
 impl<'a> Reader<'a> {
@@ -161,7 +164,12 @@ impl Iterator for Reader<'_> {
         }
         let kind = self.rest[0];
         self.rest = &self.rest[1..];
-        match kind {
+        // The body's length, which is what lets a reader skip a kind it does
+        // not know — and what lets this one insist that a record reads
+        // exactly as many bytes as it declared.
+        let declared = self.u32() as usize;
+        let before = self.rest.len();
+        let record = match kind {
             record::CONFIGURATION => {
                 let width = self.u32();
                 let height = self.u32();
@@ -180,15 +188,28 @@ impl Iterator for Reader<'_> {
                 let flags = self.rest[0];
                 self.rest = &self.rest[1..];
                 let micros = self.u64();
+                let handed = self.u64();
                 let n = self.u32() as usize;
                 Some(Record::Picture {
                     keyframe: flags & FLAG_KEYFRAME != 0,
                     micros,
+                    handed,
                     bytes: self.take(n),
                 })
             }
-            other => panic!("a record kind this format does not have: {other}"),
-        }
+            other => {
+                // Skipped rather than refused: a kind from a later version is
+                // exactly what the length is for.
+                self.take(declared);
+                Some(Record::Unknown { kind: other })
+            }
+        };
+        assert_eq!(
+            before - self.rest.len(),
+            declared,
+            "a record of kind {kind} read a different number of bytes than it declared"
+        );
+        record
     }
 }
 
@@ -233,9 +254,11 @@ fn check(stream: &[u8], what: &str) {
                 assert_eq!(description[0], 1, "{what}: configurationVersion");
                 assert_eq!(description[4] & 0x03, 3, "{what}: four-byte lengths");
             }
+            Record::Unknown { kind } => panic!("{what}: an unexpected record kind {kind}"),
             Record::Picture {
                 keyframe,
                 micros,
+                handed,
                 bytes,
             } => {
                 pictures += 1;
@@ -244,6 +267,12 @@ fn check(stream: &[u8], what: &str) {
                     assert!(*micros > previous, "{what}: time has to move forward");
                 }
                 last_micros = Some(*micros);
+                // The wall clock is what measures the hop this path adds; a
+                // zero is a writer that could not read a clock.
+                assert!(
+                    *handed > 1_600_000_000_000_000,
+                    "{what}: a picture handed over at {handed}, which is not a wall clock"
+                );
                 assert!(
                     lengths_add_up(bytes) >= 1,
                     "{what}: a picture with no units"

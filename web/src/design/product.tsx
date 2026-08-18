@@ -106,9 +106,9 @@ export function ProductSection() {
         </Sub>
       </div>
 
-      <Sub title="SessionHUD, StatTile, Sparkline" about="RTT, bitrate, fps, encoder, tier. The numbers update in place and declare no transition; a toned value carries a word beside it so the tone is never the only signal.">
+      <Sub title="SessionHUD, StatTile, Sparkline" about="RTT, bitrate, fps, the window's own hop, encoder, tier. The numbers update in place and declare no transition; a toned value carries a word beside it so the tone is never the only signal. The hop is the window's share of the latency — socket, decode, paint — and is never added to the round trip, because a hundred milliseconds of hop is a window that is behind where a hundred of round trip is an ordinary continent.">
         <div className="flex flex-col gap-3">
-          <SessionHUD stats={{ rttMs: 18, bitrateKbps: 4200, fps: 60, encoder: "h264 sw", tier: "lan", rttHistory, fpsHistory }} />
+          <SessionHUD stats={{ rttMs: 18, bitrateKbps: 4200, fps: 60, hopMs: 2, encoder: "h264 sw", tier: "lan", rttHistory, fpsHistory }} />
           <SessionHUD stats={{ rttMs: 212, bitrateKbps: 900, fps: 24, encoder: "h264 sw", tier: "relayed", degraded: true, rttHistory: rttHistory.map((x) => x * 11), fpsHistory: fpsHistory.map((x) => x * 0.4) }} />
           <Demo className="gap-8">
             <StatTile label="rtt" value={18} unit="ms" />

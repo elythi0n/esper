@@ -68,10 +68,32 @@ export interface SessionStats {
   degraded?: boolean | undefined;
   rttHistory?: readonly number[] | undefined;
   fpsHistory?: readonly number[] | undefined;
+  /**
+   * The hop from the engine to this canvas, in milliseconds.
+   *
+   * Distinct from `rttMs`, which is the link. This is what the *window* adds:
+   * the socket, the decoder and the paint. Shown beside the round trip rather
+   * than added to it, because two numbers that are measured differently
+   * should not be summed into a third that is measured neither way.
+   */
+  hopMs?: number | undefined;
 }
 
 export function formatBitrate(kbps: number): string {
   return kbps >= 1000 ? `${(kbps / 1000).toFixed(1)} Mbit/s` : `${Math.round(kbps)} kbit/s`;
+}
+
+/**
+ * How the window's own hop reads.
+ *
+ * The bars are not the link's. A hop is a socket, a decode and a paint on one
+ * machine: a hundred milliseconds of *that* is a window that is struggling,
+ * where a hundred milliseconds of round trip is an ordinary continent.
+ */
+function hopTone(ms: number): { tone: StatTone; note?: string } {
+  if (ms >= 100) return { tone: "danger", note: "the window is behind" };
+  if (ms >= 50) return { tone: "warn", note: "slow" };
+  return { tone: "neutral" };
 }
 
 function rttTone(ms: number): { tone: StatTone; note?: string } {
@@ -94,6 +116,9 @@ export function SessionHUD({ stats, className, ...props }: { stats: SessionStats
       {stats.rttHistory && <Sparkline values={stats.rttHistory} label="Round-trip time, recent" className="mb-1" />}
       <StatTile label="rate" value={formatBitrate(stats.bitrateKbps)} />
       <StatTile label="fps" value={Math.round(stats.fps)} />
+      {stats.hopMs !== undefined && (
+        <StatTile label="hop" value={Math.round(stats.hopMs)} unit="ms" tone={hopTone(stats.hopMs).tone} note={hopTone(stats.hopMs).note} />
+      )}
       {stats.fpsHistory && <Sparkline values={stats.fpsHistory} max={60} label="Frames per second, recent" className="mb-1" />}
       <StatTile label="enc" value={stats.encoder} />
       <div className="mb-0.5 ml-auto">
