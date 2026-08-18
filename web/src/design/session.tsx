@@ -63,7 +63,9 @@ export function SessionSection() {
         about="Where the remote screen is drawn: the engine's own encoded frames over a loopback socket, decoded by the window's own VideoDecoder and painted on a canvas. No WebRTC and no new crates — the measurement that settled it found 151 frames a second at 1920×1080 with every frame drawn, on software rendering. Here there is no session, so it shows the other half of its job: the command that starts one, with this window's socket already in it."
       >
         <div className="relative h-[14rem] overflow-hidden rounded-lg border border-border" data-session="">
-          <RemoteScreen device="workstation" />
+          {/* Not drivable: a specimen that took the keyboard would be a
+              gate page that swallows Tab. */}
+          <RemoteScreen device="workstation" drivable={false} />
         </div>
       </Sub>
 

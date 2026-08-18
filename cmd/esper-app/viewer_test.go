@@ -137,6 +137,121 @@ func TestAPageThatAsksWithNoSessionIsToldSo(t *testing.T) {
 	}
 }
 
+// What the page does reaches the session, down the same socket.
+func TestWhatThePageDoesReachesTheSession(t *testing.T) {
+	pictures, server := served(t)
+
+	// The page asks for the picture, which is what accepts the session.
+	go func() {
+		res, err := http.Get(server.URL + "/shell/video")
+		if err == nil {
+			defer func() { _ = res.Body.Close() }()
+			_, _ = io.ReadAll(res.Body)
+		}
+	}()
+
+	var conn net.Conn
+	var err error
+	for range 50 {
+		conn, err = net.Dial("unix", pictures.path)
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("dialling the window: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// The route only has somewhere to put input once the session is accepted.
+	var answer *http.Response
+	for range 50 {
+		answer, err = http.Post(server.URL+"/shell/video/input", "application/octet-stream",
+			strings.NewReader("ESPRINP\x00\x01"))
+		if err != nil {
+			t.Fatalf("sending input: %v", err)
+		}
+		_ = answer.Body.Close()
+		if answer.StatusCode != http.StatusConflict {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if answer.StatusCode != http.StatusNoContent {
+		t.Fatalf("the window answered %d to a batch of input", answer.StatusCode)
+	}
+
+	buf := make([]byte, 9)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("the session did not receive what the page sent: %v", err)
+	}
+	if string(buf) != "ESPRINP\x00\x01" {
+		t.Fatalf("the session received %q", buf)
+	}
+}
+
+// Input with no session is refused with a sentence rather than dropped.
+func TestInputWithNoSessionIsRefused(t *testing.T) {
+	_, server := served(t)
+	res, err := http.Post(server.URL+"/shell/video/input", "application/octet-stream", strings.NewReader("x"))
+	if err != nil {
+		t.Fatalf("sending input: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("input with no session got %d", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(body), "no session") {
+		t.Fatalf("the window said %q", body)
+	}
+}
+
+// This path ends at somebody else's keyboard, so it is bounded.
+func TestAnAbsurdBatchOfInputIsRefused(t *testing.T) {
+	pictures, server := served(t)
+	go func() {
+		res, err := http.Get(server.URL + "/shell/video")
+		if err == nil {
+			defer func() { _ = res.Body.Close() }()
+			_, _ = io.ReadAll(res.Body)
+		}
+	}()
+	var conn net.Conn
+	for range 50 {
+		c, err := net.Dial("unix", pictures.path)
+		if err == nil {
+			conn = c
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatal("could not dial the window")
+	}
+	defer func() { _ = conn.Close() }()
+
+	var answer *http.Response
+	for range 50 {
+		res, err := http.Post(server.URL+"/shell/video/input", "application/octet-stream",
+			strings.NewReader(strings.Repeat("k", mostInputBytes+1)))
+		if err != nil {
+			t.Fatalf("sending input: %v", err)
+		}
+		_ = res.Body.Close()
+		answer = res
+		if res.StatusCode != http.StatusConflict {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if answer.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("an oversized batch got %d", answer.StatusCode)
+	}
+}
+
 // A popped-out window does not take the main window's pictures.
 func TestEachWindowHasItsOwnSocket(t *testing.T) {
 	home := t.TempDir()

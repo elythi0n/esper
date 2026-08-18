@@ -5742,6 +5742,22 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 println!("  · the window was closed");
                 break;
             }
+            // **And what the person did in the *window*.**
+            //
+            // Taken every turn whether or not this session carries input: a
+            // socket nobody drains is a window that eventually blocks writing
+            // to it, and a window blocked on its keyboard stops taking
+            // pictures too.
+            let from_window = viewer
+                .as_mut()
+                .map(crate::viewer_task::Viewer::take_events)
+                .unwrap_or_default();
+            if !from_window.is_empty()
+                && driving.is_none()
+                && let Some(window) = viewer.as_mut()
+            {
+                window.note_input_not_carried();
+            }
             // **A held picture, said rather than shown as a frozen one.**
             //
             // A viewer whose frames stopped shows the last one it had, which
@@ -5895,10 +5911,24 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 // injecting them all would move its pointer along the same
                 // path a moment late.
                 let mut latest_move = None;
+                // **Two sources, one bookkeeper.** An X11 window reports the
+                // platform's codes and a webview reports the protocol's, and
+                // both go through the source that tracks what the host is
+                // holding — because a key left down on somebody else's machine
+                // is the worst failure this path has, and two places counting
+                // it would be two places to get it wrong.
+                let mut messages: Vec<esper_proto::InputMessage> = Vec::new();
                 for event in &happened {
-                    let Some(message) = source.translate(event) else {
-                        continue;
-                    };
+                    if let Some(m) = source.translate(event) {
+                        messages.push(m);
+                    }
+                }
+                for event in &from_window {
+                    if let Some(m) = source.window_said(*event) {
+                        messages.push(m);
+                    }
+                }
+                for message in messages {
                     if matches!(message, esper_proto::InputMessage::Pointer(_)) {
                         latest_move = Some(message);
                         continue;

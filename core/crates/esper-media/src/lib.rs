@@ -44,6 +44,7 @@ pub mod depacketize;
 pub mod packetize;
 pub mod rtp;
 pub mod viewer_stream;
+pub mod window_input;
 
 pub use annexb::{NalUnit, NalUnits};
 pub use avcc::{ParameterSets, Repackager, Sample};
@@ -61,6 +62,7 @@ pub use depacketize::MAX_PACKETS_PER_FRAME as MAX_PACKETS_EXPORT;
 pub use packetize::{MIN_MTU, PacketizeError, Packetizer, to_annexb};
 pub use rtp::{RTP_HEADER_LEN, RtpError, RtpHeader};
 pub use viewer_stream::{STREAM_VERSION, Writer as ViewerStreamWriter};
+pub use window_input::{Events as WindowEvents, WindowEvent};
 
 /// The payload type for H.264, as WebRTC's default offer uses.
 ///

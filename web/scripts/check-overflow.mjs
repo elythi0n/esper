@@ -20,6 +20,11 @@
 //   - **Running text keeps the measure.** Past roughly a hundred characters
 //     the return sweep fails; `--measure` exists so that cannot happen, and
 //     an uncapped paragraph on a wide display is the way it comes back.
+//   - **The pages have to be the pages.** With nothing answering on the
+//     control plane every route renders the same "nothing is answering" card,
+//     and a run that measures that card seven times finds nothing while
+//     reporting twenty-one clean renders. Seven routes that draw fewer than
+//     four different screens is not a measurement.
 //   - **The scroll boundary appears.** The topbar draws its stronger hairline
 //     only when something is behind it, through `:has(+ …)` — a selector I
 //     cannot know works by reading it, so this scrolls the page and reads the
@@ -130,6 +135,14 @@ const measurePage = `(() => {
   // A canvas measures the element's own font, so "how many characters wide is
   // this" is answered in the font it is set in rather than by a guess at an
   // average glyph.
+  // Which screen this is, so a run cannot measure one page seven times and
+  // call it seven routes. The first heading is the page's own title on every
+  // route that has one; a screen that is a single sentence — the one the app
+  // shows when nothing is answering — has none, so its first line stands in,
+  // because "(no heading)" names nothing anybody can act on.
+  const firstLine = (document.body.innerText || "").split("\\n").map((l) => l.trim()).find(Boolean);
+  const heading = (document.querySelector("h1, h2")?.textContent?.trim() || firstLine || "").slice(0, 60) || null;
+
   const ruler = document.createElement("canvas").getContext("2d");
   const charWidth = (style) => {
     ruler.font = style.font || (style.fontWeight + " " + style.fontSize + " " + style.fontFamily);
@@ -192,7 +205,7 @@ const measurePage = `(() => {
   past.sort((a, b) => b.by - a.by);
   clipped.sort((a, b) => b.by - a.by);
   long.sort((a, b) => b.chars - a.chars);
-  return JSON.stringify({ page, bodyScroll, past: past.slice(0, 4), clipped: clipped.slice(0, 6), long: long.slice(0, 6), seen: document.querySelectorAll("body *").length });
+  return JSON.stringify({ page, bodyScroll, heading, past: past.slice(0, 4), clipped: clipped.slice(0, 6), long: long.slice(0, 6), seen: document.querySelectorAll("body *").length });
 })()`;
 
 /*
@@ -204,8 +217,15 @@ const measurePage = `(() => {
   React handler writes and the selector that reads it, not the input device.
 */
 const boundary = `(() => {
+  // The app's own shell, and only if there is exactly one: the design page
+  // renders nine working shells as examples, and the boundary of an example
+  // is not the claim. The body is the topbar's *next sibling*, which is what
+  // the \`:has(+ …)\` selector under test requires.
+  if (document.querySelectorAll(".topbar").length !== 1) {
+    return JSON.stringify({ why: "this route draws no shell of its own, or several" });
+  }
   const bar = document.querySelector(".topbar");
-  const body = document.querySelector(".page-body");
+  const body = document.querySelector(".topbar + .page-body");
   if (!bar || !body) return JSON.stringify({ why: "no topbar and page body on this route" });
   if (body.scrollHeight <= body.clientHeight + 2) return JSON.stringify({ short: true });
   const read = () => {
@@ -234,6 +254,8 @@ const boundary = `(() => {
   contrast draws wider borders — the theme is in the message and the two do
   not collapse.
 */
+/** Pass ("900|dark") to route to the heading that route drew. */
+const screens = new Map();
 const found = new Set();
 const note = (line) => found.add(line);
 const findings = [];
@@ -259,6 +281,9 @@ try {
           continue;
         }
         rows.push({ route, theme, w: size.w, page: seen.page, elements: seen.seen });
+        const pass = `${size.w}|${theme}`;
+        if (!screens.has(pass)) screens.set(pass, new Map());
+        screens.get(pass).set(route, seen.heading ?? "(no heading)");
         if (seen.page > 1) {
           const widest = seen.past.map((p) => `${p.at} (+${p.by}px)`).join(", ");
           note(
@@ -274,14 +299,16 @@ try {
         }
 
         /*
-          The boundary, once per route — at the *short* viewport.
+          The boundary, wherever a page is long enough to have one.
 
           It was measured at 1400×1000 first, where every screen in this
           product fits without scrolling, so the claim came back unmeasured
-          on all seven routes. A boundary that appears when content is behind
-          it needs content behind it.
+          on all seven routes; then at 900 alone, where exactly one screen
+          scrolls and a single sample stood for every page in the product.
+          Narrow windows are where content runs past the fold, so every width
+          is tried and the run says how many pages answered.
         */
-        if (size.w === 900 && theme === "dark") {
+        if (theme === "dark") {
           const b = JSON.parse((await evaluateAsync(boundary)) ?? "{}");
           if (b.atTop && b.scrolled) {
             boundaryChecked++;
@@ -315,8 +342,26 @@ for (const route of ROUTES) {
   console.log(`    ${pad(route, 10)}${cells.join("")}`);
 }
 
-if (boundaryChecked === 0) {
-  note("no route had a page body long enough to scroll, so the boundary claim was not measured");
+for (const [pass, byRoute] of screens) {
+  const drawn = new Set(byRoute.values());
+  if (drawn.size >= 4) continue;
+  const [w, theme] = pass.split("|");
+  // The heading most routes drew, which is the one standing in for the rest.
+  const tally = new Map();
+  for (const h of byRoute.values()) tally.set(h, (tally.get(h) ?? 0) + 1);
+  const common = [...tally].sort((x, y) => y[1] - x[1])[0]?.[0];
+  note(
+    `at ${w}px in ${theme} the ${byRoute.size} routes drew only ${drawn.size} different screen(s) — ` +
+      `"${common}" — so the run measured one page over and over`,
+  );
+}
+
+if (boundaryChecked < 2) {
+  note(
+    boundaryChecked === 0
+      ? "no route had a page body long enough to scroll, so the boundary claim was not measured"
+      : "one page in the whole run was long enough to scroll, which is one sample for a claim about every screen",
+  );
 }
 findings.push(...found);
 
@@ -326,8 +371,9 @@ if (findings.length) {
   if (findings.length > 24) console.error(`  ✗ overflow: and ${findings.length - 24} more`);
   process.exit(1);
 }
+const drawn = new Set([...screens.values()].flatMap((byRoute) => [...byRoute.values()]));
 console.log(
   `  ✓ overflow: ${rows.length} renders across ${ROUTES.length} routes, ${SIZES.length} widths and ${THEMES.length} themes — ` +
-    `nothing off the side, no copy clipped without an ellipsis, no line past 108 characters, and the scroll ` +
-    `boundary appears on ${boundaryChecked} route(s)`,
+    `${drawn.size} different screens, nothing off the side, no copy clipped without an ellipsis, no line past 108 ` +
+    `characters, and the scroll boundary appears on all ${boundaryChecked} page(s) long enough to have one`,
 );

@@ -29,7 +29,14 @@ use esper_media::avcc::Repackager;
 use esper_media::viewer_stream::Writer;
 use esper_stream::Encoded;
 
-/// The pictures of one session, on their way to a window.
+/// The pictures of one session, on their way to a window — and what the
+/// person did with them on the way back.
+///
+/// # Why one socket carries both
+///
+/// Because the two have exactly one lifetime between them. A window that has
+/// stopped taking pictures is a window whose keystrokes nobody should be
+/// sending, and a second socket would be a second thing to notice that about.
 pub struct Viewer {
     stream: Writer<Box<dyn io::Write + Send>>,
     repack: Repackager,
@@ -38,6 +45,15 @@ pub struct Viewer {
     gone: bool,
     frames: u64,
     waited: u64,
+    /// The window's own end of the socket, read without blocking.
+    ///
+    /// `None` for a viewer that is only a sink — the loopback diagnostic, and
+    /// every test that hands it a buffer.
+    listening: Option<std::os::unix::net::UnixStream>,
+    /// What has arrived from the window and is not yet a whole event.
+    events: esper_media::WindowEvents,
+    /// Said once: a window whose input this session is not carrying.
+    refused: bool,
 }
 
 /// Written by hand because the sink is a trait object and a socket has
@@ -63,7 +79,14 @@ impl Viewer {
     #[cfg(unix)]
     pub fn connect(path: &Path, size: (u32, u32)) -> io::Result<Self> {
         let socket = std::os::unix::net::UnixStream::connect(path)?;
-        Ok(Self::to(Box::new(socket), size))
+        // The reading half is its own handle on the same connection, and it
+        // never blocks: the session's loop has pictures to move and cannot
+        // wait on a person who is not typing.
+        let reading = socket.try_clone()?;
+        reading.set_nonblocking(true)?;
+        let mut viewer = Self::to(Box::new(socket), size);
+        viewer.listening = Some(reading);
+        Ok(viewer)
     }
 
     /// The same, over any sink. The tests write to a buffer.
@@ -75,6 +98,64 @@ impl Viewer {
             gone: false,
             frames: 0,
             waited: 0,
+            listening: None,
+            events: esper_media::WindowEvents::new(),
+            refused: false,
+        }
+    }
+
+    /// What the person did in the window since the last time this was asked.
+    ///
+    /// Empty for a viewer nobody can type into, and empty when nothing has
+    /// arrived — which is most turns, because a session's loop runs far more
+    /// often than anybody types.
+    ///
+    /// A stream that is not a window's input, or is a version this build does
+    /// not read, stops the reading and says so **once**: a wrong stream will
+    /// not become a right one, and a line per turn would bury the session's
+    /// own output.
+    pub fn take_events(&mut self) -> Vec<esper_media::WindowEvent> {
+        let Some(socket) = self.listening.as_mut() else {
+            return Vec::new();
+        };
+        let mut arrived = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            match io::Read::read(socket, &mut buffer) {
+                Ok(0) => break,
+                Ok(n) => match self.events.feed(buffer.get(..n).unwrap_or_default()) {
+                    Ok(events) => arrived.extend(events),
+                    Err(e) => {
+                        println!("  · the window's input was refused: {e}");
+                        self.listening = None;
+                        break;
+                    }
+                },
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    // The window closed its end. Pictures stopping is said
+                    // where pictures are written; this half just stops.
+                    self.listening = None;
+                    break;
+                }
+            }
+        }
+        arrived
+    }
+
+    /// Say once that a window is typing into a session that does not carry it.
+    ///
+    /// Not an error and not a refusal to run: a person who opens a window on a
+    /// session they only asked to *watch* has done nothing wrong, and the
+    /// keystroke going nowhere is the whole of what happens. Saying it once
+    /// is the difference between that and a keyboard that seems broken.
+    pub fn note_input_not_carried(&mut self) {
+        if !self.refused {
+            self.refused = true;
+            println!(
+                "  · this session does not carry input, so what is typed in the window stays there"
+            );
         }
     }
 
@@ -303,6 +384,94 @@ mod tests {
             at += 5 + len;
         }
         found
+    }
+
+    /// The socket's own half: bytes in one end, events out of the other.
+    ///
+    /// A `UnixStream::pair` is the same kind of socket the window creates, so
+    /// what is exercised here is the reading code as it runs — including the
+    /// part that must never block, because a session's loop has pictures to
+    /// move and cannot wait on somebody who is not typing.
+    #[test]
+    fn what_a_window_writes_is_what_the_session_reads() {
+        use esper_media::WindowEvent;
+        use esper_media::window_input::Writer as InputWriter;
+
+        let (theirs, ours) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        ours.set_nonblocking(true).expect("non-blocking");
+        let mut viewer = Viewer::to(Box::new(Vec::new()), (1920, 1080));
+        viewer.listening = Some(ours);
+
+        // Nothing typed yet: the read must return at once rather than wait.
+        assert!(viewer.take_events().is_empty());
+
+        let mut writing = InputWriter::new(theirs);
+        for event in [
+            WindowEvent::Pointer { x: 100, y: 50 },
+            WindowEvent::Button {
+                button: 0,
+                pressed: true,
+            },
+            WindowEvent::Key {
+                usage: 0x04,
+                pressed: true,
+            },
+            WindowEvent::LetGo,
+        ] {
+            writing.event(event).expect("write");
+        }
+
+        let mut heard = Vec::new();
+        for _ in 0..50 {
+            heard.extend(viewer.take_events());
+            if heard.len() >= 4 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            heard,
+            vec![
+                WindowEvent::Pointer { x: 100, y: 50 },
+                WindowEvent::Button {
+                    button: 0,
+                    pressed: true
+                },
+                WindowEvent::Key {
+                    usage: 0x04,
+                    pressed: true
+                },
+                WindowEvent::LetGo,
+            ]
+        );
+    }
+
+    /// The picture stream's own bytes, sent up the input half by something
+    /// confused about which direction it is talking in.
+    #[test]
+    fn the_wrong_direction_of_the_socket_is_refused_rather_than_decoded() {
+        let (theirs, ours) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        ours.set_nonblocking(true).expect("non-blocking");
+        let mut viewer = Viewer::to(Box::new(Vec::new()), (64, 48));
+        viewer.listening = Some(ours);
+
+        let mut writing = theirs;
+        io::Write::write_all(&mut writing, b"ESPRVID\x00\x02\x01\x00\x00\x00\x04abcd")
+            .expect("write");
+
+        let mut waited = 0;
+        while viewer.listening.is_some() && waited < 50 {
+            assert!(
+                viewer.take_events().is_empty(),
+                "nothing may be decoded out of it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            waited += 1;
+        }
+        assert!(
+            viewer.listening.is_none(),
+            "a stream that is not a window's input stops being read"
+        );
     }
 
     #[test]

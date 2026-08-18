@@ -73,6 +73,8 @@ const report = (r) => {
 
 (async () => {
   const seen = {
+    // What the hand sent, when this run asked for one.
+    sent: 0, sendFailed: null,
     engine: navigator.userAgent.includes("Chrome") ? "chromium" : "webkitgtk",
     configurations: [], pictures: 0, keyframes: 0, decoded: 0, sizes: [],
     firstRecord: null, errors: [], timestamps: [], unknown: 0,
@@ -118,6 +120,71 @@ const report = (r) => {
     }
     await decoder?.flush();
     decoder?.close();
+
+    // **And the other direction**, when the run asked for it: the page's own
+    // hand, on the page's own canvas, through the page's own encoder. What
+    // the engine makes of it is judged on the engine's side — here the claim
+    // is only that the batch left.
+    if (new URLSearchParams(location.search).get("drive") === "1") {
+      const { driveWith } = await import("/src/session/hand.ts");
+      const canvas = document.getElementById("c");
+      const stop = driveWith(canvas, {
+        url: "/input",
+        picture: () => ({ width: 640, height: 480 }),
+      });
+      /*
+        A surface deliberately the wrong shape for its picture.
+
+        The canvas is made square while the picture is 4:3, so the drawn
+        picture is 400 wide and 300 tall inside a 400 box with 50px of bar
+        above and below. A pointer mapped against the *element* lands
+        somewhere it is not — the whole point of the letterbox — and a check
+        on a surface that happens to match the picture cannot tell the two
+        mappings apart.
+      */
+      canvas.style.width = "400px";
+      canvas.style.height = "400px";
+      canvas.style.objectFit = "contain";
+      const at = canvas.getBoundingClientRect();
+      // 0.625 is 400/640, and the bar above the picture is 50px, so this is
+      // (8, 16) in the picture and would be (8, 72) mapped against the box.
+      const pointAt = { clientX: at.left + 5, clientY: at.top + 60 };
+      canvas.dispatchEvent(new PointerEvent("pointerdown", { ...pointAt, button: 0, bubbles: true }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { ...pointAt, button: 0, bubbles: true }));
+      canvas.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyA", bubbles: true }));
+      canvas.dispatchEvent(new KeyboardEvent("keyup", { code: "KeyA", bubbles: true }));
+      canvas.dispatchEvent(new WheelEvent("wheel", { deltaY: 120, bubbles: true }));
+
+      /*
+        And the way back out.
+
+        Tab goes to the far machine while this has the keyboard, so the
+        ordinary way out of a control is the one that cannot work — two
+        Escapes inside half a second do it instead. One does not, because
+        Escape is a key the far machine needs, and a check that only tried two
+        would pass on an implementation that released on every one.
+      */
+      canvas.tabIndex = 0;
+      canvas.focus();
+      const escape = () => {
+        canvas.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape", bubbles: true }));
+        canvas.dispatchEvent(new KeyboardEvent("keyup", { code: "Escape", bubbles: true }));
+      };
+      escape();
+      seen.keptOnOne = document.activeElement === canvas;
+      // Long enough that the next press is a first press and not a second.
+      await new Promise((r) => setTimeout(r, 700));
+      escape();
+      escape();
+      seen.gaveBack = document.activeElement !== canvas;
+
+      // A frame for the batch, then let go — which is what a session ending
+      // has to do and is the event nothing else would produce.
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      stop();
+      await new Promise((r) => setTimeout(r, 120));
+      seen.sent = 1;
+    }
   } catch (e) {
     seen.threw = (e && e.name) + ": " + (e && e.message);
   }
@@ -126,6 +193,8 @@ const report = (r) => {
 </script>`;
 
 const reports = [];
+/** Every batch of input the page posted, in order. */
+const typed = [];
 /*
   The live leg's socket, and whatever the engine has written to it.
 
@@ -154,6 +223,13 @@ const server = createServer(async (req, res) => {
   }
   if (path === "/" || path === "/index.html") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE);
+    return;
+  }
+  if (req.method === "POST" && path === "/input") {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    typed.push(Buffer.concat(chunks));
+    res.writeHead(204).end();
     return;
   }
   if (path === "/live.bin") {
@@ -302,7 +378,7 @@ if (existsSync(ENGINE)) {
         (said ? `: ${said}` : " (it said nothing; is it older than --viewer?)"),
     );
   } else {
-    live = await drive("chromium (live)", inChromium("?from=/live.bin"), 45);
+    live = await drive("chromium (live)", inChromium("?from=/live.bin&drive=1"), 45);
   }
   try {
     engine.kill();
@@ -383,6 +459,113 @@ for (const r of [seen, webkit, live].filter(Boolean)) {
   picture arriving with no clock at all, because that is the format being
   wrong rather than the machine being slow.
 */
+
+/*
+  And the other direction, decoded the way the engine decodes it.
+
+  The page's encoder is checked here rather than in the page: what matters is
+  that the bytes a window writes are the bytes an engine reads, and the only
+  way to know that is to read them the same way — magic, version, then a kind
+  and a length per event, exactly as `esper-media`'s reader does.
+*/
+if (live) {
+  const bytes = Buffer.concat(typed);
+  if (bytes.length === 0) {
+    findings.push("the page drove the surface and sent nothing, so the input path is not connected");
+  } else {
+    const magic = bytes.subarray(0, 8).toString("latin1");
+    if (magic !== "ESPRINP\u0000") {
+      findings.push(`the window's input begins ${JSON.stringify(magic)}, which is not an input stream`);
+    } else if (bytes[8] !== 1) {
+      findings.push(`the window writes input at version ${bytes[8]}, and the engine reads 1`);
+    } else {
+      const kinds = [];
+      let at = 9;
+      while (at + 5 <= bytes.length) {
+        const kind = bytes[at];
+        const len = bytes.readUInt32BE(at + 1);
+        kinds.push({ kind, body: bytes.subarray(at + 5, at + 5 + len) });
+        at += 5 + len;
+      }
+      if (at !== bytes.length) {
+        const off = at - bytes.length;
+        findings.push(
+          `the window's input ${off > 0 ? `overran its own batch by ${off}` : `left ${-off}`} byte(s) — ` +
+            `an event's length is wrong, which is the whole framing`,
+        );
+      }
+      const seenKinds = new Set(kinds.map((k) => k.kind));
+      for (const [kind, what] of [[1, "a key"], [2, "a pointer move"], [3, "a button"], [4, "a scroll"], [5, "the release"]]) {
+        if (!seenKinds.has(kind)) findings.push(`the page drove the surface and ${what} never arrived`);
+      }
+      const key = kinds.find((k) => k.kind === 1);
+      // KeyA is 0x04 by the HID table the W3C's code values are defined
+      // against — the one fact this whole mapping rests on.
+      if (key && key.body.readUInt16BE(0) !== 0x04) {
+        findings.push(`the page sent KeyA as usage 0x${key.body.readUInt16BE(0).toString(16)}, and it is 0x04`);
+      }
+      /*
+        Which way the wheel went.
+
+        A session that scrolls backwards looks exactly like one that scrolls
+        correctly until somebody tries it, and the sign then gets fixed twice
+        in opposite directions by two people who each tried it once. The page
+        rolled the wheel down (`deltaY: 120`) and the protocol says positive
+        notches are down — the one place that inverts is `esper-input`'s
+        `wheel` module, for Windows, and it says so.
+      */
+      /*
+        Where the pointer said it was.
+
+        The gate's surface is square and its picture is 4:3, so the picture is
+        drawn 400x300 with a 50px bar above it. The click was 5px right and
+        60px down from the surface's corner, which is (8, 16) in the picture —
+        and (8, 72) for anything that maps against the element instead. A
+        surface that happens to share its picture's shape cannot tell those
+        apart, which is why this one deliberately does not.
+      */
+      const moved = kinds.find((k) => k.kind === 2);
+      if (moved) {
+        const x = moved.body.readInt32BE(0);
+        const y = moved.body.readInt32BE(4);
+        if (x !== 8 || y !== 16) {
+          findings.push(
+            `the page put a click 5px right and 60px down on a letterboxed surface at (${x}, ${y}) ` +
+              `in the picture, and it is (8, 16) — a pointer mapped against the element, not the picture`,
+          );
+        }
+      }
+      const scroll = kinds.find((k) => k.kind === 4);
+      if (scroll) {
+        const dy = scroll.body.readInt16BE(2);
+        const dx = scroll.body.readInt16BE(0);
+        if (dy !== 1 || dx !== 0) {
+          findings.push(
+            `the page rolled the wheel down and sent dx ${dx}, dy ${dy} — down is dy +1, ` +
+              `so this session scrolls backwards`,
+          );
+        }
+      }
+      const letGo = kinds.filter((k) => k.kind === 5).length;
+      if (letGo < 1) findings.push("the page stopped driving and never let go of what it held");
+      if (!live.keptOnOne) {
+        findings.push(
+          "one Escape took the keyboard off the surface — a key the far machine needs cannot be the way out",
+        );
+      }
+      if (!live.gaveBack) {
+        findings.push(
+          "two Escapes left the keyboard on the surface, so a session entered with the keyboard cannot be left with it",
+        );
+      }
+      console.log(
+        `    input: ${kinds.length} event(s) in ${typed.length} batch(es), ` +
+          `${bytes.length} bytes — key, pointer, button, scroll and a release, ` +
+          `and the keyboard came back on two Escapes and stayed on one`,
+      );
+    }
+  }
+}
 
 if (ran.length === 0) findings.push("no browser ran the page, so nothing was checked");
 

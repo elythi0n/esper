@@ -150,6 +150,60 @@ impl InputSource {
         self.dropped
     }
 
+    /// The same, for a window that speaks the protocol already.
+    ///
+    /// # Why there are two doors into this
+    ///
+    /// The X11 presenter reports X11 keycodes and X11 button numbers, so its
+    /// events have to be translated. A webview is not X11: the W3C's
+    /// `KeyboardEvent.code` values are defined against the same HID table the
+    /// wire uses, so the page has a name-to-number map rather than a
+    /// translation, and inventing keycodes for it to decode again would be two
+    /// translations to arrive where one would.
+    ///
+    /// What it must **not** do is keep its own idea of what is held. That is
+    /// the one thing this type exists for — a key left down on somebody else's
+    /// machine is the worst failure this path has — so a window's events come
+    /// through here and are recorded exactly as an X11 window's are.
+    pub fn window_said(&mut self, event: esper_media::WindowEvent) -> Option<InputMessage> {
+        use esper_media::WindowEvent;
+        match event {
+            WindowEvent::Key { usage, pressed } => {
+                // A usage no platform here has a code for is dropped with the
+                // rest: the window may be newer than the engine.
+                if esper_input::hid::evdev_for_usage(usage).is_none() {
+                    self.dropped = self.dropped.saturating_add(1);
+                    return None;
+                }
+                self.holding.key(usage, pressed);
+                Some(InputMessage::Key(KeyEvent { usage, pressed }))
+            }
+            WindowEvent::Pointer { x, y } => self.translate(&PresentEvent::Pointer { x, y }),
+            WindowEvent::Button { button, pressed } => {
+                let Some(button) = protocol_button(button) else {
+                    self.dropped = self.dropped.saturating_add(1);
+                    return None;
+                };
+                self.holding.button(button, pressed);
+                Some(InputMessage::Button(PointerButton { button, pressed }))
+            }
+            WindowEvent::Scroll { dx, dy } => Some(InputMessage::Scroll(Scroll {
+                dx_notches: dx,
+                dy_notches: dy,
+                // A wheel in a webview reports pixels as well, and they are
+                // the platform's own smoothing rather than the hardware's.
+                // Sending them would be sending a webview's scrolling
+                // preferences to somebody else's machine.
+                dx_pixels: None,
+                dy_pixels: None,
+            })),
+            WindowEvent::LetGo => {
+                self.holding.clear();
+                Some(InputMessage::ReleaseAll)
+            }
+        }
+    }
+
     /// One window event as a protocol message, if it is one.
     pub fn translate(&mut self, event: &PresentEvent) -> Option<InputMessage> {
         match event {
@@ -261,6 +315,23 @@ impl InputSource {
     }
 }
 
+/// The protocol's button for the number a window sends.
+///
+/// The window's numbering is the protocol's own order, not the browser's:
+/// the page maps `MouseEvent.button` — where 1 is the middle button and 2 is
+/// the right — onto these before it sends, so the wire never carries a
+/// vendor's numbering.
+const fn protocol_button(n: u8) -> Option<Button> {
+    match n {
+        0 => Some(Button::Left),
+        1 => Some(Button::Middle),
+        2 => Some(Button::Right),
+        3 => Some(Button::Back),
+        4 => Some(Button::Forward),
+        _ => None,
+    }
+}
+
 /// The protocol's button for one of X11's numbers.
 ///
 /// 4 to 7 are the wheel and never reach here — the presenter turns them into
@@ -283,6 +354,128 @@ mod tests {
 
     use super::*;
     use esper_capture::geometry::Rect;
+
+    /// A window's events and an X11 window's are counted by the same thing.
+    ///
+    /// This is the property that matters about having two doors: whatever a
+    /// key is pressed *through*, the session knows it is held — because the
+    /// failure that is never acceptable is a key left down on somebody else's
+    /// machine after this end has gone.
+    #[test]
+    fn whatever_pressed_a_key_the_session_knows_it_is_held() {
+        let mut s = source();
+        assert!(!s.is_holding());
+
+        // Through the window's door: a HID usage, as the page sends.
+        let said = s.window_said(esper_media::WindowEvent::Key {
+            usage: 0x04,
+            pressed: true,
+        });
+        assert!(matches!(said, Some(InputMessage::Key(_))));
+        assert!(s.is_holding(), "a window's keystroke has to count as held");
+
+        // And let go through the other one.
+        s.translate(&PresentEvent::FocusLost);
+        assert!(
+            !s.is_holding(),
+            "focus lost anywhere lets go of everything, however it was pressed"
+        );
+    }
+
+    /// The window's own way of saying it: the page cannot report focus the
+    /// way an X11 window does, so it says so itself.
+    #[test]
+    fn a_window_that_lost_the_keyboard_lets_go_of_what_it_held() {
+        let mut s = source();
+        s.window_said(esper_media::WindowEvent::Key {
+            usage: 0xE1,
+            pressed: true,
+        });
+        s.window_said(esper_media::WindowEvent::Button {
+            button: 0,
+            pressed: true,
+        });
+        assert!(s.is_holding());
+
+        let said = s.window_said(esper_media::WindowEvent::LetGo);
+        assert!(matches!(said, Some(InputMessage::ReleaseAll)));
+        assert!(!s.is_holding(), "and nothing is left held");
+    }
+
+    /// A key the engine's platform has no code for is dropped and counted,
+    /// not sent — a window may be newer than the engine behind it.
+    #[test]
+    fn a_usage_this_build_cannot_inject_is_dropped_rather_than_sent() {
+        let mut s = source();
+        let before = s.dropped();
+        // 0xFFFE is not on HID page 0x07 at all.
+        assert_eq!(
+            s.window_said(esper_media::WindowEvent::Key {
+                usage: 0xFFFE,
+                pressed: true,
+            }),
+            None
+        );
+        assert_eq!(s.dropped(), before + 1);
+        assert!(!s.is_holding(), "and it is not recorded as held either");
+    }
+
+    /// The browser numbers its buttons differently from X11, and the wire
+    /// carries neither: the page maps onto the protocol's order before it
+    /// sends, and anything outside that order is refused.
+    #[test]
+    fn a_window_button_outside_the_protocol_is_refused() {
+        let mut s = source();
+        assert!(matches!(
+            s.window_said(esper_media::WindowEvent::Button {
+                button: 2,
+                pressed: true,
+            }),
+            Some(InputMessage::Button(PointerButton {
+                button: Button::Right,
+                pressed: true
+            }))
+        ));
+        assert_eq!(
+            s.window_said(esper_media::WindowEvent::Button {
+                button: 9,
+                pressed: true,
+            }),
+            None
+        );
+    }
+
+    /// **Which way the wheel turns**, said once on this side too.
+    ///
+    /// The protocol's positive `dy_notches` is down, and a browser's positive
+    /// `deltaY` is down, so this door passes the number through. The only
+    /// place that inverts is the Windows backend, which says so. Writing the
+    /// convention down at both ends is what stops it being fixed twice in
+    /// opposite directions.
+    #[test]
+    fn a_window_wheel_rolled_down_is_down_on_the_far_machine() {
+        let mut s = source();
+        assert_eq!(
+            s.window_said(esper_media::WindowEvent::Scroll { dx: 0, dy: 1 }),
+            Some(InputMessage::Scroll(Scroll {
+                dx_notches: 0,
+                dy_notches: 1,
+                dx_pixels: None,
+                dy_pixels: None,
+            })),
+            "positive is down, and nothing between the window and the wire flips it"
+        );
+        assert_eq!(
+            s.window_said(esper_media::WindowEvent::Scroll { dx: -1, dy: 0 }),
+            Some(InputMessage::Scroll(Scroll {
+                dx_notches: -1,
+                dy_notches: 0,
+                dx_pixels: None,
+                dy_pixels: None,
+            })),
+            "and left is negative on both sides"
+        );
+    }
 
     /// One screen, filling the picture: the ordinary case.
     fn source() -> InputSource {

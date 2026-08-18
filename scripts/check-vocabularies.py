@@ -197,6 +197,25 @@ def compare(what: str, rust: list[str], go: list[str], left: str = "Rust", right
     return problems
 
 
+def engine_usages() -> set[int]:
+    """Every HID usage the engine can actually inject.
+
+    Read out of the table itself rather than from a list beside it: the table
+    is the thing that decides, and a second copy of its contents would be a
+    second thing to keep in step.
+    """
+    text = (ROOT / "core/crates/esper-input/src/hid.rs").read_text(encoding="utf-8")
+    body = text.split("const TABLE: &[(u16, u16)] = &[", 1)[1].split("];", 1)[0]
+    return {int(m.group(1), 16) for m in re.finditer(r"\(0x([0-9A-Fa-f]+),\s*\d+\)", body)}
+
+
+def window_usages() -> dict[str, int]:
+    """What the page will send, by the name the browser gives each key."""
+    text = (ROOT / "web/src/session/keys.ts").read_text(encoding="utf-8")
+    body = text.split("USAGE_FOR_CODE: Readonly<Record<string, number>> = {", 1)[1].split("};", 1)[0]
+    return {m.group(1): int(m.group(2), 16) for m in re.finditer(r"(\w+):\s*0x([0-9a-fA-F]+)", body)}
+
+
 def main() -> int:
     problems: list[str] = []
     counted: list[str] = []
@@ -228,6 +247,75 @@ def main() -> int:
             "the window authorises trail events with words that are not permissions: "
             + ", ".join(invented)
         )
+
+    # **Every key the window can send is a key the engine can inject.**
+    #
+    # The wire carries HID usages — physical positions, so a key left of Enter
+    # is that key on the far machine whatever either layout calls it — and the
+    # W3C's `KeyboardEvent.code` values are defined against the same table.
+    # That is what makes the page's map a name-to-number table rather than a
+    # translation, and it is also what makes a wrong entry invisible: a usage
+    # no platform has is a key that silently does nothing on the far side,
+    # with no error anywhere.
+    usages = engine_usages()
+    window = window_usages()
+    if len(window) < 100:
+        problems.append(
+            f"the window's key table parsed as {len(window)} entries, which is not a keyboard"
+        )
+    unknown = sorted(
+        f"{name} (0x{usage:02X})" for name, usage in window.items() if usage not in usages
+    )
+    if unknown:
+        problems.append(
+            "the window would send keys the engine cannot inject: " + ", ".join(unknown)
+        )
+    # Two names on one usage is a key that presses another key, which reads
+    # perfectly in a diff: both lines are plausible and only the pair is wrong.
+    shared: dict[int, list[str]] = {}
+    for name, usage in window.items():
+        shared.setdefault(usage, []).append(name)
+    doubled = sorted(
+        f"0x{usage:02X} is both " + " and ".join(sorted(names))
+        for usage, names in shared.items()
+        if len(names) > 1
+    )
+    if doubled:
+        problems.append("two keys in the window's table send the same usage: " + ", ".join(doubled))
+
+    # The runs HID lays out as arithmetic, checked as arithmetic.
+    #
+    # Letters are alphabetical from 0x04, the digits run 1-9 from 0x1E with
+    # zero after them, and the function keys run from 0x3A. Asserting the
+    # shape rather than the numbers is what makes this more than a copy of
+    # the table it is checking: an entry transposed anywhere in the middle of
+    # a run moves every entry after it, and nothing else here would notice.
+    runs: list[tuple[str, int]] = []
+    runs += [(f"Key{chr(ord('A') + i)}", 0x04 + i) for i in range(26)]
+    runs += [(f"Digit{i + 1}", 0x1E + i) for i in range(9)]
+    runs += [("Digit0", 0x27)]
+    runs += [(f"F{i + 1}", 0x3A + i) for i in range(12)]
+    astray = [
+        f"{name} is 0x{window[name]:02X} and HID puts it at 0x{usage:02X}"
+        for name, usage in runs
+        if window.get(name) != usage
+    ]
+    missing = [name for name, _ in runs if name not in window]
+    if missing:
+        problems.append(
+            f"the window names no usage for {len(missing)} key(s) every keyboard has: "
+            + ", ".join(missing[:6])
+        )
+    if astray:
+        problems.append("the window's key table is off the HID order: " + ", ".join(astray[:6]))
+
+    # And the other direction, as a count rather than a complaint: the engine
+    # knows keys no browser names, which is ordinary — a Japanese conversion
+    # key is not on this keyboard either.
+    counted.append(
+        f"{len(window)} keys the window can send of {len(usages)} the engine knows "
+        f"({len(runs)} of them where HID's own arithmetic puts them)"
+    )
 
     lock_rust = rust_arms(RUST_DEVICE, "pub const fn word(self) -> &'static str {")
     lock_go = go_words("LockAfter")

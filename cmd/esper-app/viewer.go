@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,14 @@ const viewerSocketName = "video.sock"
 // session's: once the stream is flowing this is not consulted again.
 const howLongToWaitForASession = 90 * time.Second
 
+// mostInputBytes is the largest batch of input a window may send at once.
+//
+// A frame of input is a few events of a few bytes each; a kilobyte is already
+// a person typing impossibly fast. The bound is here because this path ends
+// at somebody else's keyboard, and the first rule of that path is that it
+// carries what a person did and nothing else.
+const mostInputBytes = 64 * 1024
+
 // viewer accepts the engine's connection and hands the bytes to the page.
 //
 // # Why the window listens and the engine dials
@@ -48,6 +57,13 @@ const howLongToWaitForASession = 90 * time.Second
 type viewer struct {
 	listener net.Listener
 	path     string
+	// The session's connection, kept so what the page does can go back down
+	// it. Guarded because the reader and the writer are different requests.
+	mu      sync.Mutex
+	session net.Conn
+	// Held across a write, so two batches of input cannot be cut into each
+	// other. Separate from mu, which is only ever held for a moment.
+	writing sync.Mutex
 	// How long a request for the picture waits for a session. A field so a
 	// test does not have to wait ninety seconds to prove the timeout says
 	// something useful.
@@ -115,8 +131,60 @@ func (v *viewer) route(mux *http.ServeMux) {
 		writeJSON(w, map[string]any{"path": v.path})
 	})
 
+	/*
+		What the person did, on its way back down the same socket.
+
+		A POST per batch rather than a stream, because a request body that
+		stays open is a duplex fetch — which needs HTTP/2 in Chromium and is
+		not there at all in the webview this product ships. A batch per
+		animation frame costs one request every sixteen milliseconds and adds
+		at most that much to the hop, which is a price worth paying for a path
+		that works in both engines and in a browser tab.
+
+		Bounded, because it reaches somebody else's keyboard: a body larger
+		than any plausible frame of input is refused rather than forwarded.
+	*/
+	mux.HandleFunc("POST /shell/video/input", func(w http.ResponseWriter, r *http.Request) {
+		v.mu.Lock()
+		session := v.session
+		v.mu.Unlock()
+		if session == nil {
+			http.Error(w, "no session is listening for input", http.StatusConflict)
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, mostInputBytes))
+		if err != nil {
+			http.Error(w, "that is more input than a window sends in one frame", http.StatusRequestEntityTooLarge)
+			return
+		}
+		// Written under the lock, so two batches cannot interleave on the
+		// socket. A stream socket may split a write, and half of one batch
+		// followed by half of another is a length field reading somebody
+		// else's bytes.
+		v.writing.Lock()
+		_, err = session.Write(body)
+		v.writing.Unlock()
+		if err != nil {
+			http.Error(w, "the session stopped taking input", http.StatusGone)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	mux.HandleFunc("GET /shell/video", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := v.accept(r)
+		if err == nil {
+			v.mu.Lock()
+			v.session = conn
+			v.mu.Unlock()
+			defer func() {
+				v.mu.Lock()
+				if v.session == conn {
+					v.session = nil
+				}
+				v.mu.Unlock()
+			}()
+		}
 		if err != nil {
 			// A page that asked for a picture and waited is told why rather
 			// than being left with a stream that never starts.
