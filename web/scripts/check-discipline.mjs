@@ -13,7 +13,11 @@
 //   2. No ad-hoc z-index. `z-index: var(--z-…)` or nothing.
 //   3. Every media query *and container query* uses a breakpoint token's
 //      value, so the number is written in one place.
-//   4. Every transition and animation duration is a `--dur-*` token.
+//   4. Every transition and animation duration is a `--dur-*` token — in the
+//      stylesheets *and* in the components, where three different things all
+//      look like ordinary Tailwind and none of them looks like a timing:
+//      `duration-[200ms]`, the built-in `duration-200` scale, and a bare
+//      `transition-colors`, which carries Tailwind's own 150ms.
 //   5. No `@keyframes` animates a layout property. A hand-written keyframe
 //      cannot know the height a thing is about to be, so it guesses, and it
 //      makes the browser lay the page out again on every frame of the guess.
@@ -95,6 +99,47 @@ function keyframeBlocks(css) {
 
 const findings = [];
 let scanned = 0;
+/** How many className expressions were read, and how many moved. */
+let groupsRead = 0;
+let groupsMoving = 0;
+
+/*
+  Every `className` expression in a component, as the class names inside it.
+
+  Read as a whole expression rather than a line, because the question is what
+  is set on *one element*: a `transition-colors` here and a duration token on
+  the next line belong to two different things, and a line-wise reading calls
+  that a pair. `cn("a", cond && "b")` contributes every branch, which is right
+  — a class that only appears when something is true is still a class that
+  element can have.
+*/
+function classNameGroups(text) {
+  const groups = [];
+  const re = /className=/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const at = m.index + "className=".length;
+    let expr = "";
+    if (text[at] === '"' || text[at] === "'") {
+      const end = text.indexOf(text[at], at + 1);
+      expr = end < 0 ? "" : text.slice(at + 1, end);
+    } else if (text[at] === "{") {
+      let depth = 0;
+      let i = at;
+      for (; i < text.length; i++) {
+        if (text[i] === "{") depth++;
+        else if (text[i] === "}" && --depth === 0) break;
+      }
+      expr = text.slice(at + 1, i);
+    }
+    const classes = [];
+    for (const s of expr.matchAll(/["'`]([^"'`]*)["'`]/g)) {
+      classes.push(...s[1].split(/\s+/).filter(Boolean));
+    }
+    groups.push({ line: text.slice(0, m.index).split("\n").length, classes });
+  }
+  return groups;
+}
 
 for (const file of files(src)) {
   const rel = relative(root, file);
@@ -152,13 +197,57 @@ for (const file of files(src)) {
       }
     }
 
-    // 4. Durations.
+    // 4. Durations, in the stylesheets.
     if (isCss && !exempt.has(rel)) {
       if (/(?:transition|animation)(?:-duration)?\s*:[^;]*\b\d+(?:\.\d+)?m?s\b/.test(code)) {
         findings.push(`${at}: a literal duration — durations are assigned by purpose, use var(--dur-…) (${code.trim().slice(0, 60)})`);
       }
     }
+
+    // 4b. And in a motion prop, where the number is in seconds and reads as
+    //     data rather than as a timing.
+    if (!isCss && !exempt.has(rel) && /\bduration:\s*[\d.]+\s*[,}]/.test(code)) {
+      findings.push(`${at}: a literal duration in a motion transition — use the tokens in src/motion.ts (${code.trim().slice(0, 60)})`);
+    }
   });
+
+  // 4c. Durations in the components.
+  //
+  //     The stylesheet rule cannot see these: a timing written as a Tailwind
+  //     utility never reaches a .css file, and the three shapes below are the
+  //     three ways one gets in. The last is the quiet one — `transition-colors`
+  //     with no duration is not "no duration", it is Tailwind's 150ms, which
+  //     is a number nobody in this product chose.
+  if (file.endsWith(".tsx") && !exempt.has(rel)) {
+    for (const group of classNameGroups(text)) {
+      groupsRead++;
+      const at = `${rel}:${group.line}`;
+      let moves = false;
+      for (const c of group.classes) {
+        const arbitrary = /^(?:duration|delay)-\[(.+)\]$/.exec(c);
+        if (arbitrary && !arbitrary[1].includes("var(--dur-")) {
+          findings.push(`${at}: ${c} — a literal duration, and the token exists or should`);
+        }
+        if (/^(?:duration|delay)-\d+$/.test(c)) {
+          findings.push(`${at}: ${c} — Tailwind's own duration scale, which is not this product's`);
+        }
+        const animation = /^animate-\[(.+)\]$/.exec(c);
+        if (animation && /\d+(?:\.\d+)?m?s/.test(animation[1].replace(/var\([^)]*\)/g, ""))) {
+          findings.push(`${at}: ${c} — a literal duration inside an animation shorthand`);
+        }
+        if (/^transition(?:-(?!none)[a-z]+|-\[.+\])?$/.test(c)) moves = true;
+      }
+      if (!moves) continue;
+      groupsMoving++;
+      const timed = group.classes.some((c) => /^(?:duration-\[|\[transition-duration:)var\(--dur-/.test(c));
+      if (!timed) {
+        const which = group.classes.filter((c) => c.startsWith("transition")).join(" ");
+        findings.push(
+          `${at}: ${which} with no duration token — a transition utility on its own carries Tailwind's 150ms`,
+        );
+      }
+    }
+  }
 
   // 5. Keyframes that animate layout.
   //
@@ -191,4 +280,13 @@ if (findings.length) {
   for (const f of findings) console.log(`    ${f}`);
   process.exit(1);
 }
-console.log(`  ✓ discipline: ${scanned} files, no raw colour, no ad-hoc z-index, no layout keyframes, breakpoints and durations from tokens`);
+if (groupsMoving < 5) {
+  console.error(
+    `  ✗ check-discipline: ${groupsMoving} of ${groupsRead} className expression(s) moved, which is too few to have read the components`,
+  );
+  process.exit(1);
+}
+console.log(
+  `  ✓ discipline: ${scanned} files, no raw colour, no ad-hoc z-index, no layout keyframes, breakpoints from tokens, ` +
+    `and every duration a token — including ${groupsMoving} of ${groupsRead} className expressions that move`,
+);
