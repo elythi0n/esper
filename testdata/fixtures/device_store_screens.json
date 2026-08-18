@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "devices": {
+    "8e9d1a8d5b1863f1e99ed1bd8a1b7bd1ea8e19f704f5859adbcf5cdce5ca7cd9": {
+      "public_key": "8e9d1a8d5b1863f1e99ed1bd8a1b7bd1ea8e19f704f5859adbcf5cdce5ca7cd9",
+      "name": "rack",
+      "permissions": [
+        "view",
+        "control",
+        "audio",
+        "unattended"
+      ],
+      "paired_at": 1785677536,
+      "last_seen": 1789133416,
+      "last_address": "192.0.2.10:7420",
+      "overlay_address": "[100::2]:7420",
+      "pairing": "kept",
+      "unattended_when": "weekdays 09:00-17:00",
+      "lock_after": "always",
+      "groups": [
+        "ops"
+      ],
+      "last_mac": "02:00:5e:10:00:00"
+    },
+    "1a5afeda973d776e31d1d7266f184468f84d99bed311d88d3dcb67015934f9f9": {
+      "public_key": "1a5afeda973d776e31d1d7266f184468f84d99bed311d88d3dcb67015934f9f9",
+      "name": "elythion",
+      "permissions": [
+        "view",
+        "control"
+      ],
+      "paired_at": 1788355936,
+      "last_seen": null,
+      "pairing": "kept"
+    },
+    "5eec0dc419aa8337bf725f026fda9c78c1cb1c642eeaff9d6e1112f37783e942": {
+      "public_key": "5eec0dc419aa8337bf725f026fda9c78c1cb1c642eeaff9d6e1112f37783e942",
+      "name": "laptop",
+      "permissions": [
+        "view"
+      ],
+      "paired_at": 1789129936,
+      "last_seen": null,
+      "pairing": {
+        "once": {
+          "used": false,
+          "expires_at": 1789137136
+        }
+      }
+    },
+    "e81d3b0e9d82feaaf5f6e55bdff24731d7eee08632ffa63801e6397290c5d20a": {
+      "public_key": "e81d3b0e9d82feaaf5f6e55bdff24731d7eee08632ffa63801e6397290c5d20a",
+      "name": "helper's laptop",
+      "permissions": [
+        "view",
+        "control"
+      ],
+      "paired_at": 1788960736,
+      "last_seen": 1788961336,
+      "pairing": {
+        "once": {
+          "used": true,
+          "expires_at": 1789047136
+        }
+      }
+    },
+    "a0a44ed8cfc32b7e61befeb99bbff7706808c3fe4dcdf4750a8addb3ffcd4008": {
+      "public_key": "a0a44ed8cfc32b7e61befeb99bbff7706808c3fe4dcdf4750a8addb3ffcd4008",
+      "name": "build-farm-node-07",
+      "permissions": [
+        "view",
+        "control",
+        "audio",
+        "clipboard_in",
+        "clipboard_out",
+        "files_in",
+        "files_out",
+        "terminal",
+        "unattended",
+        "record",
+        "reboot",
+        "logoff",
+        "lock",
+        "forward"
+      ],
+      "paired_at": 1771853536,
+      "last_seen": 1789133531,
+      "last_address": "198.51.100.23:7420",
+      "pairing": "kept",
+      "lock_after": "never",
+      "groups": [
+        "ops",
+        "build",
+        "eu-west",
+        "gpu"
+      ]
+    },
+    "fc66f021c67d064c1490a12b5a4d4d2f5167ca692a16ca12f1f3a4cda29a6fa9": {
+      "public_key": "fc66f021c67d064c1490a12b5a4d4d2f5167ca692a16ca12f1f3a4cda29a6fa9",
+      "name": "the machine under the stairs in the second server room",
+      "permissions": [
+        "view"
+      ],
+      "paired_at": 1788701536,
+      "last_seen": 1788874336,
+      "pairing": "kept"
+    },
+    "2fcf76a4c3c75b1fb5288d83d62dd114dc556d16fba206ab35d38bfe294a2857": {
+      "public_key": "2fcf76a4c3c75b1fb5288d83d62dd114dc556d16fba206ab35d38bfe294a2857",
+      "name": "デスクトップ · مكتب",
+      "permissions": [
+        "view",
+        "control"
+      ],
+      "paired_at": 1787405536,
+      "last_seen": 1789126336,
+      "pairing": "kept",
+      "groups": [
+        "東京"
+      ]
+    }
+  }
+}

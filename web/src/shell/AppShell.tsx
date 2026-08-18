@@ -143,8 +143,12 @@ export function Sidebar({
 
       <div className="sidebar-foot">
         {foot}
+        {/* This window's own version. The engine's is in the status bar, said
+            as the engine's, because the two are different programs. */}
         {version && (
-          <span className="sidebar-version font-mono">{version}</span>
+          <span className="sidebar-version font-mono" title={`This window is version ${version}.`}>
+            {version}
+          </span>
         )}
       </div>
     </div>

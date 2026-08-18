@@ -81,7 +81,28 @@ export function StatusStrip() {
           </div>
         </Popover>
       ))}
-      <span className="font-mono">{data.engine}</span>
+      {/*
+        Whose version this is, and the one day it matters.
+
+        Two programs: this window, built at a version, and the engine it is
+        talking to, running at one. On an ordinary machine they agree and the
+        number is reassurance. They disagree exactly when somebody has updated
+        one and not the other — which is the day the readout is worth anything,
+        and the day two bare numbers, one here and one in the sidebar, tell
+        nobody which is which.
+      */}
+      {data.engine === __ESPER_VERSION__ ? (
+        <span className="font-mono">
+          <span className="text-text-3">engine</span> {data.engine}
+        </span>
+      ) : (
+        <Lamp state="warn" title={`This window is ${__ESPER_VERSION__} and the engine it is talking to is ${data.engine}.`}>
+          <span className="font-mono">
+            <span className="text-text-3">engine</span> {data.engine}
+            <span className="text-text-3"> · window</span> {__ESPER_VERSION__}
+          </span>
+        </Lamp>
+      )}
       {devices.data && <span className="font-mono tabular-nums">{devices.data.length} paired</span>}
     </>
   );

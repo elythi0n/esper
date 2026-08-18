@@ -23,19 +23,6 @@ import { Figure, Fingerprint, Heading, Key, Row, Trouble } from "./parts";
  * *looks like* is a preference, and lives in the browser.
  */
 
-function CapabilityRow({ label, cap }: { label: string; cap: Capability }) {
-  return (
-    <Row className="items-baseline py-2.5">
-      <span className="w-24 shrink-0">
-        <Key>{label}</Key>
-      </span>
-      <Lamp state={lampFor(cap.available)} className="min-w-0 flex-1 items-baseline">
-        <span className="min-w-0 flex-1 font-mono text-xs text-text">{cap.detail || (cap.available ? "yes" : "no")}</span>
-      </Lamp>
-    </Row>
-  );
-}
-
 function Line({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <Row className="items-baseline py-2.5">
@@ -44,6 +31,28 @@ function Line({ label, children }: { label: string; children: React.ReactNode })
       </span>
       <span className="min-w-0 flex-1 text-sm text-text">{children}</span>
     </Row>
+  );
+}
+
+/**
+ * A fact with a state, and the dot hangs.
+ *
+ * A lamp in front of the value pushes that row's text across by the dot and
+ * its gap, and a column where three rows in eleven start twelve pixels
+ * further right is a column with no left edge — the eye reads the ragged edge
+ * long before it reads any dot. The dot cannot simply move to a gutter of its
+ * own, because a `Lamp` will not render without its word and that rule is
+ * right: colour alone says nothing. So it hangs instead — the negative margin
+ * is exactly the dot plus the gap, which puts the *word* on the column's edge
+ * with every other value and leaves the dot in the margin beside it.
+ */
+function CapabilityRow({ label, cap }: { label: string; cap: Capability }) {
+  return (
+    <Line label={label}>
+      <Lamp state={lampFor(cap.available)} className="-ml-3 min-w-0 items-baseline">
+        <span className="min-w-0 font-mono text-xs text-text">{cap.detail || (cap.available ? "yes" : "no")}</span>
+      </Lamp>
+    </Line>
   );
 }
 

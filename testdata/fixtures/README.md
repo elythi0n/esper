@@ -45,6 +45,19 @@ derived from each of sixteen keys. Rust checks them in
 `core/crates/esper-crypto/tests/store_fixtures.rs`; Go in
 `internal/devices/devices_test.go`.
 
+`device_store_screens.json` is a third, and it is not held to a format — it is
+held to the *screens*. The browser gates drive the real control plane, so
+until it existed they measured whatever the developer's own machine held, which
+on a fresh one is nothing: no device row, no permission chip, no pairing word
+had ever been rendered under `check-a11y`, `check-ink`, `check-words` or
+`check-overflow`. This store carries the cases a screen has to survive rather
+than the cases a parser does — a name nobody would type, a name that is not
+Latin, all fourteen permissions on one row, a pairing already spent, a device
+paired and never seen. `scripts/gate-rig.sh` serves it; `make check-screens`
+runs the gates against it. It is deliberately separate from `device_store.json`,
+because that one is a shared corpus two implementations are held to and adding
+a device to it would move every count they assert.
+
 The store is the file that says who a machine trusts, and the two halves read
 it from opposite sides — Rust writes and enforces, Go shows. A disagreement
 about it is a device listed that cannot connect, or one hidden that can. The

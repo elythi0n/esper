@@ -248,6 +248,26 @@ check-web:
 	$(GUARD_ROOT)
 	@cd $(WEB) && pnpm install --frozen-lockfile --silent && pnpm check
 
+## The browser gates, against a machine that is the same on every machine
+##
+## Every gate here drives the real dev server, which reads the real control
+## plane, which reads whoever's machine it is running on — so until this target
+## existed the Devices screen was measured in whatever state the developer's own
+## store happened to be in, and on a fresh machine that state is **empty**. No
+## device row, no permission, no pairing word had ever been rendered under a11y,
+## ink, words or overflow. The rig serves a store built for the screens: a name
+## nobody would type, a name that is not Latin, every permission at once, a
+## pairing already spent, and a device paired and never seen.
+.PHONY: check-screens
+check-screens:
+	$(GUARD_ROOT)
+	@scripts/gate-rig.sh sh -c 'cd $(WEB) && \
+	  node scripts/check-a11y.mjs     --url http://127.0.1.1:5179/ && \
+	  node scripts/check-keyboard.mjs --url http://127.0.1.1:5179/ && \
+	  node scripts/check-words.mjs    --url http://127.0.1.1:5179/ && \
+	  node scripts/check-overflow.mjs --url http://127.0.1.1:5179/ && \
+	  node scripts/check-ink.mjs      --url http://127.0.1.1:5179/'
+
 ## Measure how long the window takes to be usable, and hold it to a second
 ##
 ## The number the Phase 11 exit criterion names. Measured rather than
