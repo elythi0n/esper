@@ -46,18 +46,29 @@ const longestSocketPath = 100
 // directory first, because it is per-user and cleaned on logout; `/tmp`
 // after, because a machine without one still has to work.
 func lockPath(home string) string {
-	inside := filepath.Join(home, lockName)
+	return socketPath(home, lockName)
+}
+
+// socketPath is where a socket for a home lives, with the same fallback.
+//
+// Written once and used twice: the single-instance lock, and the socket a
+// session's pictures arrive on. The second one found the same wall from the
+// other side — an engine dialling a path under a long home reports
+// `path must be shorter than SUN_LEN`, which is the same failure wearing a
+// clearer message.
+func socketPath(home, name string) string {
+	inside := filepath.Join(home, name)
 	if len(inside) <= longestSocketPath {
 		return inside
 	}
 	sum := sha256.Sum256([]byte(home))
-	name := "esper-" + hex.EncodeToString(sum[:8]) + ".lock"
+	short := "esper-" + hex.EncodeToString(sum[:8]) + "-" + name
 	if run := os.Getenv("XDG_RUNTIME_DIR"); run != "" {
-		if elsewhere := filepath.Join(run, name); len(elsewhere) <= longestSocketPath {
+		if elsewhere := filepath.Join(run, short); len(elsewhere) <= longestSocketPath {
 			return elsewhere
 		}
 	}
-	return filepath.Join(os.TempDir(), name)
+	return filepath.Join(os.TempDir(), short)
 }
 
 // onlyOne holds a lock for as long as this process runs.

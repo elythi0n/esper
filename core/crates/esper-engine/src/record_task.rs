@@ -25,7 +25,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use esper_link::ControllerLink;
 use esper_mkv::{Audio, Recording};
 
 /// A recording in progress.
@@ -70,16 +69,24 @@ impl Recorder {
         }
     }
 
-    /// Take whatever the link has kept, and write it.
+    /// Write the frames and sound this turn produced.
     ///
     /// `since` is how long the session has been running, which is what the
     /// frames are timestamped with. **Arrival time rather than the host's own
     /// clock**: the two ends' media clocks start at arbitrary offsets and
     /// reconciling them would be guesswork, while arrival time is exactly what
     /// the person watching experienced — including the pauses.
-    pub fn take_from(&mut self, link: &mut ControllerLink, since: Duration) {
+    ///
+    /// # Why it is handed the frames rather than the link
+    ///
+    /// Because taking them from the link *drains* it, and there are two
+    /// consumers now: a recording and a window. Whichever asked first would
+    /// have got all of them and the other none — a bug with no error in it,
+    /// visible only as a file or a viewer that was quietly empty. So the
+    /// session takes them once and gives them to everybody who wants them.
+    pub fn take(&mut self, frames: &[esper_stream::Encoded], sounds: &[Vec<u8>], since: Duration) {
         let at_ms = u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
-        for frame in link.take_encoded() {
+        for frame in frames {
             if self.writing.is_none() {
                 if !frame.keyframe {
                     self.waited = self.waited.saturating_add(1);
@@ -110,12 +117,12 @@ impl Recorder {
                 self.complain(&format!("could not write a frame: {e}"));
             }
         }
-        for packet in link.take_audio_packets() {
+        for packet in sounds {
             // Sound only once the video has begun, because the file's header
             // is written with the first keyframe and a packet before that has
             // nowhere to go.
             if let Some(writing) = self.writing.as_mut()
-                && let Err(e) = writing.audio(&packet, at_ms)
+                && let Err(e) = writing.audio(packet, at_ms)
             {
                 self.complain(&format!("could not write a sound packet: {e}"));
             }

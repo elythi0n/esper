@@ -154,8 +154,22 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "esper-app: %v\n", err)
 		return 1
 	}
+	// Where a session writes its pictures. One socket per window: a
+	// popped-out session is a window of its own and gets its own, so two
+	// sessions on screen are two streams rather than one being stolen.
+	//
+	// Not fatal when it cannot be opened — a window that cannot show a
+	// picture is still a window that pairs devices, shows what has happened
+	// and manages this machine, which is all it could do yesterday.
+	pictures, viewerErr := openViewer(esperHome, secondary)
+	if viewerErr != nil {
+		fmt.Fprintf(os.Stderr, "esper-app: no socket for a session's pictures: %v\n", viewerErr)
+	} else {
+		defer pictures.close()
+	}
+
 	// Only the main window can open another; a popped-out one is a leaf.
-	shell := shellAPI(!secondary, win)
+	shell := shellAPI(!secondary, win, pictures)
 
 	assets, err := fs.Sub(bundle, "dist")
 	if err != nil {

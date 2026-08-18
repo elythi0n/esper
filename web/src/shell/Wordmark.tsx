@@ -20,6 +20,25 @@ import { cn } from "@/lib/cn";
  * the design system already names, applied per letter. With reduced motion
  * it is there or it is not, which is the correct fallback and not a
  * degraded one.
+ *
+ * # Why each letter sits in a group of its own
+ *
+ * Because a CSS transform on an SVG element **replaces** its `transform`
+ * presentation attribute — including `transform: none`, which is what an
+ * animation library leaves behind when it finishes. The letters used to carry
+ * their own x offset as that attribute *and* be the elements whose transform
+ * was animated, and the two cannot coexist: measured, three paths at x = 0,
+ * 250 and 500 all collapsed to x = 0 the moment a style transform appeared.
+ *
+ * The result was a mark that imploded into a single blob for the whole of
+ * every animation in WebKit, and — because Chromium honours `transform: none`
+ * where WebKit falls back to the attribute — one that was stacked *at rest*
+ * in every browser, on this page and in the dev preview. It had been that way
+ * since the mark was drawn.
+ *
+ * So the offset lives on a `<g>` that nothing animates, and the animated path
+ * sits inside it. The group's attribute and the path's CSS transform compose,
+ * which is what was wanted all along.
  */
 
 /** The five letterforms, on a 100-unit body, spaced 125 apart. */
@@ -47,21 +66,21 @@ export function Wordmark({ className, show = true }: { className?: string | unde
       <AnimatePresence initial={false}>
         {show &&
           LETTERS.map((letter, i) => (
-            <motion.path
-              key={`${id}-${i}`}
-              d={letter.d}
-              transform={`translate(${letter.x} 0)`}
-              fill="currentColor"
-              fillRule={letter.evenodd ? "evenodd" : undefined}
-              initial={reduced ? false : { opacity: 0, y: arrive.rise * 2 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={reduced ? { opacity: 0 } : { opacity: 0, y: -arrive.leave * 2 }}
-              transition={{
-                duration: reduced ? 0 : duration.base,
-                ease: [...ease.out],
-                delay: reduced ? 0 : i * 0.04,
-              }}
-            />
+            <g key={`${id}-${i}`} transform={`translate(${letter.x} 0)`}>
+              <motion.path
+                d={letter.d}
+                fill="currentColor"
+                fillRule={letter.evenodd ? "evenodd" : undefined}
+                initial={reduced ? false : { opacity: 0, y: arrive.rise * 2 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={reduced ? { opacity: 0 } : { opacity: 0, y: -arrive.leave * 2 }}
+                transition={{
+                  duration: reduced ? 0 : duration.base,
+                  ease: [...ease.out],
+                  delay: reduced ? 0 : i * 0.04,
+                }}
+              />
+            </g>
           ))}
       </AnimatePresence>
     </svg>

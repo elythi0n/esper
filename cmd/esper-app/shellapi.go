@@ -28,9 +28,11 @@ var safeRoute = regexp.MustCompile(`^/[A-Za-z0-9/-]{0,128}$`)
 // reason the control plane is proxied: one seam, no vendor globals in the
 // bundle, and a browser tab gets a coherent answer ("no window to open")
 // instead of a missing function.
-func shellAPI(popoutAllowed bool, win *theWindow) http.Handler {
+func shellAPI(popoutAllowed bool, win *theWindow, pictures *viewer) http.Handler {
 	mux := http.NewServeMux()
 	windowRoutes(mux, win)
+	// Where a session's pictures arrive, and where to point one.
+	pictures.route(mux)
 	// Every window, including a popped-out one. There is no state to keep in
 	// step — the switch reads the file and writes the file — so two windows
 	// showing it cannot disagree, and restricting it would only mean a

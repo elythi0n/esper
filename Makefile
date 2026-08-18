@@ -595,6 +595,18 @@ fuzz-corpus:
 	@cd $(CORE) && cargo test -p esper-decode --test seed_corpus --release \
 		-- --ignored --nocapture
 
+## Regenerate the viewer stream fixture from this build's encoder
+##
+## The page parses this stream in TypeScript and hands it to the browser's own
+## decoder, so it is a shared fixture in the sense `testdata/fixtures/README.md`
+## means: a thing two implementations read, checked on both sides. Committed
+## rather than generated on the fly, because the web check has to be able to
+## run without a Rust toolchain.
+.PHONY: viewer-fixture
+viewer-fixture:
+	@cd $(CORE) && cargo test -p esper-media --test viewer_fixture \
+		-- --ignored --nocapture
+
 .PHONY: fuzz
 fuzz:
 	@command -v $(FUZZ_CC) >/dev/null 2>&1 || { \

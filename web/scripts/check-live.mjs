@@ -308,7 +308,54 @@ try {
     await sleep(300);
   }
 
-  // ── 3. Three fonts, all loaded, and nothing uses a fourth ──────────────
+  // ── 3. The wordmark's letters are in five places ───────────────────────
+  //
+  // A CSS transform on an SVG element **replaces** its `transform`
+  // presentation attribute — `transform: none` included, which is what an
+  // animation library leaves behind. The mark's letters carried their x
+  // offset as that attribute *and* were the elements whose transform was
+  // animated, so every letter sat at x = 0: a blob at rest in Chromium, and
+  // in WebKit a blob for the length of every animation. It had been that way
+  // since the mark was drawn, and no gate here could see it — a frame timer
+  // measures durations, an accessibility tree measures names, and neither
+  // asks where anything is.
+  //
+  // The rule is general because the trap is: nothing that is animated may
+  // also carry a transform attribute.
+  const mark = await evaluate(`(() => {
+    const marks = [...document.querySelectorAll('svg[aria-label="Esper"]')]
+      .filter((s) => s.getBoundingClientRect().width > 20);
+    const spread = marks.map((svg) => {
+      const lefts = [...svg.querySelectorAll("path")].map((p) => Math.round(p.getBoundingClientRect().left));
+      return { letters: lefts.length, places: new Set(lefts).size };
+    });
+    // Any element in the document that is transformed both ways at once.
+    const both = [];
+    for (const el of document.querySelectorAll("[transform]")) {
+      const inline = el.style.transform;
+      if (inline && inline !== "") {
+        both.push(el.tagName.toLowerCase() + " transform=" + el.getAttribute("transform") + " style=" + inline);
+      }
+    }
+    return JSON.stringify({ marks: spread, both: both.slice(0, 4) });
+  })()`);
+  const lettering = JSON.parse(mark ?? "{}");
+  if (!lettering.marks || lettering.marks.length === 0) {
+    findings.push("no wordmark on the page, so nothing checked that its letters are in different places");
+  }
+  for (const m of lettering.marks ?? []) {
+    if (m.places < m.letters) {
+      findings.push(
+        `the wordmark draws ${m.letters} letters in ${m.places} place(s) — they are stacked, which is what ` +
+          `an animated element carrying its own transform attribute does`,
+      );
+    }
+  }
+  for (const clash of lettering.both ?? []) {
+    findings.push(`transformed two ways at once, and the CSS one wins: ${clash}`);
+  }
+
+  // ── 4. Three fonts, all loaded, and nothing uses a fourth ──────────────
   const fonts = await evaluate(`(() => {
     const wanted = ["Inter Variable", "Space Grotesk Variable", "JetBrains Mono Variable"];
     const loaded = wanted.filter((f) => document.fonts.check('12px "' + f + '"'));
@@ -357,5 +404,6 @@ if (findings.length) {
 }
 console.log(
   `  ✓ live: the session layer stays dark under all three themes, the ring is 2px and 3px in high ` +
-    `contrast, a popover outranks a modal, and all three faces are loaded with nothing asking for a fourth`,
+    `contrast, a popover outranks a modal, the wordmark's letters are in five places, and all three faces ` +
+    `are loaded with nothing asking for a fourth`,
 );

@@ -47,6 +47,7 @@ mod screenshot_cmd;
 mod serve;
 mod session_cmd;
 mod settings;
+mod viewer_task;
 // The channel a supervisor watches a host through.
 mod supervised;
 mod terminal_cmd;

@@ -5,6 +5,7 @@ import { Button } from "@/components/button";
 import { SessionHUD } from "@/components/hud";
 import { Tooltip } from "@/components/tooltip";
 import { Presence, ReconnectNotice, SessionChrome, SessionRoot, useSessionChrome, VideoSurface, type ReconnectState } from "@/session/chrome";
+import { RemoteScreen } from "@/session/RemoteScreen";
 import { presence } from "@/session/presence.contract";
 import { Demo, Section, Sub, TokenName, useTokens } from "./ui";
 
@@ -57,6 +58,15 @@ export function SessionSection() {
       title="The session layer"
       lede="A theme, not a set of exceptions. data-session on the root re-declares the dark values, caps every duration at --dur-fast, zeroes the video surface's transition and parks the chrome above everything else. Switch the theme above: the box below does not change."
     >
+      <Sub
+        title="The picture"
+        about="Where the remote screen is drawn: the engine's own encoded frames over a loopback socket, decoded by the window's own VideoDecoder and painted on a canvas. No WebRTC and no new crates — the measurement that settled it found 151 frames a second at 1920×1080 with every frame drawn, on software rendering. Here there is no session, so it shows the other half of its job: the command that starts one, with this window's socket already in it."
+      >
+        <div className="relative h-[14rem] overflow-hidden rounded-lg border border-border" data-session="">
+          <RemoteScreen device="workstation" />
+        </div>
+      </Sub>
+
       <Sub title="Live" about="Auto-hiding chrome, the HUD, the presence indicator, and a video surface that swaps frames. The chrome retracts after --session-chrome-hide and comes back at the top edge or on focus, so every control on it has a keyboard path.">
         <SessionRoot ref={sessionRef} className="h-[28rem] rounded-lg border border-border">
           <VideoSurface>

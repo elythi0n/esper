@@ -46,7 +46,7 @@ use esper_scale::Ceiling;
 use crate::backend::{self, Choice};
 
 /// What the loopback was asked to do.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Options {
     pub width: u32,
     pub height: u32,
@@ -64,6 +64,9 @@ pub struct Options {
     pub monitor: Option<u32>,
     /// Open a window and draw the decoded pictures in it.
     pub present: bool,
+    /// A socket to write the encoded pictures to, for a window that decodes
+    /// them itself — the viewer's path, exercised with no peer and no display.
+    pub viewer: Option<std::path::PathBuf>,
 }
 
 impl Default for Options {
@@ -79,6 +82,7 @@ impl Default for Options {
             backend: Choice::default(),
             monitor: None,
             present: false,
+            viewer: None,
         }
     }
 }
@@ -147,6 +151,13 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
             "--present" => {
                 o.present = true;
                 i += 1;
+            }
+            "--viewer" => {
+                let Some(path) = args.get(i + 1) else {
+                    return Err("--viewer wants the socket a window is listening on".to_owned());
+                };
+                o.viewer = Some(std::path::PathBuf::from(path));
+                i += 2;
             }
             "--no-verify" => {
                 o.verify = false;
@@ -291,6 +302,28 @@ pub fn run(o: &Options) -> Result<(), String> {
         None
     };
 
+    // The viewer's path, with no peer and no display: the same repackaging and
+    // the same stream a session writes, from this machine's own encoder.
+    let mut viewer = match o.viewer.as_deref() {
+        Some(path) => {
+            let (ew, eh) = pipeline.encode_size();
+            match crate::viewer_task::Viewer::connect(path, (ew, eh)) {
+                Ok(window) => {
+                    println!("  viewer    {} at {ew}x{eh}", path.display());
+                    println!();
+                    Some(window)
+                }
+                Err(e) => {
+                    println!("  viewer    unavailable ({e})");
+                    println!();
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let began = std::time::Instant::now();
+
     let space = ColorSpace::default();
     let to_rgb = RgbCoefficients::for_space(space);
     let mut psnr_sum = 0f64;
@@ -311,8 +344,12 @@ pub fn run(o: &Options) -> Result<(), String> {
             Step::Encoded {
                 decoded: Some(picture),
                 damage,
+                ref bitstream,
                 ..
             } => {
+                if let Some(window) = viewer.as_mut() {
+                    window.picture(bitstream, began.elapsed());
+                }
                 if let Some(p) = presenter.as_mut() {
                     // The pipeline's damage is about the *capture*; what
                     // changed in the decoded picture is the same regions, so

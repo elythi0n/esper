@@ -153,6 +153,14 @@ pub struct ConnectOptions {
     /// the machine being recorded says so on its own screen for as long as it
     /// lasts.
     pub record: Option<std::path::PathBuf>,
+    /// A window's socket to write the session's pictures into, if one asked.
+    ///
+    /// **The window listens and the engine dials**, because the socket is the
+    /// window's: it knows its own home, creates the file with the permissions
+    /// everything else there has, and removes it when it closes. Nothing is
+    /// announced to the host — unlike a recording, a viewer is what a session
+    /// *is*, and the picture is already on its way to somebody's screen.
+    pub viewer: Option<std::path::PathBuf>,
     /// A broker to be introduced through, when nothing direct works.
     pub via: Option<esper_rendezvous::Via>,
     /// Which paired host, by name or fingerprint prefix.
@@ -340,6 +348,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     let mut all_monitors = false;
     let mut no_audio = false;
     let mut record: Option<std::path::PathBuf> = None;
+    let mut viewer: Option<std::path::PathBuf> = None;
     let mut via_addr: Option<SocketAddr> = None;
     let mut via_key: Option<[u8; 32]> = None;
     let mut named: Option<String> = None;
@@ -446,6 +455,13 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
                 record = Some(std::path::PathBuf::from(path));
                 i += 2;
             }
+            "--viewer" => {
+                let Some(path) = args.get(i + 1) else {
+                    return Err("--viewer wants the socket a window is listening on".to_owned());
+                };
+                viewer = Some(std::path::PathBuf::from(path));
+                i += 2;
+            }
             // **An address or a name.** An address says where without saying
             // which; a name says which without saying where. Both are
             // ordinary things to type, and the key check settles the identity
@@ -475,6 +491,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
     };
     Ok(ConnectOptions {
         record,
+        viewer,
         addr,
         seconds,
         profile,
@@ -4622,6 +4639,8 @@ pub fn connect_usage() -> String {
          \x20                      arrangement the host's desktop has\n\
          \x20 --all-monitors       ask for every screen the host has\n\
          \x20 --no-audio           do not ask for the host's sound, so none is sent\n\
+         \x20 --viewer <socket>    write the pictures to a window listening there,\n\
+         \x20                      encoded, for it to decode itself\n\
          \x20 --record <file.mkv>  write the session to a file. The host says so on its\n\
          \x20                      own screen for as long as it lasts\n\
          \x20 --profile <what>     text, balanced or motion: what you are doing,\n\
@@ -5286,8 +5305,38 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             });
             crate::record_task::Recorder::waiting(path, (config.width, config.height), audio)
         });
+        // The window's copy of the pictures, if a window asked for them.
+        //
+        // Dialled before the session's first frame rather than lazily: a
+        // window that is not there is a thing to say at the start, not the
+        // first time a picture has nowhere to go.
+        let mut viewer = match o.viewer.as_deref() {
+            Some(path) => {
+                match crate::viewer_task::Viewer::connect(path, (config.width, config.height)) {
+                    Ok(window) => {
+                        println!(
+                            "  viewer     {} — pictures go to the window",
+                            path.display()
+                        );
+                        Some(window)
+                    }
+                    Err(e) => {
+                        // Not fatal. A session is a session whether or not
+                        // anybody is looking at it through this socket, and the
+                        // other half of what it carries — a terminal, a transfer
+                        // — has nothing to do with the picture.
+                        eprintln!("  · no window is listening on {}: {e}", path.display());
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
+        if recorder.is_some() || viewer.is_some() {
+            link.keep_encoded(true);
+        }
         if recorder.is_some() {
-            link.keep_for_recording(true);
             match link.announce_recording(true).await {
                 Ok(()) => println!("  recording  the host has been told, and will show it"),
                 // **Not fatal, and said.** A host that cannot be told is a
@@ -5530,8 +5579,18 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             // machine decides whether it managed to decode or draw it: a
             // recording with holes where the viewer stuttered would be a worse
             // record of the session than the session was.
+            //
+            // **Taken once and given to everybody**, because taking drains:
+            // a recording and a window both want the encoded frames, and
+            // whichever asked first would otherwise get all of them.
+            let elapsed = started.elapsed();
+            let frames = link.take_encoded();
+            let sounds = link.take_audio_packets();
             if let Some(writing) = recorder.as_mut() {
-                writing.take_from(&mut link, started.elapsed());
+                writing.take(&frames, &sounds, elapsed);
+            }
+            if let Some(window) = viewer.as_mut() {
+                window.take(&frames, elapsed);
             }
             for d in out.drain(..) {
                 match d {
@@ -5997,6 +6056,22 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             recorder.finish();
         }
         println!("  pictures   {pictures} shown, {skipped} not shown");
+        // **What the window got, when there was a window**, because the two
+        // numbers can differ and the difference is the interesting part: a
+        // viewer that waited is a keyframe interval, and a window that took
+        // fewer than were shown is a decoder somebody has to look at.
+        if let Some(window) = viewer.as_ref() {
+            let waited = window.waited();
+            println!(
+                "  window     {} picture(s) sent{}",
+                window.frames(),
+                if waited > 0 {
+                    format!(", after {waited} that arrived before a decoder could begin")
+                } else {
+                    String::new()
+                }
+            );
+        }
         // **Said only when there was sound**, and said in the terms that
         // matter: how much was heard, how much was reconstructed because a
         // packet was lost, and how much was thrown away because it arrived too

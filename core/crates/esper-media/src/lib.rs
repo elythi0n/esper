@@ -39,11 +39,14 @@
 //! complete, and there are no panicking constructs anywhere in the path.
 
 pub mod annexb;
+pub mod avcc;
 pub mod depacketize;
 pub mod packetize;
 pub mod rtp;
+pub mod viewer_stream;
 
 pub use annexb::{NalUnit, NalUnits};
+pub use avcc::{ParameterSets, Repackager, Sample};
 
 pub use depacketize::{
     Abandoned, Depacketizer, MAX_FRAME_BYTES, MAX_PACKETS_PER_FRAME, Reassembled, ReassemblyError,
@@ -57,6 +60,7 @@ pub use depacketize::MAX_FRAME_BYTES as MAX_FRAME_BYTES_EXPORT;
 pub use depacketize::MAX_PACKETS_PER_FRAME as MAX_PACKETS_EXPORT;
 pub use packetize::{MIN_MTU, PacketizeError, Packetizer, to_annexb};
 pub use rtp::{RTP_HEADER_LEN, RtpError, RtpHeader};
+pub use viewer_stream::{STREAM_VERSION, Writer as ViewerStreamWriter};
 
 /// The payload type for H.264, as WebRTC's default offer uses.
 ///

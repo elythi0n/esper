@@ -27,6 +27,7 @@ export const TIER_1: readonly Tier1Entry[] = [
   { name: "SessionRoot", from: "session/chrome.tsx", what: "A live session: always dark, every duration capped, chrome above everything" },
   { name: "SessionChrome", from: "session/chrome.tsx", what: "The session's top bar, which retracts and returns" },
   { name: "VideoSurface", from: "session/chrome.tsx", what: "The remote screen. Never transitions" },
+  { name: "RemoteScreen", from: "session/RemoteScreen.tsx", what: "The picture itself: the engine's own encoded frames, decoded in the window and drawn on a canvas — or the command that starts one" },
   { name: "Presence", from: "session/chrome.tsx", what: "This screen is being watched. Held to a contract, not styled" },
   { name: "ReconnectNotice", from: "session/chrome.tsx", what: "States its state. No pulse, no spinner" },
 

@@ -305,12 +305,17 @@ impl ControllerLink {
         self.sound.is_some()
     }
 
-    /// Keep the encoded frames and sound packets, for a recording.
+    /// Keep the encoded frames and sound packets, for whoever wants them.
     ///
-    /// **One switch for both**, because a recording of the picture without the
-    /// sound is not what anybody asked for — and two switches would be two
-    /// things to forget.
-    pub fn keep_for_recording(&mut self, keeping: bool) {
+    /// **One switch for both** the picture and the sound, because a recording
+    /// of one without the other is not what anybody asked for, and two
+    /// switches would be two things to forget.
+    ///
+    /// Two callers want this now — a recording, and a window decoding the
+    /// pictures itself — which is why it is no longer named for the first of
+    /// them. Keeping costs a copy of each frame until somebody takes it, so it
+    /// stays off unless something asked.
+    pub fn keep_encoded(&mut self, keeping: bool) {
         self.stream.keep_encoded(keeping);
         if let Some(sound) = self.sound.as_mut() {
             sound.keep_packets(keeping);

@@ -18,6 +18,24 @@ declaration order, and the two produced different bytes for the same `Hello`.
 Without a byte-level check that would have surfaced as a mysterious interop
 failure months later.
 
+**Stream fixtures** (`.bin`). `viewer_stream.bin` is a session's pictures as
+the engine writes them for a window: a magic number, a version, and records
+carrying the `avcC` description and each access unit. Written by
+`esper-media`'s `viewer_stream`, regenerated with `make viewer-fixture`, and
+read by **three** implementations — Rust checks it in
+`core/crates/esper-media/tests/viewer_fixture.rs` against a reader written
+from the format's documentation rather than from the writer, and the page
+parses it with its own TypeScript reader and hands every picture to a real
+`VideoDecoder` in `web/scripts/check-viewer.mjs`, in Chromium and in the
+WebKitGTK the window actually ships.
+
+It is deliberately **not** held to byte identity the way the wire fixtures
+are. Those are ours to encode, so a difference is our drift; this one contains
+openh264's output, and holding a third party's encoder to byte identity would
+make an upstream release look like a broken format. What is checked is
+everything the format promises: the magic, the version, the record layout, and
+that every length adds up.
+
 **Store fixtures** (`.json`). `device_store.json` is a device store as
 `esper-crypto` writes one, and `device_fingerprints.json` is the fingerprint
 derived from each of sixteen keys. Rust checks them in

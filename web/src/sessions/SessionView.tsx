@@ -3,8 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { Tooltip } from "@/components/tooltip";
 import { durationMs } from "@/lib/theme";
-import { Figure, Key } from "@/screens/parts";
-import { Presence, VideoSurface } from "@/session/chrome";
+import { Figure } from "@/screens/parts";
+import { Presence } from "@/session/chrome";
+import { RemoteScreen } from "@/session/RemoteScreen";
 import { cn } from "@/lib/cn";
 
 /**
@@ -42,14 +43,7 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
         arm();
       }}
     >
-      <VideoSurface>
-        <div className="flex flex-col items-center gap-3 px-8">
-          <Key>No picture</Key>
-          <p className="max-w-[var(--measure-short)] text-center text-sm text-text-2">
-            The engine cannot hand a session to this window yet — there is no loopback presenter.
-          </p>
-        </div>
-      </VideoSurface>
+      <RemoteScreen device={name} />
 
       {/* The HUD, over the picture, retracting. */}
       <div
