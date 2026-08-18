@@ -490,6 +490,20 @@ test-rust:
 test-race:
 	go test -race -cover ./...
 
+## Hold every Go package to a coverage floor, and every package to having one
+##
+## Not a quality target — coverage is a poor measure of whether code is tested,
+## and every defect found in this tree last week was in a line already counted
+## as covered. It is good at one thing, and it is the thing that happened:
+## saying which code nothing has ever run. `internal/service` sat at 0.0% with
+## 332 lines wrapping systemd, and nothing said so, because a package with no
+## test file produces no failure. A package that appears with no floor is a
+## failure here rather than a default of zero.
+.PHONY: check-coverage
+check-coverage:
+	$(GUARD_ROOT)
+	@scripts/check-coverage.sh
+
 ## Lint both languages at the strictest setting
 .PHONY: lint
 lint: lint-go lint-rust

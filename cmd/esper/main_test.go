@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/elythi0n/esper/internal/proto"
 )
 
 func TestRunExitCodes(t *testing.T) {
@@ -113,5 +117,142 @@ func TestTheFrontDoorClaimsNoVerbTheEngineLacks(t *testing.T) {
 		if !strings.Contains(text, "  "+name+" ") {
 			t.Errorf("`esper %s` hands off to an engine that has no %q command", name, name)
 		}
+	}
+}
+
+/*
+A name is text somebody chose, and this column cuts it.
+
+The bug this guards was a byte-slice: `name[:14]` on a machine called
+デスクトップ cut a three-byte character in half and printed `デスクト\xe3\x83`,
+which reads as a broken program rather than as a long name. Nothing here had
+ever printed a name that was not ASCII, so nothing had ever seen it.
+*/
+func TestANameIsCutByCharactersAndSaysSo(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		in   string
+		wide int
+		want string
+	}{
+		{"a short name is left alone", "rack", 14, "rack"},
+		{"a name exactly the width is left alone", "fourteen chars", 14, "fourteen chars"},
+		{"a long name is cut and marked", "the machine under the stairs", 14, "the machine u…"},
+		// Thirteen characters and thirty bytes: under the budget, and exactly
+		// what the byte-slice this replaced cut in half.
+		{"a short name in bytes it is not", "デスクトップ · مكتب", 14, "デスクトップ · مكتب"},
+		{"characters, not bytes", "デスクトップコンピューターの機械", 14, "デスクトップコンピューター…"},
+		{"a short key is left alone", "019a1125", 8, "019a1125"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := clip(c.in, c.wide)
+			if got != c.want {
+				t.Errorf("clip(%q, %d) = %q, want %q", c.in, c.wide, got, c.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("clip(%q, %d) produced bytes that are not text: %q", c.in, c.wide, got)
+			}
+			if n := utf8.RuneCountInString(got); n > c.wide {
+				t.Errorf("clip(%q, %d) is %d characters wide", c.in, c.wide, n)
+			}
+		})
+	}
+}
+
+/*
+And the column it fills.
+
+A device that has been unpaired since is named by its key, because the honest
+answer to "who was that" is that this machine no longer knows — and either way
+the column is one width, or the arrows and details after it do not line up.
+*/
+func TestTheNameColumnIsOneWidthWhateverIsInIt(t *testing.T) {
+	for _, h := range []proto.Happening{
+		{Key: "019a11258f68cdd0", Device: "rack"},
+		{Key: "019a11258f68cdd0", Device: ""},
+		{Key: "019a11258f68cdd0", Device: "the machine under the stairs"},
+		{Key: "019a11258f68cdd0", Device: "デスクトップ"},
+		{Key: "short", Device: ""},
+	} {
+		got := who(h)
+		if n := utf8.RuneCountInString(got); n != 14 {
+			t.Errorf("who(%q/%q) is %d characters and the column is 14: %q", h.Device, h.Key, n, got)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("who(%q/%q) is not text: %q", h.Device, h.Key, got)
+		}
+	}
+
+	// A device this machine no longer knows is named by its key, not by an
+	// empty column that reads as a missing line.
+	if got := strings.TrimSpace(who(proto.Happening{Key: "019a11258f68cdd0"})); got != "019a1125" {
+		t.Errorf("an unpaired device is named %q, and eight characters of its key is %q", got, "019a1125")
+	}
+}
+
+/*
+Every Esper on PATH, not just the one that wins.
+
+`exec.LookPath` answers which binary runs. The question a diagnostic has to
+answer is whether there is more than one, because that is the fault where every
+other line of `esper doctor` is about a different program than the person
+thinks they are running.
+*/
+func TestEveryBinaryOnPathIsFoundInOrder(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	write := func(dir, name string, mode os.FileMode) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), mode); err != nil {
+			t.Fatalf("writing %s: %v", p, err)
+		}
+		return p
+	}
+	winner := write(first, "esper", 0o755)
+	loser := write(second, "esper", 0o755)
+	// Not executable: on PATH, and not something that would ever run.
+	write(second, "esper-engine", 0o644)
+	// A directory of the right name is not a binary either.
+	if err := os.Mkdir(filepath.Join(first, "esper-broker"), 0o755); err != nil {
+		t.Fatalf("making a directory in the way: %v", err)
+	}
+
+	// An empty entry means "the working directory" to some shells and nothing
+	// here; either way it is not a place to look for a binary.
+	t.Setenv("PATH", strings.Join([]string{first, "", second}, string(os.PathListSeparator)))
+
+	found := otherBinariesOnPath("esper")
+	if len(found) != 2 || found[0] != winner || found[1] != loser {
+		t.Errorf("found %v, and PATH holds %v then %v", found, winner, loser)
+	}
+	if got := otherBinariesOnPath("esper-engine"); len(got) != 0 {
+		t.Errorf("a file nothing can execute was reported as a binary: %v", got)
+	}
+	if got := otherBinariesOnPath("esper-broker"); len(got) != 0 {
+		t.Errorf("a directory was reported as a binary: %v", got)
+	}
+	if got := otherBinariesOnPath("nothing-is-called-this"); len(got) != 0 {
+		t.Errorf("found %v for a name nothing on PATH has", got)
+	}
+}
+
+/*
+A time the log can actually have.
+
+`when` takes a `uint64` off the wire and hands it to `time.Unix`, which takes
+an `int64` — so a number past the middle of the range is not a date in the far
+future, it is a date in the distant past with the sign flipped. It says so
+instead.
+*/
+func TestATimeThatCannotBeATimeIsSaidToBeUnknown(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	if got := when(1700000000); got != "2023-11-14 22:13" {
+		t.Errorf("when(1700000000) = %q in UTC", got)
+	}
+	if got := when(0); got != "1970-01-01 00:00" {
+		t.Errorf("when(0) = %q, and zero is the epoch rather than an error", got)
+	}
+	if got := when(math.MaxUint64); got != "—" {
+		t.Errorf("when(MaxUint64) = %q, and a number no clock can hold is not a date", got)
 	}
 }

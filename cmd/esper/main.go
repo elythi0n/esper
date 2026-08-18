@@ -17,6 +17,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/elythi0n/esper/internal/devices"
 	"github.com/elythi0n/esper/internal/engine"
@@ -627,18 +628,59 @@ func cmdSessions(args []string) int {
 // apart — and where a device has been unpaired since, the key alone, because
 // the honest answer to "who was that" is that this machine no longer knows.
 func who(h proto.Happening) string {
-	short := h.Key
-	if len(short) > 8 {
-		short = short[:8]
-	}
 	if h.Device == "" {
-		return fmt.Sprintf("%-14s", short)
+		// A prefix, not a cut name. Eight characters of a fingerprint is how
+		// this product names a device everywhere, and a mark after them would
+		// say the *key* was too long rather than that a name is missing.
+		return fmt.Sprintf("%-*s", whoWide, firstRunes(h.Key, 8))
 	}
-	name := h.Device
-	if len(name) > 14 {
-		name = name[:14]
+	return fmt.Sprintf("%-*s", whoWide, clip(h.Device, whoWide))
+}
+
+// How wide the name column is, in characters.
+const whoWide = 14
+
+/*
+clip shortens a name to fit a column, by characters and not by bytes.
+
+A device name is text somebody chose, and this one is printed in a fixed
+column, so long ones have to be cut. Cutting at a **byte** offset cuts a
+multi-byte character in half: a machine called デスクトップ came out of this
+column as `デスクト\xe3\x83`, which is two replacement characters on any
+terminal and reads as a broken program rather than as a long name.
+
+The tail is marked, because a name silently losing its end is a name somebody
+reads as the whole one — the same rule the window's own layout gate enforces
+for text it clips. `%-*s` then pads to width, which `fmt` counts in characters
+too, so the two halves agree.
+
+What this does **not** do is measure display width: a character like デ takes
+two columns in a terminal and one here, so a name in a script like that still
+runs wider than the column. Fixing it needs an East Asian width table, which
+is a dependency and a maintenance burden for one column of one subcommand —
+and unlike the mojibake above, a wide name is still legible.
+*/
+func clip(s string, wide int) string {
+	if utf8.RuneCountInString(s) <= wide {
+		return s
 	}
-	return fmt.Sprintf("%-14s", name)
+	// One character of the budget goes to the mark, so the result is the
+	// column's width and not one past it.
+	return firstRunes(s, wide-1) + "…"
+}
+
+// firstRunes takes the first n characters of a string, whole ones only.
+func firstRunes(s string, n int) string {
+	var b strings.Builder
+	for i, r := range s {
+		_ = i
+		if n <= 0 {
+			break
+		}
+		b.WriteRune(r)
+		n--
+	}
+	return b.String()
 }
 
 // when renders a timestamp in local time, to the minute.
