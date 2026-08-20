@@ -58,6 +58,23 @@ runs the gates against it. It is deliberately separate from `device_store.json`,
 because that one is a shared corpus two implementations are held to and adding
 a device to it would move every count they assert.
 
+**Its times are moved, not used as written.** The rig shifts every timestamp in
+the store by one amount when it stages it, so that the newest device was seen
+five seconds ago and the gaps between the rest are the ones the file records.
+Without that the fixture ages: written with a device seen seconds ago, it
+renders "4h" by the afternoon and "3d" by Thursday, and the states at the top
+of the scale — seconds, minutes, a one-time pairing that has **not** yet
+lapsed — stop being reachable after the first hour. Shifted, one run renders
+`7s`, `2m`, `2h`, `2d`, `3d` and "never", and both `once` and `spent`, every
+time.
+
+**What the Japanese name does and does not prove.** It is there so that a name
+which is not Latin goes through the code that measures, truncates and lays out
+one. Whether it *renders* depends on the machine: a host with no CJK font draws
+tofu, and the gates pass on tofu because a box has contrast like any other
+glyph. The Arabic in the same name is the half that exercises right-to-left
+text on a machine that has the fonts for it.
+
 The store is the file that says who a machine trusts, and the two halves read
 it from opposite sides — Rust writes and enforces, Go shows. A disagreement
 about it is a device listed that cannot connect, or one hidden that can. The

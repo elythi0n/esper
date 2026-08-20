@@ -45,7 +45,37 @@ for taken in "$port" "$api_port"; do
   fi
 done
 
-cp "$root/testdata/fixtures/device_store_screens.json" "$home/devices.json"
+# The store's times are moved up to now, keeping every gap between them.
+#
+# A fixture with absolute timestamps ages: written with a device seen five
+# seconds ago, it renders "4h" by the afternoon and "3d" by Thursday, so the
+# screen the gates measure is a different screen every day, and the states near
+# the top of the scale — seconds, minutes, a one-time pairing that has not yet
+# lapsed — become unreachable after the first hour. Shifting every time by the
+# same amount keeps the store valid and keeps the *set of ages* fixed, which is
+# what the screens are actually held to.
+python3 - "$root/testdata/fixtures/device_store_screens.json" "$home/devices.json" <<'SHIFT'
+import json, sys, time
+
+source, target = sys.argv[1], sys.argv[2]
+store = json.load(open(source))
+times = ("paired_at", "last_seen")
+
+seen = [d[t] for d in store["devices"].values() for t in times if d.get(t)]
+if not seen:
+    raise SystemExit("the fixture carries no timestamps to move")
+shift = int(time.time()) - max(seen) - 5
+
+for device in store["devices"].values():
+    for t in times:
+        if device.get(t):
+            device[t] += shift
+    pairing = device.get("pairing")
+    if isinstance(pairing, dict) and "once" in pairing:
+        pairing["once"]["expires_at"] += shift
+
+json.dump(store, open(target, "w"), indent=2, ensure_ascii=False)
+SHIFT
 # A key of its own, so the fingerprint on screen is the rig's and not anybody's.
 head -c 32 /dev/urandom > "$home/identity.key"
 chmod 600 "$home/identity.key"

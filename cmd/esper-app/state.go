@@ -107,22 +107,46 @@ func restoreWindow(ctx context.Context, state windowState) {
 // happens for positions well outside any arrangement.
 func onAScreen(ctx context.Context, state windowState) bool {
 	screens, err := wr.ScreenGetAll(ctx)
-	if err != nil || len(screens) == 0 {
+	if err != nil {
 		// Nothing to check against. Trusting the file is the better guess:
 		// the common case is the same machine with the same monitors.
 		return true
 	}
-
-	widest, tallest := 0, 0
+	sizes := make([]screenSize, 0, len(screens))
 	for _, s := range screens {
 		w, h := s.Size.Width, s.Size.Height
 		if w == 0 || h == 0 {
 			w, h = s.Width, s.Height
 		}
-		widest += w
-		if h > tallest {
-			tallest = h
+		sizes = append(sizes, screenSize{Width: w, Height: h})
+	}
+	return withinScreens(state, sizes)
+}
+
+// screenSize is one display's extent, which is all Wails 2 will say about it.
+type screenSize struct{ Width, Height int }
+
+// withinScreens is the decision itself, apart from the runtime that answers it.
+//
+// Separated because this is the part with the edges in it — the grab margin,
+// the empty list, a screen that reports nothing — and none of them can be
+// reached through a Wails runtime that only exists inside a running window.
+func withinScreens(state windowState, screens []screenSize) bool {
+	if len(screens) == 0 {
+		return true
+	}
+	widest, tallest := 0, 0
+	for _, s := range screens {
+		widest += s.Width
+		if s.Height > tallest {
+			tallest = s.Height
 		}
+	}
+	if widest == 0 || tallest == 0 {
+		// Screens that answered with nothing say nothing about where a window
+		// can be, and refusing the position on that basis would move a window
+		// that was fine.
+		return true
 	}
 	// Enough of the top edge has to be reachable to drag the window back,
 	// since the title bar is the only way to move it.

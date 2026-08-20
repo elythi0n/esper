@@ -71,8 +71,39 @@ func serveDocument(w http.ResponseWriter, r *http.Request, next http.Handler, ro
 // neither can carry a quote, a backslash or an angle bracket; this is the
 // belt to that's braces, so a future caller loosening either does not also
 // open a script injection.
+/*
+quote makes a value safe to sit inside the inline script, and the angle
+brackets are the point of it.
+
+What goes in here is a listen address and a route, and the route can come from
+an `esper://` link the operating system handed over — which any page can ask a
+browser to open. Today nothing hostile reaches this, because `linkShape` admits
+only base64url and refuses everything else two files away. This is the second
+line, and it is the one that has to hold if that allowlist is ever widened by
+somebody who has not read it.
+
+`<` and `>` are escaped because a value containing `</script>` **ends the
+script block**, and everything after it is markup the page will run — the
+quoting around it does not matter, since the browser finds the closing tag
+before it finds the end of any string. They had been listed here and mapped to
+themselves, which reads as protection and is a no-op.
+
+U+2028 and U+2029 go too: they are line terminators inside a JavaScript string
+in every engine before ES2019, so a name carrying one truncates the script at
+that point.
+*/
 func quote(value, prefix string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `<`, `<`, `>`, `>`, "\n", "", "\r", "")
+	r := strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		"<", `\u003c`,
+		">", `\u003e`,
+		"&", `\u0026`,
+		"\n", "",
+		"\r", "",
+		"\u2028", "",
+		"\u2029", "",
+	)
 	return `"` + prefix + r.Replace(value) + `"`
 }
 
