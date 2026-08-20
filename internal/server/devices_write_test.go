@@ -257,3 +257,59 @@ func TestTheAnswerIsReadBackFromTheStore(t *testing.T) {
 			got.Permissions)
 	}
 }
+
+/*
+Keeping a one-session pairing, which is the route the screen could not reach.
+
+The Devices screen has shown `once` and `spent` since it was written and could
+do nothing about either: the only way to make a pairing last was `esper keep`
+in a terminal, which is the thing this window exists to stop being necessary.
+It is the newest of the four changes and the only one nothing held.
+
+Like forgetting, it takes no body — there is nothing to say about it beyond
+which device — and like all four, it is guarded by the token.
+*/
+func TestKeepingAPairingReachesTheEngineAndNeedsTheToken(t *testing.T) {
+	engine, log := anEngineThat(t, 0, "")
+	s, token, store := serverThatCanWrite(t, engine)
+	fp := theFingerprint(t, store)
+
+	// A body is neither required nor a reason to refuse: a client that sends
+	// one is asking for the same thing.
+	w := askWith(t, s, http.MethodPost, "/devices/"+fp+"/keep", token, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("keeping answered %d: %s", w.Code, w.Body.String())
+	}
+
+	args, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("the engine was not run: %v", err)
+	}
+	if string(args) != "keep\n"+fp+"\n" {
+		t.Fatalf("the engine got %q, and the command is `keep <fingerprint>`", args)
+	}
+
+	// The answer is the store's own account of the device, not an echo of the
+	// request — which is the only way a change that did not take is visible.
+	var said struct {
+		Name        string   `json:"name"`
+		Permissions []string `json:"permissions"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &said); err != nil {
+		t.Fatalf("the answer is not a device: %v — %s", err, w.Body.String())
+	}
+	if said.Name == "" {
+		t.Errorf("keeping answered with no device: %s", w.Body.String())
+	}
+
+	if err := os.Remove(log); err != nil {
+		t.Fatalf("clearing the engine's log: %v", err)
+	}
+	unauthorised := askWith(t, s, http.MethodPost, "/devices/"+fp+"/keep", Token{}, "")
+	if unauthorised.Code != http.StatusUnauthorized {
+		t.Errorf("keeping answered %d without a token", unauthorised.Code)
+	}
+	if _, err := os.Stat(log); err == nil {
+		t.Fatal("an unauthenticated keep reached the engine")
+	}
+}
