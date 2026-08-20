@@ -36,10 +36,10 @@ internal/devices            87
 internal/engine             80
 internal/home               83
 internal/proto              86
-internal/server             56
+internal/server             59
 internal/service            53
 "
-total_floor=50
+total_floor=51
 
 profile=$(mktemp)
 trap 'rm -f "$profile"' EXIT
