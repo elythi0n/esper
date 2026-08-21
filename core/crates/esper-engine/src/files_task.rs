@@ -121,7 +121,7 @@ impl Files {
             && let Err(e) = log.append(&Entry::now(
                 &self.device,
                 Event::FileTransferred {
-                    direction: direction.to_owned(),
+                    way: direction.to_owned(),
                     path: path.to_owned(),
                     size,
                     outcome: outcome.to_owned(),

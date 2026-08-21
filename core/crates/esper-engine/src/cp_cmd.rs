@@ -316,7 +316,7 @@ pub fn run(o: &CopyOptions) -> Result<(), String> {
         crate::trail::went_out(
             session.peer_key(),
             esper_audit::Event::FileTransferred {
-                direction: if pushing { "out" } else { "in" }.to_owned(),
+                way: if pushing { "out" } else { "in" }.to_owned(),
                 path: remote_path.clone(),
                 size: outcome.as_ref().copied().unwrap_or(0),
                 outcome: match &outcome {

@@ -76,6 +76,29 @@ for device in store["devices"].values():
 
 json.dump(store, open(target, "w"), indent=2, ensure_ascii=False)
 SHIFT
+
+# The session log, shifted the same way and for the same reason.
+#
+# Without it the Activity screen is measured empty — the same hole the device
+# store had, one screen along. The lines carry what the screen has to draw and
+# an empty log cannot: a session this machine opened *outward*, which is the
+# arrow's other direction; a refusal, which is the line somebody opens this
+# screen to find; a transfer with a byte count; and a device that has since
+# been unpaired, where the log keeps the key and the name is gone.
+python3 - "$root/testdata/fixtures/session_log_screens.jsonl" "$home/sessions.log" <<'SEED'
+import json, sys, time
+
+source, target = sys.argv[1], sys.argv[2]
+lines = [json.loads(l) for l in open(source) if l.strip()]
+if not lines:
+    raise SystemExit("the session log fixture is empty")
+shift = int(time.time()) - max(l["at"] for l in lines) - 60
+
+with open(target, "w") as out:
+    for line in lines:
+        line["at"] += shift
+        out.write(json.dumps(line, ensure_ascii=False) + "\n")
+SEED
 # A key of its own, so the fingerprint on screen is the rig's and not anybody's.
 head -c 32 /dev/urandom > "$home/identity.key"
 chmod 600 "$home/identity.key"

@@ -286,8 +286,22 @@ pub enum Event {
     /// it may not have is the signal that matters, and it is invisible in a
     /// record that only keeps what succeeded.
     FileTransferred {
-        /// Which way, from this machine's point of view: `in` or `out`.
-        direction: String,
+        /// Which way the **file** went, from this machine's point of view:
+        /// `in` or `out`.
+        ///
+        /// **Not called `direction`, and that is not a preference.** The entry
+        /// around this one has a field of that name for which way the
+        /// *session* went, and the event is flattened into the same object —
+        /// so two fields called `direction` become one key. Every
+        /// `file_transferred` line written before this rename was a line the
+        /// engine could not read back: outbound wrote the key twice and read
+        /// as a duplicate, inbound had its single key taken by the entry and
+        /// read as missing. The screen skipped them all, and a file leaving
+        /// this machine is exactly what somebody opens that screen to find.
+        ///
+        /// The two are independent: a session this machine opened outward can
+        /// still receive a file.
+        way: String,
         /// Where, relative to this machine's file directory. Already checked
         /// to be free of control characters, so it cannot forge a line here.
         path: String,
@@ -556,13 +570,13 @@ impl Event {
                 format!("refused a forward to {target}: {reason}")
             }
             Self::FileTransferred {
-                direction,
+                way,
                 path,
                 size,
                 outcome,
             } => {
-                let way = if direction == "in" { "took" } else { "sent" };
-                format!("{way} {path} ({size} bytes): {outcome}")
+                let verb = if way == "in" { "took" } else { "sent" };
+                format!("{verb} {path} ({size} bytes): {outcome}")
             }
             Self::Refused { reason } => format!("refused: {reason}"),
         }

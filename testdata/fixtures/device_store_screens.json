@@ -1,8 +1,8 @@
 {
   "version": 1,
   "devices": {
-    "8e9d1a8d5b1863f1e99ed1bd8a1b7bd1ea8e19f704f5859adbcf5cdce5ca7cd9": {
-      "public_key": "8e9d1a8d5b1863f1e99ed1bd8a1b7bd1ea8e19f704f5859adbcf5cdce5ca7cd9",
+    "050d8056bdd07fdbfcb1e41ec4e5d924353d4422378555cb3b541ce3a399aa4f": {
+      "public_key": "050d8056bdd07fdbfcb1e41ec4e5d924353d4422378555cb3b541ce3a399aa4f",
       "name": "rack",
       "permissions": [
         "view",
@@ -22,8 +22,8 @@
       ],
       "last_mac": "02:00:5e:10:00:00"
     },
-    "1a5afeda973d776e31d1d7266f184468f84d99bed311d88d3dcb67015934f9f9": {
-      "public_key": "1a5afeda973d776e31d1d7266f184468f84d99bed311d88d3dcb67015934f9f9",
+    "73dd2f5a60896b53b82e4f95d90d273a50c16ab3d37fdce7c04fed9b48c79f1f": {
+      "public_key": "73dd2f5a60896b53b82e4f95d90d273a50c16ab3d37fdce7c04fed9b48c79f1f",
       "name": "elythion",
       "permissions": [
         "view",
@@ -33,8 +33,8 @@
       "last_seen": null,
       "pairing": "kept"
     },
-    "5eec0dc419aa8337bf725f026fda9c78c1cb1c642eeaff9d6e1112f37783e942": {
-      "public_key": "5eec0dc419aa8337bf725f026fda9c78c1cb1c642eeaff9d6e1112f37783e942",
+    "14f1f437bd2676d7a46b4d0ad0163f58f9689949004c594d172b8bf26faebd19": {
+      "public_key": "14f1f437bd2676d7a46b4d0ad0163f58f9689949004c594d172b8bf26faebd19",
       "name": "laptop",
       "permissions": [
         "view"
@@ -48,8 +48,8 @@
         }
       }
     },
-    "e81d3b0e9d82feaaf5f6e55bdff24731d7eee08632ffa63801e6397290c5d20a": {
-      "public_key": "e81d3b0e9d82feaaf5f6e55bdff24731d7eee08632ffa63801e6397290c5d20a",
+    "b35238b27177a703c52dfa642928eae798c5a5deb41e6044c41ad43817ecabb4": {
+      "public_key": "b35238b27177a703c52dfa642928eae798c5a5deb41e6044c41ad43817ecabb4",
       "name": "helper's laptop",
       "permissions": [
         "view",
@@ -64,8 +64,8 @@
         }
       }
     },
-    "a0a44ed8cfc32b7e61befeb99bbff7706808c3fe4dcdf4750a8addb3ffcd4008": {
-      "public_key": "a0a44ed8cfc32b7e61befeb99bbff7706808c3fe4dcdf4750a8addb3ffcd4008",
+    "30335f0d64548633384ba07b3f91313698d4c67b498520a9df954d69e0ba9173": {
+      "public_key": "30335f0d64548633384ba07b3f91313698d4c67b498520a9df954d69e0ba9173",
       "name": "build-farm-node-07",
       "permissions": [
         "view",
@@ -95,8 +95,8 @@
         "gpu"
       ]
     },
-    "fc66f021c67d064c1490a12b5a4d4d2f5167ca692a16ca12f1f3a4cda29a6fa9": {
-      "public_key": "fc66f021c67d064c1490a12b5a4d4d2f5167ca692a16ca12f1f3a4cda29a6fa9",
+    "6201199ec61bd8fc37f0d2e32388c2255bf25a93d6431fa026162c599bcb4321": {
+      "public_key": "6201199ec61bd8fc37f0d2e32388c2255bf25a93d6431fa026162c599bcb4321",
       "name": "the machine under the stairs in the second server room",
       "permissions": [
         "view"
@@ -105,8 +105,8 @@
       "last_seen": 1788874336,
       "pairing": "kept"
     },
-    "2fcf76a4c3c75b1fb5288d83d62dd114dc556d16fba206ab35d38bfe294a2857": {
-      "public_key": "2fcf76a4c3c75b1fb5288d83d62dd114dc556d16fba206ab35d38bfe294a2857",
+    "73fe8a789dd16e154ae73ac845d82fa61a7bb629981b6c7e87bcc20c165c7398": {
+      "public_key": "73fe8a789dd16e154ae73ac845d82fa61a7bb629981b6c7e87bcc20c165c7398",
       "name": "デスクトップ · مكتب",
       "permissions": [
         "view",

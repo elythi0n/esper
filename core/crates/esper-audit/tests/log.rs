@@ -381,7 +381,7 @@ fn variants() -> Vec<Event> {
             reason: "that target is not on the host's forwarding allowlist".to_owned(),
         },
         Event::FileTransferred {
-            direction: "in".to_owned(),
+            way: "in".to_owned(),
             path: "reports/q3.pdf".to_owned(),
             size: 4096,
             outcome: "stored".to_owned(),

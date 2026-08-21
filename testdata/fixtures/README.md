@@ -68,6 +68,23 @@ lapsed — stop being reachable after the first hour. Shifted, one run renders
 `7s`, `2m`, `2h`, `2d`, `3d` and "never", and both `once` and `spent`, every
 time.
 
+**And `session_log_screens.jsonl` beside it**, for the same reason one screen
+along: without it the Activity screen was measured empty. It carries what that
+screen has to draw and an empty log cannot — a session this machine opened
+*outward*, which is the arrow's other direction; a refusal, which is the line
+somebody opens the screen to find; a transfer with a byte count; and a device
+since unpaired, where the log keeps the key and the name is gone. Its times are
+shifted like the store's, and its keys are the store's keys, so a line and a
+row are about the same machine.
+
+**It is generated from the Rust types, and that is not fastidiousness.** Written
+by hand first, it had fourteen of twenty-one lines silently dropped: a line
+whose event does not deserialise is skipped, so the screen showed a third of
+the fixture and nothing said so. The shapes were plausible and wrong —
+`permissions` where the type says `granted`, `lock_after` where it says
+`after`. `esper-audit`'s `screens_fixture.rs` is what stops that coming back:
+every line must parse, and the counts must hold.
+
 **What the Japanese name does and does not prove.** It is there so that a name
 which is not Latin goes through the code that measures, truncates and lays out
 one. Whether it *renders* depends on the machine: a host with no CJK font draws
