@@ -31,11 +31,11 @@ cd "$here"
 # package                    floor
 floors="
 cmd/esper                   14
-cmd/esper-app               38
-internal/devices            87
-internal/engine             80
+cmd/esper-app               41
+internal/devices            90
+internal/engine             82
 internal/home               83
-internal/proto              86
+internal/proto              90
 internal/server             59
 internal/service            53
 "
