@@ -301,7 +301,13 @@ func Read(raw []byte, where string) ([]Device, error) {
 	// re-keys every entry from its own `public_key` on load, so an entry filed
 	// under the wrong key is corrected rather than dropped, and two entries
 	// naming one key leave the later of the two. Matched here, including the
-	// order, so neither side ever lists a device the other does not.
+	// order.
+	//
+	// The claim that neither side lists a device the other does not was made
+	// here before it was true: Rust also *drops* an entry whose key nothing can
+	// be trusted under, and this side listed it — a machine offered on the
+	// Devices screen that the engine will not talk to. Dropped below, by the
+	// same set of keys, read from the same shared file.
 	filed := make([]string, 0, len(s.Devices))
 	for key := range s.Devices {
 		filed = append(filed, key)
@@ -310,6 +316,14 @@ func Read(raw []byte, where string) ([]Device, error) {
 
 	byKey := make(map[Key]*Device, len(s.Devices))
 	for _, key := range filed {
+		// **And an entry whose key nothing can be trusted under is dropped**,
+		// the same as Rust does when it loads this file. Without it the two
+		// halves disagreed about what the store holds: the engine dropped the
+		// entry, this side listed it, and the Devices screen offered a machine
+		// that could not answer. See weak.go for why the check is a list.
+		if !usable(s.Devices[key].PublicKey) {
+			continue
+		}
 		byKey[s.Devices[key].PublicKey] = s.Devices[key]
 	}
 

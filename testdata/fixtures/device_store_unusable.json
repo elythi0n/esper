@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "devices": {
+    "0d183fa8e2246400d66ca83102e03ceb39498bfe26df24ff727ee5218bc2a70d": {
+      "public_key": "0d183fa8e2246400d66ca83102e03ceb39498bfe26df24ff727ee5218bc2a70d",
+      "name": "a machine that can connect",
+      "permissions": [
+        "view"
+      ],
+      "paired_at": 1700000000,
+      "last_seen": null,
+      "pairing": "kept"
+    },
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff": {
+      "public_key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "name": "a key that is not a point",
+      "permissions": [
+        "view"
+      ],
+      "paired_at": 1700000000,
+      "last_seen": null,
+      "pairing": "kept"
+    },
+    "0100000000000000000000000000000000000000000000000000000000000000": {
+      "public_key": "0100000000000000000000000000000000000000000000000000000000000000",
+      "name": "a key of small order",
+      "permissions": [
+        "view"
+      ],
+      "paired_at": 1700000000,
+      "last_seen": null,
+      "pairing": "kept"
+    }
+  }
+}

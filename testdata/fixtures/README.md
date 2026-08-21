@@ -85,6 +85,22 @@ the fixture and nothing said so. The shapes were plausible and wrong —
 `after`. `esper-audit`'s `screens_fixture.rs` is what stops that coming back:
 every line must parse, and the counts must hold.
 
+`weak_keys.json` is a list rather than a scenario: Ed25519's eight small-order
+points, which are the keys no device may be trusted under. It exists because
+the two halves need the same answer and only one of them has a curve library —
+Rust refuses such a key when it loads the store, and Go serves the device list
+from that same file with no engine running. `esper-crypto`'s `weak_keys.rs`
+asserts every entry is one *it* refuses; `internal/devices/weak_test.go`
+asserts the same file is what Go compiled in. Neither side owns the set, which
+is the arrangement the wire fixtures and the word list already use.
+
+`device_store_unusable.json` is what that rule is measured on: one ordinary
+device, one whose key is not a point at all, and one of small order. Both
+halves list two of the three. The middle one is deliberate — Go cannot tell a
+non-point from a point without the curve, and the engine refuses the *session*
+rather than the listing, so the difference is narrow and written down rather
+than left to be discovered.
+
 **What the Japanese name does and does not prove.** It is there so that a name
 which is not Latin goes through the code that measures, truncates and lays out
 one. Whether it *renders* depends on the machine: a host with no CJK font draws
