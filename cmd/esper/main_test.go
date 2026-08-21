@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -254,5 +255,127 @@ func TestATimeThatCannotBeATimeIsSaidToBeUnknown(t *testing.T) {
 	}
 	if got := when(math.MaxUint64); got != "—" {
 		t.Errorf("when(MaxUint64) = %q, and a number no clock can hold is not a date", got)
+	}
+}
+
+// printed runs f with stdout captured, and gives back what it wrote.
+func printed(t *testing.T, f func()) string {
+	t.Helper()
+	was := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("a pipe: %v", err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+	f()
+	_ = w.Close()
+	os.Stdout = was
+	return <-done
+}
+
+/*
+The ladder somebody reads when nothing connects.
+
+`esper doctor` lists the ways in, in the order they are tried, and the last
+line is the one that matters: when a machine has **no** way in but an address
+somebody already types, it says so. That is a working setup on a fixed address
+and nothing else — and the day the machine moves, there is no rung left.
+
+Getting the condition wrong is either a warning on a machine that is fine, or
+silence on one that is about to become unreachable. Neither shows up anywhere
+else, because this is a printer and nothing was reading what it printed.
+*/
+func TestTheWaysInAreListedAndTheDeadEndIsNamed(t *testing.T) {
+	broker := "broker.example.test:7443"
+
+	full := printed(t, func() {
+		reachTiers(&proto.Status{MDNS: true, Overlays: []string{"wg0", "tailscale0"}, Broker: &broker})
+	})
+	for _, rung := range []string{"given", "lan", "remembered", "overlay", "broker"} {
+		if !strings.Contains(full, rung) {
+			t.Errorf("a machine with every way in does not list %q:\n%s", rung, full)
+		}
+	}
+	if !strings.Contains(full, broker) {
+		t.Errorf("a configured broker is not named:\n%s", full)
+	}
+	if !strings.Contains(full, "wg0") || !strings.Contains(full, "tailscale0") {
+		t.Errorf("the overlays this machine has are not named:\n%s", full)
+	}
+	if strings.Contains(full, "the only way in is an address somebody already knows") {
+		t.Errorf("a machine with every way in was warned it had none:\n%s", full)
+	}
+
+	bare := printed(t, func() { reachTiers(&proto.Status{}) })
+	if !strings.Contains(bare, "the only way in is an address somebody already knows") {
+		t.Errorf("a machine reachable only by a typed address was not told so:\n%s", bare)
+	}
+	// And it says what is missing rather than only that something is.
+	for _, why := range []string{"discovery.mdns is off", "no WireGuard", "none configured"} {
+		if !strings.Contains(bare, why) {
+			t.Errorf("a rung is unavailable and the reason %q is not given:\n%s", why, bare)
+		}
+	}
+
+	// One rung is enough to not be a dead end — checked for each in turn,
+	// because a condition made of three `&&`s has three ways to be wrong.
+	for _, one := range []struct {
+		name   string
+		status proto.Status
+	}{
+		{"the network can be asked", proto.Status{MDNS: true}},
+		{"an overlay is up", proto.Status{Overlays: []string{"wg0"}}},
+		{"a broker is configured", proto.Status{Broker: &broker}},
+	} {
+		out := printed(t, func() { reachTiers(&one.status) })
+		if strings.Contains(out, "the only way in is an address somebody already knows") {
+			t.Errorf("%s, and it was still called a dead end:\n%s", one.name, out)
+		}
+	}
+
+	// `remembered` belongs to the controller's store, and a host cannot know
+	// whether somebody else remembers it — so it is never a tick.
+	if strings.Contains(full, "✓ remembered") {
+		t.Errorf("this machine claimed to know that somebody remembers it:\n%s", full)
+	}
+}
+
+// A capability line says which way it went, and reports it back so the caller
+// can count what is missing.
+func TestACapabilityLineSaysWhichWayItWent(t *testing.T) {
+	yes := printed(t, func() {
+		if !capability("capture", proto.Capability{Available: true, Detail: "x11"}) {
+			t.Error("an available capability reported itself as missing")
+		}
+	})
+	if !strings.Contains(yes, "capture") || !strings.Contains(yes, "x11") || !strings.Contains(yes, "✓") {
+		t.Errorf("an available capability printed %q", yes)
+	}
+
+	no := printed(t, func() {
+		if capability("input", proto.Capability{Available: false, Detail: "no uinput"}) {
+			t.Error("a missing capability reported itself as available")
+		}
+	})
+	if !strings.Contains(no, "✗") || !strings.Contains(no, "no uinput") {
+		t.Errorf("a missing capability printed %q, and the detail is why", no)
+	}
+}
+
+// No broker is the ordinary answer — Esper ships no default anywhere — so it
+// is an empty string rather than a word somebody might read as an address.
+func TestNoBrokerIsNothingRatherThanAName(t *testing.T) {
+	if got := brokerOf(&proto.Status{}); got != "" {
+		t.Errorf("a machine with no broker reported %q", got)
+	}
+	broker := "broker.example.test:7443"
+	if got := brokerOf(&proto.Status{Broker: &broker}); got != broker {
+		t.Errorf("a configured broker reported %q", got)
 	}
 }

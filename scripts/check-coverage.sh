@@ -30,7 +30,7 @@ cd "$here"
 
 # package                    floor
 floors="
-cmd/esper                    8
+cmd/esper                   14
 cmd/esper-app               38
 internal/devices            87
 internal/engine             80

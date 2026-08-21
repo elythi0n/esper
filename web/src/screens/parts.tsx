@@ -76,15 +76,7 @@ export function Fingerprint({ hex, className }: { hex: string; className?: strin
   );
 }
 
-/** "42s", "5h", "2d" — the shortest true thing, for a column that is scanned. */
-export function shortAgo(seconds: number | null): string {
-  if (seconds === null) return "—";
-  const s = Math.max(0, Math.round(Date.now() / 1000) - seconds);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  if (s < 86400) return `${Math.round(s / 3600)}h`;
-  return `${Math.round(s / 86400)}d`;
-}
+export { shortAgo } from "@/lib/ago";
 
 /**
  * A section heading inside a screen. A key and a count, and nothing else —

@@ -13,7 +13,7 @@
     "check:presence": "node scripts/check-presence.mjs",
     "check:inventory": "node scripts/check-inventory.mjs",
     "check:frames": "node scripts/check-frames.mjs",
-    "check": "node scripts/gen-motion.mjs --check && node scripts/check-contrast.mjs && node scripts/check-discipline.mjs && node scripts/check-presence.mjs && node scripts/check-inventory.mjs && node --experimental-strip-types scripts/check-identicon.mjs && tsc -b --noEmit",
+    "check": "node scripts/gen-motion.mjs --check && node scripts/check-contrast.mjs && node scripts/check-discipline.mjs && node scripts/check-presence.mjs && node scripts/check-inventory.mjs && node --experimental-strip-types scripts/check-identicon.mjs && node --experimental-strip-types scripts/check-logic.mjs && tsc -b --noEmit",
     "verify": "pnpm check && pnpm build && node scripts/check-frames.mjs && node scripts/check-a11y.mjs --url http://127.0.0.1:5178/ && node scripts/check-keyboard.mjs --url http://127.0.0.1:5178/ && node scripts/check-words.mjs --url http://127.0.0.1:5178/ && node scripts/check-live.mjs --url http://127.0.0.1:5178/ && node scripts/check-overflow.mjs --url http://127.0.0.1:5178/ && node scripts/check-ink.mjs --url http://127.0.0.1:5178/ && node scripts/check-viewer.mjs --url http://127.0.0.1:5178",
     "check:identicon": "node --experimental-strip-types scripts/check-identicon.mjs",
     "check:a11y": "node scripts/check-a11y.mjs",
@@ -21,6 +21,7 @@
     "check:words": "node scripts/check-words.mjs",
     "check:live": "node scripts/check-live.mjs",
     "check:overflow": "node scripts/check-overflow.mjs",
+    "check:logic": "node --experimental-strip-types scripts/check-logic.mjs",
     "check:ink": "node scripts/check-ink.mjs",
     "check:viewer": "node scripts/check-viewer.mjs"
   },
