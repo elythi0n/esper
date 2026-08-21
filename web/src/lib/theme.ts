@@ -32,6 +32,7 @@ export const THEMES: ReadonlyArray<{ id: Theme; label: string; about: string }> 
 ];
 
 export { THEME_KEY, MOTION_KEY } from "./first-paint";
+import { millisecondsIn, pixelsIn } from "./css-values";
 import { MOTION_KEY, THEME_KEY, resolveTheme, type ThemeApplied, type ThemeChoice } from "./first-paint";
 
 function read<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
@@ -147,10 +148,7 @@ export function motionIsReduced(): boolean {
  * timer that used the generated constant would fire on the old one.
  */
 export function durationMs(token: `--${string}`, element: Element = document.documentElement): number {
-  const raw = getComputedStyle(element).getPropertyValue(token).trim();
-  if (raw.endsWith("ms")) return Number.parseFloat(raw);
-  if (raw.endsWith("s")) return Number.parseFloat(raw) * 1000;
-  return 0;
+  return millisecondsIn(getComputedStyle(element).getPropertyValue(token));
 }
 
 /**
@@ -167,11 +165,7 @@ export function durationMs(token: `--${string}`, element: Element = document.doc
  * default" rather than as a height.
  */
 export function pixelsOf(token: `--${string}`, element: Element = document.documentElement): number {
-  const raw = getComputedStyle(element).getPropertyValue(token).trim();
-  if (raw.endsWith("px")) return Number.parseFloat(raw);
-  // A token given in any other unit is a token this cannot use, and
-  // guessing at a conversion would be worse than saying so.
-  return 0;
+  return pixelsIn(getComputedStyle(element).getPropertyValue(token));
 }
 
 /**

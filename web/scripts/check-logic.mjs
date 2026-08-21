@@ -24,12 +24,18 @@
 //      script by `toString()`, so this *is* the rule that runs before anything
 //      is drawn, not a second telling of it.
 //   4. **Joining class names.** The one utility every component is built on.
+//   5. **Reading a CSS token as a number.** `ms` is tested before `s`, and
+//      `"200ms"` ends with `"s"` — so the wrong order reads every duration in
+//      the product as a thousand times itself, in the timers that exist to
+//      agree with the CSS, with nothing about the result looking like a parse
+//      error.
 //
 // Run from web/. Exit 1 on any finding.
 import { shortAgo } from "../src/lib/ago.ts";
 import { pairingState } from "../src/api/types.ts";
 import { resolveTheme, BEFORE_PAINT } from "../src/lib/first-paint.ts";
 import { cn } from "../src/lib/cn.ts";
+import { millisecondsIn, pixelsIn } from "../src/lib/css-values.ts";
 import { readViewerStream } from "../src/session/stream.ts";
 import { readFileSync } from "node:fs";
 
@@ -147,7 +153,33 @@ is(cn(false, null), "", "only conditions that did not hold");
 is(cn("a", "", "b"), "a b", "an empty string between two classes");
 
 /*
-  5. The stream reader, fed the way a socket feeds it.
+  5. Reading a CSS token as a number.
+
+  `ms` is tested before `s`, and that is the whole of the risk: `"200ms"` ends
+  with `"s"`, so a version that asked the shorter question first would read
+  every duration in the product as a thousand times itself — a 200ms
+  transition becoming 200 seconds, in the timers that exist precisely to agree
+  with the CSS. Nothing about the result would look like a parse error, and a
+  browser check cannot see the order of two string tests.
+*/
+is(millisecondsIn("200ms"), 200, "milliseconds");
+is(millisecondsIn("0.2s"), 200, "a fraction of a second");
+is(millisecondsIn("2s"), 2000, "whole seconds");
+is(millisecondsIn("0.01ms"), 0.01, "the sweep a reduced-motion override leaves");
+is(millisecondsIn("  120ms  "), 120, "a computed value with space around it");
+is(millisecondsIn("0s"), 0, "no time at all");
+is(millisecondsIn(""), 0, "a token that is not set");
+is(millisecondsIn("200"), 0, "a number with no unit is not a duration");
+is(millisecondsIn("fast"), 0, "a word is not a duration");
+
+is(pixelsIn("28px"), 28, "pixels");
+is(pixelsIn("  0.5px "), 0.5, "a sub-pixel value with space around it");
+is(pixelsIn("2rem"), 0, "a unit this cannot convert without guessing");
+is(pixelsIn(""), 0, "a token that is not set");
+is(pixelsIn("28"), 0, "a number with no unit is not a length");
+
+/*
+  6. The stream reader, fed the way a socket feeds it.
 
   `check-viewer` decodes this fixture in two real browsers, which is the check
   that matters — and it hands the reader the bytes in whatever chunks the
@@ -225,7 +257,7 @@ try {
 }
 
 // A floor: a run that asserted nothing passes everything.
-if (checked < 30) {
+if (checked < 50) {
   console.error(`  ✗ logic: only ${checked} assertion(s) ran, which is not this file`);
   process.exit(1);
 }
@@ -237,6 +269,6 @@ if (findings.length) {
 }
 console.log(
   `  ✓ logic: ${checked} assertions — how long ago at every boundary, what a pairing admits, the theme ` +
-    `the first paint chooses, the class join every component is built on, and ${whole.length} records read ` +
-    `identically whole and one byte at a time`,
+    `the first paint chooses, the class join every component is built on, a CSS duration read in the right ` +
+    `unit, and ${whole.length} records read identically whole and one byte at a time`,
 );
