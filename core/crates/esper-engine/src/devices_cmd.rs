@@ -29,12 +29,47 @@ pub enum Change {
     Revoke,
 }
 
+/// Say that entries were left out of the store, and what that means.
+///
+/// The store reports the fingerprints of entries it would not load — a key
+/// nothing can be trusted under, which is what a hand edit or a corrupted
+/// write leaves behind. They were printed as a bare bullet and a row of
+/// fingerprint words, before the heading, with nothing to say what the line
+/// was: somebody reading it had a phrase and no question it answered. Seven
+/// commands printed it that way, each with its own copy of the loop.
+///
+/// On stderr, because it is about the file rather than about the devices, and
+/// a person piping the list somewhere wants the list.
+fn say_what_was_dropped(dropped: &[String]) {
+    if dropped.is_empty() {
+        return;
+    }
+    // Written twice rather than assembled from parts: "1 entry ... were not
+    // loaded ... until they are removed" is what a sentence built from a
+    // plural switch reads like, and this one is read by somebody who has just
+    // been told something is wrong with their file.
+    if dropped.len() == 1 {
+        eprintln!("  ⚠ One entry in the device store names a key nothing can be trusted");
+        eprintln!("    under, and was not loaded. Nothing has been written: the file still");
+        eprintln!("    holds it, and this will say so until it is removed.");
+    } else {
+        eprintln!(
+            "  ⚠ {} entries in the device store name a key nothing can be",
+            dropped.len()
+        );
+        eprintln!("    trusted under, and were not loaded. Nothing has been written: the");
+        eprintln!("    file still holds them, and this will say so until they are removed.");
+    }
+    for line in dropped {
+        eprintln!("      · {line}");
+    }
+    eprintln!();
+}
+
 /// Print every paired device, with what it may do.
 pub fn list() -> Result<(), String> {
     let (store, dropped) = paths::devices()?;
-    for line in &dropped {
-        eprintln!("  · {line}");
-    }
+    say_what_was_dropped(&dropped);
 
     println!("📇 esper devices");
     println!();
@@ -238,9 +273,7 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
     }
 
     let (mut store, dropped) = paths::devices()?;
-    for line in &dropped {
-        eprintln!("  · {line}");
-    }
+    say_what_was_dropped(&dropped);
     // **Every key resolved before the first write.** A group that names
     // nothing, or a fingerprint that names two devices, changes nothing —
     // rather than changing some of it and then saying why it stopped.
@@ -332,9 +365,7 @@ pub fn schedule(args: &[String]) -> Result<(), String> {
         return Err(schedule_usage());
     }
     let (mut store, dropped) = paths::devices()?;
-    for line in &dropped {
-        eprintln!("  · {line}");
-    }
+    say_what_was_dropped(&dropped);
     // A fingerprint or a group, resolved before anything is written — the
     // same rule the permission changes follow.
     let (whose, rest) = whose(&store, args)?;
@@ -460,9 +491,7 @@ pub fn lock_after(args: &[String]) -> Result<(), String> {
         return Err(lock_after_usage());
     }
     let (mut store, dropped) = paths::devices()?;
-    for line in &dropped {
-        eprintln!("  · {line}");
-    }
+    say_what_was_dropped(&dropped);
     let (whose, rest) = whose(&store, args)?;
     let [word] = rest else {
         return Err(lock_after_usage());
@@ -584,9 +613,7 @@ pub fn keep(args: &[String]) -> Result<(), String> {
     };
 
     let (mut store, dropped) = paths::devices()?;
-    for line in &dropped {
-        eprintln!("  · {line}");
-    }
+    say_what_was_dropped(&dropped);
     let key = *find(&store, prefix)?;
     let Some(device) = store.get_mut(&key) else {
         return Err("the device disappeared between finding it and keeping it".to_owned());
@@ -635,9 +662,7 @@ pub fn forget(args: &[String]) -> Result<(), String> {
     };
 
     let (mut store, dropped) = paths::devices()?;
-    for line in &dropped {
-        eprintln!("  · {line}");
-    }
+    say_what_was_dropped(&dropped);
     let key = *find(&store, prefix)?;
     let Some(gone) = store.remove(&key) else {
         return Err("the device disappeared between finding it and removing it".to_owned());
@@ -699,9 +724,7 @@ pub fn group(args: &[String]) -> Result<(), String> {
     }
 
     let (mut store, dropped) = paths::devices()?;
-    for line in &dropped {
-        eprintln!("  · {line}");
-    }
+    say_what_was_dropped(&dropped);
 
     // No fingerprints is a question rather than a change.
     if prefixes.is_empty() {
