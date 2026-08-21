@@ -443,8 +443,24 @@ fn shown(raw: &str) -> String {
             raw.len()
         );
     }
-    raw.chars().take(120).collect()
+    // Marked when it is cut, because a name that quietly loses its end is a
+    // name the person reading the log takes for the whole one — and this one
+    // came from somebody else's machine.
+    if raw.chars().count() > MOST_SHOWN {
+        return raw
+            .chars()
+            .take(MOST_SHOWN)
+            .chain(std::iter::once('…'))
+            .collect();
+    }
+    raw.chars().collect()
 }
+
+/// How much of a peer's name goes in the log.
+///
+/// A bound rather than a preference: without one, a peer can put a line of any
+/// length into this machine's log by naming a file that way.
+const MOST_SHOWN: usize = 120;
 
 /// A flag that becomes true when somebody presses Ctrl-C.
 ///
@@ -471,4 +487,102 @@ pub fn stop_on_interrupt() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         });
         flag
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A name a peer sent never reaches the log as it arrived.**
+    ///
+    /// The log is this machine's own record of what happened to it, and the
+    /// names in it come from somebody else. A newline in one splits a line and
+    /// lets a peer write whatever it likes as though this machine had said it;
+    /// a carriage return rewrites the line in a terminal; an escape sequence
+    /// recolours or clears the screen of whoever is watching. All three are
+    /// control characters, which is why the check is that broad rather than a
+    /// list of the ones somebody thought of.
+    ///
+    /// What replaces it is a *description* — the length and the fact — because
+    /// the name that failed the check is exactly the one not to repeat.
+    #[test]
+    fn a_name_with_control_characters_is_described_rather_than_printed() {
+        for hostile in [
+            "notes.txt\npaired with attacker",
+            "notes.txt\r\npaired with attacker",
+            "\u{1b}[2J\u{1b}[H all clear",
+            "quiet\u{0}name",
+            "tab\there",
+        ] {
+            let said = shown(hostile);
+            assert!(
+                !said.contains('\n') && !said.contains('\r') && !said.contains('\u{1b}'),
+                "a control character reached the log: {said:?}"
+            );
+            assert!(
+                said.starts_with("a name of ") && said.contains("control characters"),
+                "a hostile name was not described: {said:?}"
+            );
+            assert!(
+                !said.contains(hostile.trim()),
+                "the description repeats the name it exists not to repeat: {said:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_name_is_itself() {
+        for fine in [
+            "notes.txt",
+            "a file with spaces.pdf",
+            "réunion.md",
+            "デスクトップ.txt",
+        ] {
+            assert_eq!(
+                shown(fine),
+                fine,
+                "an ordinary name was not printed as it is"
+            );
+        }
+    }
+
+    /// A bound, because without one a peer can put a line of any length into
+    /// this machine's log by naming a file that way — and the cut is marked,
+    /// because a name that quietly loses its end is read as the whole one.
+    #[test]
+    fn a_very_long_name_is_cut_and_the_cut_is_marked() {
+        let long = "a".repeat(500);
+        let said = shown(&long);
+        assert_eq!(
+            said.chars().count(),
+            MOST_SHOWN + 1,
+            "the bound is {MOST_SHOWN} characters and a mark"
+        );
+        assert!(said.ends_with('…'), "the cut is not marked: {said:?}");
+
+        // Exactly at the bound is not cut: an off-by-one here marks a name
+        // that lost nothing.
+        let exact = "b".repeat(MOST_SHOWN);
+        assert_eq!(
+            shown(&exact),
+            exact,
+            "a name exactly the bound was marked as cut"
+        );
+    }
+
+    /// Characters, not bytes.
+    ///
+    /// The same trap the session list fell into: a name in a script that is
+    /// not Latin has more bytes than characters, and cutting at a byte offset
+    /// cuts one in half. Here it would put a broken sequence in the log.
+    #[test]
+    fn the_cut_falls_between_characters() {
+        let long = "デ".repeat(200);
+        let said = shown(&long);
+        assert_eq!(said.chars().count(), MOST_SHOWN + 1);
+        assert!(
+            said.chars().take(MOST_SHOWN).all(|c| c == 'デ'),
+            "the cut fell inside a character: {said:?}"
+        );
+    }
 }
