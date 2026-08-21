@@ -73,6 +73,44 @@ jobs:
 
   # Advisories are published continuously, so a tree that was clean yesterday
   # may not be today. This is the check that notices without a code change.
+  # The gates that need a browser, which is why they are here and not in CI.
+  #
+  # Eight of the window's checks drive a real engine: the accessibility tree,
+  # the focus order, the words, the layout at four widths in three themes, the
+  # painted contrast, the frame timings. They are minutes rather than seconds
+  # and they need Chromium and a framebuffer, so they run nightly — but they
+  # ran *nowhere* before this, which is worse than slow.
+  #
+  # Against a fixed machine, not this runner's: `gate-rig.sh` serves a device
+  # store built for the screens, because a gate pointed at an empty control
+  # plane measures the same placeholder on every route and says nothing.
+  window-gates:
+    name: the window, in a real browser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: a browser and a framebuffer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq chromium-browser xvfb || \
+            sudo apt-get install -y -qq chromium xvfb
+      - name: install exactly what the lockfile says
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: build the control plane the gates read
+        run: make build-go
+      - name: every gate, against a machine that is the same on every machine
+        run: xvfb-run -a make check-screens
+
   advisories:
     name: advisories
     runs-on: ubuntu-latest

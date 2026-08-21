@@ -351,6 +351,38 @@ jobs:
         working-directory: core
         run: cargo miri test --workspace --exclude esper-crypto
 
+  # The window's own gates, which ran nowhere.
+  #
+  # The same failure as the three above, one half of the product further along:
+  # thirteen checks hold the design system to what it says — tokens, contrast,
+  # discipline, the accessible names, the words, the layout at four widths, the
+  # decoder in two engines — and not one of them ran in any workflow. They ran
+  # when somebody typed them, which is a gate that stops running the day a
+  # contribution comes from anywhere else.
+  #
+  # This job is the half that needs no browser: the token and contrast
+  # arithmetic, the discipline lint, the component inventory, the identicon's
+  # distinctness, the rules under `check-logic`, and the typechecker. The gates
+  # that drive Chromium and WebKitGTK are slower and heavier and belong in the
+  # nightly workflow, where the browsers are already installed.
+  window:
+    name: the window's rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: install exactly what the lockfile says
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: the tokens, the rules and the typechecker
+        working-directory: web
+        run: pnpm check
+
   # The frame decoder is the first parser attacker-controlled bytes reach. A
   # short run on every change catches a regression; long runs happen out of band.
   fuzz:

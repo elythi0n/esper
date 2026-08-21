@@ -504,6 +504,18 @@ check-coverage:
 	$(GUARD_ROOT)
 	@scripts/check-coverage.sh
 
+## Measure what the Rust tests have never run
+##
+## Not in `ci`: instrumented, it is a full rebuild and about fifteen minutes,
+## and it is not a pass/fail gate — coverage is a poor measure of whether code
+## is tested. It is good at naming code nothing has run, which is how
+## `paths.rs` was found at 0.00% holding the rule that refuses an empty
+## ESPER_HOME. Installs nothing: rustc's LLVM and this machine's are the same.
+.PHONY: check-rust-coverage
+check-rust-coverage:
+	$(GUARD_ROOT)
+	@scripts/check-rust-coverage.sh
+
 ## Lint both languages at the strictest setting
 .PHONY: lint
 lint: lint-go lint-rust
@@ -699,11 +711,11 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-unsafe fmt-check lint test build check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full
-ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz check-reproducible-full
+ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz check-reproducible-full check-screens
 
 ## Install both binaries to $(PREFIX)/bin (may need sudo)
 .PHONY: install

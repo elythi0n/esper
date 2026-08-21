@@ -14,7 +14,18 @@ use esper_crypto::{DeviceStore, Identity};
 /// possible — and two engines on one machine is how a session can be tried
 /// before there are two machines to try it on.
 pub fn home() -> Result<PathBuf, String> {
-    match std::env::var("ESPER_HOME") {
+    home_from(std::env::var("ESPER_HOME").ok(), std::env::var("HOME").ok())
+}
+
+/// The rule itself, apart from the environment that answers it.
+///
+/// Separated because the environment is process-global: setting a variable to
+/// check what happens leaks into every other test in the binary, and
+/// `set_var` is `unsafe` in this edition besides. The alternative this repo
+/// uses elsewhere is a child process, which is the right answer when the thing
+/// under test *is* a process — and this is four comparisons.
+fn home_from(esper_home: Option<String>, unix_home: Option<String>) -> Result<PathBuf, String> {
+    match esper_home {
         // **Set to nothing is refused, not treated as unset.** An empty value
         // makes every path below it relative, so the identity key and the
         // device list land in whatever directory the process happened to
@@ -27,7 +38,7 @@ pub fn home() -> Result<PathBuf, String> {
         // half of the two wrong answers: a test, a packaging script or a
         // service unit with an unset variable in it would write to the
         // machine owner's own store.
-        Ok(dir) if dir.trim().is_empty() => {
+        Some(dir) if dir.trim().is_empty() => {
             return Err(
                 "ESPER_HOME is set to nothing. Unset it to use the default, or give it a \
                  directory — an empty value would put this machine's identity key and its \
@@ -35,11 +46,10 @@ pub fn home() -> Result<PathBuf, String> {
                     .to_owned(),
             );
         }
-        Ok(dir) => return Ok(PathBuf::from(dir)),
-        Err(_) => {}
+        Some(dir) => return Ok(PathBuf::from(dir)),
+        None => {}
     }
-    let home =
-        std::env::var("HOME").map_err(|_| "neither ESPER_HOME nor HOME is set".to_owned())?;
+    let home = unix_home.ok_or_else(|| "neither ESPER_HOME nor HOME is set".to_owned())?;
     Ok(PathBuf::from(home).join(".esper"))
 }
 
@@ -141,4 +151,98 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **An `ESPER_HOME` set to nothing is refused, not treated as unset.**
+    ///
+    /// The two wrong answers here are not equally wrong. Treating an empty
+    /// value as "relative to here" puts the identity key and the paired-device
+    /// list in whatever directory the process happened to start in: a fresh
+    /// identity, nobody paired, and a trust store somewhere nobody will look
+    /// for it. Falling back to the real `$HOME/.esper` is worse — somebody who
+    /// set the variable at all plainly meant an isolated home, and a packaging
+    /// script or a service unit with an unset variable in it would then write
+    /// to the machine owner's own store.
+    ///
+    /// So it refuses, and the message says which of the two it was protecting
+    /// against.
+    #[test]
+    fn an_empty_esper_home_is_refused_rather_than_guessed_at() {
+        for empty in ["", " ", "\t", "  \n "] {
+            let refused = home_from(Some(empty.to_owned()), Some("/home/somebody".to_owned()));
+            let Err(why) = refused else {
+                panic!("ESPER_HOME={empty:?} was accepted as {refused:?}");
+            };
+            assert!(
+                why.contains("identity key") && why.contains("current working directory"),
+                "the refusal does not say what it is protecting against: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn esper_home_is_where_it_says() {
+        assert_eq!(
+            home_from(
+                Some("/tmp/one".to_owned()),
+                Some("/home/somebody".to_owned())
+            ),
+            Ok(PathBuf::from("/tmp/one")),
+            "an isolated home is the one that was named"
+        );
+        // Two engines on one machine is how a session is tried before there
+        // are two machines to try it on, so this outranks the real home.
+        assert_eq!(
+            home_from(Some("/tmp/two".to_owned()), None),
+            Ok(PathBuf::from("/tmp/two")),
+            "an isolated home does not need a real one beside it"
+        );
+        // Not trimmed: a directory whose name has a space in it is a
+        // directory, and silently renaming it would be a different bug.
+        assert_eq!(
+            home_from(Some("/tmp/a home ".to_owned()), None),
+            Ok(PathBuf::from("/tmp/a home ")),
+            "a name with spaces in it is the name"
+        );
+    }
+
+    #[test]
+    fn with_no_esper_home_it_is_beside_the_users_own() {
+        assert_eq!(
+            home_from(None, Some("/home/somebody".to_owned())),
+            Ok(PathBuf::from("/home/somebody/.esper"))
+        );
+    }
+
+    /// With neither, there is nowhere — and saying so beats inventing one.
+    #[test]
+    fn with_no_home_at_all_it_refuses_and_names_both() {
+        let Err(why) = home_from(None, None) else {
+            panic!("a home was invented with nothing to go on");
+        };
+        assert!(
+            why.contains("ESPER_HOME") && why.contains("HOME"),
+            "the refusal does not name what would fix it: {why}"
+        );
+    }
+
+    /// The store and the key sit under whichever home was chosen, so the three
+    /// commands that need them cannot disagree about where they are — the bug
+    /// that presents as "pairing worked but the host does not recognise me".
+    #[test]
+    fn the_store_is_under_the_home_that_was_chosen() {
+        let dir = home_from(Some("/tmp/isolated".to_owned()), None).expect("a home");
+        assert_eq!(
+            dir.join("devices.json"),
+            PathBuf::from("/tmp/isolated/devices.json")
+        );
+        assert_eq!(
+            dir.join("identity.key"),
+            PathBuf::from("/tmp/isolated/identity.key")
+        );
+    }
 }
