@@ -29,6 +29,47 @@ pub enum Change {
     Revoke,
 }
 
+/// What `grant` and `revoke` take.
+///
+/// The same words the command answers a bad invocation with. It was only ever
+/// a closure inside the parser, so `esper-engine grant --help` fell through to
+/// the general help and `--group` and `--yes` were undiscoverable — a person
+/// told about a command in the help, and then unable to ask about it.
+#[must_use]
+pub fn change_usage(what: Change) -> String {
+    let verb = match what {
+        Change::Grant => "grant",
+        Change::Revoke => "revoke",
+    };
+    let me = crate::net::me();
+    let and = match what {
+        Change::Grant => {
+            "Give a paired device a permission. A dangerous one is asked about\n\
+             first, at this machine, unless --yes says somebody already decided."
+        }
+        Change::Revoke => {
+            "Take a permission away. It reaches a session that is already open:\n\
+             the picture keeps flowing and whatever was revoked stops."
+        }
+    };
+    format!(
+        "usage: {me} {verb} <fingerprint>|--group <name> <permission>... [--yes]\n\
+         \n\
+         {and}\n\
+         \n\
+         options:\n  \
+         \x20 --group <name>   every device in a group, rather than one\n  \
+         \x20 --yes            do not ask, because this is a pipeline and there is\n\
+         \x20                    nobody to ask. It is still recorded\n\
+         \n\
+         permissions: {}\n\
+         \n\
+         for example: {me} {verb} 8a0f18d8 view control\n\
+         \x20            {me} {verb} --group ops view",
+        every_permission()
+    )
+}
+
 /// Say that entries were left out of the store, and what that means.
 ///
 /// The store reports the fingerprints of entries it would not load — a key
@@ -209,14 +250,7 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
     // `--group ops control` is a group and one permission; reading the first
     // word as a fingerprint made the *group's name* the first permission, and
     // the error said `unknown permission "ops"`.
-    let usage = || {
-        format!(
-            "usage: {} {verb} <fingerprint>|--group <name> <permission>... [--yes]\n\
-             permissions: {}",
-            crate::net::me(),
-            every_permission()
-        )
-    };
+    let usage = || change_usage(what);
     let how_many = match args.as_slice() {
         [flag, _name, ..] if flag == "--group" => 2,
         [_prefix, ..] => 1,

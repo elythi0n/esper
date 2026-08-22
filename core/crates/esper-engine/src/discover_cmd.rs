@@ -337,3 +337,22 @@ pub async fn advertise(bound: SocketAddr) -> Result<Announcing, String> {
         task,
     })
 }
+
+/// What `discover` takes.
+pub fn usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} discover [--seconds <n>] [--porcelain]\n\
+         \n\
+         List the Esper devices answering on this network. Nothing is\n\
+         contacted and nothing is paired: this is the question \"what is\n\
+         here\", asked of the local network and nobody else.\n\
+         \n\
+         \x20 --seconds <n>        how long to listen. The default waits until\n\
+         \x20                      the answers stop arriving\n\
+         \x20 --porcelain          one device per line, tab separated, for a\n\
+         \x20                      script rather than a person\n\
+         \n\
+         for example: {me} discover --seconds 2"
+    )
+}

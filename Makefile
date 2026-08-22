@@ -516,6 +516,19 @@ check-rust-coverage:
 	$(GUARD_ROOT)
 	@scripts/check-rust-coverage.sh
 
+## Every command somebody is told about can be asked about
+##
+## `--help` is routed to a per-command usage, and falls through to the general
+## help when there is none — right for a command that takes no options, wrong
+## for one that takes four. Six commands were in that state, including `grant`,
+## whose usage text existed as a closure the parser used for errors and nothing
+## could reach. Reads the dispatcher, the general help's own list, and the
+## function each command parses its arguments with.
+.PHONY: check-help
+check-help:
+	$(GUARD_ROOT)
+	@python3 ./scripts/check-help.py
+
 ## Lint both languages at the strictest setting
 .PHONY: lint
 lint: lint-go lint-rust
@@ -711,7 +724,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

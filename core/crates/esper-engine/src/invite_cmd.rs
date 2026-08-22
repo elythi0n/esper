@@ -774,3 +774,27 @@ mod tests {
         assert_eq!(invite.remaining(invite.expires_at + 5).as_secs(), 0);
     }
 }
+
+/// What `invite` takes.
+pub fn usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} invite [--for <name>] [--expires <when>]\n\
+         \n\
+         Make a link that pairs one device with this one, for somebody who\n\
+         cannot be handed a code in person. The link is the secret: anybody\n\
+         holding it can pair until it lapses, which is why it is short-lived\n\
+         and why it is sent to one person and nobody else.\n\
+         \n\
+         It needs a broker you run — there is no default broker anywhere in\n\
+         Esper, and this will not use somebody else's.\n\
+         \n\
+         \x20 --for <name>         a label, so two invitations can be told apart.\n\
+         \x20                      Nothing checks it\n\
+         \x20 --expires <when>     how long it lasts, as `30m` or `2h`\n\
+         \x20 --via <broker>       the broker's address\n\
+         \x20 --broker-key <key>   the broker's key, which is pinned\n\
+         \n\
+         for example: {me} invite --for \"the new starter\" --expires 30m"
+    )
+}

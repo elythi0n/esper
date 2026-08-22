@@ -283,6 +283,8 @@ jobs:
         run: python3 ./scripts/check-settings-kept.py
       - name: both halves use the same words for the same things
         run: python3 ./scripts/check-vocabularies.py
+      - name: every command somebody is told about can be asked about
+        run: python3 ./scripts/check-help.py
       - name: unsafe appears only where FFI needs it
         run: python3 ./scripts/check-unsafe-inventory.py
       - name: the Windows scan-code table is derived, not transcribed

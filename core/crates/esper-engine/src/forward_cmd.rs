@@ -331,11 +331,22 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
 ///
 /// A function rather than a constant, because it names the program the way the
 /// person invoked it — which is not known until the program is running.
-fn usage() -> String {
+pub fn usage() -> String {
     let me = crate::net::me();
     format!(
         "usage: {me} forward <local>:<host>:<port> [<device>]\n\
          \x20      {me} forward --stdio <host>:<port> [<device>]\n\
+         \n\
+         Carry a TCP connection to a host's own network. The host decides\n\
+         which targets it will reach, and refuses the rest.\n\
+         \n\
+         \x20 --stdio              carry one connection on this program's own\n\
+         \x20                      input and output, for ProxyCommand and the\n\
+         \x20                      like, instead of listening on a port\n\
+         \x20 --via <broker>       be introduced by a broker when nothing direct works\n\
+         \x20 --broker-key <key>   the broker's key, when it is not remembered\n\
+         \x20 --no-mdns            do not ask the local network where the host is\n\
+         \n\
          for example: {me} forward 8080:localhost:80 elythion"
     )
 }
