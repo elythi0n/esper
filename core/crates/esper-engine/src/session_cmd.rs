@@ -266,7 +266,7 @@ pub fn parse_host(args: &[String]) -> Result<HostOptions, String> {
                 i += 2;
             }
             other => {
-                return Err(format!("unknown flag {other}\n{}", host_usage()));
+                return Err(format!("unknown option {other:?}\n{}", host_usage()));
             }
         }
     }
@@ -474,7 +474,7 @@ pub fn parse_connect(args: &[String]) -> Result<ConnectOptions, String> {
                 i += 1;
             }
             other => {
-                return Err(format!("unknown flag {other}\n{}", connect_usage()));
+                return Err(format!("unknown option {other:?}\n{}", connect_usage()));
             }
         }
     }

@@ -76,7 +76,7 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
                 addr = Some(crate::net::parse_addr(other)?);
                 i += 1;
             }
-            other => return Err(format!("unknown flag {other}")),
+            other => return Err(format!("unknown option {other:?}")),
         }
     }
     match (listen, addr, code) {

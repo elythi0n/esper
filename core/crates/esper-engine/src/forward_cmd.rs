@@ -302,7 +302,7 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
                 }
                 i += 1;
             }
-            other => return Err(format!("forward: unexpected argument {other:?}")),
+            other => return Err(format!("unknown option {other:?}")),
         }
     }
 

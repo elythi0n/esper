@@ -150,7 +150,7 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
             other if !other.starts_with('-') && addr.is_none() => {
                 addr = Some(net::parse_addr(other)?);
             }
-            other => return Err(format!("terminal: unexpected argument {other:?}")),
+            other => return Err(format!("unknown option {other:?}")),
         }
     }
     let addr = addr.ok_or_else(|| {

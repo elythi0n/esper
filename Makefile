@@ -516,6 +516,19 @@ check-rust-coverage:
 	$(GUARD_ROOT)
 	@scripts/check-rust-coverage.sh
 
+## One mistake, one sentence, asked of the built binary
+##
+## Every command refuses an option it does not know; what they did not do is
+## agree on how to say so. Three phrasings, four shapes, and one command that
+## named itself twice — none of it visible in a diff, because each line reads
+## perfectly where it is written. Needs a build: the sentence is assembled from
+## the parser and the dispatcher, and reading either alone cannot tell you what
+## comes out.
+.PHONY: check-messages
+check-messages: build-rust
+	$(GUARD_ROOT)
+	@scripts/check-messages.sh
+
 ## Every command somebody is told about can be asked about
 ##
 ## `--help` is routed to a per-command usage, and falls through to the general
@@ -724,7 +737,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-messages check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

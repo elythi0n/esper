@@ -110,7 +110,7 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
                 i += 2;
             }
             other if other.starts_with('-') && other != "-" => {
-                return Err(format!("unknown flag {other}\n{}", usage()));
+                return Err(format!("unknown option {other:?}\n{}", usage()));
             }
             other => {
                 plain.push(other.to_owned());
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn an_unknown_flag_is_refused_with_the_usage() {
         let e = parse_args(&["--recursive", "a", "elythion:b"]).expect_err("refused");
-        assert!(e.contains("unknown flag --recursive"), "{e}");
+        assert!(e.contains("unknown option \"--recursive\""), "{e}");
         assert!(e.contains("usage:"), "{e}");
         // A bare `-` is a filename, not a flag.
         assert!(parse_args(&["-", "elythion:b"]).is_ok());

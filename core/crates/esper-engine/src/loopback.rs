@@ -163,7 +163,7 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
                 o.verify = false;
                 i += 1;
             }
-            other => return Err(format!("unknown flag {other}")),
+            other => return Err(format!("unknown option {other:?}")),
         }
     }
     if o.fps == 0 {

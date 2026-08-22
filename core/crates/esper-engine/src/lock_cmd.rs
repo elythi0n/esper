@@ -318,7 +318,7 @@ pub fn parse(what: What, args: &[String]) -> Result<LockOptions, String> {
                 i += 1;
             }
             other if other.starts_with('-') => {
-                return Err(format!("unknown option {other}\n\n{}", usage(what)));
+                return Err(format!("unknown option {other:?}\n\n{}", usage(what)));
             }
             other => {
                 // An address if it parses as one, otherwise a paired host's

@@ -268,7 +268,7 @@ pub fn parse(args: &[String]) -> Result<WakeOptions, String> {
                 i += 2;
             }
             other if other.starts_with('-') => {
-                return Err(format!("unknown option {other}\n\n{}", usage()));
+                return Err(format!("unknown option {other:?}\n\n{}", usage()));
             }
             other => {
                 who = Some(other.to_owned());

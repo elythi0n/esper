@@ -476,7 +476,7 @@ pub fn parse(args: &[String]) -> Result<ShotOptions, String> {
                 i += 2;
             }
             other if other.starts_with('-') => {
-                return Err(format!("unknown option {other}\n\n{}", usage()));
+                return Err(format!("unknown option {other:?}\n\n{}", usage()));
             }
             other => {
                 // An address if it parses as one, otherwise a paired host's

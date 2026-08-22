@@ -178,7 +178,7 @@ fn main() -> ExitCode {
             match discover_cmd::parse(&rest).and_then(|o| discover_cmd::run(&o)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("discover: {e}");
+                    eprintln!("{} discover: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -254,7 +254,7 @@ fn main() -> ExitCode {
             match screenshot_cmd::parse(&rest).and_then(|o| screenshot_cmd::run(&o)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("screenshot: {e}");
+                    eprintln!("{} screenshot: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -264,7 +264,7 @@ fn main() -> ExitCode {
             match cp_cmd::parse(&rest).and_then(|o| cp_cmd::run(&o)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("cp: {e}");
+                    eprintln!("{} cp: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }

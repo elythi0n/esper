@@ -291,7 +291,7 @@ pub fn parse_invite(args: &[String]) -> Result<InviteOptions, String> {
             "--broker-key" => key = Some(crate::broker_cmd::parse_key(&value("--broker-key")?)?),
             "--for" => who = Some(value("--for")?),
             "--expires" => expires = parse_expiry(&value("--expires")?)?,
-            other => return Err(format!("unexpected argument {other:?}")),
+            other => return Err(format!("unknown option {other:?}")),
         }
     }
     // **The configured broker, when the flags do not name one.**
