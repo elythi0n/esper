@@ -331,6 +331,11 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: make build
+      # Here rather than in the `rules` job because it drives the built
+      # binaries: what a person reads is assembled from a parser and a
+      # dispatcher, and reading either alone cannot tell you what comes out.
+      - name: one wording for a refusal, and asking is never a failure
+        run: ./scripts/check-messages.sh
       - run: ./scripts/smoke.sh
 
   # Memory-safety checks over the fast crates. esper-crypto is excluded here
