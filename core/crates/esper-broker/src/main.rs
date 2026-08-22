@@ -39,10 +39,19 @@ fn main() -> ExitCode {
         },
         Some("serve") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
+            // **Asking about a command is asking, not attempting.** This
+            // reached the parser, which refused `--help` as an option it does
+            // not have — the same answer the other two binaries used to give,
+            // and the same reason it is wrong: a person who asks gets an answer
+            // on stdout and a nought, not a refusal on stderr.
+            if rest.iter().any(|a| a == "--help" || a == "-h") {
+                println!("{}", serve_usage());
+                return ExitCode::SUCCESS;
+            }
             match parse(&rest).and_then(|o| serve(&o)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("esper-broker serve: {e}");
+                    eprintln!("esper-broker serve: {e}\n\n{}", serve_usage());
                     ExitCode::FAILURE
                 }
             }
@@ -110,7 +119,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                         .map_err(|_| format!("{raw:?} is not a number of pairs"))?,
                 );
             }
-            other => return Err(format!("unexpected argument {other:?}")),
+            other => return Err(format!("unknown option {other:?}")),
         }
     }
     Ok(Options {
@@ -342,6 +351,33 @@ fn print_version() {
     println!("  built     {BUILD_TIME}");
     println!("  protocol  {}", esper_proto::PROTOCOL_VERSION);
     println!("  rendezvous {}", esper_rendezvous::RENDEZVOUS_VERSION);
+}
+
+/// What `serve` takes.
+///
+/// Its own text rather than the general help, for the same reason every verb in
+/// the engine has one: the list of commands answers "what is there", and
+/// somebody who typed `serve` and got an option wrong is asking "what does
+/// *this* take". Printed on request and after a refusal, from one copy, so the
+/// two cannot disagree.
+fn serve_usage() -> String {
+    "usage: esper-broker serve --listen <addr|port> [options]\n\
+     \n\
+     Introduce two machines that cannot dial each other, and get out of the\n\
+     way. Nothing is stored: no peer list, no session, no log of who met whom.\n\
+     \n\
+     \x20 --listen <addr|port>   where to answer. A bare port means every\n\
+     \x20                        address on this machine\n\
+     \x20 --identity <path>      the key peers pin, created on first use.\n\
+     \x20                        Default: beside this machine's Esper state\n\
+     \x20 --relay                carry traffic for peers that cannot reach\n\
+     \x20                        each other at all, which costs this machine\n\
+     \x20                        bandwidth\n\
+     \x20 --relay-bitrate 2M     the most one relayed pair may use\n\
+     \x20 --relay-pairs 64       how many pairs may be relayed at once\n\
+     \n\
+     for example: esper-broker serve --listen :7443"
+        .to_owned()
 }
 
 fn print_help() {

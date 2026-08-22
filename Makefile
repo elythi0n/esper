@@ -516,7 +516,7 @@ check-rust-coverage:
 	$(GUARD_ROOT)
 	@scripts/check-rust-coverage.sh
 
-## One mistake, one sentence, asked of the built binary
+## One mistake, one sentence, asked of all three built binaries
 ##
 ## Every command refuses an option it does not know; what they did not do is
 ## agree on how to say so. Three phrasings, four shapes, and one command that
@@ -525,7 +525,7 @@ check-rust-coverage:
 ## the parser and the dispatcher, and reading either alone cannot tell you what
 ## comes out.
 .PHONY: check-messages
-check-messages: build-rust
+check-messages: build-rust build-go
 	$(GUARD_ROOT)
 	@scripts/check-messages.sh
 

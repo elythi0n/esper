@@ -94,6 +94,15 @@ func run(args []string) int {
 	}
 }
 
+// sessionsUsage is what `esper sessions` takes.
+func sessionsUsage() string {
+	return "usage: esper sessions [<lines>]\n\n" +
+		"  What has happened on this machine: sessions, pairings and refusals,\n" +
+		"  most recent last. The default is 20 lines.\n\n" +
+		"  This is what was recorded, not what is happening now — a session in\n" +
+		"  progress appears here when it ends.\n"
+}
+
 // doctorUsage is what `esper doctor` takes, for `--help` and for a refusal.
 //
 // One copy, because a usage printed on error that disagrees with the one
@@ -138,11 +147,7 @@ func usageFor(command string) (string, bool) {
 	case "doctor":
 		return doctorUsage(), true
 	case "sessions":
-		return "usage: esper sessions [<lines>]\n\n" +
-			"  What has happened on this machine: sessions, pairings and\n" +
-			"  refusals, most recent last. The default is 20 lines.\n\n" +
-			"  This is what was recorded, not what is happening now — a\n" +
-			"  session in progress appears when it ends.\n", true
+		return sessionsUsage(), true
 	case "version":
 		return versionUsage(), true
 	}
@@ -224,7 +229,7 @@ func cmdVersion(args []string) int {
 	// no reason to look further until something downstream broke on it.
 	for _, a := range args {
 		if a != "--json" {
-			fmt.Fprintf(os.Stderr, "esper version: %q is not an option\n\n%s", a, versionUsage())
+			fmt.Fprintf(os.Stderr, "esper version: unknown option %q\n\n%s", a, versionUsage())
 			return 1
 		}
 	}
@@ -260,7 +265,7 @@ func cmdDoctor(args []string) int {
 		// the whole point of this command is to be believed about what it
 		// checked.
 		if a != "--session" {
-			fmt.Fprintf(os.Stderr, "esper doctor: %q is not an option\n\n%s", a, doctorUsage())
+			fmt.Fprintf(os.Stderr, "esper doctor: unknown option %q\n\n%s", a, doctorUsage())
 			return 1
 		}
 		deep = true
@@ -549,7 +554,7 @@ func cmdAPI(args []string) int {
 			fmt.Print(apiUsage())
 			return 0
 		default:
-			fmt.Fprintf(os.Stderr, "esper api: %q is not an option\n\n%s", args[i], apiUsage())
+			fmt.Fprintf(os.Stderr, "esper api: unknown option %q\n\n%s", args[i], apiUsage())
 			return 1
 		}
 	}
@@ -671,9 +676,18 @@ func apiUsage() string {
 func cmdSessions(args []string) int {
 	most := uint32(20)
 	if len(args) > 0 {
+		// **An option and a bad number are different mistakes.** `--json` is
+		// not "not a number of lines" — it is an option this does not have,
+		// and saying the first sends somebody looking for the number they
+		// typed. Anything starting with a dash is the second kind.
+		if strings.HasPrefix(args[0], "-") {
+			fmt.Fprintf(os.Stderr, "esper sessions: unknown option %q\n\n%s", args[0], sessionsUsage())
+			return 1
+		}
 		n, err := strconv.ParseUint(args[0], 10, 32)
 		if err != nil || n == 0 {
-			fmt.Fprintf(os.Stderr, "esper sessions: %q is not a number of lines\n", args[0])
+			fmt.Fprintf(os.Stderr, "esper sessions: %q is not a number of lines\n\n%s",
+				args[0], sessionsUsage())
 			return 1
 		}
 		most = uint32(n)

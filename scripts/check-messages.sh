@@ -26,16 +26,33 @@
 # reading either alone cannot tell you what comes out. The doubled name lived
 # exactly in that seam.
 #
-# Usage: scripts/check-messages.sh [path-to-esper-engine]
+# # Why all three binaries
+#
+# A person meets all of them: they type `esper`, `esper` hands verbs to
+# `esper-engine`, and they run `esper-broker` to host the introducer that the
+# product ships no default for. Each had its own phrasing —
+#
+#     esper api: "--nonsense" is not an option
+#     esper-broker serve: unexpected argument "--nonsense"
+#
+# — the second with a third word for it, and the first with the argument and
+# the complaint the other way round from everything else.
+#
+# Usage: scripts/check-messages.sh [path-to-build-directory]
 set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-engine="${1:-$here/build/esper-engine}"
+built="${1:-$here/build}"
+engine="$built/esper-engine"
+front="$built/esper"
+broker="$built/esper-broker"
 
-if [ ! -x "$engine" ]; then
-  echo "  ✗ messages: no engine at $engine — run \`make build\` first" >&2
-  exit 1
-fi
+for binary in "$engine" "$front" "$broker"; do
+  if [ ! -x "$binary" ]; then
+    echo "  ✗ messages: no binary at $binary — run \`make build\` first" >&2
+    exit 1
+  fi
+done
 
 home=$(mktemp -d)
 trap 'rm -rf "$home"' EXIT
@@ -59,24 +76,86 @@ tries=(
   "terminal --nonsense 192.0.2.1:7420"
 )
 
+# The front door and the broker, which a person meets just as often.
+front_tries=("api --nonsense" "doctor --nonsense" "version --nonsense" "sessions --nonsense")
+broker_tries=("serve --nonsense")
+
 fail=0
 checked=0
-for try in "${tries[@]}"; do
-  # shellcheck disable=SC2086 -- the arguments are this file's own words
-  said=$(ESPER_HOME="$home" timeout 10 "$engine" $try 2>&1 | head -1)
-  command=${try%% *}
+
+try_all() {
+  local binary="$1" name="$2"
+  shift 2
+  for try in "$@"; do
+    # shellcheck disable=SC2086 -- the arguments are this file's own words
+    said=$(ESPER_HOME="$home" timeout 10 "$binary" $try 2>&1 | head -1)
+    command=${try%% *}
+    checked=$((checked + 1))
+
+    want="$name $command: unknown option \"--nonsense\""
+    if [ "$said" != "$want" ]; then
+      printf '  ✗ messages: `%s %s` said\n      %s\n    and every other command says\n      %s\n' \
+        "$name" "$command" "$said" "$want"
+      fail=1
+    fi
+  done
+}
+
+try_all "$engine" "esper-engine" "${tries[@]}"
+try_all "$front" "esper" "${front_tries[@]}"
+try_all "$broker" "esper-broker" "${broker_tries[@]}"
+
+# And the other half: asking is never a failure.
+#
+# All three binaries used to answer a request for help on a *command* by
+# refusing it — the engine fell through to the general list, the front door ran
+# the command, and the broker called `--help` an option it does not have. A
+# person who asks gets an answer, on stdout, with a nought: anything else is a
+# program saying that asking was the mistake.
+asks=(
+  "$engine|esper-engine|discover --help"
+  "$engine|esper-engine|invite --help"
+  "$engine|esper-engine|terminal --help"
+  "$front|esper|doctor --help"
+  "$front|esper|sessions --help"
+  "$front|esper|version --help"
+  "$broker|esper-broker|serve --help"
+)
+for ask in "${asks[@]}"; do
+  binary=${ask%%|*}
+  rest=${ask#*|}
+  name=${rest%%|*}
+  argv=${rest#*|}
+  command=${argv%% *}
   checked=$((checked + 1))
 
-  want="esper-engine $command: unknown option \"--nonsense\""
-  if [ "$said" != "$want" ]; then
-    printf '  ✗ messages: `%s` said\n      %s\n    and every other command says\n      %s\n' \
-      "$command" "$said" "$want"
+  # shellcheck disable=SC2086 -- the arguments are this file's own words
+  out=$(ESPER_HOME="$home" timeout 10 "$binary" $argv 2>/dev/null)
+  code=$?
+  # shellcheck disable=SC2086
+  errors=$(ESPER_HOME="$home" timeout 10 "$binary" $argv 2>&1 >/dev/null)
+
+  if [ "$code" -ne 0 ]; then
+    printf '  ✗ messages: `%s %s --help` exited %s — asking is not attempting\n' "$name" "$command" "$code"
     fail=1
   fi
+  if [ -n "$errors" ]; then
+    printf '  ✗ messages: `%s %s --help` wrote to stderr, so it cannot be piped:\n      %s\n' \
+      "$name" "$command" "$(printf '%s' "$errors" | head -1)"
+    fail=1
+  fi
+  case "$out" in
+    "usage: $name $command"*) ;;
+    *)
+      printf '  ✗ messages: `%s %s --help` answered\n      %s\n    and a usage begins by naming the command somebody typed\n' \
+        "$name" "$command" "$(printf '%s' "$out" | head -1)"
+      fail=1
+      ;;
+  esac
 done
 
 # A floor: a run that tried nothing agrees with everything.
-if [ "$checked" -lt 8 ]; then
+if [ "$checked" -lt 20 ]; then
   echo "  ✗ messages: only $checked command(s) were tried, which is not this engine" >&2
   exit 1
 fi
@@ -87,4 +166,4 @@ if [ "$fail" -ne 0 ]; then
   echo "  which command. A command that names itself as well says it twice."
   exit 1
 fi
-echo "  ✓ messages: $checked commands refuse an option they do not know, in the same words"
+echo "  ✓ messages: $checked checks across three binaries — one wording for a refusal, and asking is never a failure"
