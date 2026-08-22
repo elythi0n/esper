@@ -94,6 +94,28 @@ func run(args []string) int {
 	}
 }
 
+// doctorUsage is what `esper doctor` takes, for `--help` and for a refusal.
+//
+// One copy, because a usage printed on error that disagrees with the one
+// printed on request is two answers to one question.
+func doctorUsage() string {
+	return "usage: esper doctor [--session]\n\n" +
+		"  Say what this machine can do and how it can be reached, and name\n" +
+		"  what is missing. Nothing is changed: it reads this machine and the\n" +
+		"  engine beside it.\n\n" +
+		"    --session   hold a real session with this machine — pairing,\n" +
+		"                transport, capture, encode and decode — and time it.\n" +
+		"                A few seconds\n"
+}
+
+// versionUsage is what `esper version` takes.
+func versionUsage() string {
+	return "usage: esper version [--json]\n\n" +
+		"  Print the version, when it was built, and the protocol version two\n" +
+		"  machines have to agree on.\n\n" +
+		"    --json   one object, for a script rather than a person\n"
+}
+
 // contains says whether a word is among the arguments.
 func contains(args []string, word string) bool {
 	for _, a := range args {
@@ -114,10 +136,7 @@ func usageFor(command string) (string, bool) {
 	case "api":
 		return apiUsage(), true
 	case "doctor":
-		return "usage: esper doctor\n\n" +
-			"  Say what this machine can do and how it can be reached, and\n" +
-			"  name what is missing. Nothing is changed and nothing is\n" +
-			"  contacted: it reads this machine and the engine beside it.\n", true
+		return doctorUsage(), true
 	case "sessions":
 		return "usage: esper sessions [<lines>]\n\n" +
 			"  What has happened on this machine: sessions, pairings and\n" +
@@ -125,10 +144,7 @@ func usageFor(command string) (string, bool) {
 			"  This is what was recorded, not what is happening now — a\n" +
 			"  session in progress appears when it ends.\n", true
 	case "version":
-		return "usage: esper version [--json]\n\n" +
-			"  Print the version, when it was built, and the protocol version\n" +
-			"  two machines have to agree on.\n\n" +
-			"    --json   one object, for a script rather than a person\n", true
+		return versionUsage(), true
 	}
 	return "", false
 }
@@ -202,6 +218,16 @@ func handOff(binary string, args []string) int {
 }
 
 func cmdVersion(args []string) int {
+	// **An argument this does not know is refused, not ignored.** Printing the
+	// version anyway answers a question nobody asked: somebody who typed
+	// `--porcelain` because another tool has it got human output, no error, and
+	// no reason to look further until something downstream broke on it.
+	for _, a := range args {
+		if a != "--json" {
+			fmt.Fprintf(os.Stderr, "esper version: %q is not an option\n\n%s", a, versionUsage())
+			return 1
+		}
+	}
 	if len(args) > 0 && args[0] == "--json" {
 		fmt.Printf("{\"version\":%q,\"buildTime\":%q,\"protocol\":%d}\n",
 			version, buildTime, proto.ProtocolVersion)
@@ -228,9 +254,16 @@ func displayOrDash(s string) string {
 func cmdDoctor(args []string) int {
 	deep := false
 	for _, a := range args {
-		if a == "--session" {
-			deep = true
+		// **Refused rather than ignored.** This ran the ordinary diagnostic for
+		// anything it did not know, so somebody who asked for a deeper check by
+		// a name it does not have got the shallow one and no sign of it — and
+		// the whole point of this command is to be believed about what it
+		// checked.
+		if a != "--session" {
+			fmt.Fprintf(os.Stderr, "esper doctor: %q is not an option\n\n%s", a, doctorUsage())
+			return 1
 		}
+		deep = true
 	}
 	fmt.Println("🩺  esper doctor")
 	fmt.Println()

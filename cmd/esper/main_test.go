@@ -258,6 +258,27 @@ func TestATimeThatCannotBeATimeIsSaidToBeUnknown(t *testing.T) {
 	}
 }
 
+// toStderr runs f with stderr captured, and gives back what it wrote.
+func toStderr(t *testing.T, f func()) string {
+	t.Helper()
+	was := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("a pipe: %v", err)
+	}
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+	f()
+	_ = w.Close()
+	os.Stderr = was
+	return <-done
+}
+
 // printed runs f with stdout captured, and gives back what it wrote.
 func printed(t *testing.T, f func()) string {
 	t.Helper()
@@ -432,5 +453,89 @@ func TestNoVerbIsOwnedWithoutAnAnswerOrAnsweredWithoutBeingOwned(t *testing.T) {
 	}
 	if _, ours := usageFor("telepathy"); ours {
 		t.Error("a usage came back for a command this program does not have")
+	}
+}
+
+/*
+A flag this program does not know is refused, not ignored.
+
+`doctor` ran the ordinary diagnostic for anything it did not recognise, and
+`version` printed the version. Both are quiet failures of the worst kind:
+somebody who asked for a deeper check by a name this does not have got the
+shallow one and no sign of it — and the whole point of `doctor` is to be
+believed about what it checked.
+
+`api` and `sessions` already refused, which is what made the other two look
+like oversights rather than a decision.
+*/
+func TestAFlagThisDoesNotKnowIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		run  func([]string) int
+		bad  string
+		good []string
+	}{
+		{"doctor", cmdDoctor, "--json", []string{"--session"}},
+		{"version", cmdVersion, "--porcelain", []string{"--json"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			/*
+			   Read from what it *said*, not from the code it returned.
+
+			   The first version of this test asserted a non-zero exit — and
+			   `doctor` exits non-zero anyway on a machine with no engine, which
+			   is every machine a unit test runs on. It passed with the refusal
+			   removed. What separates "refused the flag" from "ran and failed
+			   for its own reasons" is the sentence.
+			*/
+			var code int
+			said := toStderr(t, func() { code = c.run([]string{c.bad}) })
+			if !strings.Contains(said, c.bad) {
+				t.Errorf("%s did not say it could not use %q; it said: %s", c.name, c.bad, said)
+			}
+			if code == 0 {
+				t.Errorf("%s accepted %q and answered success", c.name, c.bad)
+			}
+			// And the flag it does know is still a flag it takes: a refusal
+			// that refuses everything is not a refusal, it is a broken command.
+			for _, ok := range c.good {
+				if ok == "--session" {
+					// Holds a real session: too slow for a unit test, and the
+					// usage below is what says it exists.
+					continue
+				}
+				if code := c.run([]string{ok}); code != 0 {
+					t.Errorf("%s refused %q, which it takes", c.name, ok)
+				}
+			}
+		})
+	}
+}
+
+// The usage a refusal prints is the usage `--help` prints.
+//
+// Two answers to one question is how a flag ends up documented in one place
+// and refused in the other — which is exactly the state `--session` was in:
+// named in the command's own closing lines, and absent from any usage.
+func TestTheUsageOnAnErrorIsTheUsageOnRequest(t *testing.T) {
+	for _, c := range []struct {
+		command string
+		usage   func() string
+		mention string
+	}{
+		{"doctor", doctorUsage, "--session"},
+		{"version", versionUsage, "--json"},
+	} {
+		asked, ours := usageFor(c.command)
+		if !ours {
+			t.Fatalf("%s answers no usage", c.command)
+		}
+		if asked != c.usage() {
+			t.Errorf("`esper %s --help` and its refusal print different text", c.command)
+		}
+		if !strings.Contains(asked, c.mention) {
+			t.Errorf("`esper %s` takes %s and its usage does not mention it:\n%s",
+				c.command, c.mention, asked)
+		}
 	}
 }
