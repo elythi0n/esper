@@ -379,3 +379,58 @@ func TestNoBrokerIsNothingRatherThanAName(t *testing.T) {
 		t.Errorf("a configured broker reported %q", got)
 	}
 }
+
+/*
+Asking about a command is asking, not attempting.
+
+`--help` after a command used to reach the command itself, and each one did
+something different with it: `doctor` ran the diagnostic, `sessions` answered
+`"--help" is not a number of lines`, and `version` printed the version. Three
+ways of telling somebody that asking was a mistake — the same fault the engine's
+dispatcher already names in a comment, in the binary people actually type.
+
+What is held here is the shape of the answer, not its wording: a usage line
+naming `esper` and the command, and no exit code but nought.
+*/
+func TestEveryVerbThisProgramOwnsAnswersWhenAsked(t *testing.T) {
+	mine := []string{"api", "doctor", "sessions", "version"}
+	for _, command := range mine {
+		t.Run(command, func(t *testing.T) {
+			usage, ours := usageFor(command)
+			if !ours {
+				t.Fatalf("%s is dispatched here and answers no usage of its own", command)
+			}
+			if !strings.HasPrefix(usage, "usage: esper "+command) {
+				t.Errorf("the usage does not begin by naming the command somebody typed:\n%s", usage)
+			}
+			// Long enough to say something. A usage line on its own is a
+			// signature, not an answer to "what does this do".
+			if len(strings.Split(strings.TrimSpace(usage), "\n")) < 3 {
+				t.Errorf("%s answers with a signature and nothing else:\n%s", command, usage)
+			}
+		})
+	}
+
+	// And the verbs that are handed over answer for themselves, under the name
+	// they were reached by — so this must NOT claim them.
+	for _, theirs := range []string{"host", "broker", "discover", "pair", "cp", "grant"} {
+		if _, ours := usageFor(theirs); ours {
+			t.Errorf("%q is handed to another binary and this one answers for it too", theirs)
+		}
+	}
+}
+
+// Every verb the dispatcher owns has a usage, and no verb has one it cannot
+// reach — the same pairing `check-help.py` holds the engine to, for the half
+// of the front door that is written in Go.
+func TestNoVerbIsOwnedWithoutAnAnswerOrAnsweredWithoutBeingOwned(t *testing.T) {
+	owned := []string{"doctor", "sessions", "api"}
+	for _, command := range owned {
+		if _, ours := usageFor(command); !ours {
+			t.Errorf("`esper %s` is run by this program and cannot be asked about", command)
+		}
+	}
+	if _, ours := usageFor("telepathy"); ours {
+		t.Error("a usage came back for a command this program does not have")
+	}
+}

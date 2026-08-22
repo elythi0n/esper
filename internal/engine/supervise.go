@@ -204,6 +204,13 @@ func (s *Supervisor) runOnce(ctx context.Context, args []string, w Watch, stoppi
 
 	words := newLastWords(os.Stderr)
 	cmd := exec.Command(s.path, args...)
+	// **The name it was reached under, not the name of the binary.** The engine
+	// reads its zeroth argument to decide what to call itself in a message, and
+	// the hand-off path has always set it — so `esper discover --help` says
+	// `esper`. This path did not, so `esper host --help` answered with a usage
+	// line naming `esper-engine`: a binary the person did not type and may not
+	// know exists. `Path` still points at the real file; only the name changes.
+	cmd.Args[0] = s.reachedAs
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, words
 
 	began := time.Now()

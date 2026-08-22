@@ -48,6 +48,30 @@ func run(args []string) int {
 	case "-h", "--help", "help":
 		printHelp()
 		return 0
+	}
+
+	/*
+		Asking about a command is asking, not attempting.
+
+		`--help` after a command reached the command itself, and each one did
+		something different with it: `doctor` ran the diagnostic, `sessions`
+		answered `"--help" is not a number of lines`, and `version` printed the
+		version. Three ways of telling somebody that asking was a mistake.
+
+		Only the verbs this program owns are answered here. `host`, `broker` and
+		everything the engine owns are handed over with the argument intact, and
+		the child prints its own usage under the name it was reached by — which
+		is the arrangement that already worked and the reason `esper discover
+		--help` says `esper`.
+	*/
+	if len(args) > 1 && (contains(args[1:], "--help") || contains(args[1:], "-h")) {
+		if usage, mine := usageFor(args[0]); mine {
+			fmt.Println(usage)
+			return 0
+		}
+	}
+
+	switch args[0] {
 	case "-v", "--version", "version":
 		return cmdVersion(args[1:])
 	case "doctor":
@@ -68,6 +92,45 @@ func run(args []string) int {
 		printHelp()
 		return 1
 	}
+}
+
+// contains says whether a word is among the arguments.
+func contains(args []string, word string) bool {
+	for _, a := range args {
+		if a == word {
+			return true
+		}
+	}
+	return false
+}
+
+// usageFor is what a verb this program owns takes.
+//
+// The second value says whether it is one of ours at all: `false` for the
+// verbs that are handed to the engine or the broker, which answer for
+// themselves and know their own flags.
+func usageFor(command string) (string, bool) {
+	switch command {
+	case "api":
+		return apiUsage(), true
+	case "doctor":
+		return "usage: esper doctor\n\n" +
+			"  Say what this machine can do and how it can be reached, and\n" +
+			"  name what is missing. Nothing is changed and nothing is\n" +
+			"  contacted: it reads this machine and the engine beside it.\n", true
+	case "sessions":
+		return "usage: esper sessions [<lines>]\n\n" +
+			"  What has happened on this machine: sessions, pairings and\n" +
+			"  refusals, most recent last. The default is 20 lines.\n\n" +
+			"  This is what was recorded, not what is happening now — a\n" +
+			"  session in progress appears when it ends.\n", true
+	case "version":
+		return "usage: esper version [--json]\n\n" +
+			"  Print the version, when it was built, and the protocol version\n" +
+			"  two machines have to agree on.\n\n" +
+			"    --json   one object, for a script rather than a person\n", true
+	}
+	return "", false
 }
 
 // engineCommands are the verbs the engine owns.
@@ -182,7 +245,7 @@ func cmdDoctor(args []string) int {
 	// Engine output goes to stderr with its origin on it, so the report on
 	// stdout stays a report — `esper doctor > file` should not have a codec's
 	// warning in the middle of it.
-	sup, err := engine.New(engine.Options{Log: logToStderr})
+	sup, err := engine.New(engine.Options{Log: logToStderr, ReachedAs: "esper"})
 	if err != nil {
 		fmt.Printf("  ✗ %v\n", err)
 		fmt.Println()
@@ -368,7 +431,7 @@ func cmdHost(args []string) int {
 			return cmdHostService(args[0], args[1:])
 		}
 	}
-	sup, err := engine.New(engine.Options{Log: logToStderr})
+	sup, err := engine.New(engine.Options{Log: logToStderr, ReachedAs: "esper"})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "esper host: %v\n", err)
 		return 1
@@ -491,7 +554,7 @@ func cmdAPI(args []string) int {
 	// writes. Empty when there is none, and a change then refuses itself
 	// rather than the API opening the trust store for writing.
 	enginePath := ""
-	sup, err := engine.New(engine.Options{Log: logToStderr})
+	sup, err := engine.New(engine.Options{Log: logToStderr, ReachedAs: "esper"})
 	switch {
 	case err != nil:
 		engineTrouble = err
@@ -583,7 +646,7 @@ func cmdSessions(args []string) int {
 		most = uint32(n)
 	}
 
-	sup, err := engine.New(engine.Options{Log: logToStderr})
+	sup, err := engine.New(engine.Options{Log: logToStderr, ReachedAs: "esper"})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "esper sessions: %v\n", err)
 		return 1

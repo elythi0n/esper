@@ -53,9 +53,10 @@ const binaryName = "esper-engine"
 //
 // The zero value is not usable; construct with New.
 type Supervisor struct {
-	path  string
-	log   func(string, ...any)
-	grace time.Duration
+	path      string
+	reachedAs string
+	log       func(string, ...any)
+	grace     time.Duration
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -99,6 +100,15 @@ type Options struct {
 	// A field rather than a constant because a test that had to wait the real
 	// answer out is a test nobody runs.
 	Grace time.Duration
+
+	// ReachedAs is the name the engine should call itself in a message.
+	//
+	// The engine reads its zeroth argument and answers as `esper` or as
+	// `esper-engine` accordingly, so that a usage line names the command
+	// somebody typed rather than a binary they may not know exists. Empty
+	// means the binary's own name, which is what a caller that is not a front
+	// door wants.
+	ReachedAs string
 }
 
 // New locates the engine binary and returns a Supervisor for it. It does not
@@ -116,7 +126,11 @@ func New(opts Options) (*Supervisor, error) {
 	if grace <= 0 {
 		grace = DefaultGrace
 	}
-	return &Supervisor{path: path, log: log, grace: grace}, nil
+	reachedAs := opts.ReachedAs
+	if reachedAs == "" {
+		reachedAs = filepath.Base(path)
+	}
+	return &Supervisor{path: path, reachedAs: reachedAs, log: log, grace: grace}, nil
 }
 
 // Path returns the resolved engine binary path.
