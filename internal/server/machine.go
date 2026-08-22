@@ -111,17 +111,42 @@ func (s *Server) hostState(w http.ResponseWriter, _ *http.Request) {
 // here rather than swallowed: a machine where this half-worked is still a
 // machine somebody can finish by hand.
 func (s *Server) setHost(w http.ResponseWriter, r *http.Request) {
+	/*
+		**A pointer, because absent is not `false`.**
+
+		This read `On bool`, so a body that did not set it — `{}`, or
+		`{"start": true}` from somebody who guessed the name, or a field a
+		later window sends — left it `false` and the route **disabled the
+		host**. It answered 200 with a report of what it had done. Asking to
+		turn something on and having it turned off is the worst shape a default
+		can take, and nothing about the answer said anything had gone wrong.
+
+		`DisallowUnknownFields` for the same reason one layer up: a field this
+		does not know is a request this does not understand, and guessing at
+		what was meant is how the above happened.
+	*/
 	var asked struct {
-		On bool `json:"on"`
+		On *bool `json:"on"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&asked); err != nil {
-		http.Error(w, `the body should be {"on": true}`, http.StatusBadRequest)
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&asked); err != nil {
+		http.Error(w, `the body should be {"on": true} or {"on": false}`, http.StatusBadRequest)
+		return
+	}
+	if asked.On == nil {
+		http.Error(
+			w,
+			`the body must say {"on": true} or {"on": false}: with no answer this would `+
+				`have turned the host off, which is not what a request with nothing in it asks for`,
+			http.StatusBadRequest,
+		)
 		return
 	}
 
 	var report bytes.Buffer
 	change := service.Disable
-	if asked.On {
+	if *asked.On {
 		change = service.Enable
 	}
 	err := change(service.Report{To: &report})

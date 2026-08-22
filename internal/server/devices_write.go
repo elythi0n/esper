@@ -56,7 +56,14 @@ func (s *Server) change(w http.ResponseWriter, r *http.Request, what devices.Cha
 
 	var wanted whatToChange
 	if what != devices.Forget && what != devices.Keep {
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&wanted); err != nil {
+		// A field this does not know is a request this does not understand.
+		// Without it, `{"permissons": [...]}` decoded to an empty list, the
+		// engine refused with "needs at least one permission", and the caller
+		// was told the *engine* had a problem with a body the server had not
+		// read properly.
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&wanted); err != nil {
 			http.Error(w, "the body should be {\"permissions\": [...]}: "+err.Error(),
 				http.StatusBadRequest)
 			return
