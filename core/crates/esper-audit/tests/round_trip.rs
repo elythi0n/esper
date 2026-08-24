@@ -45,6 +45,14 @@ fn every_variant() -> Vec<Event> {
         Event::PermissionsChanged {
             granted: vec![Permission::View, Permission::Control],
         },
+        Event::PairingKept {
+            granted: vec![Permission::View],
+        },
+        Event::PairingKept { granted: vec![] },
+        Event::ScheduleChanged {
+            when: Some("weekdays 09:00-17:00".into()),
+        },
+        Event::ScheduleChanged { when: None },
         Event::SessionOpened {
             granted: vec![Permission::View],
             tier: "lan".into(),

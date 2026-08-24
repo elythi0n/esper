@@ -94,6 +94,37 @@ pub enum Event {
     },
     /// A device was revoked, and how many live sessions that closed.
     Revoked { sessions_closed: usize },
+    /// A one-session pairing was made permanent.
+    ///
+    /// **Its own event, because it is its own thing.** It was recorded as a
+    /// [`Event::PermissionsChanged`] carrying the permissions the device
+    /// already had — so the trail said somebody had changed them, which nobody
+    /// had, and the change that *did* happen could not be found by looking for
+    /// it. Somebody asking "when did this device stop being a one-session
+    /// guest" is asking about this line.
+    ///
+    /// What it may do is unchanged and is carried anyway: the question after
+    /// "it became permanent" is always "permanent with what", and an auditor
+    /// should not have to walk back through the log to answer it.
+    PairingKept {
+        /// Everything it may do, which this did not change.
+        granted: Vec<Permission>,
+    },
+    /// When a device may connect with nobody at the host, or no longer may.
+    ///
+    /// **Its own event, for the same reason [`Event::PairingKept`] is.** This
+    /// was recorded as a [`Event::PermissionsChanged`] carrying the
+    /// permissions the device already had — so widening or narrowing when
+    /// somebody may walk in unasked left a line saying the permissions had
+    /// changed, which they had not, and the schedule itself was nowhere. The
+    /// same shape as [`Event::LockAfterChanged`], because it is the same kind
+    /// of thing: a standing decision about a device, in the operator's own
+    /// words.
+    ScheduleChanged {
+        /// The schedule as it reads now, or `None` where the device may no
+        /// longer connect unattended at all.
+        when: Option<String>,
+    },
     /// A live session was narrowed rather than ended.
     ///
     /// Distinct from [`Event::Revoked`], which counts the sessions a
@@ -433,6 +464,8 @@ impl Event {
             Self::SessionAsked { .. } => "session_asked",
             Self::LockAfterChanged { .. } => "lock_after_changed",
             Self::PermissionsChanged { .. } => "permissions_changed",
+            Self::PairingKept { .. } => "pairing_kept",
+            Self::ScheduleChanged { .. } => "schedule_changed",
             Self::SessionOpened { .. } => "session_opened",
             Self::Locked { .. } => "locked",
             Self::Powered { .. } => "powered",
@@ -472,6 +505,13 @@ impl Event {
                 n => format!("revoked, ending {n} sessions"),
             },
             Self::PermissionsChanged { granted } => format!("may now {}", names(granted)),
+            Self::PairingKept { granted } => {
+                format!("a one-session pairing was kept; may {}", names(granted))
+            }
+            Self::ScheduleChanged { when } => match when {
+                Some(schedule) => format!("may connect unattended {schedule}"),
+                None => "may no longer connect unattended".to_owned(),
+            },
             Self::LockAfterChanged { after } => match after {
                 Some(word) => format!("sessions with it now leave this screen: {word}"),
                 None => "sessions with it now follow this host's own locking rule".to_owned(),

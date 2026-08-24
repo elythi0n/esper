@@ -433,6 +433,10 @@ pub fn schedule(args: &[String]) -> Result<(), String> {
         ));
     }
     paths::save_devices(&store)?;
+    // The schedule in the operator's own words, for the trail: `None` is the
+    // device no longer connecting unattended at all, which is the half of this
+    // change somebody is most likely to be looking for.
+    let spelled = wanted.as_ref().map(|s| s.spelled().to_string());
     let Some((name, had_permission, fingerprint, key)) = scheduled.first().cloned() else {
         return Err("no device to schedule".to_owned());
     };
@@ -454,28 +458,20 @@ pub fn schedule(args: &[String]) -> Result<(), String> {
     for (_, _, _, each) in scheduled.iter().skip(1) {
         record(
             each,
-            Event::PermissionsChanged {
-                granted: store
-                    .get(each)
-                    .map(|d| d.permissions.clone())
-                    .unwrap_or_default(),
+            Event::ScheduleChanged {
+                when: spelled.clone(),
             },
         );
     }
 
-    // **Recorded like every other change to what this machine trusts.**
-    // Narrowing or widening when a device may walk in unasked is exactly the
-    // kind of thing somebody should be able to find afterwards, and the audit
-    // trail is the only place it would be.
-    record(
-        &key,
-        Event::PermissionsChanged {
-            granted: store
-                .get(&key)
-                .map(|d| d.permissions.clone())
-                .unwrap_or_default(),
-        },
-    );
+    // **Recorded like every other change to what this machine trusts, and as
+    // itself.** Narrowing or widening when a device may walk in unasked is
+    // exactly the kind of thing somebody should be able to find afterwards,
+    // and the audit trail is the only place it would be — which it was not,
+    // because this wrote a `PermissionsChanged` carrying the permissions the
+    // device already had. The line said somebody had changed them, nobody had,
+    // and the schedule was nowhere.
+    record(&key, Event::ScheduleChanged { when: spelled });
 
     match wanted.as_ref() {
         Some(schedule) => {
@@ -663,12 +659,15 @@ pub fn keep(args: &[String]) -> Result<(), String> {
     let name = device.name.clone();
     paths::save_devices(&store)?;
 
-    // Recorded like every other change to what this machine trusts. Widening
-    // a one-session pairing into a permanent one is exactly the kind of thing
-    // somebody should be able to find afterwards.
+    // Recorded like every other change to what this machine trusts, and as
+    // **itself**: this was a `PermissionsChanged` carrying the permissions the
+    // device already had, so the trail said somebody had changed them — which
+    // nobody had — and the change that did happen could not be found by
+    // looking for it. Somebody asking when a device stopped being a
+    // one-session guest is asking about this line.
     record(
         &key,
-        Event::PermissionsChanged {
+        Event::PairingKept {
             granted: store
                 .get(&key)
                 .map(|d| d.permissions.clone())

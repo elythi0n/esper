@@ -273,6 +273,8 @@ fn exhaustive_witness(e: &Event) {
         | Event::SessionAsked { .. }
         | Event::LockAfterChanged { .. }
         | Event::PermissionsChanged { .. }
+        | Event::PairingKept { .. }
+        | Event::ScheduleChanged { .. }
         | Event::SessionOpened { .. }
         | Event::SessionClosed { .. }
         | Event::TerminalOpened
@@ -385,6 +387,12 @@ fn variants() -> Vec<Event> {
             path: "reports/q3.pdf".to_owned(),
             size: 4096,
             outcome: "stored".to_owned(),
+        },
+        Event::PairingKept {
+            granted: vec![Permission::View],
+        },
+        Event::ScheduleChanged {
+            when: Some("weekdays 09:00-17:00".to_owned()),
         },
         Event::Refused {
             reason: "unknown key".to_owned(),

@@ -98,6 +98,10 @@ export const AUTHORISED_BY: Readonly<Record<string, Permission | null>> = {
   session_asked: null,
   lock_after_changed: null,
   permissions_changed: null,
+  // Like pairing and unpairing: a thing that happened *to* the arrangement of
+  // permissions, not something a permission allowed.
+  pairing_kept: null,
+  schedule_changed: null,
   session_opened: "view",
   locked: "lock",
   powered: "reboot",
