@@ -78,7 +78,7 @@ tries=(
 
 # The front door and the broker, which a person meets just as often.
 front_tries=("api --nonsense" "doctor --nonsense" "version --nonsense" "sessions --nonsense")
-broker_tries=("serve --nonsense")
+broker_tries=("serve --nonsense" "identity --nonsense" "version --nonsense")
 
 fail=0
 checked=0
@@ -120,6 +120,8 @@ asks=(
   "$front|esper|sessions --help"
   "$front|esper|version --help"
   "$broker|esper-broker|serve --help"
+  "$broker|esper-broker|identity --help"
+  "$broker|esper-broker|version --help"
 )
 for ask in "${asks[@]}"; do
   binary=${ask%%|*}
@@ -154,8 +156,25 @@ for ask in "${asks[@]}"; do
   esac
 done
 
+# And asking costs nothing, which for one command means more than a nought.
+#
+# `esper-broker identity` creates the key if there is not one yet, and it took
+# no notice of `--help` at all — so a person asking what the command did got a
+# key file written into their home as the answer, and the same happened to
+# whoever typed it here. A fresh state directory is handed to it and has to
+# come back empty.
+checked=$((checked + 1))
+untouched=$(mktemp -d)
+ESPER_HOME="$untouched" timeout 10 "$broker" identity --help >/dev/null 2>&1
+left=$(find "$untouched" -type f | wc -l)
+rm -rf "$untouched"
+if [ "$left" -ne 0 ]; then
+  printf '  ✗ messages: `esper-broker identity --help` created %s file(s) — asking is not doing\n' "$left"
+  fail=1
+fi
+
 # A floor: a run that tried nothing agrees with everything.
-if [ "$checked" -lt 20 ]; then
+if [ "$checked" -lt 26 ]; then
   echo "  ✗ messages: only $checked command(s) were tried, which is not this engine" >&2
   exit 1
 fi

@@ -263,11 +263,42 @@ mod tests {
     #[test]
     fn a_paced_source_will_not_hand_over_sound_from_the_future() {
         let mut tone = SyntheticTone::new();
+        let interval = Duration::from_millis(u64::from(tone.format().frame_ms));
+
+        // Timed from before the first frame, because the source starts its
+        // clock *inside* that call: a reading taken afterwards would sit some
+        // unknown amount after the interval began, and the comparison below
+        // would have that slack in it.
+        let start = Instant::now();
         let _ = grab(&mut tone);
-        // The next frame is 20 ms away and this asks for it with no patience.
-        assert_eq!(
-            tone.next_frame(Duration::ZERO).expect("no error"),
-            Captured::Nothing
+
+        /*
+           Asked with no patience until sound exists, and the wait is what is
+           measured.
+
+           This asked once and expected `Nothing`, which is true only while the
+           two statements run within one frame of each other. Every machine
+           this had run on managed that. An RPM build did not — the whole
+           workspace was compiling beside it — and the test failed by being
+           slow, which is a test reporting on the machine rather than on the
+           code.
+
+           A machine too slow to observe the refusal still cannot make the
+           frame arrive early, so the wait is the property that survives load.
+        */
+        loop {
+            match tone.next_frame(Duration::ZERO).expect("no error") {
+                Captured::Nothing => std::thread::sleep(Duration::from_millis(1)),
+                Captured::Frame(_) => break,
+                other => panic!("expected a frame or nothing, got {other:?}"),
+            }
+        }
+        let waited = start.elapsed();
+
+        assert!(
+            waited >= interval,
+            "a second frame arrived {waited:?} after the first was asked for, \
+             and frames are {interval:?} apart"
         );
     }
 

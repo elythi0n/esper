@@ -69,6 +69,21 @@ persistent trust between two machines that belong to the same person.
 
 Needs Go 1.26+, Rust 1.98+, and `make`. `nasm` is recommended.
 
+**Your distribution may not have those yet.** Checked in a container of each,
+on 2026-09-12:
+
+| | Go | Rust | Enough? |
+|---|---|---|---|
+| Fedora 43 | 1.26.8 | 1.98.0 | yes |
+| Debian 13 (trixie) | 1.24 | 1.85.1 | **no** — both too old |
+
+On Debian and Ubuntu, get the toolchains from upstream — [rustup](https://rustup.rs)
+and [go.dev/dl](https://go.dev/dl/) — or install a package from
+[Installing](#installing) instead, which needs no toolchain at all. This is
+worth saying because `apt install golang-go rustc` succeeds and then `make`
+fails on a version, which reads as the project being broken rather than the
+packages being old.
+
 The H.264 encoder is built from Cisco's source, and its x86 assembly needs an
 assembler. Without one, openh264's build script *silently* falls back to a
 C-only path — measured at 2.5% to 6% slower, with identical output size. The

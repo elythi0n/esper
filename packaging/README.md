@@ -8,7 +8,7 @@ Two things get installed, and they are not installed the same way.
 |---|---|---|
 | Arch | [`arch/PKGBUILD`](arch/PKGBUILD) | by `makepkg`, not by the project |
 | Debian, Ubuntu | `make package-deb` → `dist/*.deb` | **yes**, by [`../scripts/build-deb.sh`](../scripts/build-deb.sh) |
-| Fedora, RHEL | [`rpm/esper.spec`](rpm/esper.spec) | **no** — see below |
+| Fedora, RHEL | [`rpm/esper.spec`](rpm/esper.spec) | **yes**, by `make check-rpm`, in a Fedora container |
 
 All three install from one list, [`contents.tsv`](contents.tsv), through one
 script. Three package definitions describing the same software in three
@@ -20,10 +20,34 @@ with the manifest by construction, so agreeing with it proves nothing — what i
 checks is that **everything the build produced is in some package**, which is
 answered from `build/` and not from the manifest.
 
-The RPM spec has never been built: this project is developed on Arch, which has
-no `rpmbuild`. Its `%files` list is the one place a format forces the manifest
-to be written twice, so that list is compared against the manifest rather than
-trusted. Building it on a Fedora runner is a release-checklist item.
+The RPM spec's `%files` list is the one place a format forces the manifest to
+be written twice, so that list is compared against the manifest rather than
+trusted.
+
+For most of this project's life the spec had never been built — Arch has no
+`rpmbuild` — and that was stated at the top of the file rather than hidden.
+`make check-rpm` now builds it in a pinned Fedora container and installs the
+result on a clean one. It found three defects on the first run, none of them
+visible by reading: see the comment at the top of the spec.
+
+## Installing is a different question from packaging
+
+`make check-packages` asks whether everything the build produced is in some
+package. It answers that here, on Arch, from `build/`.
+
+`make check-install` asks whether `dpkg -i` works, on Debian, which this
+machine is not — and the first time anything asked, the answer was no. The
+package installed on Debian 12 and `esper-engine` could not start, because
+`Depends: libc6` is satisfied by every Debian ever released and the binary
+needs `GLIBC_2.39`. The floor is now read out of the binaries themselves
+([`../scripts/glibc-floor.py`](../scripts/glibc-floor.py)), and the check
+offers the package to a Debian too old for it to prove the floor bites.
+
+It found a second one of the same shape: both packages installed a systemd
+unit starting a binary the package does not install — `%h/.local/bin/esper` and
+`/usr/local/bin/esper-broker`, which are the paths a *hand* install uses. Units
+are now rewritten as they are staged, and every installed unit is held to
+starting a file its own package installed.
 
 | | Who runs it | How |
 |---|---|---|
@@ -124,3 +148,25 @@ no shell to get.
 
 Keep the volume. The key lives there, and losing it means every user who
 pinned it has to be given a new one.
+
+## Containers
+
+Two of them, and they are not for the same thing.
+
+[`container/Containerfile`](container/Containerfile) is a way to **run** the
+broker: distroless, no shell, no root, read-only except the directory holding
+the key. [`container/rpmbuild.Containerfile`](container/rpmbuild.Containerfile)
+is a way to **check** a package, by being a Fedora.
+
+Every image either of them uses, and every image any check starts, is written
+down once in [`images.tsv`](images.tsv) with a digest, a date and a reason. A
+tag is a pointer this project does not hold — `debian:13-slim` is a different
+filesystem this month than last — and pulling by one is both a supply-chain
+decision made by nobody and a hole in a project that checks it builds the same
+bytes twice.
+
+`make check-images` holds the rule: no `FROM` without a digest, no digest that
+is not in the manifest, and no container started outside
+[`../scripts/in-container.sh`](../scripts/in-container.sh), which is what takes
+the network away and drops the capabilities. `scripts/update-image.sh` moves a
+pin forward and dates it; `--check` reports drift without changing anything.

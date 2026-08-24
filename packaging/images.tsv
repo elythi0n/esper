@@ -1,0 +1,50 @@
+# Every container image this project uses, pinned to a digest.
+#
+# # Why a digest and not a tag
+#
+# A tag is a name someone else can repoint. `debian:13-slim` is a different
+# filesystem this month than last, `rust:1.98-slim-bookworm` gets rebuilt when
+# its base gets a security update, and `:nonroot` moves whenever distroless
+# does. That is the right behaviour for a tag and the wrong one for us twice
+# over:
+#
+#   - **Reproducibility.** This project builds the same bytes twice on purpose
+#     and checks it (`make check-reproducible`). A build whose compiler arrives
+#     by mutable name is a build that reproduces until the day it does not, and
+#     the change arrives with nobody's commit attached to it.
+#
+#   - **Supply chain.** Pulling by tag means running whatever is behind that
+#     name at the moment of the pull. Pulling by digest means running the exact
+#     bytes written down here, which someone reviewed, and which cannot be
+#     swapped without a diff to this file.
+#
+# A digest is not a claim that the image has no vulnerabilities. It is a claim
+# that the image is the one we looked at. Moving a pin forward is a deliberate
+# act with a date on it, which is what the last column is for.
+#
+# # How to move one forward
+#
+#   scripts/update-image.sh <nickname>
+#
+# It re-resolves the tag, shows what changed, and rewrites the line. Run it when
+# a base image has a security update worth taking, not on a schedule: an
+# unreviewed pull is what the pin exists to prevent.
+#
+# # Columns
+#
+#   nickname    what scripts/in-container.sh calls it
+#   reference   the human-readable tag the digest was resolved from
+#   digest      what actually gets run
+#   pinned      the date this digest was resolved and reviewed
+#   purpose     why this project needs an image at all
+#
+# The tag in the second column is *not* what is pulled. It is kept so that a
+# person can see what the pin is a pin *of*, and so that update-image.sh knows
+# what to re-resolve.
+#
+nickname	reference	digest	pinned	purpose
+rust-build	rust:1.98-slim-bookworm	sha256:6ac25dcaa81e06721043f9a815b6000c87ba2f56bf7b82a3ad0e65ae71067e0d	2026-09-12	Compiles the broker for its container. The Rust version matches rust-toolchain.toml, because a container that builds with a different compiler than the repository can fail in a way nothing else reproduces.
+broker-run	gcr.io/distroless/cc-debian12:nonroot	sha256:777e96cf322c46bc32aca926c263624c4dc8d7cf37e2fa65ba2c7e697318ebbb	2026-09-12	What the broker actually runs on. A C runtime and nothing else: no shell to get, which is the point for the one process strangers can send packets to.
+debian	debian:13-slim	sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f	2026-09-12	A machine with real dpkg on it. The .deb is assembled here by hand from ar and tar, and Arch has no dpkg to check that against.
+fedora	fedora:43	sha256:1ad64e0ebefee83263fffacc5cb139b37ff70def215e4fe44720896c83353132	2026-09-12	A machine with rpmbuild on it. The spec has been written since Phase 16 opened and had never been built, for want of this.
+debian-old	debian:12-slim	sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba13fc1b2b867	2026-09-12	A machine too old to run this. It is here so that the .deb's glibc floor can be shown to bite: a dependency nothing ever refuses is a dependency that proves nothing, and this one was written as a bare `libc6` until a container installed it on bookworm and watched the engine fail to start.

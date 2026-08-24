@@ -15,7 +15,7 @@
 //! missing. **Every file transfer ever recorded was a line nothing could
 //! read**, the Activity screen skipped them, and no test failed — because no
 //! test had ever put an event inside an entry and asked for it back.
-use esper_audit::{Direction, Entry, Event};
+use esper_audit::{Entry, Event};
 use esper_proto::Permission;
 
 /// One of every variant, so a new one added without a thought about the entry

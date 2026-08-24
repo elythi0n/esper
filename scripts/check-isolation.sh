@@ -83,7 +83,15 @@ while IFS= read -r f; do
   [ -f "$f" ] || continue
   case "$f" in scripts/check-isolation.sh) continue ;; esac
   case "$f" in *.png|*.jpg|*.ico|*.cbor|*.pdf|*.woff*) continue ;; esac
-  if hits=$(grep -nE '/home/[a-z]|/Users/[a-z]|C:\\Users' "$f" 2>/dev/null); then
+  # `/home/somebody` is this tree's one agreed placeholder, and it has to be
+  # allowed: the tests that resolve a home directory need a home directory to
+  # resolve, and inventing a different fictional name in each of them is how
+  # one of them ends up being real. Allowing exactly one name is stricter than
+  # allowing a pattern — anything else under /home is still a finding, so a
+  # path that leaks the author's account is caught by the same line that lets
+  # the fixture through.
+  if hits=$(grep -nE '/home/[a-z]|/Users/[a-z]|C:\\Users' "$f" 2>/dev/null \
+            | grep -vE '/home/somebody|/Users/somebody'); then
     bad "$f contains an absolute developer path:"
     printf '%s\n' "$hits" | sed 's/^/      /'
   fi

@@ -63,7 +63,30 @@ mkdir -p "$root/DEBIAN"
 # Installed-Size is in kibibytes and is what apt shows before installing.
 size=$(du -ks --exclude=DEBIAN "$root" | cut -f1)
 
-cat > "$root/DEBIAN/control" <<EOF
+# The glibc floor comes out of the binaries rather than out of this file.
+#
+# `Depends: libc6` was true on every Debian ever released and therefore said
+# nothing: the package installed on Debian 12 and `esper-engine` could not
+# start, because it needs `GLIBC_2.39` and bookworm has 2.36. A dependency that
+# is satisfied by every possible system is not a dependency.
+#
+# Debian computes this with `dpkg-shlibdeps`, which belongs to the source
+# package machinery this script exists to avoid. The binary knows the answer,
+# so it is asked — see scripts/glibc-floor.py.
+floor=$("$here/scripts/glibc-floor.py" "$root"/usr/bin/*)
+if [ -n "$floor" ]; then
+  depends="libc6 (>= $floor)"
+else
+  # Nothing in the package links glibc dynamically. Saying `libc6` anyway would
+  # be the same empty dependency in a new place.
+  depends=""
+fi
+
+# Written in pieces rather than as one heredoc because `Depends` is optional
+# and an empty line in the middle of a control file ends the stanza: dpkg would
+# read the package as having no description and no homepage, and say nothing.
+{
+  cat <<EOF
 Package: $pkg
 Version: ${version}-1
 Section: net
@@ -71,11 +94,16 @@ Priority: optional
 Architecture: $debarch
 Maintainer: elythi0n <https://github.com/elythi0n/esper>
 Installed-Size: $size
-Depends: libc6
+EOF
+  if [ -n "$depends" ]; then
+    echo "Depends: $depends"
+  fi
+  cat <<EOF
 Homepage: https://github.com/elythi0n/esper
 Description: $summary
 $description
 EOF
+} > "$root/DEBIAN/control"
 
 # md5sums, which `dpkg --verify` and `debsums` read. Paths are relative to /
 # and the list is sorted, because unsorted is one more thing that would differ

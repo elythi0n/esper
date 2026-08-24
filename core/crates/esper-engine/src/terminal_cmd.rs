@@ -513,6 +513,22 @@ fn window_changes() -> tokio::sync::mpsc::Receiver<()> {
     rx
 }
 
+/// What `terminal` takes.
+pub fn usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} terminal <addr> [--resume <session>]\n\
+         \n\
+         Open a shell on a paired host. The host decides whether it may be\n\
+         asked at all, and a session it allows is recorded on its own trail.\n\
+         \n\
+         \x20 --resume <session>   rejoin a session the host parked, by the id\n\
+         \x20                      it printed when the link dropped\n\
+         \n\
+         for example: {me} terminal 192.168.1.24:7420"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -557,20 +573,4 @@ mod tests {
         // A flag with nothing after it is a mistake worth naming.
         assert!(parse(&["127.0.0.1:7645".to_owned(), "--resume".to_owned()]).is_err());
     }
-}
-
-/// What `terminal` takes.
-pub fn usage() -> String {
-    let me = crate::net::me();
-    format!(
-        "usage: {me} terminal <addr> [--resume <session>]\n\
-         \n\
-         Open a shell on a paired host. The host decides whether it may be\n\
-         asked at all, and a session it allows is recorded on its own trail.\n\
-         \n\
-         \x20 --resume <session>   rejoin a session the host parked, by the id\n\
-         \x20                      it printed when the link dropped\n\
-         \n\
-         for example: {me} terminal 192.168.1.24:7420"
-    )
 }

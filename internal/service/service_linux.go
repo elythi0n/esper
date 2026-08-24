@@ -139,6 +139,39 @@ func unitDir() string {
 	return filepath.Join(home, ".config", "systemd", "user")
 }
 
+// ourPath is the absolute path of the running binary, or "" if it cannot be
+// had. On Linux this comes from `/proc/self/exe`, so it is already resolved.
+func ourPath() string {
+	path, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
+// unitFor is the unit, starting the binary that is installing it.
+//
+// The embedded copy names `%h/.local/bin/esper`, which is where
+// `make install-user` puts it — and that is one of three places it can be. A
+// distribution package installs `/usr/bin/esper`; a build from source usually
+// goes to `/usr/local/bin`. A unit carrying the wrong one of those installs
+// without complaint, enables without complaint, and then fails to start with
+// 203/EXEC on a machine where everything looks present.
+//
+// That is not hypothetical: the .deb installed `/usr/bin/esper` next to a unit
+// starting `%h/.local/bin/esper`, and the broker's package did the same with
+// `/usr/local/bin`. Both were found by installing the packages in a Debian and
+// reading the unit beside the binary.
+//
+// The binary doing the installing is the one that will be started, and it
+// knows where it is, so it says so rather than guessing a prefix.
+func unitFor(executable string) string {
+	if executable == "" {
+		return Unit
+	}
+	return strings.ReplaceAll(Unit, "%h/.local/bin/esper", executable)
+}
+
 // installUnit writes the unit, unless one is already there that this did not
 // write.
 func installUnit(r Report) (string, error) {
@@ -148,8 +181,10 @@ func installUnit(r Report) (string, error) {
 	}
 	path := filepath.Join(dir, unitName)
 
+	wanted := unitFor(ourPath())
+
 	switch existing, err := os.ReadFile(path); {
-	case err == nil && string(existing) == Unit:
+	case err == nil && string(existing) == wanted:
 		r.say("  unchanged  %s", path)
 		return path, nil
 	case err == nil:
@@ -163,7 +198,7 @@ func installUnit(r Report) (string, error) {
 		return "", fmt.Errorf("reading %s: %w", path, err)
 	}
 
-	if err := os.WriteFile(path, []byte(Unit), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(wanted), 0o600); err != nil {
 		return "", fmt.Errorf("writing %s: %w", path, err)
 	}
 	return path, nil

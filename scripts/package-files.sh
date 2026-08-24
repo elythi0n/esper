@@ -39,6 +39,23 @@ unit_source() {
   esac
 }
 
+# A packaged unit starts the packaged binary.
+#
+# The units are written for the paths a person installing by hand uses:
+# `make install-user` puts the engine in `~/.local/bin`, and a build from
+# source goes to `/usr/local/bin`. A package puts both in `/usr/bin`. Copied
+# across unchanged, the unit a package installs names a path that package does
+# not create — so it installs, enables, and fails to start with 203/EXEC on a
+# machine where everything looks present.
+#
+# Found by installing the .deb in a Debian and reading the unit next to the
+# binary; it was true of both packages. `scripts/check-install.sh` now holds
+# every installed unit to starting a file the same package installed.
+stage_unit() {
+  install -Dm644 "$1" "$2"
+  sed -i -e 's|%h/\.local/bin/|/usr/bin/|g' -e 's|/usr/local/bin/|/usr/bin/|g' "$2"
+}
+
 placed=0
 while IFS=$'\t' read -r package kind name; do
   case $package in ''|\#*) continue ;; esac
@@ -51,10 +68,10 @@ while IFS=$'\t' read -r package kind name; do
       install -Dm755 "$src" "$dest/usr/bin/$name"
       ;;
     unit-user)
-      install -Dm644 "$(unit_source "$name")" "$dest/usr/lib/systemd/user/$name"
+      stage_unit "$(unit_source "$name")" "$dest/usr/lib/systemd/user/$name"
       ;;
     unit-system)
-      install -Dm644 "$(unit_source "$name")" "$dest/usr/lib/systemd/system/$name"
+      stage_unit "$(unit_source "$name")" "$dest/usr/lib/systemd/system/$name"
       ;;
     licence)
       # The one thing distributions genuinely disagree about.

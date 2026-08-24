@@ -1,13 +1,22 @@
 # Esper, as two RPMs.
 #
-# **Written and not built here.** This project is developed on Arch, which has
-# no `rpmbuild`, so unlike the Arch and Debian packaging this file has never
-# produced a package on the machine it was written on. That is stated rather
-# than hidden: `scripts/check-packages.sh` checks what it can — that the files
-# it claims to install are the ones the manifest names — and cannot check that
-# `rpmbuild` accepts it. Building it on a Fedora runner is a release-checklist
-# item, and until that has happened this is a best effort by somebody who could
-# not run it.
+# **Built, in a Fedora, by `make check-rpm`.** For most of its life this file
+# carried a paragraph admitting the opposite: this project is developed on
+# Arch, which has no `rpmbuild`, so the spec had never produced a package and
+# `scripts/check-packages.sh` could only compare its `%files` list against the
+# manifest. Saying so was honest and was not the same as checking.
+#
+# The first time it met `rpmbuild`, three things were wrong that no amount of
+# reading had found — `BuildRequires` was short a C++ compiler, a Go test
+# borrowed `XDG_RUNTIME_DIR` from a logged-in session, and a Rust test assumed
+# two statements run within 20 ms of each other. All three are the same
+# mistake: something true of the machine it was written on, written down as
+# though it were true of the software.
+#
+# `make check-rpm` builds this in a pinned Fedora container, runs the project's
+# suite in `%check`, then installs what comes out on a *clean* Fedora and has
+# systemd read the units. It compiles the whole workspace, so it is tens of
+# minutes and is not part of `make all`.
 #
 # `%install` calls the same script the other two formats call, so the files
 # that land in the buildroot cannot drift from them. `%files` is the exception:
@@ -33,6 +42,11 @@ BuildRequires:  rust >= 1.98
 BuildRequires:  make
 BuildRequires:  cmake
 BuildRequires:  nasm
+# `openh264-sys2` builds the codec from C++ source. Fedora's build root has a C
+# compiler and no C++ one, so without this the build reaches the video crate
+# after several minutes of compiling everything else and stops with
+# `failed to find tool "g++"`. Found by building it.
+BuildRequires:  gcc-c++
 Requires:       systemd
 
 %description
@@ -83,6 +97,6 @@ make test
 %{_prefix}/lib/systemd/system/esper-broker.service
 
 %changelog
-* Tue Sep 09 2026 elythi0n <https://github.com/elythi0n/esper> - 0.0.0-1
-- Not yet released. This spec has not been built by its author; see the
-  comment at the top of the file.
+* Wed Sep 09 2026 elythi0n <https://github.com/elythi0n/esper> - 0.0.0-1
+- Not yet released. Built and installed in a Fedora container by
+  `make check-rpm`; see the comment at the top of the file.

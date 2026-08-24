@@ -460,6 +460,33 @@ check-published:
 check-packages:
 	@./scripts/check-packages.sh
 
+## Verify every container image is pinned to a digest somebody reviewed
+##
+## A tag is a pointer this project does not hold, and a floating one is
+## invisible until the day it moves. Runs anywhere; needs no containers.
+.PHONY: check-images
+check-images:
+	@./scripts/check-images.sh
+
+## Install the packages on the distributions they are for
+##
+## `check-packages` asks whether the manifest kept up with the build, on this
+## machine, which is Arch. This asks whether `dpkg -i` works, on Debian, which
+## this machine is not. Needs docker, and the images on first run.
+.PHONY: check-install
+check-install:
+	@./scripts/check-install.sh
+
+## Build the RPM the way Fedora would, in a Fedora
+##
+## The spec was written in Phase 16 and could not be built here for want of
+## `rpmbuild`. This builds it, runs the project's own suite in `%check`, and
+## installs what comes out. It compiles the whole workspace from source: it is
+## measured in tens of minutes, not seconds, and is not part of `make all`.
+.PHONY: check-rpm
+check-rpm: dist-source
+	@./scripts/check-rpm.sh
+
 ## Verify a build does not depend on where it happened
 ##
 ## The Go half only: seconds, and it catches the whole class. See

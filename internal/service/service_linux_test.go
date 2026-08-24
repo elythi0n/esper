@@ -44,7 +44,7 @@ func TestTheUnitIsWrittenWhenThereIsNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading back what was written: %v", err)
 	}
-	if string(written) != Unit {
+	if string(written) != unitFor(ourPath()) {
 		t.Error("what was written is not the unit this binary carries")
 	}
 
@@ -106,7 +106,7 @@ func TestAnIdenticalUnitIsLeftAloneAndSaidToBeUnchanged(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatalf("making the unit directory: %v", err)
 	}
-	if err := os.WriteFile(path, []byte(Unit), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(unitFor(ourPath())), 0o600); err != nil {
 		t.Fatalf("writing the unit: %v", err)
 	}
 
@@ -154,18 +154,11 @@ func TestAReportWithNowhereToWriteChangesNothing(t *testing.T) {
 		t.Fatalf("installing with no report: %v", err)
 	}
 	written, err := os.ReadFile(path)
-	if err != nil || string(written) != Unit {
+	if err != nil || string(written) != unitFor(ourPath()) {
 		t.Fatal("the unit was not written when there was nobody to tell about it")
 	}
 }
 
-/*
-The unit itself, which is the only copy there is.
-
-It lives in this package rather than in `packaging/` precisely so the file the
-binary writes and the file a distribution ships cannot drift apart — so it is
-worth holding to more than "it is a string".
-*/
 /*
 The unit file, read the way systemd reads it.
 
@@ -302,8 +295,20 @@ func TestSystemdVerifiesTheEmbeddedUnit(t *testing.T) {
 
 	// `--user`, because it is a user unit and the system manager's rules are
 	// not the ones it will be read under.
+	/*
+	   `XDG_RUNTIME_DIR`, because the user manager needs somewhere to be before
+	   it will read anything, and it does not create it.
+
+	   Every machine with somebody logged into it has one, which is why this
+	   passed everywhere it was ever run and failed the first time it ran
+	   somewhere else: inside `%check` of an RPM build, where the verdict was
+	   "Failed to initialize manager: No such device or address" and said
+	   nothing about the unit. A test that borrows a session's environment is a
+	   test that cannot run in a build system, and a build system is exactly
+	   where a distribution's packager will run it.
+	*/
 	cmd := exec.Command(analyze, "verify", "--user", path) // #nosec G204 -- a looked-up path and a temp file
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_RUNTIME_DIR="+t.TempDir())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("systemd will not accept the unit this binary installs:\n%s", out)
@@ -412,5 +417,55 @@ func TestACommandsOwnWordsSurviveTheWrapper(t *testing.T) {
 	silent := run(Report{To: said}, "sh", "-c", "exit 3")
 	if silent == nil || !strings.Contains(silent.Error(), "sh -c") {
 		t.Errorf("a silent failure lost the command it was: %v", silent)
+	}
+}
+
+/*
+The unit starts the binary that installed it.
+
+The embedded copy names `%h/.local/bin/esper`, which is where `make
+install-user` puts it — and is one of three places it can be. A distribution
+package installs `/usr/bin/esper`, and both packages shipped a unit still
+naming a path they do not create: `systemctl enable --now` would have failed
+with 203/EXEC on a machine where everything looked installed. Found by
+installing the .deb in a Debian and reading the unit beside the binary.
+
+`%h` is checked for by name because that is the specifier that was wrong, and
+because a unit installed system-wide that points into somebody's home is the
+particular shape of the mistake.
+*/
+func TestTheUnitStartsTheBinaryThatInstalledIt(t *testing.T) {
+	me := ourPath()
+	if me == "" {
+		t.Skip("this platform will not say where the running binary is")
+	}
+
+	written := unitFor(me)
+	if strings.Contains(written, "%h/.local/bin") {
+		t.Error("the unit still starts a path inside somebody's home")
+	}
+
+	var start string
+	for _, line := range strings.Split(written, "\n") {
+		if after, ok := strings.CutPrefix(line, "ExecStart="); ok {
+			start = after
+			break
+		}
+	}
+	if start == "" {
+		t.Fatal("the unit has no ExecStart, so there is nothing to start")
+	}
+	command, _, _ := strings.Cut(start, " ")
+	if command != me {
+		t.Errorf("the unit starts %s and this binary is %s", command, me)
+	}
+	if _, err := os.Stat(command); err != nil {
+		t.Errorf("the unit starts %s, which is not there: %v", command, err)
+	}
+
+	// And with nowhere to read a path from, the embedded copy is used rather
+	// than a unit with an empty ExecStart.
+	if unitFor("") != Unit {
+		t.Error("with no executable path the unit should be the embedded one, unchanged")
 	}
 }

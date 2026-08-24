@@ -26,17 +26,50 @@ use esper_rendezvous::{Broker, Limits, RelayLimits};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None | Some("version" | "--version" | "-v") => {
+        None => {
             print_version();
             ExitCode::SUCCESS
         }
-        Some("identity") => match print_identity() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("esper-broker identity: {e}");
-                ExitCode::FAILURE
+        Some("version" | "--version" | "-v") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            if rest.iter().any(|a| a == "--help" || a == "-h") {
+                println!("{}", version_usage());
+                return ExitCode::SUCCESS;
             }
-        },
+            if let Some(unknown) = rest.first() {
+                eprintln!(
+                    "esper-broker version: unknown option {unknown:?}\n\n{}",
+                    version_usage()
+                );
+                return ExitCode::FAILURE;
+            }
+            print_version();
+            ExitCode::SUCCESS
+        }
+        Some("identity") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            // `identity` creates the key if there is not one yet, so a person
+            // asking what the command does was getting a key file written into
+            // their home as the answer. Asking is asking.
+            if rest.iter().any(|a| a == "--help" || a == "-h") {
+                println!("{}", identity_usage());
+                return ExitCode::SUCCESS;
+            }
+            if let Some(unknown) = rest.first() {
+                eprintln!(
+                    "esper-broker identity: unknown option {unknown:?}\n\n{}",
+                    identity_usage()
+                );
+                return ExitCode::FAILURE;
+            }
+            match print_identity() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("esper-broker identity: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("serve") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             // **Asking about a command is asking, not attempting.** This
@@ -377,6 +410,27 @@ fn serve_usage() -> String {
      \x20 --relay-pairs 64       how many pairs may be relayed at once\n\
      \n\
      for example: esper-broker serve --listen :7443"
+        .to_owned()
+}
+
+fn identity_usage() -> String {
+    "usage: esper-broker identity\n\
+     \n\
+     Print this broker's key, which peers pin with --broker-key, and the same\n\
+     key as words for reading aloud. Creates the key if there is not one yet.\n\
+     \n\
+     The key lives beside this machine's Esper state. `serve --identity <path>`\n\
+     is what puts it somewhere else, and this prints whichever one that command\n\
+     would use."
+        .to_owned()
+}
+
+fn version_usage() -> String {
+    "usage: esper-broker version\n\
+     \n\
+     Print the version, the build time and the protocol versions this broker\n\
+     speaks. Two peers and a broker have to agree on the protocol; the numbers\n\
+     here are what this one will accept."
         .to_owned()
 }
 

@@ -25,7 +25,7 @@
 # The toolchain is pinned to the same version as `rust-toolchain.toml`: a
 # container that builds with a different compiler than the repository is a
 # container that can fail in a way nothing else reproduces.
-FROM rust:1.98-slim-bookworm AS build
+FROM rust:1.98-slim-bookworm@sha256:6ac25dcaa81e06721043f9a815b6000c87ba2f56bf7b82a3ad0e65ae71067e0d AS build
 
 # aws-lc-sys builds C and assembly and asks for cmake and a C compiler. Nothing
 # else in the broker's dependency tree needs a build tool — no codec, no
@@ -51,7 +51,7 @@ RUN cd core && cargo build --release -p esper-broker
 #
 # Distroless: a C runtime and nothing else. No shell means no shell to get,
 # which matters for the one process here that strangers can send packets to.
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:777e96cf322c46bc32aca926c263624c4dc8d7cf37e2fa65ba2c7e697318ebbb
 
 COPY --from=build /src/core/target/release/esper-broker /usr/local/bin/esper-broker
 
