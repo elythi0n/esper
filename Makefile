@@ -516,6 +516,19 @@ check-rust-coverage:
 	$(GUARD_ROOT)
 	@scripts/check-rust-coverage.sh
 
+## Comments that say a thing happens in one place, held to it
+##
+## Three faults this week were a comment asserting a property the code beneath
+## it did not have — a store loader that said both halves list the same devices
+## while one dropped entries, a supervisor that said it told the engine its
+## name and never did, a `keep` that said it could be found afterwards and
+## recorded it as something else. None was visible in a diff. Where such a
+## claim is a pattern that may appear in exactly one file, this holds it there.
+.PHONY: check-one-place
+check-one-place:
+	$(GUARD_ROOT)
+	@python3 ./scripts/check-one-place.py
+
 ## One mistake, one sentence, asked of all three built binaries
 ##
 ## Every command refuses an option it does not know; what they did not do is
@@ -737,7 +750,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-messages check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-one-place check-messages check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

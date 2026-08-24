@@ -303,9 +303,20 @@ fn describe(r: &PairResult) -> String {
 /// Pairing is first contact: neither side has the other's key yet, so the TLS
 /// layer cannot authenticate anyone. The code does that job, inside the PAKE.
 ///
-/// **This authority must never be used for a session.** It is confined to a
-/// host in pairing mode, with a live offer, for the sixty seconds that offer
-/// lasts. The name is deliberately alarming.
+/// **This authority must never be used for a session.** The name is
+/// deliberately alarming, and there are exactly two places it belongs:
+///
+/// 1. **A host in pairing mode**, with a live offer, for the sixty seconds
+///    that offer lasts — `esper-engine`'s `pairing` and `invite_cmd`.
+/// 2. **A broker**, in `esper-rendezvous`, where accepting a key nobody has
+///    seen before is the whole job: it introduces two strangers and stores
+///    nothing, and it never opens a session with either of them.
+///
+/// The second was left out of this list until somebody went looking, which is
+/// the failure this kind of sentence invites — an auditor reading "confined to
+/// a host in pairing mode" would not think to check a crate it does not name,
+/// and somebody adding a third use could point at the broker as precedent.
+/// `scripts/check-one-place.py` holds the list now.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnyKeyForPairingOnly;
 

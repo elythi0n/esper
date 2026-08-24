@@ -285,6 +285,8 @@ jobs:
         run: python3 ./scripts/check-vocabularies.py
       - name: every command somebody is told about can be asked about
         run: python3 ./scripts/check-help.py
+      - name: a comment that says "the only place" is the only place
+        run: python3 ./scripts/check-one-place.py
       - name: unsafe appears only where FFI needs it
         run: python3 ./scripts/check-unsafe-inventory.py
       - name: the Windows scan-code table is derived, not transcribed
