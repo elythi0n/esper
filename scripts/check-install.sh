@@ -199,10 +199,36 @@ case "$refused" in
   *) note_fail "Debian 12 refused the package, but not for the reason expected: ${refused:-nothing}" ;;
 esac
 
+# ── And the one format this project does not build ──────────────────────────
+#
+# The PKGBUILD is built by `makepkg`, by a packager, in their tree. So the
+# question here is not whether it produces a package — it is whether `makepkg`
+# can read it at all, because a PKGBUILD that fails to parse fails for them,
+# with this project's name on it, and nothing here would have known.
+#
+# `--printsrcinfo` is the cheap half: it sources the file and prints what it
+# declares. The two package names it declares are then held against the
+# manifest, which is the same "one list decides" rule the other two formats
+# follow — a split package that renames half of itself is a package somebody
+# installs and does not get.
+checked=$((checked + 1))
+srcinfo=$("$run" --ro "$here/packaging/arch:/pkg" --tmpfs /work --user "$(id -u):$(id -g)" arch -- sh -c '
+cp /pkg/PKGBUILD /work/ && cd /work && makepkg --printsrcinfo' 2>&1)
+
+if ! printf '%s' "$srcinfo" | grep -q '^pkgbase = '; then
+  note_fail "makepkg will not read packaging/arch/PKGBUILD:
+$(printf '%s' "$srcinfo" | head -5 | sed 's/^/      /')"
+else
+  declared=$(printf '%s' "$srcinfo" | awk '/^pkgname = /{print $3}' | LC_ALL=C sort | tr '\n' ' ')
+  expected=$(grep -v '^#' "$here/packaging/contents.tsv" | awk -F'\t' '$1 != "-" && $1 != "" {print $1}' \
+    | LC_ALL=C sort -u | tr '\n' ' ')
+  [ "$declared" = "$expected" ] || note_fail "the PKGBUILD declares [$declared] and contents.tsv names [$expected]"
+fi
+
 # A floor under the check itself: a run that tried nothing agrees with
 # everything, and every one of these is a container that could have failed to
 # start for reasons having nothing to do with the packages.
-if [ "$checked" -lt 5 ]; then
+if [ "$checked" -lt 6 ]; then
   echo "  ✗ install: only $checked checks ran, which is not all of them" >&2
   exit 1
 fi
@@ -213,4 +239,4 @@ if [ "$fail" -ne 0 ]; then
   echo "  another distribution, which this machine is not."
   exit 1
 fi
-echo "  ✓ install: $checked checks — the .debs install, run, verify and remove on Debian 13, every unit starts a file its package installed, nothing links a display library, the broker installs alone, and the glibc floor is refused by Debian 12"
+echo "  ✓ install: $checked checks — the .debs install, run, verify and remove on Debian 13, every unit starts a file its package installed, nothing links a display library, the broker installs alone, the glibc floor is refused by Debian 12, and makepkg can read the PKGBUILD"

@@ -777,11 +777,14 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-one-place check-messages check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-one-place check-messages check-images check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full
-ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz check-reproducible-full check-screens
+# `check-install` and `check-rpm` are here and not in `ci`: they need docker,
+# and `check-rpm` compiles the whole workspace in a container, which is tens of
+# minutes rather than seconds.
+ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz check-reproducible-full check-screens check-install check-rpm
 
 ## Install both binaries to $(PREFIX)/bin (may need sudo)
 .PHONY: install

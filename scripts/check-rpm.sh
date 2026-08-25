@@ -84,7 +84,11 @@ cp -r ~/rpmbuild/RPMS ~/rpmbuild/SRPMS /out/
 # Left readable and removable by whoever started this. The container builds as
 # its own user, and a directory it owns is one the host cannot clean up — which
 # turns a temporary directory into a permanent one, quietly, every run.
-chmod -R a+rwX /out
+#
+# The copied directories only: /out itself belongs to the host, and chmod
+# needs ownership rather than write permission, so including it fails the whole
+# command after a build that had already succeeded.
+chmod -R a+rwX /out/RPMS /out/SRPMS
 " > "$work/build.log" 2>&1; then
   note_fail "rpmbuild failed. The last of it:"
   tail -25 "$work/build.log" | sed 's/^/      /'
@@ -168,8 +172,12 @@ echo ok
 checked=$((checked + 1))
 engine_rpm=$(printf '%s' "$found" | grep -v -- '-broker' | grep -v debuginfo | grep -v debugsource | head -1)
 if [ -n "$engine_rpm" ]; then
+  # The same path as the container sees it. Written with sed rather than bash
+  # substitution because the pattern holds a `/` either way and the expression
+  # that results is unreadable.
+  inside=$(printf '%s' "$engine_rpm" | sed "s|$work/out|/rpms|")
   needs=$("$run" --ro "$work/out:/rpms" fedora -- \
-    rpm -qp --requires "${engine_rpm/$work\/out//rpms}" 2>/dev/null | grep -c 'libc.so.6(GLIBC_' || true)
+    rpm -qp --requires "$inside" 2>/dev/null | grep -c 'libc.so.6(GLIBC_' || true)
   [ "${needs:-0}" -gt 0 ] || note_fail "the esper package requires no versioned glibc symbol, which a dynamically linked build always does"
 else
   note_fail "could not find the esper package among what was built"
