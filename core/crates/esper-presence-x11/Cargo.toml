@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+esper-desktop.workspace = true
 esper-input.workspace = true
 esper-presence.workspace = true
 thiserror.workspace = true

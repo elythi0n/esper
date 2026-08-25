@@ -122,7 +122,7 @@ impl X11Presenter {
             });
         }
         let (conn, screen_num) = x11rb::connect(None).map_err(|e| PresentError::Unavailable {
-            tried: format!("X11 via DISPLAY: {e}"),
+            tried: esper_desktop::x11_failed(&e.to_string()),
         })?;
         let setup = conn.setup().clone();
         let screen = setup

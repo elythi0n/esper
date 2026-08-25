@@ -487,6 +487,16 @@ check-install:
 check-rpm: dist-source
 	@./scripts/check-rpm.sh
 
+## Ask a real Wayland session what it offers
+##
+## This machine is X11 under XFCE, so every Wayland claim in the tracker was
+## deferred for want of somewhere to test it. The rig is a sway session in a
+## container — nothing is installed here. Needs docker; builds the rig on
+## first run.
+.PHONY: check-wayland
+check-wayland:
+	@./scripts/check-wayland.sh
+
 ## Verify a build does not depend on where it happened
 ##
 ## The Go half only: seconds, and it catches the whole class. See
@@ -784,7 +794,7 @@ ci: check-isolation check-reached check-shaper check-trail check-host-decides ch
 # `check-install` and `check-rpm` are here and not in `ci`: they need docker,
 # and `check-rpm` compiles the whole workspace in a container, which is tens of
 # minutes rather than seconds.
-ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz check-reproducible-full check-screens check-install check-rpm
+ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz check-reproducible-full check-screens check-install check-rpm check-wayland
 
 ## Install both binaries to $(PREFIX)/bin (may need sudo)
 .PHONY: install

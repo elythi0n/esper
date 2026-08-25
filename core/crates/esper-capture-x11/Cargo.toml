@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+esper-desktop.workspace = true
 esper-capture.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

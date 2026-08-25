@@ -511,7 +511,7 @@ impl X11Presence {
     /// is being *offered*, which is one of the moments a person might want it.
     pub fn open() -> Result<Self, PresenceError> {
         let (conn, screen_num) = x11rb::connect(None).map_err(|e| PresenceError::NoBackend {
-            tried: format!("X11 via DISPLAY: {e}"),
+            tried: esper_desktop::x11_failed(&e.to_string()),
         })?;
         let screen =
             conn.setup()

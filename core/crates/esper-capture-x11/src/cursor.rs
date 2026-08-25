@@ -49,7 +49,7 @@ impl X11Cursor {
     /// Connect, and check XFIXES is really there.
     pub fn open() -> Result<Self, CaptureError> {
         let (conn, _) = x11rb::connect(None).map_err(|e| CaptureError::NoBackend {
-            tried: format!("X11 via DISPLAY: {e}"),
+            tried: esper_desktop::x11_failed(&e.to_string()),
         })?;
         // Version 1 is enough for `GetCursorImage`; asked for rather than
         // assumed, because a server can list an extension it will not serve.

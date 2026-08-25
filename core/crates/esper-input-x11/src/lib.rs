@@ -79,7 +79,7 @@ impl X11Injector {
     /// Connect, check XTEST is there, and check the keycode assumption.
     pub fn open() -> Result<Self, InputError> {
         let (conn, screen_num) = x11rb::connect(None).map_err(|e| InputError::NoBackend {
-            tried: format!("X11 via DISPLAY: {e}"),
+            tried: esper_desktop::x11_failed(&e.to_string()),
         })?;
         let root = conn
             .setup()

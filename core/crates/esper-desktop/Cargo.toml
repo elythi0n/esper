@@ -1,0 +1,16 @@
+[package]
+name = "esper-desktop"
+description = "Which display server this machine is running, so that a backend which cannot start can say why rather than name a variable."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# No dependencies. The whole crate reads three environment variables and
+# decides what they mean, and a thing that small with a dependency is a thing
+# that will one day fail to build for a reason unrelated to what it does.
+[dependencies]

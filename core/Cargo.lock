@@ -395,6 +395,7 @@ name = "esper-capture-x11"
 version = "0.0.0"
 dependencies = [
  "esper-capture",
+ "esper-desktop",
  "esper-display-lock",
  "rustix",
  "thiserror",
@@ -486,6 +487,10 @@ dependencies = [
  "thiserror",
  "tracing",
 ]
+
+[[package]]
+name = "esper-desktop"
+version = "0.0.0"
 
 [[package]]
 name = "esper-dialog"
@@ -608,6 +613,7 @@ dependencies = [
 name = "esper-input-x11"
 version = "0.0.0"
 dependencies = [
+ "esper-desktop",
  "esper-display-lock",
  "esper-input",
  "esper-keeper",
@@ -715,6 +721,7 @@ dependencies = [
 name = "esper-presence-x11"
 version = "0.0.0"
 dependencies = [
+ "esper-desktop",
  "esper-display-lock",
  "esper-input",
  "esper-keeper",
@@ -740,6 +747,7 @@ dependencies = [
  "esper-capture",
  "esper-capture-x11",
  "esper-color",
+ "esper-desktop",
  "esper-display-lock",
  "esper-present",
  "thiserror",
