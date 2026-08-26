@@ -140,6 +140,60 @@ if [ "$remote" != "absent" ]; then
     precisely because no portal offered it."
 fi
 
+# ── GNOME, which is where most people are ──────────────────────────────────
+#
+# The sway rig cannot answer anything about input through a portal, because
+# wlroots has no RemoteDesktop portal to ask. GNOME does, and Fedora and Ubuntu
+# are GNOME on Wayland by default, so this is the path most people would meet
+# and the only one that could justify a D-Bus dependency.
+#
+# `mutter --headless --virtual-monitor` with `xdg-desktop-portal-gnome` behind
+# it. What can be measured here is what the portal **offers**; what cannot is a
+# granted session, because granting is a person's act and this rig has no
+# person. Every assertion below is about the first kind.
+gnome_rig=esper-wayland-gnome
+if docker image inspect "$gnome_rig" >/dev/null 2>&1; then
+  gnome=$("$here/scripts/in-container.sh" --built "$gnome_rig" -- sh -c '
+ask() {
+  dbus-send --session --dest=org.freedesktop.portal.Desktop --type=method_call --print-reply \
+    /org/freedesktop/portal/desktop org.freedesktop.DBus.Properties.Get \
+    "string:org.freedesktop.portal.$1" "string:$2" 2>/dev/null | grep -oE "uint32 [0-9]+" | awk "{print \$2}"
+}
+echo "screencast=$(ask ScreenCast version)"
+echo "remotedesktop=$(ask RemoteDesktop version)"
+echo "devices=$(ask RemoteDesktop AvailableDeviceTypes)"
+methods=$(dbus-send --session --dest=org.freedesktop.portal.Desktop --type=method_call --print-reply \
+  /org/freedesktop/portal/desktop org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null \
+  | sed -n "/interface name=\"org.freedesktop.portal.RemoteDesktop\"/,/<\/interface>/p")
+echo "eis=$(printf "%s" "$methods" | grep -c ConnectToEIS)"
+echo "notify=$(printf "%s" "$methods" | grep -c "method name=\"Notify")"
+' 2>/dev/null)
+  gvalue() { printf '%s' "$gnome" | awk -F= -v k="$1" '$1 == k { print $2; exit }'; }
+
+  checked=$((checked + 1))
+  [ -n "$(gvalue remotedesktop)" ] && [ "$(gvalue remotedesktop)" != "" ] \
+    || note_fail "GNOME offers no RemoteDesktop portal, which is the only way to inject input there"
+
+  # Keyboard and pointer. Touch is a bonus and is not required of a desktop.
+  checked=$((checked + 1))
+  devices=$(gvalue devices)
+  [ $(( devices & 3 )) -eq 3 ] 2>/dev/null \
+    || note_fail "GNOME's RemoteDesktop offers device types $devices, which is not both a keyboard and a pointer"
+
+  # Two input paths, and the cheaper one is the plain-D-Bus `Notify*` calls:
+  # `ConnectToEIS` hands back a socket for libei, and the `Notify*` methods
+  # need no second library at all. Both are asserted because the choice between
+  # them is a real one and losing either would change it.
+  checked=$((checked + 1))
+  [ "$(gvalue eis)" -ge 1 ] 2>/dev/null \
+    || note_fail "GNOME's RemoteDesktop has no ConnectToEIS, so the libei path is not on offer"
+  checked=$((checked + 1))
+  [ "$(gvalue notify)" -ge 6 ] 2>/dev/null \
+    || note_fail "GNOME's RemoteDesktop offers $(gvalue notify) Notify methods; input without libei needs the pointer and keyboard ones"
+else
+  echo "  … wayland: no $gnome_rig image, so GNOME went unasked" >&2
+fi
+
 # ── And what Esper says when it lands in one ────────────────────────────────
 #
 # The rig's real purpose. On a Wayland session Esper refuses to serve, which is
@@ -173,7 +227,7 @@ else
   echo "  … wayland: no build/esper-engine, so what Esper says here went unasked" >&2
 fi
 
-if [ "$checked" -lt 9 ]; then
+if [ "$checked" -lt 13 ]; then
   echo "  ✗ wayland: only $checked questions were asked, which is not all of them" >&2
   exit 1
 fi
@@ -185,4 +239,8 @@ if [ "$fail" -ne 0 ]; then
   echo "  answer is for is written above each check in this file."
   exit 1
 fi
-echo "  ✓ wayland: $checked answers from a real sway session — screencopy and ext-image-copy for pixels, virtual keyboard and pointer for input, ScreenCast v$screencast with a monitor source, and no RemoteDesktop portal"
+echo "  ✓ wayland: $checked answers from two real sessions —"
+echo "      sway:  screencopy and ext-image-copy for pixels, virtual keyboard and pointer for input,"
+echo "             ScreenCast v$screencast with a monitor source, and no RemoteDesktop portal at all"
+echo "      GNOME: RemoteDesktop v$(gvalue remotedesktop) offering keyboard, pointer and touch, by ConnectToEIS for libei"
+echo "             or by $(gvalue notify) plain Notify methods that need no second library"
