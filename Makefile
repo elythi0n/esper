@@ -497,6 +497,16 @@ check-rpm: dist-source
 check-wayland:
 	@./scripts/check-wayland.sh
 
+## Check this project's own D-Bus against the reference implementation's tool
+##
+## `esper-dbus` speaks the wire format itself rather than take 30 crates and
+## ~188,000 lines. A format you write yourself agrees with itself by
+## construction, so it is asked the same questions as `dbus-send` on a real
+## session bus. Needs docker.
+.PHONY: check-dbus
+check-dbus:
+	@./scripts/check-dbus.sh
+
 ## Verify a build does not depend on where it happened
 ##
 ## The Go half only: seconds, and it catches the whole class. See
@@ -794,7 +804,7 @@ ci: check-isolation check-reached check-shaper check-trail check-host-decides ch
 # `check-install` and `check-rpm` are here and not in `ci`: they need docker,
 # and `check-rpm` compiles the whole workspace in a container, which is tens of
 # minutes rather than seconds.
-ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz check-reproducible-full check-screens check-install check-rpm check-wayland
+ci-full: ci check-other-platforms test-race deny vet-deps miri-full fuzz check-reproducible-full check-screens check-install check-rpm check-wayland check-dbus
 
 ## Install both binaries to $(PREFIX)/bin (may need sudo)
 .PHONY: install

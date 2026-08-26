@@ -227,7 +227,57 @@ else
   echo "  … wayland: no build/esper-engine, so what Esper says here went unasked" >&2
 fi
 
-if [ "$checked" -lt 13 ]; then
+# ── The conversation, driven by this project's own client ──────────────────
+#
+# The strongest thing a container can establish about the portal. `esper-dbus`
+# and `esper-input-wayland` walk the real RemoteDesktop conversation:
+# `CreateSession`, then `SelectDevices`, then `Start`.
+#
+# The first two are answered by the portal without anybody present, so they
+# either work or they do not. `Start` raises a consent dialog, and a container
+# has nobody to click it — so **stopping at `Start` is the pass**, and stopping
+# anywhere earlier is a bug in this client.
+#
+# That distinction is the whole value of the check: "it did not work" is
+# useless, and "it got two calls in and waited for a person" is a statement
+# about where the code is correct. It found one real defect this way —
+# `CreateSession` needs a `session_handle_token`, and omitting it does not
+# produce an error: xdg-desktop-portal fails an assertion and aborts, so the
+# caller sees only "recipient disconnected without replying".
+probe="$here/core/target/debug/examples/try-portal"
+if docker image inspect "$gnome_rig" >/dev/null 2>&1; then
+  echo "  … wayland: walking the RemoteDesktop conversation"
+  (cd "$here/core" && cargo build -q -p esper-input-wayland --example try-portal) 2>/dev/null
+  if [ -x "$probe" ]; then
+    checked=$((checked + 1))
+    # Three seconds, because the thing being waited for is a person who is not
+    # there. A longer wait would measure patience rather than correctness.
+    walked=$("$here/scripts/in-container.sh" --built "$gnome_rig" \
+      --ro "$here/core/target/debug/examples:/probe" -- /probe/try-portal 3 2>/dev/null | tail -1)
+    case "$walked" in
+      granted*)
+        # Somebody or something approved it. Not expected here, and not a
+        # failure — it means more of the path is exercised, not less.
+        ;;
+      *"prompt for Start"*) ;;
+      *CreateSession*)
+        note_fail "the conversation stopped at CreateSession:
+      $walked
+    That is before any person is involved, so it is this client's fault." ;;
+      *SelectDevices*)
+        note_fail "the conversation stopped at SelectDevices:
+      $walked
+    The session was created and then refused, which is a malformed request." ;;
+      *)
+        note_fail "the RemoteDesktop conversation ended somewhere unexpected:
+      ${walked:-nothing at all}" ;;
+    esac
+  else
+    echo "  … wayland: no try-portal probe, so the conversation went unwalked" >&2
+  fi
+fi
+
+if [ "$checked" -lt 14 ]; then
   echo "  ✗ wayland: only $checked questions were asked, which is not all of them" >&2
   exit 1
 fi

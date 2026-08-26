@@ -471,6 +471,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-dbus"
+version = "0.0.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "esper-decode"
 version = "0.0.0"
 dependencies = [
@@ -596,6 +603,15 @@ dependencies = [
  "esper-proto",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "esper-input-wayland"
+version = "0.0.0"
+dependencies = [
+ "esper-dbus",
+ "esper-input",
+ "esper-proto",
 ]
 
 [[package]]

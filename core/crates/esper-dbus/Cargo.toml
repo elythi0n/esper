@@ -1,0 +1,16 @@
+[package]
+name = "esper-dbus"
+description = "The subset of D-Bus the desktop portals use, spoken directly: a session-bus connection, the EXTERNAL handshake, and marshalling for the types a portal call is made of."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Nothing. The whole point of this crate is that the alternative was 30 crates
+# and ~188,000 lines to call six methods on one interface.
+[dependencies]
+thiserror.workspace = true
