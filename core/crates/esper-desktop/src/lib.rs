@@ -101,8 +101,8 @@ pub fn session() -> Session {
 pub fn why_x11_failed(session: Session) -> Option<&'static str> {
     match session {
         Session::Wayland => Some(
-            "this is a Wayland session with no X server, and Esper's screen, \
-             input and indicator all go through X11 today",
+            "this is a Wayland session with no X server; input has a Wayland \
+             path, and capture and the session indicator still go through X11",
         ),
         Session::WaylandWithX11 => Some(
             "this is a Wayland session; XWayland is running, so X11 should have \

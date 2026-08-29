@@ -72,6 +72,7 @@ esper-input-win.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 esper-capture-x11.workspace = true
 esper-present-x11.workspace = true
+esper-input-wlr.workspace = true
 esper-input-x11.workspace = true
 esper-clipboard-x11.workspace = true
 esper-presence-x11.workspace = true

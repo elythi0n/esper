@@ -95,6 +95,23 @@ fn main() -> ExitCode {
             print_version();
             ExitCode::SUCCESS
         }
+        Some("input") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            if rest.iter().any(|a| a == "--help" || a == "-h") {
+                println!("{}", input_usage());
+                return ExitCode::SUCCESS;
+            }
+            if let Some(unknown) = rest.first() {
+                eprintln!(
+                    "{} input: unknown option {unknown:?}\n\n{}",
+                    net::me(),
+                    input_usage()
+                );
+                return ExitCode::FAILURE;
+            }
+            print_input();
+            ExitCode::SUCCESS
+        }
         Some("identity") => match print_identity() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -422,6 +439,40 @@ fn main() -> ExitCode {
     }
 }
 
+/// What the input ladder chooses here, and everything it tried.
+///
+/// The ladder runs when a *session* starts rather than when the host does, so
+/// a host's own output never shows it — and "I can see the screen and nothing
+/// I type arrives" is the fault this answers. It is also the only way to check
+/// the ladder's order against a real compositor, which is how the wlroots
+/// backend was held to being reachable rather than merely written.
+fn print_input() {
+    let chosen = injector::open();
+    println!("input backend");
+    println!();
+    if chosen.real {
+        println!("  in use     {}", chosen.sink.backend());
+    } else {
+        println!("  in use     nothing — this machine is view only");
+    }
+    println!();
+    println!("  tried");
+    for attempt in &chosen.attempts {
+        println!("      {attempt}");
+    }
+}
+
+fn input_usage() -> String {
+    "usage: esper-engine input\n\
+     \n\
+     Print which backend this machine would inject keys and pointer moves\n\
+     with, and what was tried before it. A host that can be seen and not\n\
+     controlled is view only, and this says why.\n\
+     \n\
+     Nothing is injected and no session is started."
+        .to_owned()
+}
+
 /// Load or create this device's identity and print its fingerprint.
 ///
 /// The fingerprint is what a person reads aloud to confirm two machines are
@@ -496,6 +547,7 @@ fn print_help() {
          \n\
          Commands:\n  \
            identity   print this device's fingerprint\n  \
+           input      which injection backend this machine can use\n  \
            discover   list the Esper devices on this network\n  \
            pair       pair with another device, in either direction\n  \
            config     show every setting and where its value came from\n  \

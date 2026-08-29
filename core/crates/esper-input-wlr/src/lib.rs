@@ -37,7 +37,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use esper_input::{Held, InputError, InputSink, Point, evdev_for_usage};
 use esper_proto::{Button, KeyEvent, PointerButton, Scroll};
-use wayland_client::protocol::{wl_keyboard, wl_pointer, wl_registry, wl_seat};
+use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
@@ -82,6 +82,13 @@ struct Found {
     keymap: Option<String>,
     /// Whether the seat said it has a keyboard at all.
     seat_has_keyboard: bool,
+    /// The first output's size, as the compositor reports it.
+    ///
+    /// Absolute pointer motion is a position within an extent, and the extent
+    /// has to be the screen the coordinates are in. Asking the compositor is
+    /// the only way to be right about that — a size passed in by a caller who
+    /// guessed puts every click at the wrong fraction of the screen.
+    output_size: Option<(u32, u32)>,
 }
 
 /// Input into a wlroots compositor.
@@ -137,6 +144,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Found {
             "zwlr_virtual_pointer_manager_v1" => {
                 state.pointers = Some(registry.bind(name, version.min(2), queue, ()));
             }
+            "wl_output" => {
+                // Bound only to be told its size. Version 2 is where `mode`
+                // carries the resolution.
+                let _output: wl_output::WlOutput = registry.bind(name, version.min(2), queue, ());
+            }
             _ => {}
         }
     }
@@ -188,6 +200,38 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Found {
             // wants the same bytes, so the terminator is kept and only trailing
             // nothing is trimmed.
             state.keymap = Some(text);
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for Found {
+    fn event(
+        state: &mut Self,
+        _: &wl_output::WlOutput,
+        event: wl_output::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let wl_output::Event::Mode {
+            flags,
+            width,
+            height,
+            ..
+        } = event
+        else {
+            return;
+        };
+        // Only the current mode. An output reports every mode it can do, and
+        // the others are sizes it is not showing.
+        if !matches!(flags, WEnum::Value(f) if f.contains(wl_output::Mode::Current)) {
+            return;
+        }
+        if state.output_size.is_none() {
+            state.output_size = Some((
+                u32::try_from(width).unwrap_or(0).max(1),
+                u32::try_from(height).unwrap_or(0).max(1),
+            ));
         }
     }
 }
@@ -261,6 +305,7 @@ impl WlrInput {
         let keyboard = keyboards.create_virtual_keyboard(&seat, &handle, ());
         let pointer = pointers.create_virtual_pointer(Some(&seat), &handle, ());
 
+        let output_size = found.output_size;
         let keymap_is_the_seat_s = found.keymap.is_some();
         let keymap = found
             .keymap
@@ -276,7 +321,9 @@ impl WlrInput {
             pointer,
             held: Held::new(),
             keymap_is_the_seat_s,
-            size: (width.max(1), height.max(1)),
+            // The compositor's own answer where there is one; the caller's
+            // guess only where the compositor offered no output.
+            size: output_size.unwrap_or((width.max(1), height.max(1))),
         };
         input.flush()?;
         Ok(input)

@@ -49,6 +49,30 @@ pub fn open() -> Chosen {
             }
             Err(e) => attempts.push(format!("x11 xtest: {e}")),
         }
+
+        // Then wlroots' own virtual devices.
+        //
+        // Second rather than first because X11 works under XWayland, which is
+        // most Wayland sessions, and it is the complete path. This one exists
+        // for the sessions where there is no X server at all — and on wlroots
+        // there is no RemoteDesktop portal either, so without it a sway host
+        // is view-only.
+        //
+        // It asks nobody's permission: the compositor grants these protocols
+        // to anything that can open its socket. That is weaker than the portal
+        // and is why the portal is preferred where one exists — but a wlroots
+        // compositor has none to prefer.
+        match esper_input_wlr::WlrInput::open() {
+            Ok(injector) => {
+                attempts.push(format!("{}: in use", esper_input_wlr::BACKEND));
+                return Chosen {
+                    sink: Box::new(injector),
+                    attempts,
+                    real: true,
+                };
+            }
+            Err(e) => attempts.push(format!("{}: {e}", esper_input_wlr::BACKEND)),
+        }
     }
     #[cfg(target_os = "windows")]
     {

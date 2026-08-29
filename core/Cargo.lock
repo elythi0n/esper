@@ -564,6 +564,7 @@ dependencies = [
  "esper-files",
  "esper-input",
  "esper-input-win",
+ "esper-input-wlr",
  "esper-input-x11",
  "esper-interfaces",
  "esper-keeper",

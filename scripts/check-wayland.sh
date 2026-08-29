@@ -196,6 +196,35 @@ else
   echo "  … wayland: no poke probe, so nothing was injected" >&2
 fi
 
+# ── And the engine's own ladder reaches for it ─────────────────────────────
+#
+# A backend that works and nothing calls is the pattern this project has a
+# check for, and it very nearly happened here: `esper-input-wlr` was proved
+# against sway while `esper-engine` had no dependency on it at all, so a real
+# host on a wlroots machine would still have been view-only.
+#
+# `esper-engine input` runs the ladder and reports what it chose. On this
+# machine that is X11; in a sway session X11 must fail and the wlroots backend
+# must be picked up behind it — which is the order the decision calls for, and
+# the only way to see it is to ask on a machine where the first rung is absent.
+if [ -x "$here/build/esper-engine" ]; then
+  checked=$((checked + 1))
+  ladder=$("$here/scripts/in-container.sh" --built "$rig" \
+    --ro "$here/build:/esper" -- /esper/esper-engine input 2>/dev/null \
+    | grep -m1 "in use" | sed 's/.*in use *//')
+  case "$ladder" in
+    wayland-wlr) ;;
+    "")
+      note_fail "\`esper-engine input\` said nothing about a backend in a sway session" ;;
+    *)
+      note_fail "in a sway session the engine chose \"$ladder\".
+    X11 is not available there, so the wlroots backend should have been next.
+    A backend nothing reaches is a backend that is not in the product." ;;
+  esac
+else
+  echo "  … wayland: no build/esper-engine, so the ladder went unasked" >&2
+fi
+
 # ── GNOME, which is where most people are ──────────────────────────────────
 #
 # The sway rig cannot answer anything about input through a portal, because
@@ -334,7 +363,7 @@ if docker image inspect "$gnome_rig" >/dev/null 2>&1; then
   fi
 fi
 
-if [ "$checked" -lt 15 ]; then
+if [ "$checked" -lt 16 ]; then
   echo "  ✗ wayland: only $checked questions were asked, which is not all of them" >&2
   exit 1
 fi
