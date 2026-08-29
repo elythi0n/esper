@@ -90,6 +90,13 @@ cat > "$HOME/.config/sway/config" <<'CONFIG'
 xwayland disable
 default_border none
 output HEADLESS-1 resolution 1280x720 position 0 0
+
+# A key bound to leaving evidence.
+#
+# This is how an injected key is proved to have arrived: the compositor, and
+# nothing else in the container, can run this command. A test that asked the
+# injecting process whether it had injected would be asking the wrong end.
+bindsym F9 exec touch "$XDG_RUNTIME_DIR/f9-arrived"
 CONFIG
 
 sway --config "$HOME/.config/sway/config" > "$XDG_RUNTIME_DIR/sway.log" 2>&1 & started+=($!)

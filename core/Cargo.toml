@@ -41,7 +41,8 @@ esper-link = { path = "crates/esper-link" }
 esper-discovery = { path = "crates/esper-discovery" }
 esper-dbus = { path = "crates/esper-dbus" }
 esper-desktop = { path = "crates/esper-desktop" }
-esper-input-wayland = { path = "crates/esper-input-wayland" }
+esper-input-portal = { path = "crates/esper-input-portal" }
+esper-input-wlr = { path = "crates/esper-input-wlr" }
 esper-interfaces = { path = "crates/esper-interfaces" }
 esper-files = { path = "crates/esper-files" }
 esper-bench = { path = "crates/esper-bench" }
@@ -92,6 +93,9 @@ x11rb = { version = "0.14", default-features = false, features = [
 # any desktop where a browser or `avahi-daemon` already holds port 5353 — and
 # for multicast group joins and TTL.
 socket2 = "0.6"
+wayland-client = "0.31"
+wayland-protocols-misc = "0.3"
+wayland-protocols-wlr = "0.3"
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

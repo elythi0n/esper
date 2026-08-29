@@ -140,6 +140,62 @@ if [ "$remote" != "absent" ]; then
     precisely because no portal offered it."
 fi
 
+# ── A key, injected, and the compositor's own evidence that it arrived ─────
+#
+# The end of the loop, and the only part of the Wayland work that is not a
+# measurement of what a compositor *offers*. `esper-input-wlr` takes a virtual
+# keyboard and pointer and presses F9; the rig's sway config binds F9 to a
+# command that writes a file.
+#
+# **The evidence is the compositor's, not the injector's.** The injecting
+# process cannot create that file; sway can, and only would if the key reached
+# it and resolved to F9 through the keymap. Asking the injector whether it had
+# injected would be asking the wrong end — it answered yes for an hour while
+# nothing was arriving.
+#
+# One defect was found getting here, and finding it took three wrong guesses
+# first — a keymap terminator, a modifier state, and the keycode convention,
+# each of which was changed and measured and made no difference. **A flush is
+# not a delivery**: the events were lost when the process exited straight
+# afterwards, which is exactly what happens at the end of a session, and the
+# events being lost there are the key *releases*.
+poke="$here/core/target/debug/examples/poke"
+echo "  … wayland: injecting a key into sway"
+# Built, and a failure to build is a failure here. Left conditional, a sabotage
+# that does not compile leaves the previous binary in place and this check
+# passes against code that is no longer in the tree — which is exactly what
+# happened to the D-Bus check before it was made unconditional.
+if ! (cd "$here/core" && cargo build -q -p esper-input-wlr --example poke) 2>/dev/null; then
+  note_fail "the injector would not build, so nothing was injected"
+elif [ -x "$poke" ]; then
+  checked=$((checked + 1))
+  arrived=$("$here/scripts/in-container.sh" --built "$rig" \
+    --ro "$here/core/target/debug/examples:/probe" -- sh -c '
+# A floor: the evidence must not already be there, or this check passes on a
+# file somebody else wrote.
+if [ -e "$XDG_RUNTIME_DIR/f9-arrived" ]; then echo "already-there"; exit 0; fi
+/probe/poke >/dev/null 2>&1 || { echo "poke-failed"; exit 0; }
+sleep 1
+if [ -f "$XDG_RUNTIME_DIR/f9-arrived" ]; then echo "arrived"; else echo "nothing"; fi
+' 2>/dev/null | tail -1)
+
+  case "$arrived" in
+    arrived) ;;
+    already-there)
+      note_fail "the evidence file existed before anything was injected, so this check proved nothing" ;;
+    poke-failed)
+      note_fail "the injector would not run against sway at all" ;;
+    *)
+      note_fail "a key was injected into sway and sway did not act on it.
+    The compositor accepts the protocol and reports the device, so what is wrong
+    is between the keycode and the binding. The one that has bitten before is a
+    flush that was never waited on: bytes reach the socket and the process exits
+    before the compositor reads them." ;;
+  esac
+else
+  echo "  … wayland: no poke probe, so nothing was injected" >&2
+fi
+
 # ── GNOME, which is where most people are ──────────────────────────────────
 #
 # The sway rig cannot answer anything about input through a portal, because
@@ -230,7 +286,7 @@ fi
 # ── The conversation, driven by this project's own client ──────────────────
 #
 # The strongest thing a container can establish about the portal. `esper-dbus`
-# and `esper-input-wayland` walk the real RemoteDesktop conversation:
+# and `esper-input-portal` walk the real RemoteDesktop conversation:
 # `CreateSession`, then `SelectDevices`, then `Start`.
 #
 # The first two are answered by the portal without anybody present, so they
@@ -247,8 +303,9 @@ fi
 probe="$here/core/target/debug/examples/try-portal"
 if docker image inspect "$gnome_rig" >/dev/null 2>&1; then
   echo "  … wayland: walking the RemoteDesktop conversation"
-  (cd "$here/core" && cargo build -q -p esper-input-wayland --example try-portal) 2>/dev/null
-  if [ -x "$probe" ]; then
+  if ! (cd "$here/core" && cargo build -q -p esper-input-portal --example try-portal) 2>/dev/null; then
+    note_fail "the portal probe would not build, so the conversation went unwalked"
+  elif [ -x "$probe" ]; then
     checked=$((checked + 1))
     # Three seconds, because the thing being waited for is a person who is not
     # there. A longer wait would measure patience rather than correctness.
@@ -277,7 +334,7 @@ if docker image inspect "$gnome_rig" >/dev/null 2>&1; then
   fi
 fi
 
-if [ "$checked" -lt 14 ]; then
+if [ "$checked" -lt 15 ]; then
   echo "  ✗ wayland: only $checked questions were asked, which is not all of them" >&2
   exit 1
 fi

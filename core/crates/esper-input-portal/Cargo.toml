@@ -1,5 +1,5 @@
 [package]
-name = "esper-input-wayland"
+name = "esper-input-portal"
 description = "Input on Wayland through the RemoteDesktop portal: the compositor grants the channel, and the keys go over D-Bus."
 version.workspace = true
 edition.workspace = true

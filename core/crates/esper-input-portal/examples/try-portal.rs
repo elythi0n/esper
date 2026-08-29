@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use esper_dbus::Connection;
-use esper_input_wayland::PortalInput;
+use esper_input_portal::PortalInput;
 
 fn main() -> std::process::ExitCode {
     // How long to wait at the consent prompt. A person gets two minutes by
