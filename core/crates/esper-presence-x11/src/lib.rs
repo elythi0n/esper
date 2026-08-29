@@ -74,7 +74,9 @@
 
 use esper_keeper::Undo;
 use esper_presence::locked::Locked;
-use esper_presence::{Blanking, HostEvent, Missing, Presence, PresenceError, Verdict, Watching};
+use esper_presence::{
+    Blanking, HostEvent, Missing, Presence, PresenceError, THICKNESS, Verdict, Watching, colour_of,
+};
 
 pub mod backdrop;
 use x11rb::connection::Connection;
@@ -92,47 +94,6 @@ use x11rb::rust_connection::RustConnection;
 
 /// The backend name reported in logs.
 pub const BACKEND: &str = "x11-frame";
-
-/// How thick the frame is, in pixels.
-///
-/// Four is enough to be unmissable at any scaling and small enough to cover
-/// nothing. A thinner line disappears on a high-density display.
-const THICKNESS: u16 = 4;
-
-/// The colour when the far end can only watch: amber.
-const WATCHING: u32 = 0x00FF_B000;
-
-/// The colour when the far end can type: red.
-///
-/// Different because "somebody is looking at my screen" and "somebody can use
-/// my machine" are different things to be told, and a single colour for both
-/// would train a person to ignore the one that matters.
-const CONTROLLING: u32 = 0x00FF_2020;
-
-/// The colour while the far end is recording: magenta.
-///
-/// **It takes precedence over the others**, because a border says one thing at
-/// a time and this is the thing that outlives the session. Somebody who can
-/// see their screen is being watched can decide what to do about it now;
-/// somebody whose screen is being *kept* has already lost that choice by the
-/// time they find out, so it is the fact that gets the colour.
-///
-/// Magenta because the other three are taken and because nothing else on a
-/// desktop is this colour by accident.
-const RECORDING: u32 = 0x00FF_00E0;
-
-/// The colour while the picture is held: blue.
-///
-/// **Deliberately not amber or red.** Those two mean "somebody is watching"
-/// and "somebody can type", and a paused session is neither — the point of the
-/// third colour is that a person glancing at their own screen can tell "held"
-/// from "being watched" without reading anything, which is the whole design of
-/// this indicator.
-///
-/// And it is a colour rather than the frame coming down: taking it away would
-/// say "nobody is connected", which is false and is the one lie this crate
-/// exists to prevent.
-const PAUSED: u32 = 0x0020_60FF;
 
 /// A pixel as three bytes, for a message a person reads.
 ///
@@ -155,25 +116,6 @@ fn as_rgb(pixel: u32, channels: u32) -> [u8; 3] {
         }
     }
     out
-}
-
-/// Which colour the frame is, for what the indicator is saying.
-///
-/// One function rather than the choice being made where the windows are
-/// built, because the check that reads the screen back has to expect exactly
-/// what was painted: two copies of this would eventually disagree, and the
-/// symptom would be a session that stops because the indicator is the wrong
-/// shade of correct.
-const fn colour_of(watching: &Watching) -> u32 {
-    if watching.recording {
-        RECORDING
-    } else if watching.paused {
-        PAUSED
-    } else if watching.controlling {
-        CONTROLLING
-    } else {
-        WATCHING
-    }
 }
 
 /// Whether the screensaver extension says an external saver is running.
@@ -965,6 +907,28 @@ impl X11Presence {
 }
 
 impl Presence for X11Presence {
+    // Both delegate to the inherent methods, which existed before the trait
+    // had to ask: a second backend made these questions everybody's.
+    fn panic_key_grabbed(&self) -> bool {
+        Self::panic_key_grabbed(self)
+    }
+
+    fn can_show(&self) -> bool {
+        Self::can_show(self)
+    }
+
+    fn why_no_panic_key(&self) -> Option<&'static str> {
+        (!Self::panic_key_grabbed(self))
+            .then_some("something else on this display has grabbed the combination")
+    }
+
+    fn why_cannot_show(&self) -> Option<&'static str> {
+        (!Self::can_show(self)).then_some(
+            "this display has no SHAPE extension, so a frame here \
+                                          would swallow every click on the edge of the screen",
+        )
+    }
+
     fn backend(&self) -> &'static str {
         BACKEND
     }

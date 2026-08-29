@@ -27,6 +27,14 @@
 //! becomes a different backend is how a session ends up injecting through
 //! `uinput` while its audit trail says otherwise.
 
+// Unix only, and empty elsewhere.
+//
+// A session bus is a unix socket, the layer shell and the virtual-device
+// protocols are Wayland, and none of that exists on Windows or in a macOS
+// application. The engine already takes these as Linux-only dependencies; this
+// is what lets the *workspace* type-check for another target without a stack
+// of `cfg` inside every function.
+#![cfg(unix)]
 use std::time::Duration;
 
 use esper_dbus::{BusError, Connection, Value};

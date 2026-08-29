@@ -574,6 +574,7 @@ dependencies = [
  "esper-pipeline",
  "esper-png",
  "esper-presence",
+ "esper-presence-wlr",
  "esper-presence-x11",
  "esper-present",
  "esper-present-x11",
@@ -749,6 +750,17 @@ dependencies = [
  "esper-keeper",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "esper-presence-wlr"
+version = "0.0.0"
+dependencies = [
+ "esper-keeper",
+ "esper-presence",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]

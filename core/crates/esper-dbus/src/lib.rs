@@ -17,6 +17,14 @@
 //! than failing obscurely.
 //!
 
+// Unix only, and empty elsewhere.
+//
+// A session bus is a unix socket, the layer shell and the virtual-device
+// protocols are Wayland, and none of that exists on Windows or in a macOS
+// application. The engine already takes these as Linux-only dependencies; this
+// is what lets the *workspace* type-check for another target without a stack
+// of `cfg` inside every function.
+#![cfg(unix)]
 mod value;
 
 pub use value::{ReadError, Value, marshal_body, signature_of, unmarshal_body};
@@ -444,6 +452,7 @@ fn open(address: &str) -> Result<UnixStream, BusError> {
             if let Some(path) = pair.strip_prefix("path=") {
                 return Ok(UnixStream::connect(path)?);
             }
+            #[cfg(target_os = "linux")]
             if let Some(name) = pair.strip_prefix("abstract=") {
                 use std::os::linux::net::SocketAddrExt as _;
                 let socket_address = std::os::unix::net::SocketAddr::from_abstract_name(name)?;

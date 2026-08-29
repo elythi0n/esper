@@ -693,16 +693,24 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     // something a person relies on.
     let (indicator, mut presses) = match crate::presence_task::start() {
         Ok((i, presses)) => {
-            let panic_key = if i.armed() {
-                "Ctrl+Alt+Shift+Esc ends every session and locks the screen"
-            } else {
-                "PANIC KEY UNAVAILABLE: something else on this display holds it"
-            };
-            println!("  presence   {} — {panic_key}", i.backend());
-            if !i.can_show() {
+            // The reason comes from the backend. There are two of them now and
+            // the reasons have nothing in common: on X11 something else has
+            // grabbed the combination; on Wayland there is no such thing to
+            // grab. One sentence for both sends somebody on a Wayland desktop
+            // hunting for an application that is not there.
+            if i.armed() {
                 println!(
-                    "             ⚠ no session indicator: this display has no SHAPE extension"
+                    "  presence   {} — Ctrl+Alt+Shift+Esc ends every session and locks the screen",
+                    i.backend()
                 );
+            } else {
+                println!("  presence   {} — NO PANIC KEY", i.backend());
+                if let Some(why) = i.why_no_panic_key() {
+                    println!("             {why}");
+                }
+            }
+            if let Some(why) = i.why_cannot_show() {
+                println!("             ⚠ no session indicator: {why}");
             }
             println!();
             (Some(i), Some(presses))

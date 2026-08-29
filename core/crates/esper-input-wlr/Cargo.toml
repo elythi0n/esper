@@ -16,10 +16,15 @@ esper-proto.workspace = true
 # No fd-passing crate: the keymap goes over a plain `std::fs::File`, whose
 # descriptor is all the protocol wants. `wayland-client` does the `SCM_RIGHTS`
 # itself.
-wayland-client.workspace = true
-wayland-protocols-misc = { workspace = true, features = ["client"] }
-wayland-protocols-wlr = { workspace = true, features = ["client"] }
 
 [dev-dependencies]
 esper-input.workspace = true
 esper-proto.workspace = true
+
+# Only where they build. `wayland-sys` reaches for `std::os::unix` even
+# when nothing uses it, so a workspace type-check for Windows fails on a
+# dependency of a crate that is itself empty there.
+[target.'cfg(unix)'.dependencies]
+wayland-client.workspace = true
+wayland-protocols-misc = { workspace = true, features = ["client"] }
+wayland-protocols-wlr = { workspace = true, features = ["client"] }

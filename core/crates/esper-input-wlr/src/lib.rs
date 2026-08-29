@@ -31,6 +31,14 @@
 //! has no keymap to pass on, and there a minimal one is used and said to be in
 //! use.
 
+// Unix only, and empty elsewhere.
+//
+// A session bus is a unix socket, the layer shell and the virtual-device
+// protocols are Wayland, and none of that exists on Windows or in a macOS
+// application. The engine already takes these as Linux-only dependencies; this
+// is what lets the *workspace* type-check for another target without a stack
+// of `cfg` inside every function.
+#![cfg(unix)]
 use std::io::{Seek as _, Write as _};
 use std::os::fd::AsFd as _;
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -267,6 +267,76 @@ pub enum HostEvent {
 }
 
 /// Somewhere to show that a session is happening.
+/// How thick the indicator's frame is, in pixels.
+///
+/// Four is enough to be unmissable at any scaling and small enough to cover
+/// nothing. A thinner line disappears on a high-density display.
+///
+/// Here rather than in a backend because there are two of them now — X11 and
+/// wlroots — and an indicator that is four pixels on one display server and
+/// something else on the other is a thing somebody would have to discover.
+pub const THICKNESS: u16 = 4;
+
+/// The colour when the far end can only watch: amber.
+pub const WATCHING: u32 = 0x00FF_B000;
+
+/// The colour when the far end can type: red.
+///
+/// Different because "somebody is looking at my screen" and "somebody can use
+/// my machine" are different things to be told, and one colour for both would
+/// train a person to ignore the one that matters.
+pub const CONTROLLING: u32 = 0x00FF_2020;
+
+/// The colour while the far end is recording: magenta.
+///
+/// **It takes precedence over the others**, because a border says one thing at
+/// a time and this is the thing that outlives the session. Somebody who can
+/// see their screen is being watched can decide what to do about it now;
+/// somebody whose screen is being *kept* has already lost that choice by the
+/// time they find out, so it is the fact that gets the colour.
+///
+/// Magenta because the other three are taken and because nothing else on a
+/// desktop is this colour by accident.
+pub const RECORDING: u32 = 0x00FF_00E0;
+
+/// The colour while the picture is held: blue.
+///
+/// **Deliberately not amber or red.** Those two mean "somebody is watching"
+/// and "somebody can type", and a paused session is neither — the point of the
+/// third colour is that a person glancing at their own screen can tell "held"
+/// from "being watched" without reading anything, which is the whole design of
+/// this indicator.
+///
+/// And it is a colour rather than the frame coming down: taking it away would
+/// say "nobody is connected", which is false and is the one lie this crate
+/// exists to prevent.
+pub const PAUSED: u32 = 0x0020_60FF;
+
+/// What colour the frame should be for what is happening.
+///
+/// One function rather than the choice being made where the windows are built,
+/// because a check that reads the screen back has to expect exactly what was
+/// painted: two copies of this would eventually disagree, and the symptom
+/// would be a session that stops because the indicator is the wrong shade of
+/// correct.
+///
+/// **Recording takes precedence**, because a border says one thing at a time
+/// and that is the thing which outlives the session: somebody who can see they
+/// are being watched can decide what to do now, and a recording is decided
+/// about later by somebody else.
+#[must_use]
+pub const fn colour_of(watching: &Watching) -> u32 {
+    if watching.recording {
+        RECORDING
+    } else if watching.paused {
+        PAUSED
+    } else if watching.controlling {
+        CONTROLLING
+    } else {
+        WATCHING
+    }
+}
+
 pub trait Presence: std::fmt::Debug {
     /// Which backend this is, for the log.
     fn backend(&self) -> &'static str;
@@ -332,6 +402,43 @@ pub trait Presence: std::fmt::Debug {
     /// If the screen cannot be restored — which a caller should treat as
     /// serious and say out loud, because somebody is sitting in front of it.
     fn unblank(&mut self) -> Result<(), PresenceError>;
+
+    /// Whether the panic key is held by this backend.
+    ///
+    /// **False is a real answer, not a failure.** Wayland gives an ordinary
+    /// client no global hotkey by design, so a wlroots host has an indicator
+    /// and no panic key — and a caller that assumed every indicator came with
+    /// one would tell somebody a key exists that does nothing.
+    fn panic_key_grabbed(&self) -> bool {
+        false
+    }
+
+    /// Why there is no panic key here, when there is not one.
+    ///
+    /// `None` means there is one. The reason belongs to the backend because
+    /// the reasons have nothing in common: on X11 something else has grabbed
+    /// the combination, and on Wayland there is no such thing to grab. A
+    /// caller that printed one message for both sent somebody on a Wayland
+    /// desktop hunting for an application that was not there.
+    fn why_no_panic_key(&self) -> Option<&'static str> {
+        (!self.panic_key_grabbed()).then_some("this backend offers no panic key")
+    }
+
+    /// Why the frame cannot be shown, when it cannot.
+    ///
+    /// `None` means it can.
+    fn why_cannot_show(&self) -> Option<&'static str> {
+        (!self.can_show()).then_some("this backend cannot draw an indicator here")
+    }
+
+    /// Whether this backend can put the frame on the screen at all.
+    ///
+    /// Separate from [`Presence::is_showing`], which is about whether it has
+    /// been asked to: a backend may open successfully and still have nothing
+    /// to draw on.
+    fn can_show(&self) -> bool {
+        true
+    }
 
     /// Ask the screen whether the indicator is on it.
     ///

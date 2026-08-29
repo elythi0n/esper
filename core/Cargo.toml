@@ -52,6 +52,7 @@ esper-input = { path = "crates/esper-input" }
 esper-input-win = { path = "crates/esper-input-win" }
 esper-input-x11 = { path = "crates/esper-input-x11" }
 esper-presence = { path = "crates/esper-presence" }
+esper-presence-wlr = { path = "crates/esper-presence-wlr" }
 esper-dialog = { path = "crates/esper-dialog" }
 esper-ask-x11 = { path = "crates/esper-ask-x11" }
 esper-presence-x11 = { path = "crates/esper-presence-x11" }
@@ -94,6 +95,7 @@ x11rb = { version = "0.14", default-features = false, features = [
 # for multicast group joins and TTL.
 socket2 = "0.6"
 wayland-client = "0.31"
+wayland-protocols = "0.32"
 wayland-protocols-misc = "0.3"
 wayland-protocols-wlr = "0.3"
 ciborium = "0.2"

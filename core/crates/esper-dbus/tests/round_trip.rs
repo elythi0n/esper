@@ -14,6 +14,8 @@
 //! previous run of this code, which is the difference between a test and a
 //! photograph.
 
+// As unix-only as the crate it exercises.
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

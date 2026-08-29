@@ -91,6 +91,10 @@ pub struct Indicator {
     backend: &'static str,
     /// Whether the panic key is actually held by us.
     armed: bool,
+    /// Why there is no panic key, when there is none. The backend's own words.
+    why_no_panic_key: Option<&'static str>,
+    /// Why the frame cannot be shown, when it cannot.
+    why_cannot_show: Option<&'static str>,
     /// Whether an indicator can be shown at all.
     can_show: bool,
 }
@@ -104,6 +108,15 @@ impl Indicator {
 
     /// Whether the panic key is working.
     #[must_use]
+    pub const fn why_no_panic_key(&self) -> Option<&'static str> {
+        self.why_no_panic_key
+    }
+
+    /// Why the frame cannot be shown, when it cannot.
+    pub const fn why_cannot_show(&self) -> Option<&'static str> {
+        self.why_cannot_show
+    }
+
     pub const fn armed(&self) -> bool {
         self.armed
     }
@@ -205,9 +218,36 @@ pub type Presses = tokio::sync::mpsc::Receiver<HostEvent>;
 pub fn start() -> Result<(Indicator, Presses), String> {
     #[cfg(target_os = "linux")]
     {
-        let presence = esper_presence_x11::X11Presence::open().map_err(|e| e.to_string())?;
+        // The same ladder shape as the input backends, and the same order:
+        // X11 first because it works under XWayland, then wlroots' layer
+        // shell for the sessions with no X server at all.
+        //
+        // Both reasons are kept when both fail. "No indicator" on a Wayland
+        // desktop used to name only the X11 attempt, which sent people
+        // looking for a `DISPLAY` they were never going to find.
+        let x11 = esper_presence_x11::X11Presence::open();
+        match x11 {
+            Ok(presence) => start_with(presence),
+            Err(first) => match esper_presence_wlr::WlrPresence::open() {
+                Ok(presence) => start_with(presence),
+                Err(second) => Err(format!("{first}; and {second}")),
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("no session indicator is wired up for this platform".to_owned())
+    }
+}
+
+/// Run the indicator thread for a backend that opened.
+#[cfg(target_os = "linux")]
+fn start_with<P: Presence + Send + 'static>(presence: P) -> Result<(Indicator, Presses), String> {
+    {
         let armed = presence.panic_key_grabbed();
         let can_show = presence.can_show();
+        let why_no_panic_key = presence.why_no_panic_key();
+        let why_cannot_show = presence.why_cannot_show();
         let backend = esper_presence::Presence::backend(&presence);
         let (to_thread, commands) = std::sync::mpsc::channel();
         // Four deep: a person hitting the key repeatedly should not have
@@ -221,6 +261,8 @@ pub fn start() -> Result<(Indicator, Presses), String> {
                 sightings,
                 backend,
                 armed,
+                why_no_panic_key,
+                why_cannot_show,
                 can_show,
             },
             panic_rx,
@@ -846,6 +888,8 @@ mod tests {
             sightings,
             backend: "null",
             armed: true,
+            why_no_panic_key: None,
+            why_cannot_show: None,
             can_show: true,
         };
         let mut presence = NullPresence::new();

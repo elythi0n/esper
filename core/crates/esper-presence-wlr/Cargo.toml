@@ -1,0 +1,23 @@
+[package]
+name = "esper-presence-wlr"
+description = "The session indicator on a wlroots compositor: a frame on the overlay layer that takes no clicks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-keeper.workspace = true
+esper-presence.workspace = true
+
+# Only where they build. `wayland-sys` reaches for `std::os::unix` even
+# when nothing uses it, so a workspace type-check for Windows fails on a
+# dependency of a crate that is itself empty there.
+[target.'cfg(unix)'.dependencies]
+wayland-client.workspace = true
+wayland-protocols = { workspace = true, features = ["client", "staging"] }
+wayland-protocols-wlr = { workspace = true, features = ["client"] }

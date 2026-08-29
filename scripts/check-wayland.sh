@@ -225,6 +225,52 @@ else
   echo "  … wayland: no build/esper-engine, so the ladder went unasked" >&2
 fi
 
+# ── And a wlroots host will actually serve ─────────────────────────────────
+#
+# The thing all the rest of it was for. Esper does not serve a screen it cannot
+# tell somebody is being watched, and on sway that refusal was total: input had
+# a Wayland path and the indicator did not, so a wlroots host either refused to
+# start or ran with `host.serve_without_indicator` — the setting nobody should
+# need.
+#
+# Asserted against a real host with a real device store, because "the presence
+# backend opens" is a different claim from "the host agrees to serve".
+if [ -x "$here/build/esper-engine" ]; then
+  checked=$((checked + 1))
+  served=$("$here/scripts/in-container.sh" --built "$rig" \
+    --ro "$here/build:/esper" --ro "$here/testdata:/testdata" -- sh -c '
+export ESPER_HOME=/tmp/home; mkdir -p $ESPER_HOME
+cp /testdata/fixtures/device_store.json $ESPER_HOME/devices.json
+timeout 20 /esper/esper-engine host 2>&1 | grep -m1 "presence"
+' 2>/dev/null | tail -1)
+
+  case "$served" in
+    *"wayland-wlr"*) ;;
+    *"NONE"*)
+      note_fail "a wlroots host still refuses to serve:
+      $served
+    The indicator is what stands between the Wayland input work and a usable host." ;;
+    "")
+      note_fail "the host said nothing about presence in a sway session" ;;
+    *)
+      note_fail "a wlroots host served with an unexpected indicator:
+      $served" ;;
+  esac
+
+  # The reason it gives for having no panic key must be the Wayland one.
+  # X11's reason — "something else has grabbed the combination" — would send
+  # somebody on a Wayland desktop hunting for an application that is not there.
+  checked=$((checked + 1))
+  case "$served" in
+    *"NO PANIC KEY"*) ;;
+    *"ends every session"*)
+      note_fail "a wlroots host claims a panic key, and Wayland gives a client no global hotkey" ;;
+    *) note_fail "a wlroots host said nothing about the panic key: $served" ;;
+  esac
+else
+  echo "  … wayland: no build/esper-engine, so the host went unasked" >&2
+fi
+
 # ── GNOME, which is where most people are ──────────────────────────────────
 #
 # The sway rig cannot answer anything about input through a portal, because
@@ -279,37 +325,33 @@ else
   echo "  … wayland: no $gnome_rig image, so GNOME went unasked" >&2
 fi
 
-# ── And what Esper says when it lands in one ────────────────────────────────
+# ── And what Esper says about the X11 attempt it made ──────────────────────
 #
-# The rig's real purpose. On a Wayland session Esper refuses to serve, which is
-# right, and until now explained itself with
+# On a Wayland session Esper used to refuse to serve and explain itself with
 #
 #     X11 via DISPLAY: $DISPLAY variable not set
 #
-# — true, and about the wrong thing. The machine is not missing a variable, it
-# is running Wayland. Somebody on Fedora or Ubuntu reads that, sets DISPLAY,
-# and gets a different error.
+# — true, and about the wrong thing: the machine is not missing a variable, it
+# is running Wayland. Somebody on Fedora reads that, sets DISPLAY, and gets a
+# different error.
 #
-# Asserted against the built binary in a real session, because this is exactly
-# the class of message that reads fine in the source and is wrong on a machine
-# the author does not have.
+# It no longer refuses — there is a Wayland indicator and a Wayland input path
+# now — so the sentence is asserted where it still appears and still matters:
+# in the ladder's account of what it tried before it got somewhere. A host that
+# is working through a fallback should still say why the first rung failed.
 if [ -x "$here/build/esper-engine" ]; then
   checked=$((checked + 1))
-  said=$("$here/scripts/in-container.sh" --built "$rig" \
-    --ro "$here/build:/esper" --ro "$here/testdata:/testdata" -- sh -c '
-export ESPER_HOME=/tmp/home; mkdir -p $ESPER_HOME
-cp /testdata/fixtures/device_store.json $ESPER_HOME/devices.json
-timeout 20 /esper/esper-engine host 2>&1 | grep -m1 presence' 2>/dev/null)
+  tried=$("$here/scripts/in-container.sh" --built "$rig" \
+    --ro "$here/build:/esper" -- /esper/esper-engine input 2>/dev/null \
+    | grep -m1 "x11 xtest")
 
-  case "$said" in
+  case "$tried" in
     *"Wayland session"*) ;;
-    "") note_fail "the engine said nothing about presence in a Wayland session" ;;
-    *) note_fail "the engine refused a Wayland session without naming Wayland:
-      $said
+    "") note_fail "the ladder did not report trying X11 at all in a Wayland session" ;;
+    *) note_fail "the X11 attempt was explained without naming Wayland:
+      $tried
     A person reading that sets DISPLAY and meets the next error." ;;
   esac
-else
-  echo "  … wayland: no build/esper-engine, so what Esper says here went unasked" >&2
 fi
 
 # ── The conversation, driven by this project's own client ──────────────────
@@ -363,7 +405,7 @@ if docker image inspect "$gnome_rig" >/dev/null 2>&1; then
   fi
 fi
 
-if [ "$checked" -lt 16 ]; then
+if [ "$checked" -lt 17 ]; then
   echo "  ✗ wayland: only $checked questions were asked, which is not all of them" >&2
   exit 1
 fi
