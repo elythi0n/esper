@@ -1,0 +1,32 @@
+[package]
+name = "esper-capture-wlr"
+description = "Screen capture on a wlroots compositor, through zwlr_screencopy: the compositor copies a frame into a buffer this process supplied."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-capture.workspace = true
+
+# Only where they build. `wayland-sys` reaches for `std::os::unix` even when
+# nothing uses it, so a workspace type-check for Windows fails on a dependency
+# of a crate that is itself empty there.
+[target.'cfg(unix)'.dependencies]
+wayland-client.workspace = true
+wayland-protocols-wlr = { workspace = true, features = ["client"] }
+
+[dev-dependencies]
+esper-capture.workspace = true
+
+# For the probe only, and for a reason worth stating: a capture compared
+# against another tool on a *uniform* screen cannot detect a channel swap,
+# because red and blue are the same there. The indicator paints an amber frame,
+# and amber has more red in it than blue.
+[target.'cfg(unix)'.dev-dependencies]
+esper-presence-wlr.workspace = true
+esper-presence.workspace = true

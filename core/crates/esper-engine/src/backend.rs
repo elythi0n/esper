@@ -25,6 +25,8 @@ pub enum Choice {
     Auto,
     /// X11, or fail saying why.
     X11,
+    /// A wlroots compositor's own copy, or fail saying why.
+    Wlr,
     /// DXGI Desktop Duplication, or fail saying why.
     Dxgi,
     /// The known moving pattern. Always available, never a real screen.
@@ -37,10 +39,11 @@ impl Choice {
         match s {
             "auto" => Ok(Self::Auto),
             "x11" => Ok(Self::X11),
+            "wlr" => Ok(Self::Wlr),
             "dxgi" => Ok(Self::Dxgi),
             "synthetic" => Ok(Self::Synthetic),
             other => Err(format!(
-                "--backend wants auto, x11, dxgi or synthetic, got {other}"
+                "--backend wants auto, x11, wlr, dxgi or synthetic, got {other}"
             )),
         }
     }
@@ -51,6 +54,7 @@ impl fmt::Display for Choice {
         match self {
             Self::Auto => write!(f, "auto"),
             Self::X11 => write!(f, "x11"),
+            Self::Wlr => write!(f, "wlr"),
             Self::Dxgi => write!(f, "dxgi"),
             Self::Synthetic => write!(f, "synthetic"),
         }
@@ -92,6 +96,21 @@ fn motion() -> esper_capture::pattern::Motion {
 
 /// `size` is the synthetic screen's size, and is ignored by a real backend:
 /// a real screen is whatever size it is.
+/// Open a wlroots capturer, if this platform has one compiled in.
+#[cfg(target_os = "linux")]
+fn open_wlr(monitor: Option<MonitorId>) -> Result<Option<Box<dyn Capturer>>, CaptureError> {
+    let mut capturer = esper_capture_wlr::WlrCapturer::open()?;
+    if let Some(id) = monitor {
+        capturer.serve(&[id])?;
+    }
+    Ok(Some(Box::new(capturer)))
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn open_wlr(_monitor: Option<MonitorId>) -> Result<Option<Box<dyn Capturer>>, CaptureError> {
+    Ok(None)
+}
+
 pub fn open(
     choice: Choice,
     monitor: Option<MonitorId>,
@@ -117,6 +136,31 @@ pub fn open(
                     return Err(e);
                 }
                 attempts.push(format!("x11: {e}"));
+            }
+        }
+    }
+
+    // Then a wlroots compositor's own copy.
+    //
+    // After X11 for the same reason the input ladder is: X11 works under
+    // XWayland, which is most Wayland sessions, and it is the complete path.
+    // This is for the sessions with no X server at all, where the alternative
+    // is the ScreenCast portal and a PipeWire dependency.
+    if matches!(choice, Choice::Auto | Choice::Wlr) {
+        match open_wlr(monitor) {
+            Ok(Some(c)) => {
+                attempts.push("wlr: in use".to_owned());
+                return Ok(Selected {
+                    capturer: c,
+                    attempts,
+                });
+            }
+            Ok(None) => attempts.push("wlr: not compiled in for this platform".to_owned()),
+            Err(e) => {
+                if choice == Choice::Wlr {
+                    return Err(e);
+                }
+                attempts.push(format!("wlr: {e}"));
             }
         }
     }
@@ -227,9 +271,14 @@ mod tests {
 
     #[test]
     fn an_unknown_backend_says_what_it_accepts() {
-        let e = Choice::parse("wayland").expect_err("not a backend yet");
+        // "wayland" is deliberately not a backend name: there are two Wayland
+        // capture paths and they share nothing, so the name would have to mean
+        // one of them. `wlr` is the compositor's own copy; the ScreenCast
+        // portal, when it exists, will need its own name.
+        let e = Choice::parse("wayland").expect_err("not a backend, and not a family either");
         assert!(e.contains("auto"), "{e}");
         assert!(e.contains("x11"), "{e}");
+        assert!(e.contains("wlr"), "{e}");
         assert!(e.contains("dxgi"), "{e}");
         assert!(e.contains("synthetic"), "{e}");
     }

@@ -271,6 +271,72 @@ else
   echo "  … wayland: no build/esper-engine, so the host went unasked" >&2
 fi
 
+# ── A frame, and somebody else's opinion of the same frame ────────────────
+#
+# `grim` is the wlroots screenshot tool and is not this code. Both write PPM —
+# a short header and then bytes — so "did we capture the screen correctly" is a
+# comparison rather than a judgement.
+#
+# It settles the one thing a capture backend gets quietly wrong: **channel
+# order**. `Xrgb8888` names a *word*, and on a little-endian machine the bytes
+# run blue, green, red, unused. Reading the name as a byte order swaps red and
+# blue, which looks like a colour-management problem, is not one, and survives
+# every test that only checks a frame arrived.
+poke_grab="$here/core/target/debug/examples/grab"
+echo "  … wayland: capturing a frame, and asking grim for the same one"
+if ! (cd "$here/core" && cargo build -q -p esper-capture-wlr --example grab) 2>/dev/null; then
+  note_fail "the capture probe would not build, so no frame was compared"
+elif [ -x "$poke_grab" ]; then
+  checked=$((checked + 1))
+  verdict=$("$here/scripts/in-container.sh" --built "$rig" \
+    --ro "$here/core/target/debug/examples:/probe" -- sh -c '
+# The indicator is shown first and held, for two reasons. A uniform screen
+# cannot detect a channel swap — red and blue are the same when everything is
+# grey — and the indicator paints amber, which has red in it and no blue. And
+# holding it means grim photographs the *same* screen: the frame exists only
+# while that connection does, so a tool run afterwards compares a different
+# screen and calls the difference a fault.
+/probe/grab --with-indicator --hold 10 /tmp/ours.ppm > /tmp/said 2>&1 &
+waited=0
+until grep -q "wrote=" /tmp/said 2>/dev/null; do
+  waited=$((waited + 1))
+  [ "$waited" -gt 100 ] && { echo "grab-failed"; exit 0; }
+  sleep 0.1
+done
+grim -t ppm /tmp/theirs.ppm 2>/dev/null || { echo "grim-failed"; exit 0; }
+ours=$(md5sum < /tmp/ours.ppm | cut -d" " -f1)
+theirs=$(md5sum < /tmp/theirs.ppm | cut -d" " -f1)
+size=$(grep -o "size=[0-9x]*" /tmp/said)
+# A floor: two empty files hash the same and prove nothing.
+bytes=$(wc -c < /tmp/ours.ppm)
+if [ "$bytes" -lt 100000 ]; then echo "too-small=$bytes"; exit 0; fi
+# And the frame must actually contain the amber the indicator paints, or the
+# comparison above is two tools agreeing about a grey rectangle.
+# (No apostrophes in here: this whole block is a single-quoted argument, and
+# one would end it.)
+amber=$(od -An -tu1 -j 16 -N 3 /tmp/ours.ppm | tr -s " " | sed "s/^ //")
+if [ "$amber" != "255 176 0" ]; then echo "no-amber=$amber"; exit 0; fi
+if [ "$ours" = "$theirs" ]; then echo "identical $size"; else echo "differ $size"; fi
+' 2>/dev/null | tail -1)
+
+  case "$verdict" in
+    identical*) ;;
+    differ*)
+      note_fail "this capture and grim disagree about the same screen ($verdict).
+    The commonest cause is channel order: Xrgb8888 names a word, and the bytes
+    on a little-endian machine run blue, green, red, unused." ;;
+    too-small*)
+      note_fail "the captured frame was $verdict bytes, which is not a screen" ;;
+    no-amber*)
+      note_fail "the captured frame has no indicator in it ($verdict), so the comparison
+    would have been two tools agreeing about a grey rectangle — which a channel
+    swap survives, because red and blue are the same there." ;;
+    grab-failed) note_fail "capturing a frame failed outright" ;;
+    grim-failed) note_fail "grim could not capture, so there was nothing to compare against" ;;
+    *) note_fail "the capture comparison said: ${verdict:-nothing}" ;;
+  esac
+fi
+
 # ── GNOME, which is where most people are ──────────────────────────────────
 #
 # The sway rig cannot answer anything about input through a portal, because
@@ -405,7 +471,7 @@ if docker image inspect "$gnome_rig" >/dev/null 2>&1; then
   fi
 fi
 
-if [ "$checked" -lt 17 ]; then
+if [ "$checked" -lt 18 ]; then
   echo "  ✗ wayland: only $checked questions were asked, which is not all of them" >&2
   exit 1
 fi

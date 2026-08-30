@@ -397,6 +397,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-capture-wlr"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-presence",
+ "esper-presence-wlr",
+ "wayland-client",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "esper-capture-x11"
 version = "0.0.0"
 dependencies = [
@@ -549,6 +560,7 @@ dependencies = [
  "esper-buildinfo",
  "esper-capture",
  "esper-capture-win",
+ "esper-capture-wlr",
  "esper-capture-x11",
  "esper-clipboard",
  "esper-clipboard-x11",

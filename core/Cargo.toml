@@ -27,6 +27,7 @@ esper-buildinfo = { path = "crates/esper-buildinfo" }
 esper-audio = { path = "crates/esper-audio" }
 esper-audio-pulse = { path = "crates/esper-audio-pulse" }
 esper-capture = { path = "crates/esper-capture" }
+esper-capture-wlr = { path = "crates/esper-capture-wlr" }
 esper-capture-win = { path = "crates/esper-capture-win" }
 esper-capture-x11 = { path = "crates/esper-capture-x11" }
 esper-color = { path = "crates/esper-color" }
