@@ -265,8 +265,14 @@ a second message.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) — including what Esper does **not** defend
-against, and the plain statement that it has not yet been independently audited.
+[`SECURITY.md`](SECURITY.md) is what the project claims and how to report a
+vulnerability. [`docs/threat-model.md`](docs/threat-model.md) is who might
+attack it, from where, and what stops them — including the boundary Wayland
+does not close on wlroots compositors. [`docs/protocol.md`](docs/protocol.md)
+is what goes on the wire, written so somebody else could implement it.
+
+Between them they say what Esper does **not** defend against, and state plainly
+that it has not yet been independently audited.
 
 Short version: Ed25519 device identity, SPAKE2 pairing, hybrid post-quantum key
 agreement, `forbid(unsafe_code)` outside FFI, no panicking constructs in the
