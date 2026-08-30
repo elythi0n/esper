@@ -37,6 +37,18 @@ use esper_stream::Encoded;
 /// Because the two have exactly one lifetime between them. A window that has
 /// stopped taking pictures is a window whose keystrokes nobody should be
 /// sending, and a second socket would be a second thing to notice that about.
+/// The window's own end of the back channel.
+///
+/// A unix socket where there is one. On Windows there is not, and the window
+/// there would use a named pipe that does not exist yet — so `Empty` stands in,
+/// which reads zero bytes for ever. That is exactly what "no window is talking
+/// to us" means, so the reading loop above needs no `cfg` of its own and there
+/// is no second copy of it to drift.
+#[cfg(unix)]
+type BackChannel = std::os::unix::net::UnixStream;
+#[cfg(not(unix))]
+type BackChannel = std::io::Empty;
+
 pub struct Viewer {
     stream: Writer<Box<dyn io::Write + Send>>,
     repack: Repackager,
@@ -49,7 +61,7 @@ pub struct Viewer {
     ///
     /// `None` for a viewer that is only a sink — the loopback diagnostic, and
     /// every test that hands it a buffer.
-    listening: Option<std::os::unix::net::UnixStream>,
+    listening: Option<BackChannel>,
     /// What has arrived from the window and is not yet a whole event.
     events: esper_media::WindowEvents,
     /// Said once: a window whose input this session is not carrying.
@@ -89,7 +101,27 @@ impl Viewer {
         Ok(viewer)
     }
 
+    /// Dialling a window on a platform with no socket to dial.
+    ///
+    /// Present so that every caller compiles everywhere and none of them has to
+    /// carry a `cfg`. It refuses, naming the reason: a host on Windows can
+    /// serve a session perfectly well, it just has no local window to show it
+    /// in yet.
+    #[cfg(not(unix))]
+    pub fn connect(_path: &Path, _size: (u32, u32)) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the window's socket is a unix socket, and this platform has none",
+        ))
+    }
+
     /// The same, over any sink. The tests write to a buffer.
+    ///
+    /// Where there is a socket, or in a test. On Windows the only caller would
+    /// be a `connect` that refuses before it builds anything, and an
+    /// unreachable constructor in a binary is dead code the compiler is right
+    /// about.
+    #[cfg(any(unix, test))]
     pub fn to(sink: Box<dyn io::Write + Send>, size: (u32, u32)) -> Self {
         Self {
             stream: Writer::new(sink),
@@ -393,6 +425,7 @@ mod tests {
     /// part that must never block, because a session's loop has pictures to
     /// move and cannot wait on somebody who is not typing.
     #[test]
+    #[cfg(unix)]
     fn what_a_window_writes_is_what_the_session_reads() {
         use esper_media::WindowEvent;
         use esper_media::window_input::Writer as InputWriter;
@@ -449,6 +482,7 @@ mod tests {
     /// The picture stream's own bytes, sent up the input half by something
     /// confused about which direction it is talking in.
     #[test]
+    #[cfg(unix)]
     fn the_wrong_direction_of_the_socket_is_refused_rather_than_decoded() {
         let (theirs, ours) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
         ours.set_nonblocking(true).expect("non-blocking");
