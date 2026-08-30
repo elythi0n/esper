@@ -262,11 +262,14 @@ check-web:
 check-screens:
 	$(GUARD_ROOT)
 	@scripts/gate-rig.sh sh -c 'cd $(WEB) && \
-	  node scripts/check-a11y.mjs     --url http://127.0.1.1:5179/ && \
-	  node scripts/check-keyboard.mjs --url http://127.0.1.1:5179/ && \
-	  node scripts/check-words.mjs    --url http://127.0.1.1:5179/ && \
-	  node scripts/check-overflow.mjs --url http://127.0.1.1:5179/ && \
-	  node scripts/check-ink.mjs      --url http://127.0.1.1:5179/'
+	  node scripts/check-a11y.mjs     --url "$$ESPER_GATE_URL" && \
+	  node scripts/check-keyboard.mjs --url "$$ESPER_GATE_URL" && \
+	  node scripts/check-words.mjs    --url "$$ESPER_GATE_URL" && \
+	  node scripts/check-overflow.mjs --url "$$ESPER_GATE_URL" && \
+	  node scripts/check-ink.mjs      --url "$$ESPER_GATE_URL" && \
+	  node scripts/check-frames.mjs   --url "$$ESPER_GATE_URL" && \
+	  node scripts/check-live.mjs     --url "$$ESPER_GATE_URL" && \
+	  node scripts/check-viewer.mjs   --url "$${ESPER_GATE_URL%/}"'
 
 ## Measure how long the window takes to be usable, and hold it to a second
 ##

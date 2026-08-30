@@ -26,8 +26,18 @@ home="$(mktemp -d /tmp/esper-gate-home.XXXXXX)"
 port="${ESPER_GATE_PORT:-5179}"
 api_port="${ESPER_GATE_API_PORT:-8688}"
 
+# **The whole process group, not the process.**
+#
+# `npx vite` is a shell that starts node, so killing the job kills the shell
+# and leaves node holding the port. The next run then refuses to start, saying
+# something is already answering — which is true, and it is the last run.
+#
+# So the dev server is started with `setsid`, making it a group leader, and the
+# group is what gets signalled. The negative PID is the group.
 cleanup() {
-  [ -n "${vite_pid:-}" ] && kill "$vite_pid" 2>/dev/null || true
+  if [ -n "${vite_pid:-}" ]; then
+    kill -- -"$vite_pid" 2>/dev/null || kill "$vite_pid" 2>/dev/null || true
+  fi
   [ -n "${api_pid:-}" ] && kill "$api_pid" 2>/dev/null || true
   rm -rf "$home"
 }
@@ -114,8 +124,8 @@ if [ ! -s "$home/api.token" ]; then
   echo "the API wrote no token:" >&2; cat "$home/api.log" >&2; exit 1
 fi
 
-(cd "$root/web" && ESPER_HOME="$home" ESPER_API="http://127.0.0.1:$api_port" \
-  npx vite --port "$port" --host 127.0.1.1 > "$home/vite.log" 2>&1) &
+setsid sh -c "cd '$root/web' && ESPER_HOME='$home' ESPER_API='http://127.0.0.1:$api_port' \
+  exec npx vite --port '$port' --host 127.0.1.1" > "$home/vite.log" 2>&1 &
 vite_pid=$!
 
 for _ in $(seq 1 100); do
@@ -130,6 +140,19 @@ if [ "$answered" != "200" ]; then
 fi
 count=$(curl -s "http://127.0.1.1:$port/api/devices" | grep -o '"public_key"' | wc -l)
 echo "  rig: $count device(s) at http://127.0.1.1:$port/ (home $home)"
+
+# The wrapped command gets the rig's own addresses.
+#
+# `ESPER_API` was set for the dev server and nowhere else, so a gate run inside
+# this rig that talks to the control plane *directly* — rather than through the
+# dev server's proxy — looked for one on the default port, found nothing, and
+# reported "the control plane did not answer". `check-frames` does exactly
+# that, and is why this is here.
+#
+# `ESPER_GATE_URL` so a gate need not be told the port twice: the rig chose it.
+export ESPER_API="http://127.0.0.1:$api_port"
+export ESPER_GATE_URL="http://127.0.1.1:$port/"
+export ESPER_HOME="$home"
 
 if [ "$#" -gt 0 ]; then
   "$@"
