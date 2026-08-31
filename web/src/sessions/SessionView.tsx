@@ -22,6 +22,8 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
   const root = useRef<HTMLDivElement>(null);
   const [hidden, setHidden] = useState(false);
   const [picture, setPicture] = useState<ViewerState>(IDLE);
+  /** What the window said when it would not start a session. */
+  const [refusal, setRefusal] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const arm = () => {
@@ -36,6 +38,44 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /*
+    Ask the window to start the session, and to end it on the way out.
+
+    This is what makes "one click from Devices" true: until now the screen
+    showed the command and left somebody to type it. The window is what does
+    it, because the window owns the socket the pictures arrive on and is the
+    only thing that knows its path.
+
+    A browser tab has no such route and gets a 404 — which is not a failure to
+    report, it is a tab. `RemoteScreen` already says what to type in that case,
+    which is the right answer there and the wrong one in a window.
+
+    Ending it on unmount matters more than starting it: an engine left running
+    holds a connection to somebody else's machine, and their screen goes on
+    saying it is being watched.
+  */
+  useEffect(() => {
+    let live = true;
+    fetch("/shell/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device: fingerprint }),
+    })
+      .then((r) => {
+        if (!live || r.ok || r.status === 404) return;
+        return r.text().then((why) => setRefusal(why.trim() || null));
+      })
+      .catch(() => {
+        // No window, or it went away. `RemoteScreen` says what to do.
+      });
+    return () => {
+      live = false;
+      // `keepalive` so the request survives the page tearing this down, which
+      // is exactly when it is sent.
+      void fetch("/shell/session", { method: "DELETE", keepalive: true }).catch(() => {});
+    };
+  }, [fingerprint]);
+
   return (
     <div
       ref={root}
@@ -46,6 +86,20 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
       }}
     >
       <RemoteScreen device={name} onState={setPicture} />
+
+      {/*
+        The window refusing to start one — already showing another session,
+        most often. Said over the picture rather than instead of it, because
+        there may still be a picture from a session somebody else started.
+      */}
+      {refusal && (
+        <p
+          role="status"
+          className="absolute inset-x-0 top-0 z-[var(--z-session-hud)] bg-surface-0/85 px-4 py-2 text-sm text-text-2"
+        >
+          {refusal}
+        </p>
+      )}
 
       {/* The HUD, over the picture, retracting. */}
       <div

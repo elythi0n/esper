@@ -57,6 +57,10 @@ const mostInputBytes = 64 * 1024
 type viewer struct {
 	listener net.Listener
 	path     string
+	// The session this window started, if it started one. See session.go —
+	// the window owns the socket, so the window is what can name it on a
+	// command line.
+	sessions running
 	// The session's connection, kept so what the page does can go back down
 	// it. Guarded because the reader and the writer are different requests.
 	mu      sync.Mutex
@@ -125,11 +129,14 @@ func (v *viewer) route(mux *http.ServeMux) {
 		return
 	}
 
-	// Where to point a session. The Session screen shows this, because the
-	// way a session is started today is somebody running a command.
+	// Where to point a session. Still answered, because a person may want to
+	// run the command themselves — but no longer the only way, now that the
+	// window can start one: see routeSession below.
 	mux.HandleFunc("GET /shell/video/socket", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{"path": v.path})
 	})
+
+	v.routeSession(mux)
 
 	/*
 		What the person did, on its way back down the same socket.
