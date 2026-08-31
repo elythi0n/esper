@@ -23,6 +23,7 @@
  * key this build has no usage for, is dropped in the page rather than sent to
  * be dropped at the other end.
  */
+import { type Fit, inPicture, placement } from "./fitting";
 import { buttonFor, usageFor } from "./keys";
 
 const MAGIC = "ESPRINP\0";
@@ -95,6 +96,13 @@ export interface HandOptions {
   url?: string;
   /** The picture's size, so a position can be a position in it. */
   picture: () => { width: number; height: number } | null;
+  /**
+   * How the picture is sitting, read at the moment of each event.
+   *
+   * A function rather than a value because somebody can change it mid-session,
+   * and the very next click has to land in the right place.
+   */
+  fit?: () => Fit;
 }
 
 /**
@@ -105,7 +113,10 @@ export interface HandOptions {
  * would be a key held on somebody else's machine with nothing left here to
  * release it.
  */
-export function driveWith(surface: HTMLElement, { url = "/shell/video/input", picture }: HandOptions): () => void {
+export function driveWith(
+  surface: HTMLElement,
+  { url = "/shell/video/input", picture, fit = () => "fit" }: HandOptions,
+): () => void {
   let queue: Event[] = [];
   let first = true;
   let stopped = false;
@@ -154,34 +165,57 @@ export function driveWith(surface: HTMLElement, { url = "/shell/video/input", pi
   /*
     Where a pointer event is, in the picture rather than on the screen.
 
-    The surface draws its picture *contained* — scaled to fit and centred,
-    which is what `object-contain` does and what every view of this canvas
-    uses — so the element's box is the picture's box only when the two happen
-    to share an aspect ratio. Every other time there are bars, and mapping
-    against the element instead of against the drawn picture puts the pointer
-    somewhere it is not: stretched along one axis and offset along the other,
-    getting worse the further the window is from the session's shape. It is
-    the kind of wrong that looks like a calibration problem rather than a bug.
-
-    Positions outside the picture are still sent. Somebody dragging past the
-    edge means it, and the engine is where a position is clamped or dropped.
+    The geometry is `fitting.ts` and not this file, because the canvas is told
+    how to draw by the same answer. If the two disagreed — the canvas
+    contained and the mapping assuming stretched, or the reverse — every click
+    would be offset along one axis and scaled along the other, worse the
+    further the window is from the session's shape. That is the kind of wrong
+    which looks like a calibration problem rather than a bug, and this project
+    has had it once already.
   */
-  const inPicture = (e: PointerEvent | WheelEvent): { x: number; y: number } | null => {
+  const where = (e: PointerEvent | WheelEvent): { x: number; y: number } | null => {
     const size = picture();
     if (!size) return null;
-    const box = surface.getBoundingClientRect();
-    if (box.width === 0 || box.height === 0 || size.width === 0 || size.height === 0) return null;
-    const scale = Math.min(box.width / size.width, box.height / size.height);
-    const left = box.left + (box.width - size.width * scale) / 2;
-    const top = box.top + (box.height - size.height * scale) / 2;
-    return {
-      x: Math.round((e.clientX - left) / scale),
-      y: Math.round((e.clientY - top) / scale),
-    };
+    // The mode is read at the moment of the event, not captured when the
+    // surface was wired up: somebody who changes how the picture sits expects
+    // the very next click to land in the right place.
+    return inPicture(fit(), surface.getBoundingClientRect(), size, e.clientX, e.clientY);
   };
 
+  /*
+    Where the far machine's pointer is, while this one is locked.
+
+    Pointer lock hides the local cursor and reports **movement** rather than a
+    position — which is what a game wants and the opposite of what this
+    protocol carries, since Esper sends where the pointer *is*. So a position
+    is kept here and moved by each event, clamped to the picture.
+
+    Clamped rather than left to run: an unclamped position drifts off the
+    picture and stays there, and the pointer then appears stuck against an
+    edge with no way back — the mouse is locked, so there is no absolute
+    position to recover from. Clamping means pushing against an edge and
+    coming back works the way it does on a real desk.
+  */
+  let locked: { x: number; y: number } | null = null;
+
   const onPointerMove = (e: PointerEvent) => {
-    const at = inPicture(e);
+    const size = picture();
+    if (document.pointerLockElement === surface && size) {
+      const from = locked ?? { x: Math.round(size.width / 2), y: Math.round(size.height / 2) };
+      // The scale the picture is drawn at, so a pixel of hand movement is a
+      // pixel of picture movement rather than a pixel of screen.
+      const at = placement(fit(), surface.getBoundingClientRect(), size);
+      const scaleX = at?.scaleX || 1;
+      const scaleY = at?.scaleY || 1;
+      locked = {
+        x: Math.min(size.width, Math.max(0, Math.round(from.x + e.movementX / scaleX))),
+        y: Math.min(size.height, Math.max(0, Math.round(from.y + e.movementY / scaleY))),
+      };
+      send({ kind: POINTER, x: locked.x, y: locked.y });
+      return;
+    }
+    locked = null;
+    const at = where(e);
     if (at) send({ kind: POINTER, x: at.x, y: at.y });
   };
   const onPointerDown = (e: PointerEvent) => {
@@ -190,7 +224,7 @@ export function driveWith(surface: HTMLElement, { url = "/shell/video/input", pi
     // The surface takes the keyboard on a press, so what is typed next goes
     // to the far machine rather than to whatever was focused before.
     surface.focus();
-    const at = inPicture(e);
+    const at = where(e);
     if (at) send({ kind: POINTER, x: at.x, y: at.y });
     send({ kind: BUTTON, button, pressed: true });
   };

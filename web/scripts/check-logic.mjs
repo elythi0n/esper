@@ -37,6 +37,7 @@ import { resolveTheme, BEFORE_PAINT } from "../src/lib/first-paint.ts";
 import { cn } from "../src/lib/cn.ts";
 import { millisecondsIn, pixelsIn } from "../src/lib/css-values.ts";
 import { readViewerStream } from "../src/session/stream.ts";
+import { FIT_CLASS, FITS, inPicture, placement } from "../src/session/fitting.ts";
 import { readFileSync } from "node:fs";
 
 const findings = [];
@@ -256,8 +257,77 @@ try {
   }
 }
 
+/*
+  7. Where the picture sits, and therefore where a click landed.
+
+  Two consumers read this and must never disagree: the canvas is told how to
+  draw with `FIT_CLASS`, and the pointer is mapped with `inPicture`. If they
+  part company every click is offset along one axis and scaled along the
+  other — worse the further the window is from the session's shape, and
+  looking like a calibration problem rather than a bug. This project has had
+  that once, when the pointer was mapped against the element rather than
+  against the drawn picture.
+
+  The surface below is deliberately a different shape from the picture: a
+  square box and a 2:1 picture, so "contained" and "stretched" cannot give the
+  same answer by accident.
+*/
+{
+  const box = { left: 0, top: 0, width: 400, height: 400 };
+  const size = { width: 200, height: 100 };
+
+  // Fit: scaled by the smaller ratio (2), centred, so bars top and bottom.
+  const fitted = placement("fit", box, size);
+  is(fitted?.scaleX, 2, "fit scales by the smaller ratio");
+  is(fitted?.scaleY, 2, "fit scales both axes the same");
+  is(fitted?.left, 0, "fit fills the wider axis");
+  is(fitted?.top, 100, "fit centres on the other axis");
+
+  // Actual: never scaled, whatever the box is.
+  const actual = placement("actual", box, size);
+  is(actual?.scaleX, 1, "actual size does not scale");
+  is(actual?.top, 150, "actual size is centred");
+
+  // Stretch: each axis its own ratio, origin at the box.
+  const stretched = placement("stretch", box, size);
+  is(stretched?.scaleX, 2, "stretch scales x to fill");
+  is(stretched?.scaleY, 4, "stretch scales y independently");
+  is(stretched?.left, 0, "stretch starts at the box");
+
+  // **The corners.** In every mode, the picture's own corners map back to its
+  // own coordinates — which is the property a click depends on, and the one
+  // that breaks when the drawing and the mapping disagree.
+  for (const fit of FITS) {
+    const at = placement(fit, box, size);
+    const topLeft = inPicture(fit, box, size, at.left, at.top);
+    is(topLeft?.x, 0, `${fit}: the picture's left edge is x=0`);
+    is(topLeft?.y, 0, `${fit}: the picture's top edge is y=0`);
+
+    const bottomRight = inPicture(
+      fit,
+      box,
+      size,
+      at.left + size.width * at.scaleX,
+      at.top + size.height * at.scaleY,
+    );
+    is(bottomRight?.x, size.width, `${fit}: the right edge is the picture's width`);
+    is(bottomRight?.y, size.height, `${fit}: the bottom edge is the picture's height`);
+  }
+
+  // A surface with no area, and a picture with none: no placement rather than
+  // a division by zero that travels onward as Infinity.
+  is(placement("fit", { left: 0, top: 0, width: 0, height: 400 }, size), null, "a surface with no width places nothing");
+  is(placement("fit", box, { width: 200, height: 0 }), null, "a picture with no height places nothing");
+  is(inPicture("fit", box, { width: 0, height: 0 }, 10, 10), null, "no picture, no position");
+
+  // Every mode has a class, and they are not all the same one — a table where
+  // two modes shared a class would draw two of them identically while the
+  // mapping treated them differently.
+  is(new Set(FITS.map((f) => FIT_CLASS[f])).size, FITS.length, "every fit draws differently");
+}
+
 // A floor: a run that asserted nothing passes everything.
-if (checked < 50) {
+if (checked < 80) {
   console.error(`  ✗ logic: only ${checked} assertion(s) ran, which is not this file`);
   process.exit(1);
 }
@@ -270,5 +340,6 @@ if (findings.length) {
 console.log(
   `  ✓ logic: ${checked} assertions — how long ago at every boundary, what a pairing admits, the theme ` +
     `the first paint chooses, the class join every component is built on, a CSS duration read in the right ` +
-    `unit, and ${whole.length} records read identically whole and one byte at a time`,
+    `unit, where a picture sits in all three fittings and that its corners map back to its own ` +
+    `coordinates in each, and ${whole.length} records read identically whole and one byte at a time`,
 );

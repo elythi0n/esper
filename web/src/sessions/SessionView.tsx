@@ -1,10 +1,11 @@
-import { Maximize2, Monitor, Settings2 } from "lucide-react";
+import { Maximize2, Minimize2, Monitor, MousePointer2, MousePointerBan, Ratio, Settings2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { Tooltip } from "@/components/tooltip";
 import { durationMs } from "@/lib/theme";
 import { Figure } from "@/screens/parts";
 import { Presence } from "@/session/chrome";
+import { type Fit, FIT_NAMES, FITS } from "@/session/fitting";
 import { RemoteScreen } from "@/session/RemoteScreen";
 import { IDLE, type ViewerState } from "@/session/video";
 import { cn } from "@/lib/cn";
@@ -24,6 +25,60 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
   const [picture, setPicture] = useState<ViewerState>(IDLE);
   /** What the window said when it would not start a session. */
   const [refusal, setRefusal] = useState<string | null>(null);
+  const [fit, setFit] = useState<Fit>("fit");
+  const surface = useRef<HTMLCanvasElement | null>(null);
+  const [captured, setCaptured] = useState(false);
+  const [full, setFull] = useState(false);
+
+  /*
+    Whether this is full screen, from the browser rather than from a variable.
+
+    Somebody can leave full screen with Escape or the window manager, and a
+    button that tracked only its own clicks would then offer to leave a state
+    it is no longer in. The event is the truth; the state follows it.
+  */
+  useEffect(() => {
+    const onChange = () => setFull(document.fullscreenElement === root.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  /*
+    Whether the pointer is captured, from the browser rather than a variable.
+
+    The same reasoning as full screen: Escape releases the pointer without
+    telling this component, and a control that tracked only its own clicks
+    would offer to release something already released.
+  */
+  useEffect(() => {
+    const onChange = () => setCaptured(document.pointerLockElement === surface.current);
+    document.addEventListener("pointerlockchange", onChange);
+    return () => document.removeEventListener("pointerlockchange", onChange);
+  }, []);
+
+  const toggleCapture = () => {
+    if (document.pointerLockElement === surface.current) {
+      document.exitPointerLock();
+    } else {
+      // Requested on the canvas and inside this click, which is what a browser
+      // requires — and focused first, so what is typed next goes to the far
+      // machine rather than to the button that was just pressed.
+      surface.current?.focus();
+      void surface.current?.requestPointerLock();
+    }
+  };
+
+  const toggleFull = () => {
+    if (document.fullscreenElement === root.current) {
+      void document.exitFullscreen().catch(() => {});
+    } else {
+      void root.current?.requestFullscreen().catch(() => {});
+    }
+  };
+
+  // The next mode round, so one control serves three without a menu over the
+  // picture — which is the thing the design system says not to put there.
+  const nextFit = () => setFit((was) => FITS[(FITS.indexOf(was) + 1) % FITS.length] ?? "fit");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const arm = () => {
@@ -85,7 +140,7 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
         arm();
       }}
     >
-      <RemoteScreen device={name} onState={setPicture} />
+      <RemoteScreen device={name} onState={setPicture} fit={fit} surfaceRef={surface} />
 
       {/*
         The window refusing to start one — already showing another session,
@@ -137,9 +192,37 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
               <Settings2 aria-hidden size={16} />
             </Button>
           </Tooltip>
-          <Tooltip label="Full screen">
-            <Button variant="ghost" size="sm" aria-label="Full screen" className="px-1.5" disabled>
-              <Maximize2 aria-hidden size={16} />
+          <Tooltip label={captured ? "Release the pointer (Escape)" : "Capture the pointer"}>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label={captured ? "Release the pointer" : "Capture the pointer"}
+              className="px-1.5"
+              onClick={toggleCapture}
+            >
+              {captured ? <MousePointerBan aria-hidden size={16} /> : <MousePointer2 aria-hidden size={16} />}
+            </Button>
+          </Tooltip>
+          <Tooltip label={`${FIT_NAMES[fit]} — change how the picture fits`}>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label={`Change how the picture fits. Now: ${FIT_NAMES[fit].toLowerCase()}`}
+              className="px-1.5"
+              onClick={nextFit}
+            >
+              <Ratio aria-hidden size={16} />
+            </Button>
+          </Tooltip>
+          <Tooltip label={full ? "Leave full screen" : "Full screen"}>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label={full ? "Leave full screen" : "Full screen"}
+              className="px-1.5"
+              onClick={toggleFull}
+            >
+              {full ? <Minimize2 aria-hidden size={16} /> : <Maximize2 aria-hidden size={16} />}
             </Button>
           </Tooltip>
         </div>

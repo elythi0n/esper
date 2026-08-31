@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { CopyField } from "@/components/copy-field";
 import { Key } from "@/screens/parts";
+import { type Fit, FIT_CLASS } from "./fitting";
 import { driveWith } from "./hand";
 import { IDLE, showTheScreen, type ViewerState } from "./video";
 
@@ -19,6 +20,8 @@ export function RemoteScreen({
   device,
   onState,
   drivable = true,
+  fit = "fit",
+  surfaceRef,
 }: {
   device?: string | undefined;
   /** What the surface knows, for a HUD that wants to say it. */
@@ -32,11 +35,23 @@ export function RemoteScreen({
    * move.
    */
   drivable?: boolean;
+  /** How the picture sits in the surface. See `fitting.ts`. */
+  fit?: Fit;
+  /**
+   * Filled with the canvas, so chrome outside this component can act on it.
+   *
+   * Pointer lock is the reason: it must be requested from the element the
+   * pointer will be locked to, inside a user gesture, and the control that
+   * asks for it lives in the HUD rather than here.
+   */
+  surfaceRef?: React.RefObject<HTMLCanvasElement | null>;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const id = useId();
   const [state, setState] = useState<ViewerState>(IDLE);
   const [socket, setSocket] = useState<string | null>(null);
+  const fitRef = useRef<Fit>(fit);
+  fitRef.current = fit;
 
   useEffect(() => {
     // Where to point a session, asked once. A window without the route — a
@@ -88,7 +103,12 @@ export function RemoteScreen({
   */
   useEffect(() => {
     if (!drivable || !canvas.current || state.status !== "playing") return undefined;
-    return driveWith(canvas.current, { picture: () => stateRef.current.size });
+    return driveWith(canvas.current, {
+      picture: () => stateRef.current.size,
+      // Read through a ref, so changing how the picture sits does not tear the
+      // input wiring down and put it back — which would drop whatever is held.
+      fit: () => fitRef.current,
+    });
   }, [drivable, state.status]);
 
   const playing = state.status === "playing";
@@ -112,7 +132,10 @@ export function RemoteScreen({
         yet, and the frame is lost.
       */}
       <canvas
-        ref={canvas}
+        ref={(node) => {
+          canvas.current = node;
+          if (surfaceRef) surfaceRef.current = node;
+        }}
         // A canvas cannot take the keyboard without one, and a remote desktop
         // that cannot be typed into is a television. Focusable by click and by
         // Tab, because a session somebody reached with the keyboard has to be
@@ -124,7 +147,9 @@ export function RemoteScreen({
         // the ordinary way out of a control is the one thing that does not
         // work here.
         aria-describedby={drivable ? wayOut : undefined}
-        className={playing || ended ? "h-full w-full object-contain" : "sr-only"}
+        // The class and the pointer mapping come from the same module, so a
+        // picture drawn one way cannot be clicked as though it sat another.
+        className={playing || ended ? `h-full w-full ${FIT_CLASS[fit]}` : "sr-only"}
       />
       {drivable && (
         <p id={wayOut} className="sr-only">
