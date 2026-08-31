@@ -2,13 +2,11 @@ import { Maximize2, Minimize2, Monitor, MousePointer2, MousePointerBan, Ratio, S
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { Tooltip } from "@/components/tooltip";
-import { durationMs } from "@/lib/theme";
 import { Figure } from "@/screens/parts";
-import { Presence } from "@/session/chrome";
+import { Presence, SessionChrome, SessionRoot } from "@/session/chrome";
 import { type Fit, FIT_NAMES, FITS } from "@/session/fitting";
 import { RemoteScreen } from "@/session/RemoteScreen";
 import { IDLE, type ViewerState } from "@/session/video";
-import { cn } from "@/lib/cn";
 
 /**
  * One session, inside its dock panel.
@@ -21,7 +19,6 @@ import { cn } from "@/lib/cn";
  */
 export function SessionView({ fingerprint, name }: { fingerprint: string; name: string }) {
   const root = useRef<HTMLDivElement>(null);
-  const [hidden, setHidden] = useState(false);
   const [picture, setPicture] = useState<ViewerState>(IDLE);
   /** What the window said when it would not start a session. */
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -79,19 +76,6 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
   // The next mode round, so one control serves three without a menu over the
   // picture — which is the thing the design system says not to put there.
   const nextFit = () => setFit((was) => FITS[(FITS.indexOf(was) + 1) % FITS.length] ?? "fit");
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-
-  const arm = () => {
-    clearTimeout(timer.current);
-    const ms = root.current ? durationMs("--session-chrome-hide", root.current) : 0;
-    if (ms > 0) timer.current = setTimeout(() => setHidden(true), ms);
-  };
-
-  useEffect(() => {
-    arm();
-    return () => clearTimeout(timer.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   /*
     Ask the window to start the session, and to end it on the way out.
@@ -132,14 +116,7 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
   }, [fingerprint]);
 
   return (
-    <div
-      ref={root}
-      className="relative h-full w-full overflow-hidden bg-video [contain:paint]"
-      onPointerMove={() => {
-        setHidden(false);
-        arm();
-      }}
-    >
+    <SessionRoot ref={root} className="h-full w-full">
       <RemoteScreen device={name} onState={setPicture} fit={fit} surfaceRef={surface} />
 
       {/*
@@ -156,16 +133,14 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
         </p>
       )}
 
-      {/* The HUD, over the picture, retracting. */}
-      <div
-        aria-hidden={hidden}
-        className={cn(
-          "absolute inset-x-0 bottom-0 z-[var(--z-session-hud)] flex items-center gap-4 px-4 py-2",
-          "bg-surface-0/85 transition-[translate,opacity] duration-[var(--dur-base)] ease-[var(--ease)]",
-          hidden && "pointer-events-none translate-y-full opacity-0",
-        )}
-        onFocusCapture={() => setHidden(false)}
-      >
+      {/*
+        The HUD, over the picture, retracting — the design system's own chrome
+        rather than a second implementation of it. It was one: the same timer,
+        the same transition and the same hidden state were written again here,
+        and the copy answered a pointer moving anywhere over the picture, which
+        is the one gesture `SessionRoot` exists to ignore.
+      */}
+      <SessionChrome edge="bottom" aria-label="Session" className="gap-4">
         <Figure className="text-xs text-text-3" value={fingerprint.slice(0, 8)} />
         <span className="min-w-0 flex-1 truncate text-sm text-text">{name}</span>
         {/*
@@ -226,9 +201,9 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
             </Button>
           </Tooltip>
         </div>
-      </div>
+      </SessionChrome>
 
       <Presence />
-    </div>
+    </SessionRoot>
   );
 }

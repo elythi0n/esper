@@ -192,6 +192,31 @@ const report = (r) => {
 })();
 </script>`;
 
+/*
+  The surface page: the product's own session screen, in a box.
+
+  Everything about it that matters is in `scripts/probes/session-surface.tsx`
+  — this is the frame it mounts into. The module is served through the dev
+  server like any other, so what mounts is `SessionView` itself rather than a
+  copy of it that agrees with itself.
+*/
+const SURFACE = `<!doctype html><meta charset="utf-8"><title>surface check</title>
+<body style="margin:0;background:#0b0b0d">
+<div id="surface" style="position:relative;width:900px;height:560px"></div>
+<!--
+  The refresh preamble the React plugin's own HTML transform injects. This page
+  is not Vite's index.html, so it has to carry it: without it every component
+  module throws on import and the page reports nothing at all.
+-->
+<script type="module">
+import RefreshRuntime from "/@react-refresh";
+RefreshRuntime.injectIntoGlobalHook(window);
+window.$RefreshReg$ = () => {};
+window.$RefreshSig$ = () => (type) => type;
+window.__vite_plugin_react_preamble_installed__ = true;
+</script>
+<script type="module" src="/scripts/probes/session-surface.tsx"></script>`;
+
 const reports = [];
 /** Every batch of input the page posted, in order. */
 const typed = [];
@@ -203,8 +228,19 @@ const typed = [];
   measures is the hop the product has, not a hop this script invented.
 */
 const liveSocket = `/tmp/esper-check-viewer-${process.pid}.sock`;
+/*
+  The surface leg gets a stream of its own.
+
+  One connection can only be read once, and both legs read one to the end —
+  so the surface leg runs its own engine on its own socket rather than sharing
+  the hop leg's. It also needs a longer one: the chrome's own clock is three
+  seconds, and a session that stopped sending before the chrome retracted
+  would measure the retract on a still.
+*/
+const surfaceSocket = `/tmp/esper-check-surface-${process.pid}.sock`;
 let engine = null;
 let liveConn = null;
+let surfaceConn = null;
 
 const server = createServer(async (req, res) => {
   // The path, without the query — the page carries which stream to read in
@@ -232,27 +268,50 @@ const server = createServer(async (req, res) => {
     res.writeHead(204).end();
     return;
   }
-  if (path === "/live.bin") {
-    if (!liveConn) {
+  if (path === "/surface" || path === "/surface.html") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(SURFACE);
+    return;
+  }
+  /*
+    The window's own route names, answered the same way the window answers
+    them — because the surface leg mounts the product's component, and the
+    component fetches `/shell/video`. A gate that passed it a different URL
+    would be checking a path the product does not take.
+  */
+  if (path === "/shell/video/socket") {
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ path: liveSocket }));
+    return;
+  }
+  if (req.method === "POST" && path === "/shell/session") {
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ showing: "a gate" }));
+    return;
+  }
+  if (req.method === "DELETE" && path === "/shell/session") {
+    res.writeHead(204).end();
+    return;
+  }
+  if (path === "/live.bin" || path === "/shell/video") {
+    const conn = path === "/shell/video" ? surfaceConn : liveConn;
+    if (!conn) {
       res.writeHead(503).end("no engine is sending pictures");
       return;
     }
     res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" });
     // Flushed per chunk, like the window's route: a buffered copy would add
     // exactly the latency this leg exists to measure.
-    liveConn.on("data", (chunk) => {
+    conn.on("data", (chunk) => {
       res.write(chunk);
       res.flushHeaders?.();
     });
-    liveConn.on("end", () => res.end());
-    liveConn.on("error", () => res.end());
+    conn.on("end", () => res.end());
+    conn.on("error", () => res.end());
     return;
   }
   if (path === "/fixture.bin") {
     res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": fixture.length }).end(fixture);
     return;
   }
-  if (path.startsWith("/src/") || path.startsWith("/@") || path.startsWith("/node_modules/")) {
+  if (path.startsWith("/src/") || path.startsWith("/@") || path.startsWith("/node_modules/") || path.startsWith("/scripts/")) {
     try {
       const upstream = await fetch(dev + req.url);
       const body = Buffer.from(await upstream.arrayBuffer());
@@ -322,8 +381,24 @@ async function drive(name, start, seconds) {
 
 const chromium = process.env.CHROME ?? "/usr/bin/chromium";
 const profile = `/tmp/esper-viewer-${process.pid}`;
+/*
+  `ESPER_VIEWER_LOG=1` puts the page's own console on this terminal.
+
+  A page that never reports is the one failure this script cannot explain by
+  itself — the report is how it speaks — so the way to hear it is kept rather
+  than rebuilt each time somebody needs it.
+*/
+const loud = process.env.ESPER_VIEWER_LOG === "1";
 const inChromium = (from) => () =>
-  spawn(chromium, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", `--user-data-dir=${profile}`, url + from], { stdio: "ignore" });
+  spawn(
+    chromium,
+    [
+      "--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run",
+      ...(loud ? ["--enable-logging=stderr", "--v=0"] : []),
+      `--user-data-dir=${profile}`, url + from,
+    ],
+    { stdio: loud ? ["ignore", "ignore", "inherit"] : "ignore" },
+  );
 const MINI = "/usr/lib/webkit2gtk-4.1/MiniBrowser";
 const inWebKit = (from) => () => spawn(MINI, [url + from], { stdio: "ignore", env: { ...process.env } });
 const haveWebKit = existsSync(MINI) && process.env.DISPLAY;
@@ -388,6 +463,48 @@ if (existsSync(ENGINE)) {
   sockets.close();
 } else {
   console.log(`    live: skipped — ${ENGINE} is not built, so the hop was not measured`);
+}
+
+/*
+  The surface leg: the product's session screen, with pictures arriving.
+
+  The two things it exists to settle cannot be settled on a still. "Nothing
+  animates over the video" is true of every session that is not running, and a
+  stylesheet cannot answer it at all — a duration written as a Tailwind utility
+  never reaches a `.css` file. So `SessionView` is mounted for real, fed by a
+  real engine through the route the product fetches, and the document is read
+  while the canvas is provably changing.
+
+  The chrome's own clock is measured here for the same reason: the rule is that
+  it retracts after `--session-chrome-hide`, comes back at the edge, and does
+  **not** come back for a pointer moving over the picture — which is the
+  gesture somebody makes constantly.
+*/
+let surface = null;
+if (existsSync(ENGINE)) {
+  const sockets = createSocketServer((conn) => {
+    surfaceConn = conn;
+  });
+  await new Promise((r) => sockets.listen(surfaceSocket, r));
+  // Long enough to outlast the chrome's three-second clock with the retract,
+  // the edge and the pointer over the picture still on a live session.
+  const child = spawn(
+    ENGINE,
+    ["loopback", "--backend", "synthetic", "--size", "640x480", "--fps", "30", "--seconds", "16", "--viewer", surfaceSocket],
+    { stdio: ["ignore", "ignore", "ignore"] },
+  );
+  for (let waited = 0; waited < 100 && !surfaceConn; waited++) await sleep(100);
+  if (!surfaceConn) {
+    findings.push("the engine never dialled the surface socket, so the session screen was measured on a still");
+  } else {
+    surface = await drive("chromium (surface)", inChromium("surface"), 60);
+  }
+  try {
+    child.kill();
+  } catch {
+    // It exits when its seconds are up, which is the usual case.
+  }
+  sockets.close();
 }
 
 server.close();
@@ -564,6 +681,138 @@ if (live) {
           `and the keyboard came back on two Escapes and stayed on one`,
       );
     }
+  }
+}
+
+/*
+  And what the session screen did while the pictures were arriving.
+
+  Every claim below is conditional on `arriving` — the canvas showing something
+  different from a moment earlier. Without that this is a still, and a still
+  proves nothing about motion: it is the state where nothing animates however
+  the session is written.
+*/
+if (surface) {
+  if (surface.threw) findings.push(`the surface leg threw — ${surface.threw}`);
+  if (!surface.mounted) findings.push("the session screen did not mount, so nothing about it was measured");
+  else if (!surface.playing) {
+    findings.push(
+      "the session screen never got a picture, so every claim about a live session is unmeasured" +
+        (surface.said ? ` — the screen said: ${surface.said}` : ""),
+    );
+  } else if (!surface.arriving) {
+    findings.push("the canvas did not change while it was watched — this was a still, which is what the item says not to measure");
+  } else {
+    const ceiling = surface.ceilingMs ?? 0;
+    if (!(ceiling > 0)) findings.push(`--dur-fast resolved to ${ceiling}ms inside the session, so there is no ceiling to hold anything to`);
+
+    // A session declares itself, or it gets none of the session theme: not the
+    // dark values, not the duration ceiling, not the chrome's own layers.
+    if (!surface.session) {
+      findings.push("the session screen carries no [data-session], so the session theme applies to none of it");
+    }
+
+    // The ceiling, on the tokens the session actually resolves.
+    for (const [what, ms] of [["--dur-base", surface.baseMs], ["--dur-slow", surface.slowMs]]) {
+      if (ms > ceiling) {
+        findings.push(
+          `inside the session ${what} resolves to ${ms}ms against a --dur-fast ceiling of ${ceiling}ms — ` +
+            `the cap on [data-session] is not winning, so anything over the video using it runs long`,
+        );
+      }
+    }
+    if (surface.videoMs !== 0) {
+      findings.push(`--dur-video resolves to ${surface.videoMs}ms inside a session, and the picture may not ease`);
+    }
+
+    // The surface itself: never a transition, never an animation.
+    for (const el of surface.surface ?? []) {
+      if (el.transitionMs !== 0) {
+        findings.push(`${el.what} carries a ${el.transitionMs}ms transition — the frame that arrives is the frame that is shown`);
+      }
+      if (el.animation && el.animation !== "none") {
+        findings.push(`${el.what} is running the ${el.animation} animation — the video surface never animates`);
+      }
+    }
+
+    /*
+      Everything over the picture, held to the ceiling.
+
+      The list is also the floor: the HUD does transition, so an empty list
+      means the walk found nothing and every assertion above it is vacuous.
+    */
+    const over = [...(surface.timed ?? []), ...(surface.timedOnResize ?? [])];
+    if ((surface.timed ?? []).length === 0) {
+      findings.push("nothing over the video was found to have any timing at all — the walk measured nothing");
+    }
+    for (const el of over) {
+      if (el.transitionMs > ceiling) {
+        findings.push(
+          `over the video, ${el.what} transitions ${el.property} over ${el.transitionMs}ms — ` +
+            `${ceiling}ms is the ceiling in a live session`,
+        );
+      }
+      if (el.animationMs > ceiling) {
+        findings.push(`over the video, ${el.what} runs ${el.animation} for ${el.animationMs}ms, over the ${ceiling}ms ceiling`);
+      }
+    }
+    for (const a of [...(surface.running ?? []), ...(surface.runningOnResize ?? [])]) {
+      if (a.overVideo && a.ms > ceiling) {
+        findings.push(`while pictures were arriving, ${a.what} animated ${a.cause} for ${a.ms}ms over the video`);
+      }
+    }
+
+    /*
+      The HUD's numbers, which the design system singles out: a counting-up
+      animation on a latency readout is a lie about latency.
+    */
+    const hud = surface.hud ?? {};
+    if (!hud.found) {
+      findings.push("the HUD showed no frame rate on a live session, so its readouts were not measured");
+    } else {
+      if (!hud.sameNode) {
+        findings.push("the HUD's frame rate was a different element from one sample to the next — a readout that is replaced is not updating in place");
+      }
+      if (hud.transitionMs !== 0) findings.push(`the HUD's frame rate carries a ${hud.transitionMs}ms transition`);
+      if (hud.animation) findings.push(`the HUD's frame rate is running the ${hud.animation} animation`);
+      if (!/tabular-nums/.test(hud.numerals ?? "")) {
+        findings.push(`the HUD's frame rate renders with font-variant-numeric "${hud.numerals}" — without tabular figures a number changing in place shifts everything beside it`);
+      }
+    }
+
+    // A resize swaps frames rather than fading between them.
+    if (!surface.resized) {
+      findings.push("the picture did not change across a resize, so the surface was not live through it");
+    }
+
+    // ── The chrome's clock, Phase 10's rule driven ────────────────────────
+    if (surface.hiddenWhileUsed) findings.push("the chrome was already gone while the session was being used");
+    if (!surface.retracted) {
+      findings.push(`the chrome never retracted — ${surface.hideMs}ms is what --session-chrome-hide says it waits`);
+    } else if (Math.abs(surface.retractedAfterMs - surface.hideMs) > 900) {
+      findings.push(
+        `the chrome retracted after ${surface.retractedAfterMs}ms and --session-chrome-hide is ${surface.hideMs}ms`,
+      );
+    }
+    if (!surface.stayedGoneOverVideo) {
+      findings.push(
+        "a pointer moving over the picture brought the chrome back — that is the gesture somebody makes " +
+          "constantly, so chrome that answers it is never gone",
+      );
+    }
+    if (!surface.cameBackAtEdge) {
+      findings.push("the pointer reached the chrome's edge and it did not come back, so it cannot be got at");
+    }
+    if (!surface.stillArriving) {
+      findings.push("pictures stopped before the chrome was measured, so the chrome was measured on a still");
+    }
+    console.log(
+      `    surface: ${surface.size} live, --dur-fast ${surface.ceilingMs}ms ceiling ` +
+        `(base ${surface.baseMs}ms, slow ${surface.slowMs}ms, video ${surface.videoMs}ms), ` +
+        `${(surface.timed ?? []).length} timed element(s) over the picture, ` +
+        `fps read ${(surface.hud?.said ?? []).join("/") || "nothing"} in one node with no transition, ` +
+        `chrome retracted at ${surface.retractedAfterMs}ms and came back at the edge`,
+    );
   }
 }
 

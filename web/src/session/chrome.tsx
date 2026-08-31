@@ -33,7 +33,7 @@ interface ChromeState {
 
 const Ctx = createContext<ChromeState | null>(null);
 
-/** How close to the top edge the pointer must come to bring the chrome back, in px. */
+/** How close to an edge the pointer must come to bring the chrome back, in px. */
 const EDGE = 8;
 
 export interface SessionRootProps extends HTMLAttributes<HTMLDivElement> {
@@ -44,9 +44,13 @@ export interface SessionRootProps extends HTMLAttributes<HTMLDivElement> {
 /**
  * The root of a live session. Owns the auto-hide clock: the chrome retracts
  * `--session-chrome-hide` after the last interaction and comes back when the
- * pointer reaches the top edge or focus lands inside it. Moving over the
- * video does not bring it back — that is the one gesture the person makes
- * constantly, and chrome that answered it would never be gone.
+ * pointer reaches the top or bottom edge, or focus lands inside it. Moving
+ * over the video does not bring it back — that is the one gesture the person
+ * makes constantly, and chrome that answered it would never be gone.
+ *
+ * Either edge, because chrome sits at either: the viewer's HUD is along the
+ * bottom and the specimen's bar is across the top, and `hidden` is one state
+ * for all of it.
  *
  * `contain: paint` makes this the containing block for the presence
  * indicator's fixed position, so in a preview it stays inside the box; in
@@ -81,7 +85,8 @@ export function SessionRoot({ children, className, onPointerMove, onPointerLeave
   const move = (e: PointerEvent<HTMLDivElement>) => {
     onPointerMove?.(e);
     const box = ref.current?.getBoundingClientRect();
-    if (box && e.clientY - box.top <= EDGE) show();
+    if (!box) return;
+    if (e.clientY - box.top <= EDGE || box.bottom - e.clientY <= EDGE) show();
   };
 
   return (
@@ -111,13 +116,24 @@ export function useSessionChrome(): ChromeState {
 }
 
 /**
- * The bar across the top of a session. Retracts upward over `--dur-base`,
- * which the session theme has already capped at `--dur-fast`. Pointer over it
- * or focus inside it keeps it, so every control on it has a keyboard path:
- * Tab into it and it is there.
+ * A bar along an edge of a session. Retracts the way it came over
+ * `--dur-base`, which the session theme has already capped at `--dur-fast`.
+ * Pointer over it or focus inside it keeps it, so every control on it has a
+ * keyboard path: Tab into it and it is there.
+ *
+ * `edge` is where it sits and therefore which way it leaves. The viewer's HUD
+ * is along the bottom and the design system's specimen is across the top, and
+ * both are the same component — a second one would be a second set of rules
+ * about chrome over somebody's desktop.
  */
-export function SessionChrome({ children, className, ...props }: HTMLAttributes<HTMLDivElement>) {
+export function SessionChrome({
+  children,
+  className,
+  edge = "top",
+  ...props
+}: HTMLAttributes<HTMLDivElement> & { edge?: "top" | "bottom" }) {
   const { hidden, show } = useSessionChrome();
+  const top = edge === "top";
   return (
     <div
       role="toolbar"
@@ -126,9 +142,11 @@ export function SessionChrome({ children, className, ...props }: HTMLAttributes<
       onPointerMove={show}
       onFocusCapture={show}
       className={cn(
-        "absolute inset-x-0 top-0 z-[var(--z-session-chrome)] flex h-[var(--topbar-h)] items-center gap-3 border-b border-border bg-surface-0/90 px-4",
+        "absolute inset-x-0 z-[var(--z-session-chrome)] flex items-center gap-3 bg-surface-0/90 px-4",
+        top ? "top-0 h-[var(--topbar-h)] border-b border-border" : "bottom-0 border-t border-border py-2",
         "transition-[translate,opacity] duration-[var(--dur-base)] ease-[var(--ease)]",
-        hidden && "pointer-events-none -translate-y-full opacity-0",
+        hidden && "pointer-events-none opacity-0",
+        hidden && (top ? "-translate-y-full" : "translate-y-full"),
         className,
       )}
       {...props}
