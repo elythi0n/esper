@@ -241,6 +241,9 @@ const surfaceSocket = `/tmp/esper-check-surface-${process.pid}.sock`;
 let engine = null;
 let liveConn = null;
 let surfaceConn = null;
+/** The engine feeding the surface leg, so the leg can have it taken away. */
+let surfaceEngine = null;
+let startSurfaceEngine = () => null;
 
 const server = createServer(async (req, res) => {
   // The path, without the query — the page carries which stream to read in
@@ -288,6 +291,27 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === "DELETE" && path === "/shell/session") {
     res.writeHead(204).end();
+    return;
+  }
+  /*
+    Take the pictures away, and give them back.
+
+    The reconnect the viewer promises is not something a page can stage for
+    itself: the engine has to actually go. So the page asks for it here, this
+    kills the engine feeding it, and another starts a couple of seconds later
+    — long enough that the notice has to count rather than flash.
+  */
+  if (path === "/break-the-link") {
+    try {
+      surfaceEngine?.kill();
+    } catch {
+      // Already gone, which is the thing being asked for.
+    }
+    surfaceEngine = null;
+    res.writeHead(204).end();
+    setTimeout(() => {
+      surfaceEngine = startSurfaceEngine();
+    }, 2500);
     return;
   }
   if (path === "/live.bin" || path === "/shell/video") {
@@ -484,15 +508,23 @@ let surface = null;
 if (existsSync(ENGINE)) {
   const sockets = createSocketServer((conn) => {
     surfaceConn = conn;
+    // So the route answers 503 between engines rather than handing the page a
+    // socket nothing is writing to — which is what the page retries against.
+    conn.on("close", () => {
+      if (surfaceConn === conn) surfaceConn = null;
+    });
   });
   await new Promise((r) => sockets.listen(surfaceSocket, r));
   // Long enough to outlast the chrome's three-second clock with the retract,
-  // the edge and the pointer over the picture still on a live session.
-  const child = spawn(
-    ENGINE,
-    ["loopback", "--backend", "synthetic", "--size", "640x480", "--fps", "30", "--seconds", "16", "--viewer", surfaceSocket],
-    { stdio: ["ignore", "ignore", "ignore"] },
-  );
+  // the edge and the pointer over the picture still on a live session — and
+  // then the reconnect after it.
+  startSurfaceEngine = () =>
+    spawn(
+      ENGINE,
+      ["loopback", "--backend", "synthetic", "--size", "640x480", "--fps", "30", "--seconds", "25", "--viewer", surfaceSocket],
+      { stdio: ["ignore", "ignore", "ignore"] },
+    );
+  surfaceEngine = startSurfaceEngine();
   for (let waited = 0; waited < 100 && !surfaceConn; waited++) await sleep(100);
   if (!surfaceConn) {
     findings.push("the engine never dialled the surface socket, so the session screen was measured on a still");
@@ -500,7 +532,7 @@ if (existsSync(ENGINE)) {
     surface = await drive("chromium (surface)", inChromium("surface"), 60);
   }
   try {
-    child.kill();
+    surfaceEngine?.kill();
   } catch {
     // It exits when its seconds are up, which is the usual case.
   }
@@ -806,6 +838,50 @@ if (surface) {
     if (!surface.stillArriving) {
       findings.push("pictures stopped before the chrome was measured, so the chrome was measured on a still");
     }
+    /*
+      And the reconnect, with the engine really taken away.
+
+      "Never a dead window" is the claim, and a dead window is exactly what
+      this used to be: the stream ended, the surface said the session was over
+      and nothing asked again. What is held here is the whole of the other
+      behaviour — the last picture kept rather than blanked, a notice that
+      *counts* rather than sits, and the picture back with nobody touching
+      anything.
+    */
+    const said = surface.noticed ?? [];
+    if (said.length === 0) {
+      findings.push("the engine was killed and the window said nothing — a session that stops with no notice is a dead window");
+    } else if (said.length < 2) {
+      findings.push(
+        `the window said ${JSON.stringify(said[0])} and it never changed — a notice that does not count ` +
+          `cannot be told from a window that has stopped`,
+      );
+    }
+    if (!surface.flatIsFlat) {
+      findings.push("the page's own test for a cleared canvas does not recognise one, so \"the picture was kept\" means nothing");
+    }
+    if (!surface.keptThePicture) {
+      findings.push("the canvas was blanked when the pictures stopped — the last frame is the most recent true thing about that machine");
+    }
+    if (surface.resizedOnReturn > 0) {
+      findings.push(
+        `the canvas was resized ${surface.resizedOnReturn} time(s) coming back from a reconnect at the same ` +
+          `size — setting width or height clears it, so every reconnect is a black flash`,
+      );
+    }
+    if (surface.wentBlank) {
+      findings.push(
+        "the canvas went to one flat colour while the picture was coming back — a black flash on every reconnect, " +
+          "which is what resizing a canvas to the size it already is does",
+      );
+    }
+    if (surface.cameBackMs === null) {
+      findings.push("a new engine started and the picture never came back, so the reconnect is not automatic");
+    }
+    console.log(
+      `    reconnect: ${said.map((t) => JSON.stringify(t)).join(" then ")}, last picture kept, ` +
+        `back in ${surface.cameBackMs}ms with nobody touching anything and no blank frame`,
+    );
     console.log(
       `    surface: ${surface.size} live, --dur-fast ${surface.ceilingMs}ms ceiling ` +
         `(base ${surface.baseMs}ms, slow ${surface.slowMs}ms, video ${surface.videoMs}ms), ` +

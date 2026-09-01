@@ -1,5 +1,5 @@
 import { Maximize2, Minimize2, Monitor, MousePointer2, MousePointerBan, Ratio, Settings2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { Tooltip } from "@/components/tooltip";
 import { Figure } from "@/screens/parts";
@@ -7,6 +7,9 @@ import { Presence, SessionChrome, SessionRoot } from "@/session/chrome";
 import { type Fit, FIT_NAMES, FITS } from "@/session/fitting";
 import { RemoteScreen } from "@/session/RemoteScreen";
 import { IDLE, type ViewerState } from "@/session/video";
+
+/** How often to ask the window to put a session back while there is no picture. */
+const ASK_AGAIN_MS = 5_000;
 
 /**
  * One session, inside its dock panel.
@@ -93,9 +96,9 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
     holds a connection to somebody else's machine, and their screen goes on
     saying it is being watched.
   */
-  useEffect(() => {
+  const ask = useCallback(() => {
     let live = true;
-    fetch("/shell/session", {
+    void fetch("/shell/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device: fingerprint }),
@@ -109,11 +112,43 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
       });
     return () => {
       live = false;
+    };
+  }, [fingerprint]);
+
+  useEffect(() => {
+    const stop = ask();
+    return () => {
+      stop();
       // `keepalive` so the request survives the page tearing this down, which
       // is exactly when it is sent.
       void fetch("/shell/session", { method: "DELETE", keepalive: true }).catch(() => {});
     };
-  }, [fingerprint]);
+  }, [ask]);
+
+  /*
+    And ask again while the pictures are gone.
+
+    The surface reconnects to the socket on its own, but a socket nothing is
+    writing to stays empty for ever: the engine this window started is what
+    died, and starting one is the window's job. The route refuses while a
+    session is already running, so asking repeatedly costs a 409 and can never
+    leave two engines behind.
+
+    Not a retry of a *request* — a retry of the session. The far end is asked
+    again, because a new session is a new session and consent is per session.
+  */
+  useEffect(() => {
+    if (picture.link === "live") return undefined;
+    let stop = ask();
+    const again = setInterval(() => {
+      stop();
+      stop = ask();
+    }, ASK_AGAIN_MS);
+    return () => {
+      clearInterval(again);
+      stop();
+    };
+  }, [picture.link, ask]);
 
   return (
     <SessionRoot ref={root} className="h-full w-full">

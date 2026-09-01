@@ -84,7 +84,7 @@ function running(picture: DOMRect) {
   });
 }
 
-/** Whether the canvas is showing something different from a moment ago. */
+/** The canvas, shrunk to 16x16, as a string — for telling two moments apart. */
 function fingerprintOf(canvas: HTMLCanvasElement): string {
   const small = document.createElement("canvas");
   small.width = 16;
@@ -93,6 +93,23 @@ function fingerprintOf(canvas: HTMLCanvasElement): string {
   if (!ctx) return "";
   ctx.drawImage(canvas, 0, 0, 16, 16);
   return [...ctx.getImageData(0, 0, 16, 16).data].join(",");
+}
+
+/**
+ * Whether the canvas is one flat colour — which is what a cleared one is.
+ *
+ * Not "all zeroes": the context is opaque, so clearing it gives black at full
+ * alpha and a test for zero bytes passes over exactly the failure it was
+ * written for. A picture of somebody's screen is never one colour.
+ */
+function flat(fingerprint: string): boolean {
+  const bytes = fingerprint.split(",");
+  if (bytes.length < 8) return true;
+  const first = bytes.slice(0, 4).join(",");
+  for (let at = 4; at + 4 <= bytes.length; at += 4) {
+    if (bytes.slice(at, at + 4).join(",") !== first) return false;
+  }
+  return true;
 }
 
 const box = document.getElementById("surface");
@@ -252,6 +269,90 @@ const report = (r: unknown) =>
     await sleep(200);
     seen.cameBackAtEdge = !isHidden();
     seen.stillArriving = fingerprintOf(canvas) !== beforeChrome;
+    /*
+      And the reconnect: the pictures actually taken away.
+
+      Nothing here is staged in the page. The gate kills the engine when this
+      asks it to and starts another a couple of seconds later, so what is
+      measured is the window's own answer to a session that stopped — the last
+      picture kept, a notice that counts, and the picture coming back without
+      anybody touching anything.
+    */
+    const notice = () =>
+      [...box.querySelectorAll('[role="status"]')].find((el) => /Connection/.test(el.textContent ?? "")) ?? null;
+
+    // The oracle, checked against a canvas that *is* cleared, so "the picture
+    // was kept" cannot be a sentence that is true of everything.
+    seen.flatIsFlat = flat([...new Array(16 * 16 * 4)].map((_, i) => (i % 4 === 3 ? 255 : 0)).join(","));
+
+    await fetch("/break-the-link", { method: "GET" });
+    const readings: string[] = [];
+    for (let waited = 0; waited < 8000; waited += 100) {
+      const el = notice();
+      if (el) {
+        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+        if (readings[readings.length - 1] !== text) readings.push(text);
+        // Two different readings is the count moving, which is the difference
+        // between a notice and a window that has simply stopped.
+        if (readings.length >= 2) break;
+      }
+      await sleep(100);
+    }
+    seen.noticed = readings;
+    // The last picture is still there under it, rather than a black canvas.
+    seen.keptThePicture = !flat(fingerprintOf(canvas));
+
+    /*
+      Watched every frame rather than every fifth of a second.
+
+      A reconnect that clears the canvas is black for the gap between the new
+      stream's configuration and its first decoded picture — a flash, and a
+      poll slow enough to miss it would pass on a session that blinks every
+      time the link hiccups.
+    */
+    /*
+      Whether the canvas is *resized* on the way back, which is the thing that
+      clears it.
+
+      Watched rather than sampled. A cleared canvas is black for the gap
+      between the new stream's configuration and its first decoded picture,
+      and sampling for that flash caught it in one run out of two — a detector
+      that finds a real defect half the time is worse than one that says it
+      cannot see it. Writing `canvas.width` queues a mutation record even when
+      the value is the one already there, so the observer sees every write and
+      the reconnect is expected to make none: the size did not change.
+    */
+    let resizes = 0;
+    const watcher = new MutationObserver((records) => {
+      resizes += records.length;
+    });
+    watcher.observe(canvas, { attributes: true, attributeFilter: ["width", "height"] });
+
+    const frozen = fingerprintOf(canvas);
+    let cameBackMs: number | null = null;
+    let wentBlank = false;
+    const broke = Date.now();
+    await new Promise<void>((done) => {
+      const look = () => {
+        const now = fingerprintOf(canvas);
+        if (flat(now)) wentBlank = true;
+        if (now !== frozen && !flat(now) && notice() === null) {
+          cameBackMs = Date.now() - broke;
+          done();
+          return;
+        }
+        if (Date.now() - broke > 20000) {
+          done();
+          return;
+        }
+        requestAnimationFrame(look);
+      };
+      requestAnimationFrame(look);
+    });
+    watcher.disconnect();
+    seen.cameBackMs = cameBackMs;
+    seen.wentBlank = wentBlank;
+    seen.resizedOnReturn = resizes;
   } catch (e) {
     seen.threw = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
   }

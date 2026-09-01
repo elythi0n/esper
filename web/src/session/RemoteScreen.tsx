@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { CopyField } from "@/components/copy-field";
 import { Key } from "@/screens/parts";
+import { ReconnectNotice } from "./chrome";
 import { type Fit, FIT_CLASS } from "./fitting";
 import { driveWith } from "./hand";
 import { IDLE, showTheScreen, type ViewerState } from "./video";
@@ -113,15 +114,16 @@ export function RemoteScreen({
 
   const playing = state.status === "playing";
   /*
-    A session that ended keeps its last picture and says so over it.
+    A session whose pictures stopped keeps the last one and says so over it.
 
     Not a blank canvas: the last frame is the most recent true thing about
     that machine, and clearing it throws away information to make room for a
     message. Not silence either — a still picture with no explanation is
     exactly what a frozen session looks like, which is the failure this
-    product's reconnect rules are written against.
+    product's reconnect rules are written against. The window goes on asking
+    for the picture underneath; see `showTheScreen`.
   */
-  const ended = state.status === "ended" && state.pictures > 0;
+  const away = state.link !== "live" && state.pictures > 0;
   const wayOut = `${id}-way-out`;
   return (
     <div className="absolute inset-0 grid place-items-center bg-video [transition-duration:var(--dur-video)]">
@@ -149,7 +151,7 @@ export function RemoteScreen({
         aria-describedby={drivable ? wayOut : undefined}
         // The class and the pointer mapping come from the same module, so a
         // picture drawn one way cannot be clicked as though it sat another.
-        className={playing || ended ? `h-full w-full ${FIT_CLASS[fit]}` : "sr-only"}
+        className={playing || away ? `h-full w-full ${FIT_CLASS[fit]}` : "sr-only"}
       />
       {drivable && (
         <p id={wayOut} className="sr-only">
@@ -157,17 +159,12 @@ export function RemoteScreen({
           back.
         </p>
       )}
-      {ended && (
-        <div
-          role="status"
-          className="absolute inset-x-0 bottom-0 flex justify-center p-4"
-        >
-          <p className="rounded-md border border-border bg-surface-1/95 px-4 py-2 text-sm text-text">
-            The session ended. This is the last picture it sent.
-          </p>
+      {away && (
+        <div className="absolute inset-0 grid place-items-center">
+          <ReconnectNotice state={state.link} sinceMs={state.awayMs ?? 0} />
         </div>
       )}
-      {!playing && !ended && (
+      {!playing && !away && (
         <div className="flex max-w-[var(--measure)] flex-col items-center gap-3 px-8 text-center">
           <Key>{state.status === "failed" ? "No picture" : "Waiting for a session"}</Key>
           <p className="text-sm text-text-2">

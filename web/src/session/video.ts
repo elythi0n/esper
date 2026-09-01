@@ -19,10 +19,25 @@
  */
 import { readViewerStream, type Configuration } from "./stream";
 
+/** What the picture path is doing, which the notice over the picture renders. */
+export type LinkState = "live" | "reconnecting" | "lost";
+
 /** What the surface knows about itself, for whatever wants to say it. */
 export interface ViewerState {
   /** Nothing yet, a picture, or a reason there is not one. */
-  status: "waiting" | "playing" | "ended" | "failed";
+  status: "waiting" | "playing" | "failed";
+  /**
+   * The state of the path the pictures come down.
+   *
+   * Separate from `status` because they answer different questions: `status`
+   * is about the picture on the canvas, which stays there when the link goes,
+   * and this is about whether anything is still feeding it. A window that
+   * conflated them would either throw away the last true thing it knows about
+   * that machine or show it as though it were current.
+   */
+  link: LinkState;
+  /** How long the pictures have been gone, in milliseconds, or null. */
+  awayMs: number | null;
   /** Pictures drawn since the session opened. */
   pictures: number;
   /** The size the engine says it is sending. */
@@ -56,6 +71,8 @@ export interface ViewerState {
 
 export const IDLE: ViewerState = {
   status: "waiting",
+  link: "live",
+  awayMs: null,
   pictures: 0,
   size: null,
   codec: null,
@@ -85,13 +102,38 @@ async function refusal(response: Response): Promise<string> {
   return `This window could not start the picture (${response.status}).`;
 }
 
+/** The first pause before trying the picture again, in milliseconds. */
+const FIRST_WAIT_MS = 300;
+/** The longest pause between tries. Doubling stops here and stays. */
+const LONGEST_WAIT_MS = 5_000;
 /**
- * Draw a session's pictures onto a canvas until it ends.
+ * How long the pictures may be gone before the window stops calling it a
+ * reconnect and calls it lost. It goes on trying either way — what changes is
+ * what it is honest to say.
+ */
+const LOST_AFTER_MS = 20_000;
+
+/**
+ * Draw a session's pictures onto a canvas, and keep drawing them.
  *
  * Returns a function that stops it. Everything it owns — the decoder, the
  * fetch, the frames — is closed there, because a session that is torn down
  * while a decoder still holds frames is a leak the browser reports as memory
  * rather than as an error.
+ *
+ * # Why it does not stop when the pictures do
+ *
+ * Because a window that freezes is the worst thing a remote desktop can do:
+ * the last picture goes on looking like that machine, and there is no way to
+ * tell a screen that stopped changing from a link that stopped carrying. So
+ * the stream ending is a *state* rather than the end — the last picture stays,
+ * the window says the link is interrupted and counts, and it goes on asking
+ * for the picture until one arrives.
+ *
+ * The one thing it does not retry is a window that has no socket at all: a
+ * browser tab asking a dev server for this route gets a 404, and trying that
+ * again every second for ever would be a page spinning on something that
+ * cannot come.
  */
 export function showTheScreen(
   canvas: HTMLCanvasElement,
@@ -102,6 +144,8 @@ export function showTheScreen(
   const held: { decoder: VideoDecoder | null } = { decoder: null };
   let state: ViewerState = { ...IDLE };
   let skipped = false;
+  /** When the pictures stopped, and how long to wait before asking again. */
+  const lost: { at: number | null; waitMs: number } = { at: null, waitMs: FIRST_WAIT_MS };
 
   const say = (next: Partial<ViewerState>) => {
     state = { ...state, ...next };
@@ -139,8 +183,11 @@ export function showTheScreen(
     // changed, and a decoder configured for the old ones is a decoder that
     // will produce nothing and say nothing about why.
     held.decoder?.close();
-    canvas.width = record.width;
-    canvas.height = record.height;
+    // Setting either clears the canvas, so it is set only when it is not
+    // already that — a reconnect at the same size keeps the last picture
+    // underneath the notice rather than blanking to black.
+    if (canvas.width !== record.width) canvas.width = record.width;
+    if (canvas.height !== record.height) canvas.height = record.height;
     held.decoder = new VideoDecoder({
       output: (frame) => {
         ctx?.drawImage(frame, 0, 0);
@@ -159,8 +206,15 @@ export function showTheScreen(
           if (hops.length > 100) hops.shift();
           worst = Math.max(...hops);
         }
+        // A picture is the only proof the link is back, so it is the only
+        // thing that clears the count and the backoff.
+        lost.at = null;
+        lost.waitMs = FIRST_WAIT_MS;
         say({
           status: "playing",
+          link: "live",
+          awayMs: null,
+          trouble: null,
           pictures: state.pictures + 1,
           fps: recent(now),
           hopMs: hop,
@@ -178,12 +232,24 @@ export function showTheScreen(
     say({ size: { width: record.width, height: record.height }, codec: record.codec });
   };
 
-  (async () => {
+  /*
+    One go at the picture: ask for it, read it until it stops.
+
+    What it returns is what to do next — `"again"` for anything that could be a
+    link, `"never"` for a window that has no socket to be pointed at. A
+    boolean would have lost exactly that distinction.
+  */
+  const once = async (): Promise<"again" | "never"> => {
     try {
       const response = await fetch(url, { signal: abort.signal });
       if (!response.ok || !response.body) {
-        say({ status: "failed", trouble: await refusal(response) });
-        return;
+        const why = await refusal(response);
+        // 404 and 501 are this window saying it has no socket for pictures at
+        // all — a browser tab, or a build without the route. Nothing arrives
+        // by waiting, so this is the one refusal that ends it.
+        const never = response.status === 404 || response.status === 501;
+        say({ status: "failed", trouble: why, ...(never ? { link: "live" as const, awayMs: null } : {}) });
+        return never ? "never" : "again";
       }
       for await (const record of readViewerStream(response.body)) {
         if (record.kind === "configuration") {
@@ -216,16 +282,50 @@ export function showTheScreen(
           }),
         );
       }
-      say({ status: state.pictures > 0 ? "ended" : "failed", trouble: state.pictures > 0 ? null : "the session sent no pictures" });
+      return "again";
     } catch (e) {
-      if (abort.signal.aborted) return;
-      say({ status: "failed", trouble: e instanceof Error ? e.message : String(e) });
+      if (abort.signal.aborted) return "never";
+      // A stream that broke mid-picture is a link, not a fault to report and
+      // stop on: the trouble is kept for a window that never had one.
+      if (state.pictures === 0) say({ status: "failed", trouble: e instanceof Error ? e.message : String(e) });
+      return "again";
     } finally {
       try {
         held.decoder?.close();
       } catch {
         // Already closed, which is the ordinary way this ends.
       }
+      held.decoder = null;
+    }
+  };
+
+  (async () => {
+    while (!abort.signal.aborted) {
+      const next = await once();
+      if (next === "never" || abort.signal.aborted) return;
+
+      // The link is gone from here until a picture proves otherwise — and
+      // `lost` is cleared where that proof arrives, in the decoder's output,
+      // rather than after a try. Resetting it per attempt would start the
+      // count again every few seconds, so a link that never came back would
+      // report a few seconds gone for ever.
+      lost.at ??= Date.now();
+      const lostAt = lost.at;
+      const waitMs = lost.waitMs;
+      /*
+        Wait, saying how long — and go on saying it while waiting.
+
+        The count is what makes this visible rather than merely automatic: a
+        notice that appeared and then sat still is indistinguishable from a
+        window that has stopped, which is the thing this exists to avoid.
+      */
+      const until = Date.now() + waitMs;
+      do {
+        const away = Date.now() - lostAt;
+        say({ link: away >= LOST_AFTER_MS ? "lost" : "reconnecting", awayMs: away });
+        await new Promise((r) => setTimeout(r, Math.min(250, Math.max(0, until - Date.now()))));
+      } while (Date.now() < until && !abort.signal.aborted);
+      lost.waitMs = Math.min(waitMs * 2, LONGEST_WAIT_MS);
     }
   })();
 

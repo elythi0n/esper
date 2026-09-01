@@ -11,6 +11,7 @@ import {
   type Ref,
 } from "react";
 import { cn } from "@/lib/cn";
+import type { LinkState } from "./video";
 import { durationMs } from "@/lib/theme";
 
 /**
@@ -182,14 +183,19 @@ export function VideoSurface({ className, children, ...props }: HTMLAttributes<H
   );
 }
 
-export type ReconnectState = "connected" | "reconnecting" | "lost";
+/**
+ * What the picture path is doing. The same three words the surface reports —
+ * see `ViewerState["link"]` — because a screen and the stream feeding it
+ * describing one state in two vocabularies is how they come to disagree.
+ */
+export type ReconnectState = LinkState;
 
 /**
  * Reconnect states its state. No pulse, no spinner, no breathing: a sentence
  * in the middle of the frame, and a count of how long, updating in place.
  */
 export function ReconnectNotice({ state, sinceMs }: { state: ReconnectState; sinceMs: number }) {
-  if (state === "connected") return null;
+  if (state === "live") return null;
   const s = Math.floor(sinceMs / 1000);
   return (
     <div role="status" className="rounded-md border border-border bg-surface-1 px-4 py-3 text-center text-sm text-text">

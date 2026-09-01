@@ -50,7 +50,7 @@ export function SessionSection() {
   const innerProbe = useRef<HTMLSpanElement>(null);
   const outerPaint = usePainted(outerProbe);
   const innerPaint = usePainted(innerProbe);
-  const [reconnect, setReconnect] = useState<ReconnectState>("connected");
+  const [reconnect, setReconnect] = useState<ReconnectState>("live");
 
   return (
     <Section
@@ -72,7 +72,7 @@ export function SessionSection() {
       <Sub title="Live" about="Auto-hiding chrome, the HUD, the presence indicator, and a video surface that swaps frames. The chrome retracts after --session-chrome-hide and comes back at the top edge or on focus, so every control on it has a keyboard path.">
         <SessionRoot ref={sessionRef} className="h-[28rem] rounded-lg border border-border">
           <VideoSurface>
-            {reconnect === "connected" ? (
+            {reconnect === "live" ? (
               <span className="font-mono text-xs text-text-3">2560 × 1440 · 60 fps · the picture goes here</span>
             ) : (
               <ReconnectNotice state={reconnect} sinceMs={7000} />
@@ -99,7 +99,7 @@ export function SessionSection() {
         <Demo className="justify-between">
           <span className="text-sm text-text-2">Reconnect states its state — no pulse, no spinner, no breathing.</span>
           <div className="flex gap-2">
-            {(["connected", "reconnecting", "lost"] as const).map((s) => (
+            {(["live", "reconnecting", "lost"] as const).map((s) => (
               <Button key={s} size="sm" variant={reconnect === s ? "primary" : "secondary"} onClick={() => setReconnect(s)}>{s}</Button>
             ))}
           </div>
