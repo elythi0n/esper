@@ -536,7 +536,8 @@ cleanup_terminal() {
              "${seat_host:-}" "${switch_x:-}" "${lk_host:-}" "${wk_listener:-}" \
              "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}" \
              "${mk_host:-}" "${mk_client:-}" "${na_host:-}" "${la_host:-}" \
-             "${bd_host:-}"; do
+             "${bd_host:-}" "${wd_host:-}" "${wd_client:-}" "${wd_win:-}" \
+             "${wd_xev:-}" "${wd_x:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -2310,6 +2311,150 @@ print(s.getsockname()[1]); s.close()')
       ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" clipboard-out clipboard-in >/dev/null
       kill "$clip_host" 2>/dev/null || true
       clip_host=""
+
+      # **A window is somewhere to drive from — and for a long time it was
+      # not.**
+      #
+      # Input comes from a window, and there are two kinds: the X11 one this
+      # process opens with `--present`, and a webview on the other end of
+      # `--viewer`. The controller asked only about the first, so the
+      # arrangement the desktop application actually uses — `esper connect
+      # <device> --viewer <socket>` — carried no keystroke at all. The window
+      # sent them, the engine read them off the socket, and nothing forwarded
+      # them.
+      #
+      # Nothing else in this suite reaches it. The window's own half is
+      # checked in the browser by `check:viewer`, which proves the bytes leave
+      # the page; the engine's half is checked by `input_source`'s tests,
+      # which prove a `WindowEvent` becomes an `InputMessage`. Neither can see
+      # the thing between them, and the thing between them was the bug.
+      #
+      # So: a real host on a display of its own, a socket standing in for the
+      # window, one key written down it, and **the host's own X server asked
+      # what it received** — `xev` on the root, which is where a fake key
+      # lands when nothing is focused.
+      echo "  — typing into a session from a window on a socket"
+      if command -v Xvfb >/dev/null 2>&1 && command -v xev >/dev/null 2>&1; then
+        wd_d=""
+        for d in $(seq 71 99); do
+          [ -e "/tmp/.X${d}-lock" ] && continue
+          wd_d=$d; break
+        done
+      fi
+      if [ -n "${wd_d:-}" ]; then
+        Xvfb ":$wd_d" -screen 0 800x600x24 >/dev/null 2>&1 &
+        wd_x=$!
+        sleep 1
+        # Control, and unattended so nobody has to be there to allow the
+        # session — this check is about what happens *after* it is allowed.
+        ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" control >/dev/null
+        ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null
+        DISPLAY=":$wd_d" ESPER_HOME="$term_a" \
+          timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+          > "$term_a/window.log" 2>&1 &
+        wd_host=$!
+        wd_addr=""
+        for _ in $(seq 1 150); do
+          wd_addr=$( { awk '/^  listening/{print $2}' "$term_a/window.log" 2>/dev/null || true; } | head -1)
+          [ -n "$wd_addr" ] && break
+          sleep 0.1
+        done
+        if [ -z "$wd_addr" ]; then
+          printf '  ✗ the host for the window check never started\n'
+          sed 's/^/      /' "$term_a/window.log"
+          fail=1
+        else
+          wd_sock="$term_b/window.sock"
+          # The window: it listens, drains the pictures so the engine is never
+          # blocked writing to it, and types one key — the protocol's own
+          # bytes, which is all a window ever sends.
+          python3 - "$wd_sock" > "$term_b/window-socket.log" 2>&1 <<'WINDOW' &
+import os, socket, sys, threading, time
+
+path = sys.argv[1]
+if os.path.exists(path):
+    os.unlink(path)
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+server.listen(1)
+conn, _ = server.accept()
+
+# Drained on a thread of its own: a window that stops reading is a window the
+# engine blocks writing to, and a blocked engine stops doing everything else.
+pictures = [0]
+
+
+def drain():
+    while True:
+        chunk = conn.recv(65536)
+        if not chunk:
+            return
+        pictures[0] += len(chunk)
+
+
+threading.Thread(target=drain, daemon=True).start()
+
+
+def event(kind, body):
+    conn.sendall(bytes([kind]) + len(body).to_bytes(4, "big") + body)
+
+
+conn.sendall(b"ESPRINP\0" + bytes([1]))
+# Typed more than once, over several seconds. A session has to be granted,
+# announced and driving before a key means anything, and a check that pressed
+# once at a moment of its own choosing would be measuring the clock.
+time.sleep(2)
+for _ in range(14):
+    event(1, (0x04).to_bytes(2, "big") + bytes([1]))
+    time.sleep(0.05)
+    event(1, (0x04).to_bytes(2, "big") + bytes([0]))
+    print("typed, after %d bytes of pictures" % pictures[0], flush=True)
+    time.sleep(0.5)
+time.sleep(5)
+WINDOW
+          wd_win=$!
+          DISPLAY=":$wd_d" xev -root -event keyboard > "$term_b/xev.log" 2>&1 &
+          wd_xev=$!
+          env -u XAUTHORITY ESPER_HOME="$term_b" \
+            timeout 60 "$BIN/esper-engine" connect "$wd_addr" \
+            --viewer "$wd_sock" --control --seconds 14 \
+            > "$term_b/window-client.log" 2>&1 &
+          wd_client=$!
+          typed=""
+          for _ in $(seq 1 200); do
+            grep -q 'keysym 0x61' "$term_b/xev.log" 2>/dev/null && { typed=yes; break; }
+            sleep 0.1
+          done
+          if [ -n "$typed" ]; then
+            printf '  ✓ a key from a window on the socket reached the host'"'"'s own X server\n'
+          else
+            printf '  ✗ nothing arrived at the host from a window with no --present\n'
+            grep -iE 'control|viewer' "$term_b/window-client.log" 2>/dev/null | sed 's/^/      /' || true
+            tail -4 "$term_b/window-socket.log" 2>/dev/null | sed 's/^/      /' || true
+            fail=1
+          fi
+          # And the controller says so rather than leaving somebody to guess
+          # why their typing does nothing.
+          if grep -q 'keys and pointer go to the host' "$term_b/window-client.log"; then
+            printf '  ✓ and the controller said the session carries input\n'
+          else
+            printf '  ✗ the controller did not say input was carried\n'
+            grep -i 'control' "$term_b/window-client.log" 2>/dev/null | sed 's/^/      /' || true
+            fail=1
+          fi
+          kill "$wd_client" "$wd_win" 2>/dev/null || true
+          wait "$wd_client" 2>/dev/null || true
+          kill "$wd_xev" 2>/dev/null || true
+          wd_client=""; wd_win=""; wd_xev=""
+        fi
+        kill "$wd_host" 2>/dev/null || true
+        wait "$wd_host" 2>/dev/null || true
+        kill "$wd_x" 2>/dev/null || true
+        wd_host=""; wd_x=""
+        ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" control >/dev/null 2>&1 || true
+      else
+        printf '  — skipped the window-drives check: needs Xvfb and xev\n'
+      fi
 
       # **Moving a file, and every way of not moving one.** The name rules
       # and the confinement have their own tests; what those cannot reach is

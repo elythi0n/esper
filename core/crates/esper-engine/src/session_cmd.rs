@@ -5234,33 +5234,10 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             None
         };
 
-        // **Driving needs a window to drive from.** Input comes from the
-        // viewer's own window, so `--control` without `--present` has nothing
-        // to read: said plainly rather than accepted and silently doing
-        // nothing.
         let mut driving = None;
         // What this session holds, as the host last said. Starts from the
         // grant it opened with, so the first narrowing can say what went.
         let mut held_permissions: Vec<Permission> = grant.granted.clone();
-        if o.control && may_drive {
-            match presenter.as_mut() {
-                Some(p) => match announce(&session, esper_proto::StreamPurpose::Input).await {
-                    Ok(control) => {
-                        p.forward_input(true);
-                        println!("  control    keys and pointer go to the host");
-                        driving = Some((
-                            crate::input_source::InputSource::new(
-                                esper_stream::tiles_of(&config),
-                                (config.width, config.height),
-                            ),
-                            control,
-                        ));
-                    }
-                    Err(e) => println!("  control    unavailable ({e})"),
-                },
-                None => println!("  control    needs a window; add --present"),
-            }
-        }
 
         // **The clipboard, from the same grant the host is working from.**
         // The permissions are written from the host's side, so this end reads
@@ -5343,6 +5320,47 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 
         if recorder.is_some() || viewer.is_some() {
             link.keep_encoded(true);
+        }
+
+        /*
+            **Driving needs somewhere to drive from**, and there are two of
+            them.
+
+            Input comes from a window: the one this process opens with
+            `--present`, or a webview on the other end of `--viewer`. This
+            asked only about the first, so the arrangement the desktop
+            application actually uses — `esper connect <device> --viewer
+            <socket>` — could never carry a keystroke. The window sent them,
+            the engine read them off the socket, and nothing forwarded them,
+            because `driving` was `None` for want of an X11 window nobody had
+            asked for. Said plainly when there is neither, rather than accepted
+            and silently doing nothing.
+
+            It sits *after* the viewer is dialled for that reason: a check that
+            ran before there was anything to check could only ever have one
+            answer.
+        */
+        if o.control && may_drive {
+            if presenter.is_some() || viewer.is_some() {
+                match announce(&session, esper_proto::StreamPurpose::Input).await {
+                    Ok(control) => {
+                        if let Some(p) = presenter.as_mut() {
+                            p.forward_input(true);
+                        }
+                        println!("  control    keys and pointer go to the host");
+                        driving = Some((
+                            crate::input_source::InputSource::new(
+                                esper_stream::tiles_of(&config),
+                                (config.width, config.height),
+                            ),
+                            control,
+                        ));
+                    }
+                    Err(e) => println!("  control    unavailable ({e})"),
+                }
+            } else {
+                println!("  control    needs a window to drive from; add --present or --viewer");
+            }
         }
         if recorder.is_some() {
             match link.announce_recording(true).await {
@@ -5857,29 +5875,28 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 // answered a question about this session.
                 if held_permissions.contains(&Permission::Control) && driving.is_none() && o.control
                 {
-                    match presenter.as_mut() {
-                        Some(p) => {
-                            match announce(&session, esper_proto::StreamPurpose::Input).await {
-                                Ok(control) => {
+                    if presenter.is_some() || viewer.is_some() {
+                        match announce(&session, esper_proto::StreamPurpose::Input).await {
+                            Ok(control) => {
+                                if let Some(p) = presenter.as_mut() {
                                     p.forward_input(true);
-                                    println!(
-                                        "  · allowed at the host: keys and pointer go there now"
-                                    );
-                                    driving = Some((
-                                        crate::input_source::InputSource::new(
-                                            esper_stream::tiles_of(&config),
-                                            (config.width, config.height),
-                                        ),
-                                        control,
-                                    ));
                                 }
-                                Err(e) => println!("  · control was allowed, but ({e})"),
+                                println!("  · allowed at the host: keys and pointer go there now");
+                                driving = Some((
+                                    crate::input_source::InputSource::new(
+                                        esper_stream::tiles_of(&config),
+                                        (config.width, config.height),
+                                    ),
+                                    control,
+                                ));
                             }
+                            Err(e) => println!("  · control was allowed, but ({e})"),
                         }
+                    } else {
                         // Nothing to drive from, which is the same answer as
-                        // at the start of a session: input comes from the
-                        // viewer's own window.
-                        None => println!("  · control was allowed, but this viewer has no window"),
+                        // at the start of a session: input comes from a
+                        // window, and this session has neither kind.
+                        println!("  · control was allowed, but this viewer has no window");
                     }
                 }
                 if !held_permissions.contains(&Permission::Control)

@@ -76,7 +76,11 @@ func (r *running) start(device, socket string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(front, "connect", device, "--viewer", socket) // #nosec G204 -- device is matched against aFingerprint above, and front is resolved beside this binary
+	// `--control` because a window is a thing you drive a machine *with*. It
+	// asks; the host decides, and a host that says no leaves a session that
+	// watches — which is what every session here was before, since nothing
+	// asked at all.
+	cmd := exec.Command(front, "connect", device, "--viewer", socket, "--control") // #nosec G204 -- device is matched against aFingerprint above, and front is resolved beside this binary
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {
 		return err
