@@ -38,6 +38,7 @@ import { cn } from "../src/lib/cn.ts";
 import { millisecondsIn, pixelsIn } from "../src/lib/css-values.ts";
 import { readViewerStream } from "../src/session/stream.ts";
 import { FIT_CLASS, FITS, inPicture, placement } from "../src/session/fitting.ts";
+import { narrowing } from "../src/session/narrowing.ts";
 import { readFileSync } from "node:fs";
 
 const findings = [];
@@ -324,6 +325,21 @@ try {
   // two modes shared a class would draw two of them identically while the
   // mapping treated them differently.
   is(new Set(FITS.map((f) => FIT_CLASS[f])).size, FITS.length, "every fit draws differently");
+}
+
+/*
+  What a session has given up, said in the fewest words that are true.
+
+  Zero is not a ceiling: it is the ordinary state of a link that is keeping up,
+  and a readout that said "0 fps" would report a stalled session on a perfect
+  one. Both numbers are asks rather than settings, so an empty answer has to
+  mean *nothing was taken away* rather than "nothing is known".
+*/
+{
+  is(narrowing(0, 0), "", "a link keeping up has given up nothing");
+  is(narrowing(15, 0), "15 fps", "frames given up");
+  is(narrowing(0, 1280), "1280px", "size given up");
+  is(narrowing(15, 1280), "15 fps, 1280px", "both, in the order a ladder spends them");
 }
 
 // A floor: a run that asserted nothing passes everything.

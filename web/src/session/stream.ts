@@ -95,6 +95,16 @@ export interface SessionRecord {
   showing: number[];
   /** Every screen the host has. */
   screens: Screen[];
+  /**
+   * What a ladder is asking the host to send, and 0 for nothing asked.
+   *
+   * The only way a window can say *why* a session looks softer than it
+   * started: a link that could not carry what it was being sent asked for
+   * fewer frames or smaller ones, and without this the only visible fact is a
+   * blurrier picture.
+   */
+  askedFps: number;
+  askedLongEdge: number;
 }
 
 /**
@@ -267,7 +277,12 @@ export async function* readViewerStream(
           screens.push({ id, name, x, y, width, height, primary });
           at += 23 + nameLength;
         }
-        yield { kind: "session", profile, sharpness, showing, screens };
+        // Read only if they are there: these two were added after the rest,
+        // and a body grows at its end so a reader written against the shorter
+        // version is not replaced on the day a field appears.
+        const askedFps = at + 2 <= body.length ? fixed.getUint16(at) : 0;
+        const askedLongEdge = at + 6 <= body.length ? fixed.getUint32(at + 2) : 0;
+        yield { kind: "session", profile, sharpness, showing, screens, askedFps, askedLongEdge };
         continue;
       }
 

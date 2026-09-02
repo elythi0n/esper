@@ -46,6 +46,9 @@
 //!       id u32, x i32, y i32, width u32, height u32,
 //!       flags u8           bit 0 set for the host's primary screen
 //!       name  u16 length + that many UTF-8 bytes
+//!     fps       u16        what a ladder is asking the host to send, 0 for
+//!                          nothing asked
+//!     long_edge u32        the same, in pixels of the longest edge
 //!   kind 4, pointer:
 //!     flags u8             bit 0 the pointer is in the picture
 //!                          bit 1 draw it — the host's pointer is not under
@@ -84,6 +87,16 @@
 //! It carries the quality the session is asking for on the same record and
 //! for the same reason: a control that shows a state it cannot read is a
 //! control that lies the first time anything else changes it.
+//!
+//! # Why the last two fields are at the end
+//!
+//! Because they were added after the rest, and a body grows at its end for
+//! the same reason a record carries a length: a reader written against the
+//! shorter version reads every field it knows and stops, rather than being
+//! replaced on the day a field appears. They are what a window needs to say
+//! *why* a session looks softer than it started — the honest answer being
+//! that a ladder asked the host for less, which is otherwise invisible except
+//! as a blurrier picture.
 //!
 //! # Why the pointer is two records and not one
 //!
@@ -278,12 +291,17 @@ impl<W: Write> Writer<W> {
     /// Written when the host first says what it has and again whenever that
     /// changes — a screen plugged in, a screen switched to. A window that was
     /// told once would go on offering a monitor somebody unplugged.
+    ///
+    /// `asked` is what a ladder is asking the host to send: a framerate and a
+    /// longest edge, either zero when nothing has been asked for. It is the
+    /// only way a window can say why a session looks softer than it started.
     pub fn session(
         &mut self,
         profile: u8,
         sharpness: u8,
         showing: &[u32],
         screens: &[Screen],
+        asked: (u16, u32),
     ) -> io::Result<()> {
         let mut body = Vec::with_capacity(16 + showing.len() * 4 + screens.len() * 32);
         body.push(profile);
@@ -305,6 +323,9 @@ impl<W: Write> Writer<W> {
             body.extend_from_slice(&len.to_be_bytes());
             body.extend_from_slice(name.get(..usize::from(len)).unwrap_or_default());
         }
+        let (fps, long_edge) = asked;
+        body.extend_from_slice(&fps.to_be_bytes());
+        body.extend_from_slice(&long_edge.to_be_bytes());
         self.record(record::SESSION, &body)
     }
 
@@ -503,6 +524,7 @@ mod tests {
                     primary: false,
                 },
             ],
+            (15, 1280),
         )
         .expect("a buffer does not fail");
         let out = w.into_inner();
@@ -548,6 +570,22 @@ mod tests {
             -1280
         );
         assert_eq!(body[at + 20] & FLAG_PRIMARY, 0, "and it is not the primary");
+
+        // And the two fields at the end, which were added after the rest: a
+        // body grows at its end so a reader written against the shorter
+        // version reads what it knows and stops.
+        let at = at + 23 + usize::from(u16::from_be_bytes([body[at + 21], body[at + 22]]));
+        assert_eq!(
+            u16::from_be_bytes([body[at], body[at + 1]]),
+            15,
+            "the framerate asked for"
+        );
+        assert_eq!(
+            u32::from_be_bytes([body[at + 2], body[at + 3], body[at + 4], body[at + 5]]),
+            1280,
+            "the longest edge asked for"
+        );
+        assert_eq!(at + 6, body.len(), "and nothing after them");
     }
 
     /// The reason every record carries a length: one that nothing understands

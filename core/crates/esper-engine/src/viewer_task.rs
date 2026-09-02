@@ -264,11 +264,15 @@ impl Viewer {
         sharpness: u8,
         showing: &[u32],
         screens: &[esper_media::viewer_stream::Screen],
+        asked: (u16, u32),
     ) {
         if self.gone {
             return;
         }
-        if let Err(e) = self.stream.session(profile, sharpness, showing, screens) {
+        if let Err(e) = self
+            .stream
+            .session(profile, sharpness, showing, screens, asked)
+        {
             self.stop(&e);
         }
     }

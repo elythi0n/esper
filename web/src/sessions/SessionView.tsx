@@ -1,4 +1,4 @@
-import { Maximize2, Minimize2, Monitor, MousePointer2, MousePointerBan, Ratio, Settings2 } from "lucide-react";
+import { Maximize2, Minimize2, Monitor, MousePointer2, MousePointerBan, Ratio, Settings2, TrendingDown } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { MenuUnder, type MenuAction } from "@/components/menu";
@@ -8,6 +8,7 @@ import { Presence, SessionChrome, SessionRoot } from "@/session/chrome";
 import { type Fit, FIT_NAMES, FITS } from "@/session/fitting";
 import { showScreens, wantQuality, type Hand } from "@/session/hand";
 import { RemoteScreen } from "@/session/RemoteScreen";
+import { narrowing } from "@/session/narrowing";
 import { IDLE, type ViewerState } from "@/session/video";
 
 /** How often to ask the window to put a session back while there is no picture. */
@@ -121,6 +122,8 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
     disabled: !drivable,
     onSelect: () => hand.current?.ask(showScreens([screen.id])),
   }));
+
+  const narrowed = narrowing(picture.askedFps, picture.askedLongEdge);
 
   const qualities: MenuAction[] = PROFILES.map(({ label, profile, sharpness }) => ({
     label,
@@ -250,6 +253,27 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
             <Figure value={picture.fps} unit="fps" className="text-xs" />
             {picture.hopMs !== null && <Figure value={Math.round(picture.hopMs)} unit="ms" className="text-xs" />}
           </span>
+        )}
+        {/*
+          What has been given up, and why.
+
+          Degradation is otherwise invisible: the only fact on screen is a
+          picture that has gone soft, and somebody looking at that cannot tell
+          a link that is struggling from a host that is — or from a quality
+          somebody chose. It says the number in force and the reason in one
+          line, and it is not there at all while nothing has been given up.
+        */}
+        {narrowed && (
+          <Tooltip label="The link could not carry what the host was sending, so this session asked for less">
+            <span
+              role="status"
+              data-narrowed=""
+              className="flex shrink-0 items-center gap-1.5 text-xs text-text-3"
+            >
+              <TrendingDown aria-hidden size={14} />
+              <span>{narrowed}</span>
+            </span>
+          </Tooltip>
         )}
         <div className="flex shrink-0 items-center gap-1">
           {/*

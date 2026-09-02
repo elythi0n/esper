@@ -365,6 +365,9 @@ pub fn run(o: &Options) -> Result<(), String> {
                                 primary: m.primary,
                             })
                             .collect::<Vec<_>>(),
+                        // Nothing is asking for less: there is no link here
+                        // to be short of anything.
+                        (0, 0),
                     );
                     Some(window)
                 }

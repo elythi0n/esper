@@ -290,6 +290,10 @@ const report = (r: unknown) =>
       engine decides which, so the window is checked for doing what it was
       told rather than for deciding again.
     */
+    // What the HUD says was given up, which on a loopback is nothing at all.
+    const gave = box.querySelector("[data-narrowed]");
+    seen.narrowed = gave ? (gave.textContent ?? "").trim() : null;
+
     const drawnPointer = () => box.querySelector("[data-remote-pointer]") as HTMLElement | null;
     for (let waited = 0; waited < 4000; waited += 100) {
       if (drawnPointer() && /url\(/.test(getComputedStyle(canvas).cursor)) break;

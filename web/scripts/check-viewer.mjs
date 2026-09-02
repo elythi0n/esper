@@ -90,7 +90,7 @@ const report = (r) => {
     for await (const record of readViewerStream(response.body)) {
       seen.firstRecord ??= record.kind;
       if (record.kind === "unknown") { seen.unknown++; continue; }
-      if (record.kind === "session") { seen.session = { screens: record.screens.length, showing: record.showing, names: record.screens.map((s) => s.name), lefts: record.screens.map((s) => s.x) }; continue; }
+      if (record.kind === "session") { seen.session = { screens: record.screens.length, showing: record.showing, names: record.screens.map((s) => s.name), lefts: record.screens.map((s) => s.x), asked: [record.askedFps, record.askedLongEdge] }; continue; }
       if (record.kind === "pointer") { seen.pointer = { inPicture: record.inPicture, draw: record.draw, x: record.x, y: record.y }; continue; }
       if (record.kind === "pointer-shape") {
         seen.shape = record.image
@@ -630,6 +630,13 @@ for (const r of [seen, webkit, live].filter(Boolean)) {
       findings.push(`${who}: the fixture says what the session is of and the page read nothing`);
     } else {
       if (r.session.screens !== 2) findings.push(`${who}: read ${r.session.screens} screens out of a fixture with two`);
+      if (r.session.asked?.[0] !== 15 || r.session.asked?.[1] !== 1280) {
+        findings.push(
+          `${who}: read a ladder asking for ${JSON.stringify(r.session.asked)}, and the fixture wrote 15 fps ` +
+            `and a 1280px edge — the two fields are different widths, and reading a framerate out of half a ` +
+            `resolution is the mistake this catches`,
+        );
+      }
       if (r.session.lefts?.[1] !== -640) {
         findings.push(
           `${who}: the screen left of the primary one is at x ${r.session.lefts?.[1]}, and the fixture put it at -640 — ` +
@@ -900,6 +907,12 @@ if (surface) {
       held to doing what it was told.
     */
     const pointer = surface.pointer ?? {};
+    // Nothing was given up on a loopback with no link, so the readout that
+    // says what was given up is *not there*. An indicator that is always on
+    // says nothing at all.
+    if (surface.narrowed !== null) {
+      findings.push(`the session says it gave up ${JSON.stringify(surface.narrowed)} on a link that asked for nothing`);
+    }
     if (!pointer.worn) {
       findings.push("the surface is not wearing the remote pointer — its CSS cursor is not the shape the engine sent");
     } else if (!pointer.hotspot) {

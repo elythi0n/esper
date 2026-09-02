@@ -79,6 +79,15 @@ export interface ViewerState {
   profile: number;
   sharpness: number;
   /**
+   * What a ladder is asking the host to send, and 0 for nothing asked.
+   *
+   * Not a preference — a *narrowing*: these move when the link cannot carry
+   * what it was being sent, and a session that has gone soft for this reason
+   * looks exactly like one somebody chose to soften.
+   */
+  askedFps: number;
+  askedLongEdge: number;
+  /**
    * The host's pointer: where it is, and what it looks like.
    *
    * `cursor` is a data URL because that is what CSS and an `<img>` both take,
@@ -116,6 +125,8 @@ export const IDLE: ViewerState = {
   showing: [],
   profile: 0,
   sharpness: 0,
+  askedFps: 0,
+  askedLongEdge: 0,
   pointer: null,
   cursor: null,
   connection: 0,
@@ -338,6 +349,8 @@ export function showTheScreen(
             sharpness: record.sharpness,
             showing: record.showing,
             screens: record.screens,
+            askedFps: record.askedFps,
+            askedLongEdge: record.askedLongEdge,
           });
           continue;
         }

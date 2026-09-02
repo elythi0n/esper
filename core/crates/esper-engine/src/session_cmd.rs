@@ -5010,6 +5010,19 @@ fn sharpness_from_number(n: u8) -> Option<Option<Sharpness>> {
     }
 }
 
+/// What a ladder is asking the host for, as a window is told it.
+///
+/// Zero for "nothing asked", which is the ordinary state of a link that is
+/// keeping up — and the difference between a session that is soft because
+/// somebody chose that and one that is soft because the link could not carry
+/// what it started with.
+fn asked_of_the_host(link: &esper_link::ControllerLink) -> (u16, u32) {
+    (
+        link.link_fps().unwrap_or(0),
+        link.link_ceiling().unwrap_or(0),
+    )
+}
+
 /// The host's screens, as a window needs to know them.
 fn screens_for_window(
     monitors: &[esper_proto::MonitorDescription],
@@ -5256,6 +5269,13 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // told: a control showing a state it cannot read is a control that
         // lies the first time anything else changes it.
         let mut profile = o.profile;
+        // The host's screens as they are *now*: a desktop can change under a
+        // session, and a window told the opening list would go on offering a
+        // monitor somebody unplugged.
+        let mut known_monitors = config.monitors.clone();
+        // What a ladder was last asking for, so the window is told when it
+        // moves rather than only when something else happens to announce.
+        let mut last_asked = (0u16, 0u32);
         let mut asked_for: Option<Vec<u32>> = None;
         // Which screens the picture is of, so a layout change can be told
         // apart from a switch — the host sends one message for both.
@@ -5401,6 +5421,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 sharpness_number(settle_for),
                 &config.serving,
                 &screens_for_window(&config.monitors),
+                asked_of_the_host(&link),
             );
         }
 
@@ -5575,12 +5596,14 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                         // there, and a switcher that still shows the old one
                         // as current is a control describing a session that
                         // has moved on.
+                        known_monitors.clone_from(&announced.monitors);
                         if let Some(window) = viewer.as_mut() {
                             window.session(
                                 profile_number(profile),
                                 sharpness_number(settle_for),
                                 &announced.serving,
-                                &screens_for_window(&announced.monitors),
+                                &screens_for_window(&known_monitors),
+                                asked_of_the_host(&link),
                             );
                         }
                         match asked_for.take_if(|m| *m != announced.serving) {
@@ -5953,7 +5976,8 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                                 profile_number(profile),
                                 sharpness_number(settle_for),
                                 showing.as_deref().unwrap_or(&config.serving),
-                                &screens_for_window(&config.monitors),
+                                &screens_for_window(&known_monitors),
+                                asked_of_the_host(&link),
                             );
                         }
                     }
@@ -5963,6 +5987,30 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             }
             if said_input_is_not_carried && let Some(window) = viewer.as_mut() {
                 window.note_input_not_carried();
+            }
+
+            /*
+                **And when a ladder changes its mind, the window is told.**
+
+                Degradation is otherwise invisible: the only visible fact is a
+                picture that has gone soft, and somebody looking at that has no
+                way to tell a link that is struggling from a host that is. It
+                changes on its own clock rather than with an announcement, so
+                it is watched rather than waited for — and sent only when it
+                moves, because this runs every turn of the loop.
+            */
+            let now_asked = asked_of_the_host(&link);
+            if now_asked != last_asked {
+                last_asked = now_asked;
+                if let Some(window) = viewer.as_mut() {
+                    window.session(
+                        profile_number(profile),
+                        sharpness_number(settle_for),
+                        showing.as_deref().unwrap_or(&config.serving),
+                        &screens_for_window(&known_monitors),
+                        now_asked,
+                    );
+                }
             }
             // **A held picture, said rather than shown as a frozen one.**
             //

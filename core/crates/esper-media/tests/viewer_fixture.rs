@@ -140,6 +140,11 @@ fn build() -> Vec<u8> {
                             primary: false,
                         },
                     ],
+                    // A ladder asking for less, so a reader has something
+                    // other than zero to get right — and the two fields are
+                    // different widths, which is the mistake that reads a
+                    // framerate out of half a resolution.
+                    (15, 1280),
                 )
                 .expect("a buffer does not fail");
             // A pointer with a hotspot that is not its corner, and pixels
@@ -191,6 +196,7 @@ enum Record {
         sharpness: u8,
         showing: Vec<u32>,
         screens: Vec<(u32, String, i32, i32, u32, u32, bool)>,
+        asked: (u16, u32),
     },
     Pointer {
         in_picture: bool,
@@ -305,11 +311,13 @@ impl Iterator for Reader<'_> {
                     let name = String::from_utf8(self.take(n)).expect("utf-8");
                     screens.push((id, name, x, y, width, height, primary));
                 }
+                let asked = (self.u16(), self.u32());
                 Some(Record::Session {
                     profile,
                     sharpness,
                     showing,
                     screens,
+                    asked,
                 })
             }
             record::POINTER => {
@@ -400,6 +408,7 @@ fn check(stream: &[u8], what: &str) {
                 sharpness,
                 showing,
                 screens,
+                asked,
             } => {
                 sessions += 1;
                 assert_eq!((*profile, *sharpness), (1, 1), "{what}: what it asked for");
@@ -411,6 +420,7 @@ fn check(stream: &[u8], what: &str) {
                 // whole reason this field is signed.
                 assert_eq!(screens[1].2, -640, "{what}: a screen left of the primary");
                 assert!(!screens[1].6, "{what}: and it is not the primary");
+                assert_eq!(*asked, (15, 1280), "{what}: what a ladder asked for");
             }
             Record::Pointer {
                 in_picture,
