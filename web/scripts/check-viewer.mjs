@@ -77,7 +77,7 @@ const report = (r) => {
     sent: 0, sendFailed: null,
     engine: navigator.userAgent.includes("Chrome") ? "chromium" : "webkitgtk",
     configurations: [], pictures: 0, keyframes: 0, decoded: 0, sizes: [],
-    firstRecord: null, errors: [], timestamps: [], unknown: 0,
+    firstRecord: null, errors: [], timestamps: [], unknown: 0, configuredFirst: true, session: null,
     // The hop the stream's own clock makes measurable: engine to drawn.
     hops: [], clocked: 0,
   };
@@ -89,6 +89,11 @@ const report = (r) => {
     for await (const record of readViewerStream(response.body)) {
       seen.firstRecord ??= record.kind;
       if (record.kind === "unknown") { seen.unknown++; continue; }
+      if (record.kind === "session") { seen.session = { screens: record.screens.length, showing: record.showing }; continue; }
+      // What matters is the order of these two, not which record came first:
+      // a stream may say what the session is of before it says how to decode
+      // it, and neither is a decoder being fed early.
+      if (record.kind === "picture" && seen.configurations.length === 0) seen.configuredFirst = false;
       if (record.kind === "configuration") {
         seen.configurations.push({ width: record.width, height: record.height, codec: record.codec, description: record.description.length });
         decoder?.close();
@@ -128,7 +133,7 @@ const report = (r) => {
     if (new URLSearchParams(location.search).get("drive") === "1") {
       const { driveWith } = await import("/src/session/hand.ts");
       const canvas = document.getElementById("c");
-      const stop = driveWith(canvas, {
+      const hand = driveWith(canvas, {
         url: "/input",
         picture: () => ({ width: 640, height: 480 }),
       });
@@ -181,7 +186,7 @@ const report = (r) => {
       // A frame for the batch, then let go — which is what a session ending
       // has to do and is the event nothing else would produce.
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      stop();
+      hand.stop();
       await new Promise((r) => setTimeout(r, 120));
       seen.sent = 1;
     }
@@ -220,6 +225,8 @@ window.__vite_plugin_react_preamble_installed__ = true;
 const reports = [];
 /** Every batch of input the page posted, in order. */
 const typed = [];
+/** And what the session screen asked the session for, in its own batches. */
+const asked = [];
 /*
   The live leg's socket, and whatever the engine has written to it.
 
@@ -262,6 +269,22 @@ const server = createServer(async (req, res) => {
   }
   if (path === "/" || path === "/index.html") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE);
+    return;
+  }
+  /*
+    The window's own input route, which is where the surface leg's bytes go.
+
+    Recorded *and* written on to the engine, exactly as the window's route
+    does: a gate that only recorded them would be checking that the page can
+    produce bytes rather than that a session can be asked for something.
+  */
+  if (req.method === "POST" && path === "/shell/video/input") {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const bytes = Buffer.concat(chunks);
+    asked.push(bytes);
+    surfaceConn?.write(bytes);
+    res.writeHead(204).end();
     return;
   }
   if (req.method === "POST" && path === "/input") {
@@ -545,8 +568,8 @@ for (const r of [seen, webkit, live].filter(Boolean)) {
   const who = r === live ? "the live leg" : r.engine;
   if (r.threw) findings.push(`${who}: the reader threw — ${r.threw}`);
   for (const e of r.errors ?? []) findings.push(`${who}: the decoder reported ${e}`);
-  if (r.firstRecord !== "configuration") {
-    findings.push(`${who}: the first record was ${r.firstRecord}, so a decoder would be fed before it was configured`);
+  if (r.configuredFirst === false) {
+    findings.push(`${who}: a picture arrived before any configuration, so a decoder would be fed before it was set up`);
   }
   if ((r.configurations ?? []).length !== 1) {
     findings.push(`${who}: ${(r.configurations ?? []).length} configurations for one unchanging size`);
@@ -815,6 +838,75 @@ if (surface) {
     // A resize swaps frames rather than fading between them.
     if (!surface.resized) {
       findings.push("the picture did not change across a resize, so the surface was not live through it");
+    }
+
+    /*
+      **What the window may ask of the session.**
+
+      The host's screens reach a window on the picture stream and nowhere
+      else, so this is two claims at once: the engine said what it can see,
+      and the window could act on it. Both were missing — the controller had
+      the list from the first message of the session and never passed it on,
+      and the two controls in the HUD were drawn `disabled` because there was
+      nothing to put in them.
+    */
+    if (!surface.switcher?.found) {
+      findings.push("the session screen has no way to switch monitor at all");
+    } else if (!surface.switcher.offered) {
+      findings.push("the monitor switcher is still disabled on a live session — the engine said nothing about the host's screens");
+    } else if ((surface.screensOffered ?? []).length === 0) {
+      findings.push("the monitor switcher opened on an empty list");
+    }
+    if (!surface.quality?.offered) {
+      findings.push("the quality control is disabled on a live session, so nothing can be asked for");
+    }
+
+    /*
+      And the bytes, decoded the way the engine decodes them.
+
+      The same reader as the input above, because it is the same stream: the
+      window has one way to speak, and a screen or a quality travels on it
+      beside the keystrokes.
+    */
+    const bytes = Buffer.concat(asked);
+    if (bytes.length === 0) {
+      findings.push("the window picked a monitor and a quality and sent nothing at all");
+    } else {
+      const kinds = [];
+      let at = bytes.subarray(0, 8).toString("latin1") === "ESPRINP\u0000" ? 9 : 0;
+      if (at === 0) findings.push(`what the window asked for begins ${JSON.stringify(bytes.subarray(0, 8).toString("latin1"))}, which is not an input stream`);
+      while (at + 5 <= bytes.length) {
+        const kind = bytes[at];
+        const len = bytes.readUInt32BE(at + 1);
+        kinds.push({ kind, body: bytes.subarray(at + 5, at + 5 + len) });
+        at += 5 + len;
+      }
+      if (at !== bytes.length) {
+        findings.push(`the window's asks left ${bytes.length - at} byte(s) unclaimed — a length is wrong`);
+      }
+      const screens = kinds.find((k) => k.kind === 6);
+      if (!screens) {
+        findings.push("a monitor was picked from the switcher and no screens event was sent");
+      } else if (screens.body[0] !== 1) {
+        findings.push(`the window asked for ${screens.body[0]} screens, and one was picked`);
+      }
+      const quality = kinds.find((k) => k.kind === 7);
+      if (!quality) {
+        findings.push("a quality was picked and no quality event was sent");
+      } else if (quality.body[0] !== 2 || quality.body[1] !== 3) {
+        // The last item in the menu is the motion profile at the soft rung.
+        // A default would be 0,0, which is the whole reason the *last* one is
+        // the one this picks.
+        findings.push(
+          `the window asked for profile ${quality.body[0]} at sharpness ${quality.body[1]}, ` +
+            `and the motion profile is 2 at 3 — a control that sends a default whatever is picked ` +
+            `looks exactly like one that works`,
+        );
+      }
+      console.log(
+        `    asked: ${(surface.screensOffered ?? []).length} screen(s) offered, ` +
+          `${(surface.qualitiesOffered ?? []).length} qualities, and ${kinds.length} ask(s) left as bytes`,
+      );
     }
 
     // ── The chrome's clock, Phase 10's rule driven ────────────────────────

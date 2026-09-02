@@ -248,6 +248,31 @@ impl Viewer {
         self.frames = self.frames.saturating_add(1);
     }
 
+    /// Tell the window what the session is of, and what else it could be of.
+    ///
+    /// Sent when the host first says what it has and again whenever that
+    /// changes — a screen plugged in, a screen switched to, a quality the
+    /// person asked for and got. A window told once would go on offering a
+    /// monitor somebody unplugged and showing a setting somebody changed.
+    ///
+    /// Written straight through rather than remembered here: the session owns
+    /// what it is of, and a second copy in this struct would be a second
+    /// thing to keep in step with the host.
+    pub fn session(
+        &mut self,
+        profile: u8,
+        sharpness: u8,
+        showing: &[u32],
+        screens: &[esper_media::viewer_stream::Screen],
+    ) {
+        if self.gone {
+            return;
+        }
+        if let Err(e) = self.stream.session(profile, sharpness, showing, screens) {
+            self.stop(&e);
+        }
+    }
+
     /// The window went away. Said once, and never again.
     ///
     /// Not an error the session ends on: a viewer closing its window is an

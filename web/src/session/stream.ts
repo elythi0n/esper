@@ -23,7 +23,9 @@ export const STREAM_VERSION = 2;
 
 const CONFIGURATION = 1;
 const PICTURE = 2;
+const SESSION = 3;
 const FLAG_KEYFRAME = 0b0000_0001;
+const FLAG_PRIMARY = 0b0000_0001;
 
 /** Configure the decoder: a new size, codec or parameter set. */
 export interface Configuration {
@@ -56,6 +58,40 @@ export interface Picture {
   data: Uint8Array;
 }
 
+/** One of the host's screens, as a window is told about it. */
+export interface Screen {
+  /** The host's id for it. Opaque: it is echoed back and never interpreted. */
+  id: number;
+  /** What the host calls it, which is what a person picks from. */
+  name: string;
+  /** Where it sits in the host's desktop. Can be negative. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Whether the host calls this its primary display. */
+  primary: boolean;
+}
+
+/**
+ * What the session is of, and what else it could be of.
+ *
+ * The host's list of screens reaches the window here and nowhere else, so a
+ * switcher built on anything else would be a second idea of what is plugged
+ * in to the far machine.
+ */
+export interface SessionRecord {
+  kind: "session";
+  /** 0 balanced, 1 text, 2 motion — the viewer stream's own numbering. */
+  profile: number;
+  /** 0 nothing stated, 1 sharp, 2 balanced, 3 soft. */
+  sharpness: number;
+  /** The ids of the screens the picture is of. */
+  showing: number[];
+  /** Every screen the host has. */
+  screens: Screen[];
+}
+
 /** A record from a version that knows more than this reader does. */
 export interface Unknown {
   kind: "unknown";
@@ -63,7 +99,7 @@ export interface Unknown {
   record: number;
 }
 
-export type Record = Configuration | Picture | Unknown;
+export type Record = Configuration | Picture | SessionRecord | Unknown;
 
 export class StreamError extends Error {}
 
@@ -174,6 +210,33 @@ export async function* readViewerStream(
           handedAt: handed > 0 ? handed / 1000 : null,
           data: new Uint8Array(body.subarray(21, 21 + bytes)),
         };
+        continue;
+      }
+
+      if (kind === SESSION) {
+        const fixed = view(body);
+        const profile = fixed.getUint8(0);
+        const sharpness = fixed.getUint8(1);
+        const showingCount = fixed.getUint8(2);
+        const showing: number[] = [];
+        for (let n = 0; n < showingCount; n++) showing.push(fixed.getUint32(3 + n * 4));
+        let at = 3 + showingCount * 4;
+        const screenCount = fixed.getUint8(at);
+        at += 1;
+        const screens: Screen[] = [];
+        for (let n = 0; n < screenCount; n++) {
+          const id = fixed.getUint32(at);
+          const x = fixed.getInt32(at + 4);
+          const y = fixed.getInt32(at + 8);
+          const width = fixed.getUint32(at + 12);
+          const height = fixed.getUint32(at + 16);
+          const primary = (fixed.getUint8(at + 20) & FLAG_PRIMARY) !== 0;
+          const nameLength = fixed.getUint16(at + 21);
+          const name = new TextDecoder().decode(body.subarray(at + 23, at + 23 + nameLength));
+          screens.push({ id, name, x, y, width, height, primary });
+          at += 23 + nameLength;
+        }
+        yield { kind: "session", profile, sharpness, showing, screens };
         continue;
       }
 

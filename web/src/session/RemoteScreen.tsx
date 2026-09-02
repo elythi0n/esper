@@ -3,7 +3,7 @@ import { CopyField } from "@/components/copy-field";
 import { Key } from "@/screens/parts";
 import { ReconnectNotice } from "./chrome";
 import { type Fit, FIT_CLASS } from "./fitting";
-import { driveWith } from "./hand";
+import { driveWith, type Hand } from "./hand";
 import { IDLE, showTheScreen, type ViewerState } from "./video";
 
 /**
@@ -23,6 +23,7 @@ export function RemoteScreen({
   drivable = true,
   fit = "fit",
   surfaceRef,
+  onHand,
 }: {
   device?: string | undefined;
   /** What the surface knows, for a HUD that wants to say it. */
@@ -38,6 +39,15 @@ export function RemoteScreen({
   drivable?: boolean;
   /** How the picture sits in the surface. See `fitting.ts`. */
   fit?: Fit;
+  /**
+   * The hand on the surface, while there is one, so chrome outside can ask
+   * something of the session — a screen, a quality.
+   *
+   * Handed over rather than rebuilt outside, because the input stream has one
+   * beginning and therefore one writer. `null` when the surface is not being
+   * driven, which is also when there is nothing to ask with.
+   */
+  onHand?: ((hand: Hand | null) => void) | undefined;
   /**
    * Filled with the canvas, so chrome outside this component can act on it.
    *
@@ -104,13 +114,23 @@ export function RemoteScreen({
   */
   useEffect(() => {
     if (!drivable || !canvas.current || state.status !== "playing") return undefined;
-    return driveWith(canvas.current, {
+    const hand = driveWith(canvas.current, {
       picture: () => stateRef.current.size,
       // Read through a ref, so changing how the picture sits does not tear the
       // input wiring down and put it back — which would drop whatever is held.
       fit: () => fitRef.current,
     });
-  }, [drivable, state.status]);
+    onHand?.(hand);
+    return () => {
+      onHand?.(null);
+      hand.stop();
+    };
+    // `connection` is in here on purpose: the input stream writes its magic
+    // once, so a new engine on the socket needs a new hand. Without it the
+    // window would go on typing into a reader that never saw the beginning of
+    // the stream, and every keystroke after a reconnect would be refused.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drivable, state.status, state.connection]);
 
   const playing = state.status === "playing";
   /*

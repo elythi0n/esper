@@ -4963,6 +4963,71 @@ pub async fn reach(identity: &esper_crypto::Identity, o: &Reaching<'_>) -> Resul
 }
 
 /// Connect to a paired host and show what it sends.
+/*
+    What a window is told about the session, and what it may say back.
+
+    The numbering is the viewer stream's, written down once here and once in
+    the page's reader, because the alternative is the protocol's serde names
+    reaching a browser — which would make every rename in `esper-proto` a
+    breaking change for a window somebody has not updated.
+*/
+const fn profile_number(profile: Profile) -> u8 {
+    match profile {
+        Profile::Balanced => 0,
+        Profile::Text => 1,
+        Profile::Motion => 2,
+    }
+}
+
+const fn profile_from_number(n: u8) -> Option<Profile> {
+    match n {
+        0 => Some(Profile::Balanced),
+        1 => Some(Profile::Text),
+        2 => Some(Profile::Motion),
+        _ => None,
+    }
+}
+
+/// `0` is "nothing stated", which is not the same as `Balanced`: one leaves
+/// the host's own judgement alone and the other overrides it with the middle
+/// rung.
+const fn sharpness_number(sharpness: Option<Sharpness>) -> u8 {
+    match sharpness {
+        None => 0,
+        Some(Sharpness::Sharp) => 1,
+        Some(Sharpness::Balanced) => 2,
+        Some(Sharpness::Soft) => 3,
+    }
+}
+
+fn sharpness_from_number(n: u8) -> Option<Option<Sharpness>> {
+    match n {
+        0 => Some(None),
+        1 => Some(Some(Sharpness::Sharp)),
+        2 => Some(Some(Sharpness::Balanced)),
+        3 => Some(Some(Sharpness::Soft)),
+        _ => None,
+    }
+}
+
+/// The host's screens, as a window needs to know them.
+fn screens_for_window(
+    monitors: &[esper_proto::MonitorDescription],
+) -> Vec<esper_media::viewer_stream::Screen> {
+    monitors
+        .iter()
+        .map(|m| esper_media::viewer_stream::Screen {
+            id: m.id,
+            name: m.name.clone(),
+            x: m.x,
+            y: m.y,
+            width: m.width,
+            height: m.height,
+            primary: m.primary,
+        })
+        .collect()
+}
+
 pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
     net::install_crypto();
     let identity = paths::identity()?;
@@ -5168,7 +5233,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // consequence — because the host acts on the second and a person
         // reads the first. `Balanced` states no preference at all and leaves
         // the host's own judgement alone.
-        let wanted = match o.profile {
+        let mut settle_for = match o.profile {
             Profile::Text => Some(Sharpness::Sharp),
             Profile::Balanced => None,
             Profile::Motion => Some(Sharpness::Soft),
@@ -5176,7 +5241,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         link.hint(None, None, o.profile)
             .await
             .map_err(|e| format!("saying what this viewer is doing: {e}"))?;
-        link.want_sharpness(wanted)
+        link.want_sharpness(settle_for)
             .await
             .map_err(|e| format!("saying what this viewer will settle for: {e}"))?;
         if ask_to_drive {
@@ -5187,6 +5252,10 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             }
         }
 
+        // What this session is asking for, kept because a window has to be
+        // told: a control showing a state it cannot read is a control that
+        // lies the first time anything else changes it.
+        let mut profile = o.profile;
         let mut asked_for: Option<Vec<u32>> = None;
         // Which screens the picture is of, so a layout change can be told
         // apart from a switch — the host sends one message for both.
@@ -5320,6 +5389,19 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 
         if recorder.is_some() || viewer.is_some() {
             link.keep_encoded(true);
+        }
+        // **What the window may offer.** The host has already said what it
+        // has — it has to, because a pointer position is a fraction of a named
+        // monitor — and the controller had the list all along and never passed
+        // it on, so the switcher in the window's own chrome was a button that
+        // could not be pressed.
+        if let Some(window) = viewer.as_mut() {
+            window.session(
+                profile_number(profile),
+                sharpness_number(settle_for),
+                &config.serving,
+                &screens_for_window(&config.monitors),
+            );
         }
 
         /*
@@ -5487,6 +5569,20 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                         // only the host's monitor list had.
                         let was = showing.replace(announced.serving.clone());
                         let layout_only = was.as_ref() == Some(&announced.serving);
+                        // **The window is told every time, whichever of the
+                        // four things this was.** A picker built from a list
+                        // the host has replaced offers a screen that is not
+                        // there, and a switcher that still shows the old one
+                        // as current is a control describing a session that
+                        // has moved on.
+                        if let Some(window) = viewer.as_mut() {
+                            window.session(
+                                profile_number(profile),
+                                sharpness_number(settle_for),
+                                &announced.serving,
+                                &screens_for_window(&announced.monitors),
+                            );
+                        }
                         match asked_for.take_if(|m| *m != announced.serving) {
                             Some(refused) => println!(
                                 "  · the host would not send {}; it is still sending {}",
@@ -5778,10 +5874,75 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 .as_mut()
                 .map(crate::viewer_task::Viewer::take_events)
                 .unwrap_or_default();
-            if !from_window.is_empty()
-                && driving.is_none()
-                && let Some(window) = viewer.as_mut()
-            {
+            /*
+                **What the window asked of the session, before what it did to
+                the far machine.**
+
+                Choosing a screen or a quality is not input: nothing is held
+                down by either, so neither goes through the thing that tracks
+                what the host is holding. They are acted on here, where the
+                session is — and the window is told the answer where the host
+                gives one, which for a monitor is an announcement and not a
+                reply.
+            */
+            let mut said_input_is_not_carried = false;
+            for asked in &from_window {
+                match asked {
+                    esper_media::WindowEvent::Screens(ids) => {
+                        let named = esper_stream::screens_named(ids);
+                        if showing.as_ref() == Some(ids) {
+                            continue;
+                        }
+                        println!("  · the window asked for {named}");
+                        link.select_monitors(ids.clone());
+                        if let Err(e) = link.flush_outbound().await {
+                            println!("  · asking for {named}: {e}");
+                        } else {
+                            asked_for = Some(ids.clone());
+                        }
+                    }
+                    esper_media::WindowEvent::Quality {
+                        profile: p,
+                        sharpness: sh,
+                    } => {
+                        let (Some(chosen), Some(settle)) =
+                            (profile_from_number(*p), sharpness_from_number(*sh))
+                        else {
+                            // A window newer than this engine. Ignored rather
+                            // than guessed at: a quality nobody asked for is
+                            // worse than the one they already have.
+                            println!(
+                                "  · the window asked for a quality this engine does not know"
+                            );
+                            continue;
+                        };
+                        profile = chosen;
+                        settle_for = settle;
+                        if let Err(e) = link.hint(None, None, chosen).await {
+                            println!("  · saying what this viewer is doing: {e}");
+                        }
+                        if let Err(e) = link.want_sharpness(settle).await {
+                            println!("  · saying what this viewer will settle for: {e}");
+                        }
+                        println!("  · the window asked for the {chosen:?} profile");
+                        // **Said back at once**, because the host answers a
+                        // hint with nothing at all: it is a hint, and a
+                        // control that waited for a reply would sit disabled
+                        // for ever.
+                        if let Some(window) = viewer.as_mut() {
+                            window.session(
+                                profile_number(profile),
+                                sharpness_number(settle_for),
+                                showing.as_deref().unwrap_or(&config.serving),
+                                &screens_for_window(&config.monitors),
+                            );
+                        }
+                    }
+                    _ if driving.is_none() => said_input_is_not_carried = true,
+                    _ => {}
+                }
+            }
+            if said_input_is_not_carried && let Some(window) = viewer.as_mut() {
                 window.note_input_not_carried();
             }
             // **A held picture, said rather than shown as a frozen one.**
@@ -5949,7 +6110,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                     }
                 }
                 for event in &from_window {
-                    if let Some(m) = source.window_said(*event) {
+                    if let Some(m) = source.window_said(event) {
                         messages.push(m);
                     }
                 }

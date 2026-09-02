@@ -17,7 +17,7 @@
  * canvas also gives the session what a remote desktop needs and a media
  * element fights — no buffering, no smoothing, no catch-up after a stall.
  */
-import { readViewerStream, type Configuration } from "./stream";
+import { readViewerStream, type Configuration, type Screen } from "./stream";
 
 /** What the picture path is doing, which the notice over the picture renders. */
 export type LinkState = "live" | "reconnecting" | "lost";
@@ -67,6 +67,28 @@ export interface ViewerState {
   hopMs: number | null;
   /** The worst of the last hundred, because a mean hides a stall. */
   worstHopMs: number | null;
+  /**
+   * The host's screens, and which of them this picture is of.
+   *
+   * Empty until the engine says — a window that guessed would be a second
+   * idea of what is plugged in to somebody else's machine.
+   */
+  screens: Screen[];
+  showing: number[];
+  /** What the session is asking the host for. See `stream.ts` for the numbers. */
+  profile: number;
+  sharpness: number;
+  /**
+   * How many times the pictures have started arriving.
+   *
+   * One per *connection*, not per configuration — a parameter-set change
+   * mid-session is the same engine on the same socket. Anything that has to
+   * begin again when the engine does watches this: the window's input stream
+   * writes its magic once per connection, and a hand that did not know the
+   * engine had been replaced would go on typing into a reader that never saw
+   * the beginning of the stream.
+   */
+  connection: number;
 }
 
 export const IDLE: ViewerState = {
@@ -80,6 +102,11 @@ export const IDLE: ViewerState = {
   fps: 0,
   hopMs: null,
   worstHopMs: null,
+  screens: [],
+  showing: [],
+  profile: 0,
+  sharpness: 0,
+  connection: 0,
 };
 
 /**
@@ -251,9 +278,20 @@ export function showTheScreen(
         say({ status: "failed", trouble: why, ...(never ? { link: "live" as const, awayMs: null } : {}) });
         return never ? "never" : "again";
       }
+      // A body to read is a new engine on the other end of the socket.
+      say({ connection: state.connection + 1 });
       for await (const record of readViewerStream(response.body)) {
         if (record.kind === "configuration") {
           configure(record);
+          continue;
+        }
+        if (record.kind === "session") {
+          say({
+            profile: record.profile,
+            sharpness: record.sharpness,
+            showing: record.showing,
+            screens: record.screens,
+          });
           continue;
         }
         if (record.kind !== "picture") {

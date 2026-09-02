@@ -38,6 +38,14 @@
 //!     handed u64          this machine's wall clock, in microseconds, when
 //!                         the picture was written — 0 when unknown
 //!     bytes  u32 length + that many bytes          (AVCC, length-prefixed NALs)
+//!   kind 3, session:
+//!     profile   u8         0 balanced, 1 text, 2 motion
+//!     sharpness u8         0 none stated, 1 sharp, 2 balanced, 3 soft
+//!     showing   u8 count + that many u32 monitor ids
+//!     monitors  u8 count, then per monitor:
+//!       id u32, x i32, y i32, width u32, height u32,
+//!       flags u8           bit 0 set for the host's primary screen
+//!       name  u16 length + that many UTF-8 bytes
 //! ```
 //!
 //! Everything is big-endian, which is what the rest of this protocol uses and
@@ -52,6 +60,19 @@
 //! format becomes impossible to extend. The first version had no length; the
 //! second added one *before* anything shipped it, which is the only cheap
 //! time to make this mistake.
+//!
+//! # Why a window is told what the session *could* be
+//!
+//! Because a window that cannot offer the other screens is a window that can
+//! only ever show the one the host happened to start with. The host already
+//! says what it has — it has to, since pointer positions are a fraction of a
+//! named monitor — and the controller already had the list. It simply never
+//! passed it on, so the switcher in the window's own chrome was a button that
+//! could not be pressed.
+//!
+//! It carries the quality the session is asking for on the same record and
+//! for the same reason: a control that shows a state it cannot read is a
+//! control that lies the first time anything else changes it.
 //!
 //! # Why a picture carries two clocks
 //!
@@ -91,10 +112,38 @@ pub mod record {
     pub const CONFIGURATION: u8 = 1;
     /// One access unit for the decoder.
     pub const PICTURE: u8 = 2;
+    /// What the session is of, and what else it could be of.
+    pub const SESSION: u8 = 3;
 }
 
 /// Set on a picture a decoder can begin at.
 pub const FLAG_KEYFRAME: u8 = 0b0000_0001;
+
+/// Set on the screen the host calls its primary one.
+pub const FLAG_PRIMARY: u8 = 0b0000_0001;
+
+/// One of the host's screens, as a window needs to know it.
+///
+/// Deliberately not `esper_proto::MonitorDescription`: this crate does not
+/// depend on the protocol crate, and a window needs a name to show and an id
+/// to ask for rather than everything the protocol carries. The scale is left
+/// out for that reason — a window offering a list of screens has no use for
+/// the host's backing-store factor, and a field nothing reads is a field that
+/// goes wrong unnoticed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Screen {
+    /// The host's id for it, which a window echoes back and never interprets.
+    pub id: u32,
+    /// What the host calls it.
+    pub name: String,
+    /// Where it sits in the host's desktop. Can be negative.
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// Whether the host calls this its primary display.
+    pub primary: bool,
+}
 
 /// Writes the stream. Owns no socket: a `Write` is a socket, a file, or a
 /// test's buffer, and the difference has never been this module's business.
@@ -185,6 +234,41 @@ impl<W: Write> Writer<W> {
         body.extend_from_slice(&len.to_be_bytes());
         body.extend_from_slice(sample.bytes.get(..len as usize).unwrap_or_default());
         self.record(record::PICTURE, &body)
+    }
+
+    /// What the session is of, and what else it could be of.
+    ///
+    /// Written when the host first says what it has and again whenever that
+    /// changes — a screen plugged in, a screen switched to. A window that was
+    /// told once would go on offering a monitor somebody unplugged.
+    pub fn session(
+        &mut self,
+        profile: u8,
+        sharpness: u8,
+        showing: &[u32],
+        screens: &[Screen],
+    ) -> io::Result<()> {
+        let mut body = Vec::with_capacity(16 + showing.len() * 4 + screens.len() * 32);
+        body.push(profile);
+        body.push(sharpness);
+        body.push(u8::try_from(showing.len()).unwrap_or(u8::MAX));
+        for id in showing.iter().take(usize::from(u8::MAX)) {
+            body.extend_from_slice(&id.to_be_bytes());
+        }
+        body.push(u8::try_from(screens.len()).unwrap_or(u8::MAX));
+        for screen in screens.iter().take(usize::from(u8::MAX)) {
+            body.extend_from_slice(&screen.id.to_be_bytes());
+            body.extend_from_slice(&screen.x.to_be_bytes());
+            body.extend_from_slice(&screen.y.to_be_bytes());
+            body.extend_from_slice(&screen.width.to_be_bytes());
+            body.extend_from_slice(&screen.height.to_be_bytes());
+            body.push(if screen.primary { FLAG_PRIMARY } else { 0 });
+            let name = screen.name.as_bytes();
+            let len = u16::try_from(name.len()).unwrap_or(u16::MAX);
+            body.extend_from_slice(&len.to_be_bytes());
+            body.extend_from_slice(name.get(..usize::from(len)).unwrap_or_default());
+        }
+        self.record(record::SESSION, &body)
     }
 
     /// The writer's sink, for a caller that has to close it.
@@ -303,6 +387,86 @@ mod tests {
         );
         assert_eq!(u32::from_be_bytes(body[17..21].try_into().unwrap()), 3);
         assert_eq!(&body[21..24], &[9, 9, 9]);
+    }
+
+    /// What a window is told about the session, read back out of the bytes.
+    ///
+    /// Read by hand rather than by a reader this module owns, because the
+    /// reader that matters is in TypeScript: what is asserted here is the
+    /// shape the page is written against, field by field, in the order they
+    /// go down the socket.
+    #[test]
+    fn a_window_is_told_what_the_session_is_of() {
+        let mut w = Writer::new(Vec::new());
+        w.session(
+            1,
+            3,
+            &[7],
+            &[
+                Screen {
+                    id: 7,
+                    name: "eDP-1".to_owned(),
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    primary: true,
+                },
+                Screen {
+                    id: 8,
+                    name: "the one on the left".to_owned(),
+                    x: -1280,
+                    y: 120,
+                    width: 1280,
+                    height: 1024,
+                    primary: false,
+                },
+            ],
+        )
+        .expect("a buffer does not fail");
+        let out = w.into_inner();
+        let all = records(&out);
+        assert_eq!(all.len(), 1);
+        let (kind, body) = &all[0];
+        assert_eq!(*kind, record::SESSION);
+
+        assert_eq!(body[0], 1, "the profile");
+        assert_eq!(body[1], 3, "what it will settle for");
+        assert_eq!(body[2], 1, "one screen is being shown");
+        assert_eq!(u32::from_be_bytes([body[3], body[4], body[5], body[6]]), 7);
+        assert_eq!(body[7], 2, "and the host has two");
+
+        let at = 8;
+        assert_eq!(
+            u32::from_be_bytes([body[at], body[at + 1], body[at + 2], body[at + 3]]),
+            7
+        );
+        assert_eq!(
+            i32::from_be_bytes([body[at + 4], body[at + 5], body[at + 6], body[at + 7]]),
+            0
+        );
+        assert_eq!(
+            u32::from_be_bytes([body[at + 12], body[at + 13], body[at + 14], body[at + 15]]),
+            1920
+        );
+        assert_eq!(body[at + 20] & FLAG_PRIMARY, FLAG_PRIMARY);
+        let name_len = usize::from(u16::from_be_bytes([body[at + 21], body[at + 22]]));
+        assert_eq!(name_len, "eDP-1".len());
+        assert_eq!(&body[at + 23..at + 23 + name_len], b"eDP-1");
+
+        // And the second, whose x is negative — a screen left of the primary
+        // one starts at a negative offset, and a format that could not say so
+        // would describe a desktop nobody has.
+        let at = at + 23 + name_len;
+        assert_eq!(
+            u32::from_be_bytes([body[at], body[at + 1], body[at + 2], body[at + 3]]),
+            8
+        );
+        assert_eq!(
+            i32::from_be_bytes([body[at + 4], body[at + 5], body[at + 6], body[at + 7]]),
+            -1280
+        );
+        assert_eq!(body[at + 20] & FLAG_PRIMARY, 0, "and it is not the primary");
     }
 
     /// The reason every record carries a length: one that nothing understands

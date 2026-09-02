@@ -113,6 +113,38 @@ export function RowMenu({ actions, label, className }: RowMenuProps) {
 }
 
 /**
+ * The same menu, from an icon of the caller's own.
+ *
+ * The session's HUD needs a menu under a monitor and a slider icon, and both
+ * have to look like every other control on that bar. Same list, same content,
+ * a trigger the caller draws — rather than a second menu component whose
+ * items would drift from these.
+ *
+ * `side="top"` because the HUD is along the bottom of a session: a menu
+ * opening downward from it would be off the window.
+ */
+export function MenuUnder({
+  actions,
+  children,
+  side = "top",
+}: {
+  actions: readonly MenuAction[];
+  children: ReactNode;
+  side?: "top" | "bottom";
+}) {
+  return (
+    <DM.Root>
+      <DM.Trigger asChild>{children}</DM.Trigger>
+      <DM.Portal>
+        <DM.Content side={side} align="end" sideOffset={6} className={content}>
+          <Items actions={actions} />
+        </DM.Content>
+      </DM.Portal>
+    </DM.Root>
+  );
+}
+
+/**
  * The same menu, from a right-click anywhere in `children`.
  *
  * **A convenience over a visible control, never instead of one.** A menu that

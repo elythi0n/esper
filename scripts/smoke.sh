@@ -2410,6 +2410,15 @@ for _ in range(14):
     event(1, (0x04).to_bytes(2, "big") + bytes([0]))
     print("typed, after %d bytes of pictures" % pictures[0], flush=True)
     time.sleep(0.5)
+
+# And the two things that are not input: a quality, and a screen that is not
+# there. Both travel on this stream because it is the window's only way to
+# speak, and the second one is deliberately impossible — what is being checked
+# is that the ask reached the host and came back as an answer.
+event(7, bytes([1, 1]))
+time.sleep(1)
+event(6, bytes([1]) + (99).to_bytes(4, "big"))
+print("asked for a quality and a screen", flush=True)
 time.sleep(5)
 WINDOW
           wd_win=$!
@@ -2440,6 +2449,32 @@ WINDOW
           else
             printf '  ✗ the controller did not say input was carried\n'
             grep -i 'control' "$term_b/window-client.log" 2>/dev/null | sed 's/^/      /' || true
+            fail=1
+          fi
+          # **And the two things a window says that are not input.** A quality
+          # and a screen: the controller had the host's monitor list from the
+          # first message of every session and no way to be told which one to
+          # ask for, so the switcher in the window was a button that could not
+          # be pressed. The screen asked for here does not exist, deliberately
+          # — what is checked is that the ask reached the host and came back as
+          # an answer rather than as silence.
+          for _ in $(seq 1 120); do
+            grep -q 'would not send' "$term_b/window-client.log" 2>/dev/null && break
+            sleep 0.1
+          done
+          if grep -q 'the window asked for the Text profile' "$term_b/window-client.log"; then
+            printf '  ✓ a quality chosen in the window reached the session\n'
+          else
+            printf '  ✗ a quality chosen in the window went nowhere\n'
+            grep -i 'window asked' "$term_b/window-client.log" 2>/dev/null | sed 's/^/      /' || true
+            fail=1
+          fi
+          if grep -q 'the window asked for monitor 99' "$term_b/window-client.log" &&
+            grep -q 'would not send' "$term_b/window-client.log"; then
+            printf '  ✓ and a screen it asked for was put to the host, which said no\n'
+          else
+            printf '  ✗ asking for a screen never reached the host\n'
+            grep -iE 'window asked|would not send|now showing' "$term_b/window-client.log" 2>/dev/null | sed 's/^/      /' || true
             fail=1
           fi
           kill "$wd_client" "$wd_win" 2>/dev/null || true

@@ -308,9 +308,39 @@ pub fn run(o: &Options) -> Result<(), String> {
         Some(path) => {
             let (ew, eh) = pipeline.encode_size();
             match crate::viewer_task::Viewer::connect(path, (ew, eh)) {
-                Ok(window) => {
+                Ok(mut window) => {
                     println!("  viewer    {} at {ew}x{eh}", path.display());
                     println!();
+                    /*
+                        What a window would be told by a session, told by this.
+
+                        The loopback path has no peer, so there is no host to
+                        say what it has — but it *is* capturing something, and
+                        the screens it can see are the honest answer to the
+                        same question. A window given nothing here would show
+                        a switcher with no screens in it, which is the state
+                        that used to be permanent.
+
+                        The profile is the balanced one with nothing stated:
+                        there is nobody to state it to.
+                    */
+                    window.session(
+                        0,
+                        0,
+                        &[selected.0],
+                        &monitors
+                            .iter()
+                            .map(|m| esper_media::viewer_stream::Screen {
+                                id: m.id.0,
+                                name: m.name.clone(),
+                                x: m.geometry.x,
+                                y: m.geometry.y,
+                                width: m.geometry.width,
+                                height: m.geometry.height,
+                                primary: m.primary,
+                            })
+                            .collect::<Vec<_>>(),
+                    );
                     Some(window)
                 }
                 Err(e) => {

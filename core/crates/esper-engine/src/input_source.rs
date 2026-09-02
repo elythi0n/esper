@@ -165,9 +165,9 @@ impl InputSource {
     /// the one thing this type exists for — a key left down on somebody else's
     /// machine is the worst failure this path has — so a window's events come
     /// through here and are recorded exactly as an X11 window's are.
-    pub fn window_said(&mut self, event: esper_media::WindowEvent) -> Option<InputMessage> {
+    pub fn window_said(&mut self, event: &esper_media::WindowEvent) -> Option<InputMessage> {
         use esper_media::WindowEvent;
-        match event {
+        match *event {
             WindowEvent::Key { usage, pressed } => {
                 // A usage no platform here has a code for is dropped with the
                 // rest: the window may be newer than the engine.
@@ -201,6 +201,12 @@ impl InputSource {
                 self.holding.clear();
                 Some(InputMessage::ReleaseAll)
             }
+            // **Not input, and deliberately nothing here.** Choosing a screen
+            // or a quality is something about the session rather than
+            // something done to the far machine, and nothing is held down by
+            // either. They are acted on where the session is, and this type
+            // exists only to keep count of what a person is holding.
+            WindowEvent::Screens(_) | WindowEvent::Quality { .. } => None,
         }
     }
 
@@ -367,7 +373,7 @@ mod tests {
         assert!(!s.is_holding());
 
         // Through the window's door: a HID usage, as the page sends.
-        let said = s.window_said(esper_media::WindowEvent::Key {
+        let said = s.window_said(&esper_media::WindowEvent::Key {
             usage: 0x04,
             pressed: true,
         });
@@ -387,17 +393,17 @@ mod tests {
     #[test]
     fn a_window_that_lost_the_keyboard_lets_go_of_what_it_held() {
         let mut s = source();
-        s.window_said(esper_media::WindowEvent::Key {
+        s.window_said(&esper_media::WindowEvent::Key {
             usage: 0xE1,
             pressed: true,
         });
-        s.window_said(esper_media::WindowEvent::Button {
+        s.window_said(&esper_media::WindowEvent::Button {
             button: 0,
             pressed: true,
         });
         assert!(s.is_holding());
 
-        let said = s.window_said(esper_media::WindowEvent::LetGo);
+        let said = s.window_said(&esper_media::WindowEvent::LetGo);
         assert!(matches!(said, Some(InputMessage::ReleaseAll)));
         assert!(!s.is_holding(), "and nothing is left held");
     }
@@ -410,7 +416,7 @@ mod tests {
         let before = s.dropped();
         // 0xFFFE is not on HID page 0x07 at all.
         assert_eq!(
-            s.window_said(esper_media::WindowEvent::Key {
+            s.window_said(&esper_media::WindowEvent::Key {
                 usage: 0xFFFE,
                 pressed: true,
             }),
@@ -427,7 +433,7 @@ mod tests {
     fn a_window_button_outside_the_protocol_is_refused() {
         let mut s = source();
         assert!(matches!(
-            s.window_said(esper_media::WindowEvent::Button {
+            s.window_said(&esper_media::WindowEvent::Button {
                 button: 2,
                 pressed: true,
             }),
@@ -437,7 +443,7 @@ mod tests {
             }))
         ));
         assert_eq!(
-            s.window_said(esper_media::WindowEvent::Button {
+            s.window_said(&esper_media::WindowEvent::Button {
                 button: 9,
                 pressed: true,
             }),
@@ -456,7 +462,7 @@ mod tests {
     fn a_window_wheel_rolled_down_is_down_on_the_far_machine() {
         let mut s = source();
         assert_eq!(
-            s.window_said(esper_media::WindowEvent::Scroll { dx: 0, dy: 1 }),
+            s.window_said(&esper_media::WindowEvent::Scroll { dx: 0, dy: 1 }),
             Some(InputMessage::Scroll(Scroll {
                 dx_notches: 0,
                 dy_notches: 1,
@@ -466,7 +472,7 @@ mod tests {
             "positive is down, and nothing between the window and the wire flips it"
         );
         assert_eq!(
-            s.window_said(esper_media::WindowEvent::Scroll { dx: -1, dy: 0 }),
+            s.window_said(&esper_media::WindowEvent::Scroll { dx: -1, dy: 0 }),
             Some(InputMessage::Scroll(Scroll {
                 dx_notches: -1,
                 dy_notches: 0,

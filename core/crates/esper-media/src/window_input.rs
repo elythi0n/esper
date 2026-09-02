@@ -40,7 +40,23 @@
 //!                                              3 back, 4 forward
 //!   kind 4, scroll:   dx i16, dy i16           notches
 //!   kind 5, let go:   (no body)                the window lost the keyboard
+//!   kind 6, screens:  count u8, then that many u32 monitor ids
+//!   kind 7, quality:  profile u8, sharpness u8   0 balanced/none, and see
+//!                                                the viewer stream's session
+//!                                                record for the rest
 //! ```
+//!
+//! # Why two of these are not input
+//!
+//! Kinds 6 and 7 are not something the person did to the *far* machine: they
+//! are what this session is to be of, and how dear a picture it may be. They
+//! travel here anyway because this is the window's only way to speak, and a
+//! second socket for two messages would be a second thing to connect, to fail
+//! and to authorise.
+//!
+//! The engine keeps them apart where it matters — they never reach the thing
+//! that tracks what the host is holding down, because nothing is held down by
+//! choosing a monitor.
 
 use std::io::{self, Write};
 
@@ -63,7 +79,18 @@ pub mod event {
     pub const SCROLL: u8 = 4;
     /// The window lost the keyboard and is letting everything go.
     pub const LET_GO: u8 = 5;
+    /// Which of the host's screens the window would like to see.
+    pub const SCREENS: u8 = 6;
+    /// What the window is being used for, and what it will settle for.
+    pub const QUALITY: u8 = 7;
 }
+
+/// The most screens a window may ask for at once.
+///
+/// The protocol's own limit, restated rather than imported: this crate does
+/// not depend on the protocol crate, and a bound that is not checked here is
+/// a length a window controls reaching a `Vec`.
+pub const MOST_SCREENS: usize = 16;
 
 /// What a window can say.
 ///
@@ -71,7 +98,7 @@ pub mod event {
 /// handles, so the two sources meet at the one place that tracks what is
 /// held — and a key held by a window that vanished is released by the same
 /// code that releases one held by an X11 window that vanished.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowEvent {
     /// A key, as a HID usage on page 0x07.
     Key { usage: u16, pressed: bool },
@@ -83,6 +110,14 @@ pub enum WindowEvent {
     Scroll { dx: i16, dy: i16 },
     /// Everything held is let go — the window lost the keyboard.
     LetGo,
+    /// Show these of the host's screens, by the ids the host gave them.
+    Screens(Vec<u32>),
+    /// What this window is for, and how sharp a picture it will settle for.
+    ///
+    /// Both are the wire's own numbering, passed through: this crate does not
+    /// know what a profile *is*, and translating it into something it made up
+    /// would be a second vocabulary to keep in step with the protocol's.
+    Quality { profile: u8, sharpness: u8 },
 }
 
 /// What went wrong reading a window's events.
@@ -167,6 +202,16 @@ impl<W: Write> Writer<W> {
                 (event::SCROLL, b)
             }
             WindowEvent::LetGo => (event::LET_GO, Vec::new()),
+            WindowEvent::Screens(ids) => {
+                let mut b = vec![u8::try_from(ids.len()).unwrap_or(u8::MAX)];
+                for id in ids.iter().take(MOST_SCREENS) {
+                    b.extend_from_slice(&id.to_be_bytes());
+                }
+                (event::SCREENS, b)
+            }
+            WindowEvent::Quality { profile, sharpness } => {
+                (event::QUALITY, vec![profile, sharpness])
+            }
         };
         let len = u32::try_from(body.len()).unwrap_or(u32::MAX);
         self.out.write_all(&[kind])?;
@@ -314,6 +359,31 @@ fn decode(kind: u8, body: &[u8]) -> Result<Option<WindowEvent>, InputStreamError
             Some(WindowEvent::Scroll { dx, dy })
         }
         event::LET_GO => Some(WindowEvent::LetGo),
+        event::SCREENS => {
+            let count = usize::from(*body.first().ok_or_else(short)?);
+            // **Refused rather than truncated.** A window asking for more
+            // screens than a desktop has is a window this build does not
+            // understand, and quietly serving the first sixteen of a list
+            // somebody meant differently is worse than saying so.
+            if count == 0 || count > MOST_SCREENS {
+                return Err(short());
+            }
+            let mut ids = Vec::with_capacity(count);
+            for at in 0..count {
+                let from = 1 + at * 4;
+                let four: [u8; 4] = body
+                    .get(from..from + 4)
+                    .ok_or_else(short)?
+                    .try_into()
+                    .map_err(|_| short())?;
+                ids.push(u32::from_be_bytes(four));
+            }
+            Some(WindowEvent::Screens(ids))
+        }
+        event::QUALITY => Some(WindowEvent::Quality {
+            profile: *body.first().ok_or_else(short)?,
+            sharpness: *body.get(1).ok_or_else(short)?,
+        }),
         // A kind from a later window. Walked past by its length, which is the
         // entire reason every event carries one.
         _ => None,
@@ -331,7 +401,7 @@ mod tests {
     fn written(events: &[WindowEvent]) -> Vec<u8> {
         let mut w = Writer::new(Vec::new());
         for e in events {
-            w.event(*e).expect("a buffer does not fail");
+            w.event(e.clone()).expect("a buffer does not fail");
         }
         w.into_inner()
     }
@@ -470,6 +540,88 @@ mod tests {
             heard.skipped(),
             1,
             "and it is counted rather than forgotten"
+        );
+    }
+
+    /// A window asking for screens and a quality, read back as it was sent.
+    #[test]
+    fn what_a_window_asks_for_survives_the_wire() {
+        let asked = [
+            WindowEvent::Screens(vec![3]),
+            WindowEvent::Screens(vec![0, 1, 2]),
+            WindowEvent::Quality {
+                profile: 1,
+                sharpness: 3,
+            },
+        ];
+        let mut heard = Events::new();
+        assert_eq!(
+            heard
+                .feed(&written(&asked))
+                .expect("a stream this end wrote"),
+            asked.to_vec()
+        );
+    }
+
+    /// One byte at a time, which is what a socket does.
+    ///
+    /// The screens event is the first in this format whose length is not
+    /// fixed by its kind, so it is the first that can be half-arrived in a
+    /// way the others cannot.
+    #[test]
+    fn a_list_of_screens_arriving_in_pieces_is_one_event() {
+        let bytes = written(&[WindowEvent::Screens(vec![7, 8, 9])]);
+        let mut heard = Events::new();
+        let mut out = Vec::new();
+        for byte in &bytes {
+            out.extend(
+                heard
+                    .feed(std::slice::from_ref(byte))
+                    .expect("a stream this end wrote"),
+            );
+        }
+        assert_eq!(out, vec![WindowEvent::Screens(vec![7, 8, 9])]);
+    }
+
+    /// A count nothing could mean is refused rather than trimmed.
+    ///
+    /// A window asking for no screens has asked for a session with no
+    /// picture, which it has a close for; one asking for more than a desktop
+    /// can hold is a window this build does not understand. Serving the first
+    /// sixteen of either would be answering a question nobody asked.
+    #[test]
+    fn a_screen_count_outside_the_bound_is_refused() {
+        for count in [0_u8, 17, 255] {
+            let mut bytes = MAGIC.to_vec();
+            bytes.push(INPUT_VERSION);
+            let mut body = vec![count];
+            body.extend(std::iter::repeat_n(0_u8, usize::from(count) * 4));
+            bytes.push(event::SCREENS);
+            bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+            bytes.extend_from_slice(&body);
+            let mut heard = Events::new();
+            assert_eq!(
+                heard.feed(&bytes),
+                Err(InputStreamError::Truncated(event::SCREENS)),
+                "a window asked for {count} screens"
+            );
+        }
+    }
+
+    /// A list shorter than its own count is an error, not a short list.
+    #[test]
+    fn a_screen_list_shorter_than_it_claims_is_refused() {
+        let mut bytes = MAGIC.to_vec();
+        bytes.push(INPUT_VERSION);
+        // Three screens promised, one delivered.
+        let body = vec![3_u8, 0, 0, 0, 1];
+        bytes.push(event::SCREENS);
+        bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(&body);
+        let mut heard = Events::new();
+        assert_eq!(
+            heard.feed(&bytes),
+            Err(InputStreamError::Truncated(event::SCREENS))
         );
     }
 

@@ -281,6 +281,59 @@ const report = (r: unknown) =>
     const notice = () =>
       [...box.querySelectorAll('[role="status"]')].find((el) => /Connection/.test(el.textContent ?? "")) ?? null;
 
+    /*
+      **The switcher, which was a button that could not be pressed.**
+
+      The host's screens reach a window on the picture stream and nowhere
+      else, so this is also the check that the engine sent them: the menu is
+      built from what arrived, and picking one has to leave as bytes on the
+      window's own input route.
+    */
+    const named = (label: RegExp) =>
+      [...box.querySelectorAll("button")].find((b) => label.test(b.getAttribute("aria-label") ?? "")) ?? null;
+    const switcher = named(/switch screen/i);
+    seen.switcher = {
+      found: switcher !== null,
+      offered: switcher?.hasAttribute("disabled") === false,
+    };
+    // Opened the way a person opens it. A dropdown of this kind opens on
+    // *pointerdown* — `click()` alone leaves it shut, and a check that only
+    // clicked would report an empty menu on a menu that works.
+    const open = (el: HTMLElement) => {
+      el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+      el.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 0, pointerType: "mouse" }));
+      el.click();
+    };
+    const choose = (el: HTMLElement) => {
+      el.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse" }));
+      el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+      el.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 0, pointerType: "mouse" }));
+      el.click();
+    };
+
+    if (switcher && !switcher.hasAttribute("disabled")) {
+      open(switcher);
+      await sleep(400);
+      const items = [...document.querySelectorAll('[role="menuitem"]')];
+      seen.screensOffered = items.map((el) => (el.textContent ?? "").trim());
+      const first = items[0] as HTMLElement | undefined;
+      if (first) choose(first);
+      await sleep(400);
+    }
+
+    const quality = named(/^quality$/i);
+    seen.quality = { found: quality !== null, offered: quality?.hasAttribute("disabled") === false };
+    if (quality && !quality.hasAttribute("disabled")) {
+      open(quality);
+      await sleep(400);
+      const items = [...document.querySelectorAll('[role="menuitem"]')];
+      seen.qualitiesOffered = items.map((el) => (el.textContent ?? "").trim());
+      // The last one, so what arrives cannot be mistaken for a default.
+      const last = items[items.length - 1] as HTMLElement | undefined;
+      if (last) choose(last);
+      await sleep(400);
+    }
+
     // The oracle, checked against a canvas that *is* cleared, so "the picture
     // was kept" cannot be a sentence that is true of everything.
     seen.flatIsFlat = flat([...new Array(16 * 16 * 4)].map((_, i) => (i % 4 === 3 ? 255 : 0)).join(","));

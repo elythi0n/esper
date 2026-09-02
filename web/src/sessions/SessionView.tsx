@@ -1,15 +1,32 @@
 import { Maximize2, Minimize2, Monitor, MousePointer2, MousePointerBan, Ratio, Settings2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/button";
+import { MenuUnder, type MenuAction } from "@/components/menu";
 import { Tooltip } from "@/components/tooltip";
 import { Figure } from "@/screens/parts";
 import { Presence, SessionChrome, SessionRoot } from "@/session/chrome";
 import { type Fit, FIT_NAMES, FITS } from "@/session/fitting";
+import { showScreens, wantQuality, type Hand } from "@/session/hand";
 import { RemoteScreen } from "@/session/RemoteScreen";
 import { IDLE, type ViewerState } from "@/session/video";
 
 /** How often to ask the window to put a session back while there is no picture. */
 const ASK_AGAIN_MS = 5_000;
+
+/**
+ * What a person can ask a session to be.
+ *
+ * The numbers are the viewer stream's own — see `stream.ts` — and the pairing
+ * of a profile with a sharpness is the same statement said twice, once as
+ * content and once as a consequence, which is how `esper connect` says it
+ * too. "No preference" is a real answer and not the middle rung: it leaves
+ * the host's own judgement alone.
+ */
+const PROFILES: readonly { label: string; profile: number; sharpness: number }[] = [
+  { label: "Reading and typing — sharp", profile: 1, sharpness: 1 },
+  { label: "Balanced", profile: 0, sharpness: 0 },
+  { label: "Video and motion — smooth", profile: 2, sharpness: 3 },
+];
 
 /**
  * One session, inside its dock panel.
@@ -29,6 +46,15 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
   const surface = useRef<HTMLCanvasElement | null>(null);
   const [captured, setCaptured] = useState(false);
   const [full, setFull] = useState(false);
+  /*
+    What asks the session for a screen or a quality.
+
+    A ref rather than state because it is the same object for the life of a
+    connection and nothing renders differently for *which* hand it is; what
+    the render does need is whether there is one, which is `drivable`.
+  */
+  const hand = useRef<Hand | null>(null);
+  const [drivable, setDrivable] = useState(false);
 
   /*
     Whether this is full screen, from the browser rather than from a variable.
@@ -79,6 +105,29 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
   // The next mode round, so one control serves three without a menu over the
   // picture — which is the thing the design system says not to put there.
   const nextFit = () => setFit((was) => FITS[(FITS.indexOf(was) + 1) % FITS.length] ?? "fit");
+
+  /*
+    One screen at a time from this menu.
+
+    The protocol carries a set and the host can serve several at once, which
+    is what `--monitor 0,1` asks for. A menu of single screens is what a
+    person picking one from a list means, and a multi-select over somebody
+    else's desktop is a control for a later day rather than one to guess at
+    now.
+  */
+  const screens: MenuAction[] = picture.screens.map((screen) => ({
+    label: `${screen.name}${screen.primary ? " (primary)" : ""} — ${screen.width}x${screen.height}`,
+    icon: Monitor,
+    disabled: !drivable,
+    onSelect: () => hand.current?.ask(showScreens([screen.id])),
+  }));
+
+  const qualities: MenuAction[] = PROFILES.map(({ label, profile, sharpness }) => ({
+    label,
+    icon: Settings2,
+    disabled: !drivable,
+    onSelect: () => hand.current?.ask(wantQuality(profile, sharpness)),
+  }));
 
   /*
     Ask the window to start the session, and to end it on the way out.
@@ -152,7 +201,18 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
 
   return (
     <SessionRoot ref={root} className="h-full w-full">
-      <RemoteScreen device={name} onState={setPicture} fit={fit} surfaceRef={surface} />
+      <RemoteScreen
+        device={name}
+        onState={setPicture}
+        fit={fit}
+        surfaceRef={surface}
+        onHand={(h) => {
+          hand.current = h;
+          // The controls are disabled while there is nothing to ask with, so
+          // the hand arriving has to reach the render.
+          setDrivable(h !== null);
+        }}
+      />
 
       {/*
         The window refusing to start one — already showing another session,
@@ -192,16 +252,36 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
           </span>
         )}
         <div className="flex shrink-0 items-center gap-1">
-          <Tooltip label="Switch screen">
-            <Button variant="ghost" size="sm" aria-label="Switch screen" className="px-1.5" disabled>
+          {/*
+            The host's screens, from the host.
+
+            Disabled until the engine has said what there is — and it says so
+            on the picture stream, which is the only place a window learns it.
+            A switcher built from anything else would be a second idea of
+            what is plugged in to somebody else's machine.
+          */}
+          <MenuUnder actions={screens}>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Switch screen"
+              className="px-1.5"
+              disabled={screens.length === 0}
+            >
               <Monitor aria-hidden size={16} />
             </Button>
-          </Tooltip>
-          <Tooltip label="Quality">
-            <Button variant="ghost" size="sm" aria-label="Quality" className="px-1.5" disabled>
+          </MenuUnder>
+          <MenuUnder actions={qualities}>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Quality"
+              className="px-1.5"
+              disabled={hand.current === null}
+            >
               <Settings2 aria-hidden size={16} />
             </Button>
-          </Tooltip>
+          </MenuUnder>
           <Tooltip label={captured ? "Release the pointer (Escape)" : "Capture the pointer"}>
             <Button
               variant="ghost"

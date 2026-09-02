@@ -34,6 +34,8 @@ const POINTER = 2;
 const BUTTON = 3;
 const SCROLL = 4;
 const LET_GO = 5;
+const SCREENS = 6;
+const QUALITY = 7;
 
 /** One thing the person did, before it is bytes. */
 type Event =
@@ -41,7 +43,22 @@ type Event =
   | { kind: typeof POINTER; x: number; y: number }
   | { kind: typeof BUTTON; button: number; pressed: boolean }
   | { kind: typeof SCROLL; dx: number; dy: number }
-  | { kind: typeof LET_GO };
+  | { kind: typeof LET_GO }
+  | Ask;
+
+/**
+ * Something the window asks *of the session*, rather than does to the machine.
+ *
+ * It travels on the input stream because that is the window's only way to
+ * speak, and a second socket for two messages would be a second thing to
+ * connect, to fail and to authorise. The engine keeps them apart at its end:
+ * nothing is held down by choosing a screen.
+ */
+export type Ask =
+  /** Show these of the host's screens, by the ids it gave them. */
+  | { kind: typeof SCREENS; screens: number[] }
+  /** What this window is for, and what it will settle for. */
+  | { kind: typeof QUALITY; profile: number; sharpness: number };
 
 function encode(events: readonly Event[], first: boolean): Uint8Array {
   const parts: number[] = [];
@@ -77,6 +94,13 @@ function encode(events: readonly Event[], first: boolean): Uint8Array {
         be16(body, e.dx | 0);
         be16(body, e.dy | 0);
         break;
+      case SCREENS:
+        body.push(e.screens.length);
+        for (const id of e.screens) be32(body, id);
+        break;
+      case QUALITY:
+        body.push(e.profile, e.sharpness);
+        break;
       default:
         break;
     }
@@ -89,6 +113,16 @@ function encode(events: readonly Event[], first: boolean): Uint8Array {
   const out = new Uint8Array(new ArrayBuffer(parts.length));
   out.set(parts);
   return out;
+}
+
+/** Ask the session to show these of the host's screens. */
+export function showScreens(screens: number[]): Ask {
+  return { kind: SCREENS, screens };
+}
+
+/** Ask the session for a quality. The numbers are the stream's; see `stream.ts`. */
+export function wantQuality(profile: number, sharpness: number): Ask {
+  return { kind: QUALITY, profile, sharpness };
 }
 
 export interface HandOptions {
@@ -105,18 +139,38 @@ export interface HandOptions {
   fit?: () => Fit;
 }
 
+/** A hand on a surface: what it can say, and how to take it off. */
+export interface Hand {
+  /**
+   * Stop watching, and let go of everything held.
+   *
+   * The important half: a key still down when a session view unmounts would
+   * be a key held on somebody else's machine with nothing left here to
+   * release it.
+   */
+  stop: () => void;
+  /**
+   * Ask something of the session — a screen, a quality.
+   *
+   * Here rather than in a function of its own because the stream has a
+   * beginning: its magic and version go down the socket once, and a second
+   * writer would send them again in the middle of somebody's typing, where
+   * the engine reads them as an event kind with a preposterous length and
+   * refuses the whole stream.
+   */
+  ask: (what: Ask) => void;
+}
+
 /**
  * Watch an element, and send what happens on it to the session.
  *
- * Returns a function that stops watching and lets go of everything held —
- * which is the important half: a key still down when a session view unmounts
- * would be a key held on somebody else's machine with nothing left here to
- * release it.
+ * One of these per *connection* to the engine: see `Hand.ask` for why, and
+ * `ViewerState.connection` for what tells a caller the engine has changed.
  */
 export function driveWith(
   surface: HTMLElement,
   { url = "/shell/video/input", picture, fit = () => "fit" }: HandOptions,
-): () => void {
+): Hand {
   let queue: Event[] = [];
   let first = true;
   let stopped = false;
@@ -298,7 +352,7 @@ export function driveWith(
   surface.addEventListener("blur", letGo);
   window.addEventListener("blur", letGo);
 
-  return () => {
+  const stop = () => {
     if (frame !== null) cancelAnimationFrame(frame);
     /*
       Let go, always — not only when this side thinks something is held.
@@ -320,5 +374,17 @@ export function driveWith(
     surface.removeEventListener("keyup", onKey);
     surface.removeEventListener("blur", letGo);
     window.removeEventListener("blur", letGo);
+  };
+
+  return {
+    stop,
+    ask: (what: Ask) => {
+      if (stopped) return;
+      send(what);
+      // Sent now rather than on the next frame. A frame's wait is right for
+      // input, which arrives in floods; somebody who picked a monitor has
+      // made one decision and is watching for it to happen.
+      flush();
+    },
   };
 }
