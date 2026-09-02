@@ -79,6 +79,16 @@ export interface ViewerState {
   profile: number;
   sharpness: number;
   /**
+   * The host's pointer: where it is, and what it looks like.
+   *
+   * `cursor` is a data URL because that is what CSS and an `<img>` both take,
+   * and because the pixels arrive once per shape change while the position
+   * arrives at the speed of a hand — building the image on every move would
+   * be the expensive half of the pair done at the rate of the cheap one.
+   */
+  pointer: { inPicture: boolean; draw: boolean; x: number; y: number } | null;
+  cursor: { url: string; hotX: number; hotY: number } | null;
+  /**
    * How many times the pictures have started arriving.
    *
    * One per *connection*, not per configuration — a parameter-set change
@@ -106,6 +116,8 @@ export const IDLE: ViewerState = {
   showing: [],
   profile: 0,
   sharpness: 0,
+  pointer: null,
+  cursor: null,
   connection: 0,
 };
 
@@ -139,6 +151,41 @@ const LONGEST_WAIT_MS = 5_000;
  * what it is honest to say.
  */
 const LOST_AFTER_MS = 20_000;
+
+/**
+ * The host's pointer as something a browser can draw.
+ *
+ * A PNG data URL, because both places it goes take one: the `cursor` property,
+ * which is how a surface *wears* it, and an `<img>`, which is how it is drawn
+ * when wearing it would be a lie. Built once per shape change — the position
+ * arrives a hundred times a second and must never cost this.
+ *
+ * The pixels are straight RGBA, which is what `putImageData` takes, so there
+ * is no premultiplication to undo. A cursor that came out with dark edges on
+ * a light screen would be exactly that mistake.
+ */
+function pictureOf(image: {
+  width: number;
+  height: number;
+  hotX: number;
+  hotY: number;
+  rgba: Uint8Array;
+}): { url: string; hotX: number; hotY: number } | null {
+  if (image.width === 0 || image.height === 0) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  const wanted = image.width * image.height * 4;
+  if (image.rgba.length < wanted) return null;
+  ctx.putImageData(
+    new ImageData(new Uint8ClampedArray(image.rgba.subarray(0, wanted)), image.width, image.height),
+    0,
+    0,
+  );
+  return { url: canvas.toDataURL("image/png"), hotX: image.hotX, hotY: image.hotY };
+}
 
 /**
  * Draw a session's pictures onto a canvas, and keep drawing them.
@@ -292,6 +339,16 @@ export function showTheScreen(
             showing: record.showing,
             screens: record.screens,
           });
+          continue;
+        }
+        if (record.kind === "pointer") {
+          say({
+            pointer: { inPicture: record.inPicture, draw: record.draw, x: record.x, y: record.y },
+          });
+          continue;
+        }
+        if (record.kind === "pointer-shape") {
+          say({ cursor: record.image ? pictureOf(record.image) : null });
           continue;
         }
         if (record.kind !== "picture") {

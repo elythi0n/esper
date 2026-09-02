@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { CopyField } from "@/components/copy-field";
 import { Key } from "@/screens/parts";
 import { ReconnectNotice } from "./chrome";
-import { type Fit, FIT_CLASS } from "./fitting";
+import { type Fit, FIT_CLASS, placement } from "./fitting";
 import { driveWith, type Hand } from "./hand";
 import { IDLE, showTheScreen, type ViewerState } from "./video";
 
@@ -59,6 +59,26 @@ export function RemoteScreen({
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const id = useId();
+  /*
+    How big the surface is, watched rather than measured.
+
+    The drawn pointer needs it and the pointer moves at the speed of a hand —
+    a hundred times a second — so reading a bounding box in the render would
+    be a hundred forced layouts a second for a number that changes when
+    somebody resizes a window.
+  */
+  const box = useRef<HTMLDivElement>(null);
+  const [surface, setSurface] = useState<{ width: number; height: number } | null>(null);
+  useEffect(() => {
+    const node = box.current;
+    if (!node) return undefined;
+    const watch = new ResizeObserver(([entry]) => {
+      const rect = entry?.contentRect;
+      if (rect) setSurface({ width: rect.width, height: rect.height });
+    });
+    watch.observe(node);
+    return () => watch.disconnect();
+  }, []);
   const [state, setState] = useState<ViewerState>(IDLE);
   const [socket, setSocket] = useState<string | null>(null);
   const fitRef = useRef<Fit>(fit);
@@ -133,6 +153,41 @@ export function RemoteScreen({
   }, [drivable, state.status, state.connection]);
 
   const playing = state.status === "playing";
+
+  /*
+    The host's pointer, worn.
+
+    Worn rather than composited whenever it is honest: the browser draws it at
+    the person's own hand, so it moves at the speed of the hand rather than the
+    speed of the link, and nothing has to be repainted behind it. Phase 5
+    measured the same choice for X11 — 22.5µs worn against 96.8µs composited,
+    and a round trip of latency either way.
+
+    `none` when the host says its pointer is hidden, because on a real desktop
+    an invisible cursor is how an application hides one.
+  */
+  const worn = state.cursor
+    ? `url(${state.cursor.url}) ${state.cursor.hotX} ${state.cursor.hotY}, auto`
+    : state.pointer && !state.pointer.inPicture
+      ? "none"
+      : undefined;
+
+  /*
+    And composited, when wearing it would be a lie.
+
+    A session that is only watching has no local pointer to speak of, and a
+    host whose pointer is not following this one has a pointer somewhere else.
+    The engine decides which it is — see `stream.ts` — and this draws it where
+    the picture is drawn, which is the same geometry the canvas was told.
+  */
+  const drawn =
+    state.cursor && state.pointer?.draw && state.pointer.inPicture && state.size && surface
+      ? // A box at the origin, because the pointer is drawn *inside* this
+        // container and the canvas fills it: what comes back is then already
+        // an offset within it, with no page coordinates to subtract and no
+        // layout to read on every move.
+        placement(fit, { left: 0, top: 0, width: surface.width, height: surface.height }, state.size)
+      : null;
   /*
     A session whose pictures stopped keeps the last one and says so over it.
 
@@ -146,7 +201,7 @@ export function RemoteScreen({
   const away = state.link !== "live" && state.pictures > 0;
   const wayOut = `${id}-way-out`;
   return (
-    <div className="absolute inset-0 grid place-items-center bg-video [transition-duration:var(--dur-video)]">
+    <div ref={box} className="absolute inset-0 grid place-items-center bg-video [transition-duration:var(--dur-video)]">
       {/*
         Always mounted, and hidden rather than unmounted while it waits: a
         canvas that appears when the first picture arrives is a canvas that
@@ -172,6 +227,7 @@ export function RemoteScreen({
         // The class and the pointer mapping come from the same module, so a
         // picture drawn one way cannot be clicked as though it sat another.
         className={playing || away ? `h-full w-full ${FIT_CLASS[fit]}` : "sr-only"}
+        style={worn ? { cursor: worn } : undefined}
       />
       {drivable && (
         <p id={wayOut} className="sr-only">
@@ -179,6 +235,23 @@ export function RemoteScreen({
           back.
         </p>
       )}
+      {drawn && state.cursor && state.pointer && (
+        // Nothing to click on and nothing to read: it is a picture of where
+        // somebody else's pointer is.
+        <img
+          src={state.cursor.url}
+          alt=""
+          aria-hidden
+          data-remote-pointer=""
+          className="pointer-events-none absolute left-0 top-0 z-[var(--z-session-hud)] origin-top-left"
+          style={{
+            translate: `${drawn.left + (state.pointer.x - state.cursor.hotX) * drawn.scaleX}px ${
+              drawn.top + (state.pointer.y - state.cursor.hotY) * drawn.scaleY
+            }px`,
+          }}
+        />
+      )}
+
       {away && (
         <div className="absolute inset-0 grid place-items-center">
           <ReconnectNotice state={state.link} sinceMs={state.awayMs ?? 0} />

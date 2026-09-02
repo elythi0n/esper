@@ -78,6 +78,7 @@ const report = (r) => {
     engine: navigator.userAgent.includes("Chrome") ? "chromium" : "webkitgtk",
     configurations: [], pictures: 0, keyframes: 0, decoded: 0, sizes: [],
     firstRecord: null, errors: [], timestamps: [], unknown: 0, configuredFirst: true, session: null,
+    pointer: null, shape: undefined,
     // The hop the stream's own clock makes measurable: engine to drawn.
     hops: [], clocked: 0,
   };
@@ -89,7 +90,14 @@ const report = (r) => {
     for await (const record of readViewerStream(response.body)) {
       seen.firstRecord ??= record.kind;
       if (record.kind === "unknown") { seen.unknown++; continue; }
-      if (record.kind === "session") { seen.session = { screens: record.screens.length, showing: record.showing }; continue; }
+      if (record.kind === "session") { seen.session = { screens: record.screens.length, showing: record.showing, names: record.screens.map((s) => s.name), lefts: record.screens.map((s) => s.x) }; continue; }
+      if (record.kind === "pointer") { seen.pointer = { inPicture: record.inPicture, draw: record.draw, x: record.x, y: record.y }; continue; }
+      if (record.kind === "pointer-shape") {
+        seen.shape = record.image
+          ? { width: record.image.width, height: record.image.height, hotX: record.image.hotX, hotY: record.image.hotY, bytes: record.image.rgba.length, first: [...record.image.rgba.subarray(0, 8)] }
+          : null;
+        continue;
+      }
       // What matters is the order of these two, not which record came first:
       // a stream may say what the session is of before it says how to decode
       // it, and neither is a decoder being fed early.
@@ -607,6 +615,48 @@ for (const r of [seen, webkit, live].filter(Boolean)) {
       findings.push(`the live leg's hop is ${p50}ms at the median, which is not a latency — something is being measured that is not the hop`);
     }
   }
+  /*
+    The records that are not pictures, read by the page against bytes Rust
+    wrote.
+
+    This is the whole reason they went into the fixture: a record kind that is
+    never in it is a kind whose two readers have never been compared, and the
+    drift shows up as a session that shows the wrong thing rather than as an
+    error anybody can read. Only the fixture legs are held to it — the live
+    engine writes what it has, which is a different stream.
+  */
+  if (r !== live) {
+    if (!r.session) {
+      findings.push(`${who}: the fixture says what the session is of and the page read nothing`);
+    } else {
+      if (r.session.screens !== 2) findings.push(`${who}: read ${r.session.screens} screens out of a fixture with two`);
+      if (r.session.lefts?.[1] !== -640) {
+        findings.push(
+          `${who}: the screen left of the primary one is at x ${r.session.lefts?.[1]}, and the fixture put it at -640 — ` +
+            `read as unsigned it lands four billion pixels to the right`,
+        );
+      }
+    }
+    if (!r.pointer) {
+      findings.push(`${who}: the fixture says where the pointer is and the page read nothing`);
+    } else if (r.pointer.x !== 100 || r.pointer.y !== 50 || !r.pointer.draw) {
+      findings.push(`${who}: read the pointer at ${r.pointer.x},${r.pointer.y} draw=${r.pointer.draw}, and it was written at 100,50 draw=true`);
+    }
+    if (!r.shape) {
+      findings.push(`${who}: the fixture carries a pointer shape and the page read ${r.shape === null ? "a hidden one" : "nothing"}`);
+    } else {
+      if (r.shape.width !== 16 || r.shape.height !== 16) findings.push(`${who}: the shape is ${r.shape.width}x${r.shape.height}, and it was written 16x16`);
+      // A hotspot read as the corner still looks like a cursor and points a
+      // few pixels wrong, which is why the fixture's is not the corner.
+      if (r.shape.hotX !== 4 || r.shape.hotY !== 3) findings.push(`${who}: the hotspot read ${r.shape.hotX},${r.shape.hotY} and was written 4,3`);
+      if (r.shape.bytes !== 16 * 16 * 4) findings.push(`${who}: ${r.shape.bytes} bytes for a 16x16 shape, and four a pixel is ${16 * 16 * 4}`);
+      // Straight RGBA: the first pixel opaque, the second transparent.
+      if (r.shape.first?.[3] !== 255 || r.shape.first?.[7] !== 0) {
+        findings.push(`${who}: the first two pixels read ${JSON.stringify(r.shape.first)}, and the fixture alternates opaque and clear`);
+      }
+    }
+  }
+
   const ts = r.timestamps ?? [];
   if (ts.length >= 2 && !(ts[1] > ts[0])) {
     findings.push(`${who}: timestamps do not advance (${ts.join(", ")}) — WebCodecs orders on them`);
@@ -841,6 +891,28 @@ if (surface) {
     }
 
     /*
+      **The host's pointer, worn and drawn.**
+
+      Both, because they are different claims: a surface that wears it draws
+      it at the person's own hand with no network in the path, and one that
+      composites it shows where the *host's* pointer is — which is what a
+      session nobody is driving needs. The engine says which; the window is
+      held to doing what it was told.
+    */
+    const pointer = surface.pointer ?? {};
+    if (!pointer.worn) {
+      findings.push("the surface is not wearing the remote pointer — its CSS cursor is not the shape the engine sent");
+    } else if (!pointer.hotspot) {
+      findings.push("the remote pointer is worn without a hotspot, so it points wherever its top-left corner is");
+    }
+    if (!pointer.drawn) {
+      findings.push("the engine said to draw the pointer and nothing was drawn over the video");
+    } else {
+      if (!pointer.inPicture) findings.push("the drawn pointer is outside the picture it belongs to");
+      if (!pointer.moves) findings.push("the drawn pointer never moved, so it is not following the position the engine sends");
+    }
+
+    /*
       **What the window may ask of the session.**
 
       The host's screens reach a window on the picture stream and nowhere
@@ -970,6 +1042,10 @@ if (surface) {
     if (surface.cameBackMs === null) {
       findings.push("a new engine started and the picture never came back, so the reconnect is not automatic");
     }
+    console.log(
+      `    pointer: worn as a ${surface.shapeSize ?? "16x16"} shape with its hotspot, ` +
+        `and drawn over the picture, following the engine's position`,
+    );
     console.log(
       `    reconnect: ${said.map((t) => JSON.stringify(t)).join(" then ")}, last picture kept, ` +
         `back in ${surface.cameBackMs}ms with nobody touching anything and no blank frame`,

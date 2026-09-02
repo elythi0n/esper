@@ -273,6 +273,41 @@ impl Viewer {
         }
     }
 
+    /// Where the host's pointer is, and whether the window has to draw it.
+    ///
+    /// The decision is passed on rather than the evidence: whether a pointer
+    /// is worn or drawn turns on whether this session is driving and whether
+    /// the host is following, and that has been worked out once already. A
+    /// window deciding it again would be a second implementation of a rule
+    /// that took a finding to get right.
+    pub fn pointer(&mut self, in_picture: bool, draw: bool, x: i32, y: i32) {
+        if self.gone {
+            return;
+        }
+        if let Err(e) = self.stream.pointer(in_picture, draw, x, y) {
+            self.stop(&e);
+        }
+    }
+
+    /// What the host's pointer looks like. `None` is hidden.
+    pub fn pointer_shape(&mut self, image: Option<&esper_capture::cursor::CursorImage>) {
+        if self.gone {
+            return;
+        }
+        let said = image.map(|i| {
+            (
+                i.width,
+                i.height,
+                i.hotspot_x,
+                i.hotspot_y,
+                i.rgba.as_slice(),
+            )
+        });
+        if let Err(e) = self.stream.pointer_shape(said) {
+            self.stop(&e);
+        }
+    }
+
     /// The window went away. Said once, and never again.
     ///
     /// Not an error the session ends on: a viewer closing its window is an

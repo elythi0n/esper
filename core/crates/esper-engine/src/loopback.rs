@@ -176,6 +176,31 @@ fn encoder_for(config: &EncoderConfig) -> Result<Box<dyn VideoEncoder>, EncodeEr
     Ok(Box::new(OpenH264::new(config)?))
 }
 
+/// A pointer to stand in for a host's, so the window's half can be exercised.
+///
+/// An arrow, drawn rather than loaded: the alternative is a file to ship and
+/// a path to resolve, for sixteen pixels of shape whose only job is to be
+/// something a window can wear.
+fn pointer_shape() -> esper_capture::cursor::CursorImage {
+    const N: u16 = 16;
+    let mut rgba = vec![0u8; usize::from(N) * usize::from(N) * 4];
+    for row in 0..usize::from(N) {
+        for col in 0..=row.min(usize::from(N) - 1 - row / 3) {
+            let at = (row * usize::from(N) + col) * 4;
+            if let Some(px) = rgba.get_mut(at..at + 4) {
+                px.copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+    }
+    esper_capture::cursor::CursorImage {
+        width: N,
+        height: N,
+        hotspot_x: 0,
+        hotspot_y: 0,
+        rgba,
+    }
+}
+
 /// Run the loopback and print what it cost.
 pub fn run(o: &Options) -> Result<(), String> {
     let pattern = Pattern::new(o.width, o.height).map_err(|e| e.to_string())?;
@@ -353,6 +378,7 @@ pub fn run(o: &Options) -> Result<(), String> {
         None => None,
     };
     let began = std::time::Instant::now();
+    let mut pointer_said = false;
 
     let space = ColorSpace::default();
     let to_rgb = RgbCoefficients::for_space(space);
@@ -379,6 +405,32 @@ pub fn run(o: &Options) -> Result<(), String> {
             } => {
                 if let Some(window) = viewer.as_mut() {
                     window.picture(bitstream, began.elapsed());
+                    /*
+                        A pointer, so the whole of what a session sends is
+                        exercised without a peer.
+
+                        This path has no host to read a cursor from, and the
+                        window's half of the pointer — wearing a shape,
+                        drawing it where the picture is drawn — cannot be
+                        reached at all without one. So the loopback stands in
+                        for that too: one shape, once, and a position that
+                        moves, which is exactly the split the format has.
+
+                        `draw` is set because there is nothing here for a
+                        pointer to follow: no session is being driven, so a
+                        window that wore it would be showing somebody a
+                        pointer at their own hand for a machine that does not
+                        have one.
+                    */
+                    let (pw, ph) = pipeline.encode_size();
+                    if !pointer_said {
+                        pointer_said = true;
+                        window.pointer_shape(Some(&pointer_shape()));
+                    }
+                    let round = began.elapsed().as_millis() as f64 / 900.0;
+                    let x = f64::from(pw) / 2.0 * (1.0 + 0.6 * round.cos());
+                    let y = f64::from(ph) / 2.0 * (1.0 + 0.6 * round.sin());
+                    window.pointer(true, true, x as i32, y as i32);
                 }
                 if let Some(p) = presenter.as_mut() {
                     // The pipeline's damage is about the *capture*; what

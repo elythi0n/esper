@@ -2381,15 +2381,35 @@ conn, _ = server.accept()
 
 # Drained on a thread of its own: a window that stops reading is a window the
 # engine blocks writing to, and a blocked engine stops doing everything else.
-pictures = [0]
+#
+# And read rather than counted, because what arrives is the answer to half of
+# this check: the host's pointer travels on this stream, and a window that got
+# pictures and no pointer would look exactly like one that got both.
+seen = {"bytes": 0, "kinds": {}}
 
 
 def drain():
+    buf = b""
+    begun = False
     while True:
         chunk = conn.recv(65536)
         if not chunk:
             return
-        pictures[0] += len(chunk)
+        seen["bytes"] += len(chunk)
+        buf += chunk
+        if not begun:
+            if len(buf) < 9:
+                continue
+            assert buf[:8] == b"ESPRVID\0", "the window was handed something else"
+            buf = buf[9:]
+            begun = True
+        while len(buf) >= 5:
+            kind = buf[0]
+            length = int.from_bytes(buf[1:5], "big")
+            if len(buf) < 5 + length:
+                break
+            seen["kinds"][kind] = seen["kinds"].get(kind, 0) + 1
+            buf = buf[5 + length :]
 
 
 threading.Thread(target=drain, daemon=True).start()
@@ -2404,11 +2424,15 @@ conn.sendall(b"ESPRINP\0" + bytes([1]))
 # announced and driving before a key means anything, and a check that pressed
 # once at a moment of its own choosing would be measuring the clock.
 time.sleep(2)
-for _ in range(14):
+for n in range(14):
     event(1, (0x04).to_bytes(2, "big") + bytes([1]))
     time.sleep(0.05)
     event(1, (0x04).to_bytes(2, "big") + bytes([0]))
-    print("typed, after %d bytes of pictures" % pictures[0], flush=True)
+    # And the pointer, which is what makes the host's own cursor move — and
+    # therefore what makes the host report where it is. A window that only
+    # typed would be waiting for a pointer nobody had touched.
+    event(2, (200 + n * 7).to_bytes(4, "big", signed=True) + (150 + n * 5).to_bytes(4, "big", signed=True))
+    print("typed, after %d bytes and kinds %s" % (seen["bytes"], sorted(seen["kinds"])), flush=True)
     time.sleep(0.5)
 
 # And the two things that are not input: a quality, and a screen that is not
@@ -2420,6 +2444,9 @@ time.sleep(1)
 event(6, bytes([1]) + (99).to_bytes(4, "big"))
 print("asked for a quality and a screen", flush=True)
 time.sleep(5)
+# The last word, and the one the check reads: what kinds of record a real
+# session sent this window.
+print("records %s" % sorted(seen["kinds"].items()), flush=True)
 WINDOW
           wd_win=$!
           DISPLAY=":$wd_d" xev -root -event keyboard > "$term_b/xev.log" 2>&1 &
@@ -2475,6 +2502,23 @@ WINDOW
           else
             printf '  ✗ asking for a screen never reached the host\n'
             grep -iE 'window asked|would not send|now showing' "$term_b/window-client.log" 2>/dev/null | sed 's/^/      /' || true
+            fail=1
+          fi
+          # **And the host's own pointer, which travels on the picture
+          # stream.** The window drove the pointer above, so the host's cursor
+          # moved and the host said where it is — the whole round trip, both
+          # machines, and the records that carry it. A shape is record 5 and a
+          # position is record 4; they are two kinds for one reason, that a
+          # pointer moving must never cost a shape.
+          for _ in $(seq 1 100); do
+            grep -q '^records ' "$term_b/window-socket.log" 2>/dev/null && break
+            sleep 0.2
+          done
+          got=$( { grep -m1 '^records ' "$term_b/window-socket.log" 2>/dev/null || true; } )
+          if printf '%s' "$got" | grep -q '(5,' && printf '%s' "$got" | grep -q '(4,'; then
+            printf '  ✓ the host'"'"'s pointer reached the window, shape and position apart\n'
+          else
+            printf '  ✗ the window got no pointer from the host: %s\n' "${got:-nothing}"
             fail=1
           fi
           kill "$wd_client" "$wd_win" 2>/dev/null || true

@@ -5787,6 +5787,13 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                                 rgba: rgba.clone(),
                             }),
                         };
+                        // **And the window gets it too.** A webview wears the
+                        // remote pointer the same way an X11 window does —
+                        // as the surface's own cursor, drawn by the browser at
+                        // the person's hand — so the shape is all it needs.
+                        if let Some(window) = viewer.as_mut() {
+                            window.pointer_shape(image.as_ref());
+                        }
                         if let Some(p) = presenter.as_mut()
                             && let Err(e) = p.set_cursor(image.as_ref())
                         {
@@ -5818,6 +5825,29 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                                 source.host_is_not_following(at, std::time::Instant::now())
                             }
                         };
+                        // **Where it is in the picture**, worked out once for
+                        // both windows: an X11 one and a webview ask the same
+                        // question and would get two answers if they each did
+                        // the arithmetic.
+                        let on_screen = esper_stream::tiles_of(link.config())
+                            .into_iter()
+                            .find(|(id, _)| *id == at.monitor);
+                        let in_picture = on_screen.map(|(_, tile)| {
+                            let (x, y) = at.to_pixels(tile.width, tile.height);
+                            (
+                                x.saturating_add(tile.x.unsigned_abs()),
+                                y.saturating_add(tile.y.unsigned_abs()),
+                            )
+                        });
+                        if let Some(window) = viewer.as_mut() {
+                            let (x, y) = in_picture.unwrap_or((0, 0));
+                            window.pointer(
+                                in_picture.is_some(),
+                                draw,
+                                i32::try_from(x).unwrap_or(i32::MAX),
+                                i32::try_from(y).unwrap_or(i32::MAX),
+                            );
+                        }
                         if let Some(p) = presenter.as_mut() {
                             // **Which screen it is on, and where in the
                             // picture that screen is.** A position on the wire
@@ -5832,18 +5862,7 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                             // and nothing to wear either — a worn pointer
                             // would be showing the person a cursor for a
                             // screen they cannot see.
-                            let on_screen = esper_stream::tiles_of(link.config())
-                                .into_iter()
-                                .find(|(id, _)| *id == at.monitor);
-                            let target = on_screen.and_then(|(_, tile)| {
-                                draw.then(|| {
-                                    let (x, y) = at.to_pixels(tile.width, tile.height);
-                                    (
-                                        x.saturating_add(tile.x.unsigned_abs()),
-                                        y.saturating_add(tile.y.unsigned_abs()),
-                                    )
-                                })
-                            });
+                            let target = draw.then_some(in_picture).flatten();
                             if let Err(e) = p.draw_cursor_at(target)
                                 && cursor_moves == 1
                             {

@@ -46,6 +46,17 @@
 //!       id u32, x i32, y i32, width u32, height u32,
 //!       flags u8           bit 0 set for the host's primary screen
 //!       name  u16 length + that many UTF-8 bytes
+//!   kind 4, pointer:
+//!     flags u8             bit 0 the pointer is in the picture
+//!                          bit 1 draw it — the host's pointer is not under
+//!                                this person's hand, so the window has to
+//!                                show where it is
+//!     x i32, y i32         where it is, in picture pixels
+//!   kind 5, pointer shape:
+//!     flags u8             bit 0 there is an image; 0 means hidden
+//!     hot_x u16, hot_y u16
+//!     width u16, height u16
+//!     rgba  u32 length + that many bytes    straight RGBA, not premultiplied
 //! ```
 //!
 //! Everything is big-endian, which is what the rest of this protocol uses and
@@ -73,6 +84,21 @@
 //! It carries the quality the session is asking for on the same record and
 //! for the same reason: a control that shows a state it cannot read is a
 //! control that lies the first time anything else changes it.
+//!
+//! # Why the pointer is two records and not one
+//!
+//! The same reason it is two messages on the wire: a pointer that moves must
+//! not cost a shape. A shape is kilobytes and changes when somebody crosses
+//! an edge; a position is nine bytes and changes at the speed of a hand.
+//!
+//! **And why the window is told to draw it.** A remote pointer is best *worn*
+//! — the browser draws it at the person's own hand, with no network in the
+//! path at all — but that is only honest while the local pointer is the
+//! host's pointer. When it is not, the host's own position has to be drawn.
+//! Which of the two it is comes down to whether this session is driving and
+//! whether the host is following, and the engine has worked that out already:
+//! sending the answer rather than the evidence keeps the window from being a
+//! second implementation of a rule that took a finding to get right.
 //!
 //! # Why a picture carries two clocks
 //!
@@ -114,6 +140,10 @@ pub mod record {
     pub const PICTURE: u8 = 2;
     /// What the session is of, and what else it could be of.
     pub const SESSION: u8 = 3;
+    /// Where the host's pointer is, and whether to draw it.
+    pub const POINTER: u8 = 4;
+    /// What the host's pointer looks like. Sent on change, never on a move.
+    pub const POINTER_SHAPE: u8 = 5;
 }
 
 /// Set on a picture a decoder can begin at.
@@ -121,6 +151,13 @@ pub const FLAG_KEYFRAME: u8 = 0b0000_0001;
 
 /// Set on the screen the host calls its primary one.
 pub const FLAG_PRIMARY: u8 = 0b0000_0001;
+
+/// Set when the pointer is somewhere in the picture at all.
+pub const FLAG_IN_PICTURE: u8 = 0b0000_0001;
+/// Set when the window has to draw the pointer rather than wear it.
+pub const FLAG_DRAW_POINTER: u8 = 0b0000_0010;
+/// Set on a shape that has an image. Clear means the pointer is hidden.
+pub const FLAG_HAS_IMAGE: u8 = 0b0000_0001;
 
 /// One of the host's screens, as a window needs to know it.
 ///
@@ -269,6 +306,50 @@ impl<W: Write> Writer<W> {
             body.extend_from_slice(name.get(..usize::from(len)).unwrap_or_default());
         }
         self.record(record::SESSION, &body)
+    }
+
+    /// Where the host's pointer is, in picture pixels.
+    ///
+    /// Nine bytes, because this is the record that moves: a hand crossing a
+    /// screen produces one of these a hundred times a second and must never
+    /// cost a shape.
+    pub fn pointer(&mut self, in_picture: bool, draw: bool, x: i32, y: i32) -> io::Result<()> {
+        let mut body = Vec::with_capacity(9);
+        let mut flags = 0;
+        if in_picture {
+            flags |= FLAG_IN_PICTURE;
+        }
+        if draw {
+            flags |= FLAG_DRAW_POINTER;
+        }
+        body.push(flags);
+        body.extend_from_slice(&x.to_be_bytes());
+        body.extend_from_slice(&y.to_be_bytes());
+        self.record(record::POINTER, &body)
+    }
+
+    /// What the host's pointer looks like, or that there is not one.
+    ///
+    /// `None` is hidden, which is a state rather than four kilobytes of
+    /// transparent pixels — and on X11 an invisible cursor *is* how an
+    /// application hides one, so it is what the host reads it from.
+    pub fn pointer_shape(&mut self, image: Option<(u16, u16, u16, u16, &[u8])>) -> io::Result<()> {
+        let Some((width, height, hot_x, hot_y, rgba)) = image else {
+            return self.record(
+                record::POINTER_SHAPE,
+                &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            );
+        };
+        let mut body = Vec::with_capacity(13 + rgba.len());
+        body.push(FLAG_HAS_IMAGE);
+        body.extend_from_slice(&hot_x.to_be_bytes());
+        body.extend_from_slice(&hot_y.to_be_bytes());
+        body.extend_from_slice(&width.to_be_bytes());
+        body.extend_from_slice(&height.to_be_bytes());
+        let len = u32::try_from(rgba.len()).unwrap_or(u32::MAX);
+        body.extend_from_slice(&len.to_be_bytes());
+        body.extend_from_slice(rgba.get(..len as usize).unwrap_or_default());
+        self.record(record::POINTER_SHAPE, &body)
     }
 
     /// The writer's sink, for a caller that has to close it.

@@ -282,6 +282,51 @@ const report = (r: unknown) =>
       [...box.querySelectorAll('[role="status"]')].find((el) => /Connection/.test(el.textContent ?? "")) ?? null;
 
     /*
+      **The host's pointer**, worn by the surface and drawn over it.
+
+      Worn is the CSS cursor, which is how a browser draws a pointer at the
+      person's own hand with no network in the path; drawn is an element over
+      the picture, which is what a session that is only watching needs. The
+      engine decides which, so the window is checked for doing what it was
+      told rather than for deciding again.
+    */
+    const drawnPointer = () => box.querySelector("[data-remote-pointer]") as HTMLElement | null;
+    for (let waited = 0; waited < 4000; waited += 100) {
+      if (drawnPointer() && /url\(/.test(getComputedStyle(canvas).cursor)) break;
+      await sleep(100);
+    }
+    const pointerStyle = getComputedStyle(canvas).cursor;
+    const composited = drawnPointer();
+    const compositedBox = composited?.getBoundingClientRect() ?? null;
+    const pictureBox = canvas.getBoundingClientRect();
+    seen.pointer = {
+      worn: /^url\(/.test(pointerStyle),
+      // The hotspot travels with it: `url(...) 4 3, auto` and not `url(...), auto`.
+      hotspot: /url\([^)]*\)\s+-?\d+\s+-?\d+/.test(pointerStyle),
+      drawn: composited !== null,
+      // Where it ended up, so "it is on the screen somewhere" cannot pass for
+      // "it is where the engine said".
+      inPicture:
+        compositedBox !== null &&
+        compositedBox.left >= pictureBox.left - 32 &&
+        compositedBox.right <= pictureBox.right + 32 &&
+        compositedBox.top >= pictureBox.top - 32 &&
+        compositedBox.bottom <= pictureBox.bottom + 32,
+      moves: false,
+    };
+    if (compositedBox) {
+      const was = `${compositedBox.left},${compositedBox.top}`;
+      for (let waited = 0; waited < 2000; waited += 100) {
+        const now = drawnPointer()?.getBoundingClientRect();
+        if (now && `${now.left},${now.top}` !== was) {
+          (seen.pointer as { moves: boolean }).moves = true;
+          break;
+        }
+        await sleep(100);
+      }
+    }
+
+    /*
       **The switcher, which was a button that could not be pressed.**
 
       The host's screens reach a window on the picture stream and nowhere

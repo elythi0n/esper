@@ -24,8 +24,13 @@ export const STREAM_VERSION = 2;
 const CONFIGURATION = 1;
 const PICTURE = 2;
 const SESSION = 3;
+const POINTER = 4;
+const POINTER_SHAPE = 5;
 const FLAG_KEYFRAME = 0b0000_0001;
 const FLAG_PRIMARY = 0b0000_0001;
+const FLAG_IN_PICTURE = 0b0000_0001;
+const FLAG_DRAW_POINTER = 0b0000_0010;
+const FLAG_HAS_IMAGE = 0b0000_0001;
 
 /** Configure the decoder: a new size, codec or parameter set. */
 export interface Configuration {
@@ -92,6 +97,32 @@ export interface SessionRecord {
   screens: Screen[];
 }
 
+/**
+ * Where the host's pointer is, and whether this window has to draw it.
+ *
+ * `draw` is the engine's answer rather than its evidence. A remote pointer is
+ * best *worn* — the browser draws it at the person's own hand, with no network
+ * in the path — and that is honest only while the local pointer is the host's
+ * pointer. Which it is turns on whether this session is driving and whether
+ * the host is following, and working that out again here would be a second
+ * implementation of a rule that took a finding to get right.
+ */
+export interface Pointer {
+  kind: "pointer";
+  /** Whether it is anywhere in this picture at all. */
+  inPicture: boolean;
+  /** Whether to draw it, rather than wear it. */
+  draw: boolean;
+  x: number;
+  y: number;
+}
+
+/** What the host's pointer looks like. `image` is null when it is hidden. */
+export interface PointerShape {
+  kind: "pointer-shape";
+  image: { width: number; height: number; hotX: number; hotY: number; rgba: Uint8Array } | null;
+}
+
 /** A record from a version that knows more than this reader does. */
 export interface Unknown {
   kind: "unknown";
@@ -99,7 +130,7 @@ export interface Unknown {
   record: number;
 }
 
-export type Record = Configuration | Picture | SessionRecord | Unknown;
+export type Record = Configuration | Picture | SessionRecord | Pointer | PointerShape | Unknown;
 
 export class StreamError extends Error {}
 
@@ -237,6 +268,39 @@ export async function* readViewerStream(
           at += 23 + nameLength;
         }
         yield { kind: "session", profile, sharpness, showing, screens };
+        continue;
+      }
+
+      if (kind === POINTER) {
+        const fixed = view(body);
+        const flags = fixed.getUint8(0);
+        yield {
+          kind: "pointer",
+          inPicture: (flags & FLAG_IN_PICTURE) !== 0,
+          draw: (flags & FLAG_DRAW_POINTER) !== 0,
+          x: fixed.getInt32(1),
+          y: fixed.getInt32(5),
+        };
+        continue;
+      }
+
+      if (kind === POINTER_SHAPE) {
+        const fixed = view(body);
+        if ((fixed.getUint8(0) & FLAG_HAS_IMAGE) === 0) {
+          yield { kind: "pointer-shape", image: null };
+          continue;
+        }
+        const hotX = fixed.getUint16(1);
+        const hotY = fixed.getUint16(3);
+        const width = fixed.getUint16(5);
+        const height = fixed.getUint16(7);
+        const bytes = fixed.getUint32(9);
+        yield {
+          kind: "pointer-shape",
+          // Copied, not a view: the buffer it came from is reused, and the
+          // pixels outlive this turn — they become an image the surface wears.
+          image: { width, height, hotX, hotY, rgba: new Uint8Array(body.subarray(13, 13 + bytes)) },
+        };
         continue;
       }
 

@@ -29,7 +29,10 @@ use esper_color::{ColorSpace, I420};
 use esper_encode::encoder::{EncoderConfig, VideoEncoder};
 use esper_encode::openh264::OpenH264;
 use esper_media::avcc::Repackager;
-use esper_media::viewer_stream::{FLAG_KEYFRAME, MAGIC, STREAM_VERSION, Writer, record};
+use esper_media::viewer_stream::{
+    FLAG_DRAW_POINTER, FLAG_HAS_IMAGE, FLAG_IN_PICTURE, FLAG_KEYFRAME, FLAG_PRIMARY, MAGIC,
+    STREAM_VERSION, Screen, Writer, record,
+};
 
 const W: u32 = 320;
 const H: u32 = 240;
@@ -81,6 +84,16 @@ fn build() -> Vec<u8> {
     let mut repack = Repackager::new();
     let mut writer = Writer::new(Vec::new());
 
+    /*
+        Everything a window is told, not only the pictures.
+
+        The page reads this stream with a reader of its own, in a third
+        language, and a record kind that is never in the fixture is a kind
+        whose two readers have never been compared. The session and the
+        pointer went in the day they were added for that reason.
+    */
+    let mut said_what_it_is = false;
+
     for index in 0..FRAMES {
         let encoded = encoder
             .encode(&picture(index), index == 0)
@@ -96,6 +109,60 @@ fn build() -> Vec<u8> {
         writer
             .picture(&sample, index * 1_000_000 / FPS)
             .expect("a buffer does not fail");
+
+        if !said_what_it_is {
+            said_what_it_is = true;
+            writer
+                .session(
+                    1,
+                    1,
+                    &[0],
+                    &[
+                        Screen {
+                            id: 0,
+                            name: "the one it is showing".to_owned(),
+                            x: 0,
+                            y: 0,
+                            width: W,
+                            height: H,
+                            primary: true,
+                        },
+                        // Left of the primary one, so its origin is negative:
+                        // a reader that took this for unsigned would put the
+                        // screen four billion pixels to the right.
+                        Screen {
+                            id: 1,
+                            name: "the one to the left".to_owned(),
+                            x: -640,
+                            y: 24,
+                            width: 640,
+                            height: 480,
+                            primary: false,
+                        },
+                    ],
+                )
+                .expect("a buffer does not fail");
+            // A pointer with a hotspot that is not its corner, and pixels
+            // that are not all the same: both are things a reader can get
+            // wrong in a way that still looks like a cursor.
+            let rgba: Vec<u8> = (0..16 * 16)
+                .flat_map(|i: u32| {
+                    let on = (i / 16 + i % 16).is_multiple_of(2);
+                    [
+                        255,
+                        u8::try_from(i % 251).unwrap(),
+                        0,
+                        if on { 255 } else { 0 },
+                    ]
+                })
+                .collect();
+            writer
+                .pointer_shape(Some((16, 16, 4, 3, &rgba)))
+                .expect("a buffer does not fail");
+            writer
+                .pointer(true, true, 100, 50)
+                .expect("a buffer does not fail");
+        }
     }
     writer.into_inner()
 }
@@ -119,6 +186,21 @@ enum Record {
         handed: u64,
         bytes: Vec<u8>,
     },
+    Session {
+        profile: u8,
+        sharpness: u8,
+        showing: Vec<u32>,
+        screens: Vec<(u32, String, i32, i32, u32, u32, bool)>,
+    },
+    Pointer {
+        in_picture: bool,
+        draw: bool,
+        x: i32,
+        y: i32,
+    },
+    PointerShape {
+        image: Option<(u16, u16, u16, u16, Vec<u8>)>,
+    },
     /// A kind this reader does not know, walked past by its length.
     Unknown { kind: u8 },
 }
@@ -136,6 +218,16 @@ impl<'a> Reader<'a> {
     fn u16(&mut self) -> u16 {
         let v = u16::from_be_bytes(self.rest[..2].try_into().unwrap());
         self.rest = &self.rest[2..];
+        v
+    }
+    fn u8(&mut self) -> u8 {
+        let v = self.rest[0];
+        self.rest = &self.rest[1..];
+        v
+    }
+    fn i32(&mut self) -> i32 {
+        let v = i32::from_be_bytes(self.rest[..4].try_into().unwrap());
+        self.rest = &self.rest[4..];
         v
     }
     fn u32(&mut self) -> u32 {
@@ -197,6 +289,51 @@ impl Iterator for Reader<'_> {
                     bytes: self.take(n),
                 })
             }
+            record::SESSION => {
+                let profile = self.u8();
+                let sharpness = self.u8();
+                let showing = (0..self.u8()).map(|_| self.u32()).collect();
+                let mut screens = Vec::new();
+                for _ in 0..self.u8() {
+                    let id = self.u32();
+                    let x = self.i32();
+                    let y = self.i32();
+                    let width = self.u32();
+                    let height = self.u32();
+                    let primary = self.u8() & FLAG_PRIMARY != 0;
+                    let n = usize::from(self.u16());
+                    let name = String::from_utf8(self.take(n)).expect("utf-8");
+                    screens.push((id, name, x, y, width, height, primary));
+                }
+                Some(Record::Session {
+                    profile,
+                    sharpness,
+                    showing,
+                    screens,
+                })
+            }
+            record::POINTER => {
+                let flags = self.u8();
+                Some(Record::Pointer {
+                    in_picture: flags & FLAG_IN_PICTURE != 0,
+                    draw: flags & FLAG_DRAW_POINTER != 0,
+                    x: self.i32(),
+                    y: self.i32(),
+                })
+            }
+            record::POINTER_SHAPE => {
+                let flags = self.u8();
+                let hot_x = self.u16();
+                let hot_y = self.u16();
+                let width = self.u16();
+                let height = self.u16();
+                let n = self.u32() as usize;
+                let rgba = self.take(n);
+                Some(Record::PointerShape {
+                    image: (flags & FLAG_HAS_IMAGE != 0)
+                        .then_some((width, height, hot_x, hot_y, rgba)),
+                })
+            }
             other => {
                 // Skipped rather than refused: a kind from a later version is
                 // exactly what the length is for.
@@ -234,6 +371,9 @@ fn check(stream: &[u8], what: &str) {
     let records: Vec<Record> = Reader::begin(stream).collect();
     let mut configurations = 0;
     let mut pictures = 0;
+    let mut sessions = 0;
+    let mut pointers = 0;
+    let mut shapes = 0;
     let mut first_is_key = None;
     let mut last_micros = None;
 
@@ -255,6 +395,52 @@ fn check(stream: &[u8], what: &str) {
                 assert_eq!(description[4] & 0x03, 3, "{what}: four-byte lengths");
             }
             Record::Unknown { kind } => panic!("{what}: an unexpected record kind {kind}"),
+            Record::Session {
+                profile,
+                sharpness,
+                showing,
+                screens,
+            } => {
+                sessions += 1;
+                assert_eq!((*profile, *sharpness), (1, 1), "{what}: what it asked for");
+                assert_eq!(showing, &vec![0], "{what}: the screen it is of");
+                assert_eq!(screens.len(), 2, "{what}: the screens the host has");
+                assert!(screens[0].6, "{what}: the first is the primary one");
+                assert_eq!(screens[0].1, "the one it is showing");
+                // The one to the left starts at a negative x, which is the
+                // whole reason this field is signed.
+                assert_eq!(screens[1].2, -640, "{what}: a screen left of the primary");
+                assert!(!screens[1].6, "{what}: and it is not the primary");
+            }
+            Record::Pointer {
+                in_picture,
+                draw,
+                x,
+                y,
+            } => {
+                pointers += 1;
+                assert!(
+                    *in_picture && *draw,
+                    "{what}: the flags it was written with"
+                );
+                assert_eq!((*x, *y), (100, 50), "{what}: where the pointer is");
+            }
+            Record::PointerShape { image } => {
+                shapes += 1;
+                let (width, height, hot_x, hot_y, rgba) =
+                    image.as_ref().expect("{what}: a shape with an image");
+                assert_eq!((*width, *height), (16, 16));
+                // A hotspot that is not the corner: one read as (0,0) still
+                // looks like a cursor and points a few pixels wrong.
+                assert_eq!((*hot_x, *hot_y), (4, 3), "{what}: the hotspot");
+                assert_eq!(
+                    rgba.len(),
+                    16 * 16 * 4,
+                    "{what}: four bytes a pixel, straight RGBA"
+                );
+                assert_eq!(rgba[3], 255, "{what}: the first pixel is opaque");
+                assert_eq!(rgba[7], 0, "{what}: and the second is not");
+            }
             Record::Picture {
                 keyframe,
                 micros,
@@ -295,6 +481,11 @@ fn check(stream: &[u8], what: &str) {
         matches!(records.first(), Some(Record::Configuration { .. })),
         "{what}: the decoder is configured before it is fed"
     );
+    // One of each, so a reader in another language has something of every
+    // kind to be wrong about.
+    assert_eq!(sessions, 1, "{what}: what the session is of");
+    assert_eq!(pointers, 1, "{what}: where the pointer is");
+    assert_eq!(shapes, 1, "{what}: what the pointer looks like");
 }
 
 #[test]
