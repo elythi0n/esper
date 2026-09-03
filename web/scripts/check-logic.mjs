@@ -39,6 +39,7 @@ import { millisecondsIn, pixelsIn } from "../src/lib/css-values.ts";
 import { readViewerStream } from "../src/session/stream.ts";
 import { FIT_CLASS, FITS, inPicture, placement } from "../src/session/fitting.ts";
 import { askState, narrowing } from "../src/session/narrowing.ts";
+import { checklist, stepsFor } from "../src/screens/permissions.ts";
 import { readFileSync } from "node:fs";
 
 const findings = [];
@@ -47,6 +48,12 @@ let checked = 0;
 const is = (got, want, what) => {
   checked++;
   if (got !== want) findings.push(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+};
+
+/** For a claim with no second value to compare against. */
+const ok = (held, what) => {
+  checked++;
+  if (!held) findings.push(what);
 };
 
 /*
@@ -365,6 +372,47 @@ try {
   is(askState(1, [0, 1], false), "asking", "one of two is not the one asked for");
 }
 
+/*
+  What a person has to go and do, per platform.
+
+  The table is the part that has to be right on machines nobody here can test,
+  so what is asserted is the shape rather than the wording: that a machine
+  which *can* do a thing is told nothing about it, that every platform this
+  product ships on has an answer, and that the answer differs — a table that
+  gave the same advice everywhere would be a table nobody had filled in.
+*/
+{
+  const machines = [
+    { os: "macos", display: "" },
+    { os: "linux", display: "wayland" },
+    { os: "linux", display: "x11" },
+    { os: "linux", display: "headless" },
+    { os: "windows", display: "" },
+  ];
+  for (const machine of machines) {
+    const name = `${machine.os}${machine.display ? `/${machine.display}` : ""}`;
+    is(checklist(machine, { capture: true, input: true }).length, 0, `${name}: nothing to do is nothing said`);
+    ok(
+      checklist(machine, { capture: false, input: false }).length >= 2,
+      `${name}: a machine that can do neither has something to say about both`,
+    );
+    ok(
+      stepsFor(machine, "capture", false).every((s) => s.todo.length > 20),
+      `${name}: the capture remedy is a sentence`,
+    );
+  }
+  // An engine too old to say what it is still gets an answer, and it is a
+  // different one: sending somebody to the wrong settings pane is worse than
+  // telling them to ask the machine.
+  ok(stepsFor({ os: "", display: "" }, "capture", false).length === 1, "an unknown machine gets one step");
+  const advice = new Set(machines.map((m) => stepsFor(m, "capture", false)[0]?.todo));
+  is(advice.size, machines.length, "every platform's capture remedy is its own");
+  // And input, which is the one that differs most: a Mac asks for a
+  // permission, Wayland asks for a device node, Windows asks for privilege.
+  const forInput = new Set(machines.map((m) => stepsFor(m, "input", false)[0]?.todo));
+  is(forInput.size, machines.length, "every platform's input remedy is its own");
+}
+
 // A floor: a run that asserted nothing passes everything.
 if (checked < 80) {
   console.error(`  ✗ logic: only ${checked} assertion(s) ran, which is not this file`);
@@ -380,5 +428,6 @@ console.log(
   `  ✓ logic: ${checked} assertions — how long ago at every boundary, what a pairing admits, the theme ` +
     `the first paint chooses, the class join every component is built on, a CSS duration read in the right ` +
     `unit, where a picture sits in all three fittings and that its corners map back to its own ` +
-    `coordinates in each, and ${whole.length} records read identically whole and one byte at a time`,
+    `coordinates in each, what a person has to go and do on each of five platforms, and ${whole.length} ` +
+    `records read identically whole and one byte at a time`,
 );

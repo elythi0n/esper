@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "@/api/client";
 import { useAsk, useStatus } from "@/api/hooks";
 import type { Capability, HostState } from "@/api/types";
+import { PermissionChecklist } from "@/screens/PermissionChecklist";
 import { Skeleton } from "@/components/states";
 import { CopyField } from "@/components/copy-field";
 import { Identicon } from "@/components/identicon";
@@ -278,6 +279,17 @@ export function SettingsScreen() {
                 <CapabilityRow label="Capture" cap={data.capture} />
                 <CapabilityRow label="Encode" cap={data.encoder} />
                 <CapabilityRow label="Input" cap={data.input} />
+                {/*
+                  What to do about anything above that is missing, on this
+                  platform. Beside the capabilities rather than on a page of
+                  its own: the fault and the remedy belong together, and a
+                  person reading "Capture — not available" has the next step
+                  in the same glance.
+                */}
+                <PermissionChecklist
+                  platform={data.platform ?? { os: "", display: "" }}
+                  have={{ capture: data.capture.available, input: data.input.available }}
+                />
                 <Line label="Engine">
                   <Figure value={data.engine} className="text-xs" />
                 </Line>

@@ -1,7 +1,7 @@
 import { ArrowRight, Infinity, MonitorSmartphone, Plus, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
-import { useDevices, useReachable } from "@/api/hooks";
+import { useDevices, useReachable, useStatus } from "@/api/hooks";
 import { PERMISSION_LABEL, PERMISSIONS, SENSITIVE, type Permission } from "@/api/permissions";
 import { pairingState, type Device } from "@/api/types";
 import { Button } from "@/components/button";
@@ -12,6 +12,7 @@ import { Identicon } from "@/components/identicon";
 import { Lamp } from "@/components/lamp";
 import type { MenuAction } from "@/components/menu";
 import { EmptyState, Skeleton } from "@/components/states";
+import { PermissionChecklist } from "@/screens/PermissionChecklist";
 import { useToast } from "@/components/toast";
 import { cn } from "@/lib/cn";
 import { PageBody, Topbar } from "@/shell/AppShell";
@@ -268,6 +269,10 @@ export function DevicesScreen({
   onSetUp: () => void;
 }) {
   const { data, error, loading, reload } = useDevices();
+  // What this machine can do, for the checklist below — asked here rather
+  // than inside it so a screen with nothing to say makes no request of its
+  // own on every render.
+  const { data: machine } = useStatus();
   const { seen, looked } = useReachable();
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
@@ -398,6 +403,24 @@ export function DevicesScreen({
               >
                 The device list could not be read.
               </Trouble>
+            )}
+
+            {/*
+              **The first run, which is a machine with nothing paired.**
+
+              A checklist of what this machine still needs somebody to do,
+              shown here because this is where a person lands and because a
+              machine with no devices is the machine that has not been set up
+              — the honest signal, and one that needs no "have they seen this
+              yet" stored anywhere. It is not drawn at all when there is
+              nothing to do.
+            */}
+            {!loading && !error && devices.length === 0 && machine && (
+              <PermissionChecklist
+                className="mb-4"
+                platform={machine.platform ?? { os: "", display: "" }}
+                have={{ capture: machine.capture.available, input: machine.input.available }}
+              />
             )}
 
             {!loading && !error && devices.length === 0 && (

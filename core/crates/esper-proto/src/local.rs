@@ -201,6 +201,34 @@ pub struct Status {
     pub broker: Option<String>,
     /// How many devices are paired.
     pub paired: u32,
+    /// What kind of machine this is, and what it is showing on.
+    ///
+    /// **Because a remedy is per-platform.** "No capture backend" is a
+    /// different sentence on a Mac, where somebody has to allow screen
+    /// recording, from on Wayland, where a portal has to be installed. A
+    /// screen that has the fault and not the platform can only say what is
+    /// wrong, never what to do about it — which is the one thing this
+    /// product's content rules ask of every failure.
+    ///
+    /// `#[serde(default)]` because it was added after the rest: an engine
+    /// older than this field answers without it, and an empty platform is
+    /// read as "not said" rather than as a platform nobody has.
+    #[serde(default)]
+    pub platform: Platform,
+}
+
+/// What kind of machine an engine is running on, as a screen needs it.
+///
+/// Deliberately coarse. The remedies differ by operating system and, on
+/// Linux, by what is drawing the screen — and nothing beyond that changes
+/// what a person has to go and do.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Platform {
+    /// `linux`, `macos`, `windows`, or whatever this was built for.
+    pub os: String,
+    /// `wayland`, `x11`, `headless` — empty off Linux, where it means nothing.
+    pub display: String,
 }
 
 #[cfg(test)]
@@ -219,6 +247,10 @@ mod tests {
             mdns: true,
             broker: None,
             paired: 2,
+            platform: Platform {
+                os: "linux".to_owned(),
+                display: "wayland".to_owned(),
+            },
         }
     }
 

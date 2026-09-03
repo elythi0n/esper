@@ -109,6 +109,13 @@ fn expected_status() -> esper_proto::Report {
         mdns: true,
         broker: Some("broker.example.com:7443".to_owned()),
         paired: 3,
+        // A machine on Wayland: the platform where the remedies differ most
+        // from the development one, and therefore the one worth carrying in
+        // the fixture both halves read.
+        platform: esper_proto::Platform {
+            os: "linux".to_owned(),
+            display: "wayland".to_owned(),
+        },
     })
 }
 

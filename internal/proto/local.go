@@ -82,6 +82,30 @@ type Status struct {
 	// default exists anywhere in Esper, so nil is the ordinary answer.
 	Broker *string `cbor:"broker" json:"broker"`
 	Paired uint32  `cbor:"paired" json:"paired"`
+	// Platform is what kind of machine this is, and what it is showing on.
+	//
+	// **Because a remedy is per-platform.** "No capture backend" is a
+	// different sentence on a Mac, where somebody has to allow screen
+	// recording, from on Wayland, where a portal has to be installed — and a
+	// screen with the fault but not the platform can say what is wrong and
+	// never what to do about it.
+	//
+	// `omitempty` is deliberate on neither field: a platform that said
+	// nothing would be indistinguishable from one this build does not know,
+	// and the screen has a sentence for each.
+	Platform Platform `cbor:"platform" json:"platform"`
+}
+
+// Platform is what kind of machine an engine is running on, as a screen needs
+// it. Deliberately coarse: the remedies differ by operating system and, on
+// Linux, by what is drawing the screen, and nothing finer changes what a
+// person has to go and do.
+type Platform struct {
+	// OS is "linux", "macos", "windows", or whatever it was built for.
+	OS string `cbor:"os" json:"os"`
+	// Display is "wayland", "x11" or "headless" — empty off Linux, where it
+	// means nothing.
+	Display string `cbor:"display" json:"display"`
 }
 
 // Happening is one line of what has happened on this machine.

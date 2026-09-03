@@ -569,6 +569,7 @@ dependencies = [
  "esper-config",
  "esper-crypto",
  "esper-decode",
+ "esper-desktop",
  "esper-dialog",
  "esper-discovery",
  "esper-display-lock",

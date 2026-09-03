@@ -152,6 +152,38 @@ fn status() -> Status {
         paired: crate::paths::devices()
             .map(|(store, _)| u32::try_from(store.iter().count()).unwrap_or(u32::MAX))
             .unwrap_or(0),
+        platform: platform(),
+    }
+}
+
+/// What kind of machine this is, and what it is showing on.
+///
+/// Said so a screen can name a *remedy*: "no capture backend" is a different
+/// sentence on a Mac, where somebody has to allow screen recording, from on
+/// Wayland, where a portal has to be installed. The display is read from the
+/// environment the same way everything else in this product reads it — see
+/// `esper_desktop`, which exists so the answer is in one place.
+fn platform() -> esper_proto::Platform {
+    let display = if cfg!(target_os = "linux") {
+        match esper_desktop::session_from(
+            std::env::var("DISPLAY").ok().as_deref(),
+            std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+            std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+        ) {
+            esper_desktop::Session::X11 => "x11",
+            // Both are there and the X11 path works, which is the thing a
+            // remedy turns on: a machine with XWayland needs none of the
+            // portal advice.
+            esper_desktop::Session::WaylandWithX11 => "x11",
+            esper_desktop::Session::Wayland => "wayland",
+            esper_desktop::Session::Headless => "headless",
+        }
+    } else {
+        ""
+    };
+    esper_proto::Platform {
+        os: std::env::consts::OS.to_owned(),
+        display: display.to_owned(),
     }
 }
 

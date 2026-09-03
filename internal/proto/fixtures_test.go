@@ -99,6 +99,7 @@ func expectedStatus() Report {
 		MDNS:     true,
 		Broker:   &broker,
 		Paired:   3,
+		Platform: Platform{OS: "linux", Display: "wayland"},
 	}}
 }
 
@@ -126,6 +127,13 @@ func TestFixtureStatusDecodesToExpectedValue(t *testing.T) {
 	}
 	if g.Broker == nil || *g.Broker != *w.Broker {
 		t.Fatalf("broker decoded to %v, want %v", g.Broker, *w.Broker)
+	}
+	// The platform, which is what lets a screen name a remedy rather than only
+	// a fault. A missing one reads as "not said", and the screens have a
+	// sentence for that — but a *wrong* one sends somebody to the wrong
+	// settings pane, so it is checked like everything else on this seam.
+	if g.Platform != w.Platform {
+		t.Fatalf("platform decoded to %+v, want %+v", g.Platform, w.Platform)
 	}
 }
 

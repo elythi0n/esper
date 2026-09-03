@@ -2,7 +2,7 @@ import { Activity, ArrowRight, Inbox, Infinity, Monitor, Plus, Search, Settings,
 import { useState } from "react";
 import { Badge, TierBadge, type Tier, type Tone } from "@/components/badge";
 import { Button, type ButtonSize, type ButtonVariant } from "@/components/button";
-import { Figure, Row } from "@/screens/parts";
+import { Figure, Key, Row } from "@/screens/parts";
 import { Alarm } from "@/components/alarm";
 import { CopyField } from "@/components/copy-field";
 import { Identicon } from "@/components/identicon";
@@ -17,6 +17,7 @@ import { TransferQueue } from "@/components/transfer-queue";
 import type { Transfer } from "@/components/transfer-progress";
 import { ShortcutSheet, modifier, type Shortcut } from "@/components/shortcuts";
 import { Callout } from "@/components/callout";
+import { PermissionChecklist } from "@/screens/PermissionChecklist";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/card";
 import { CommandPalette, useCommandKey } from "@/components/command-palette";
 import { Dialog, DialogContent, DialogFooter, DialogTrigger } from "@/components/dialog";
@@ -140,6 +141,36 @@ export function ComponentsSection() {
           <Callout tone="ok" title="Paired">workstation can connect to this machine. Change what it may do in its permissions.</Callout>
           <Callout tone="warn" title="Relayed through a broker">Your bytes cross a machine that is not an endpoint. They are encrypted end to end, and this is slower.</Callout>
           <Callout tone="danger" title="This device's key has changed">Somebody may be impersonating it. Do not connect until you have checked with the person who owns it.</Callout>
+        </div>
+      </Sub>
+
+      <Sub
+        title="Permission checklist"
+        about="What a person has to go and do, on the platform they are on. Every one of these is rendered here because the part that has to be right is the part nobody here can test: a person who owns a Mac can read these words and correct them without touching a screen."
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          {(
+            [
+              ["macOS", { os: "macos", display: "" }],
+              ["Wayland", { os: "linux", display: "wayland" }],
+              ["X11", { os: "linux", display: "x11" }],
+              ["A machine with no screen", { os: "linux", display: "headless" }],
+              ["Windows", { os: "windows", display: "" }],
+              ["An engine that did not say", { os: "", display: "" }],
+            ] as const
+          ).map(([what, platform]) => (
+            <div key={what} className="flex flex-col gap-1.5">
+              <Key>{what}</Key>
+              <PermissionChecklist platform={platform} have={{ capture: false, input: false }} />
+            </div>
+          ))}
+          <div className="flex flex-col gap-1.5">
+            <Key>A machine that can do both</Key>
+            <p className="text-sm text-text-2">
+              Nothing is drawn. A checklist of things that are already true is one nobody reads, and it would sit here for ever
+              on a machine where everything works.
+            </p>
+          </div>
         </div>
       </Sub>
 

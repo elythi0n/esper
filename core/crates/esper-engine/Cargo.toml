@@ -21,6 +21,7 @@ esper-capture.workspace = true
 esper-color.workspace = true
 esper-encode.workspace = true
 esper-decode.workspace = true
+esper-desktop.workspace = true
 esper-proto.workspace = true
 esper-crypto.workspace = true
 esper-transport.workspace = true

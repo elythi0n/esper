@@ -67,6 +67,16 @@ export interface Capability {
 
 export interface Status {
   engine: string;
+  /**
+   * What kind of machine this is, and what it is showing on.
+   *
+   * What makes a remedy possible: "no capture backend" is a different
+   * sentence on a Mac from on Wayland, and a screen with the fault but not
+   * the platform can only say what is wrong. Optional because an engine older
+   * than the field answers without it, and "not said" has a sentence of its
+   * own.
+   */
+  platform?: { os: string; display: string };
   capture: Capability;
   encoder: Capability;
   input: Capability;
