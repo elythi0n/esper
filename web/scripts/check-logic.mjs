@@ -38,7 +38,7 @@ import { cn } from "../src/lib/cn.ts";
 import { millisecondsIn, pixelsIn } from "../src/lib/css-values.ts";
 import { readViewerStream } from "../src/session/stream.ts";
 import { FIT_CLASS, FITS, inPicture, placement } from "../src/session/fitting.ts";
-import { narrowing } from "../src/session/narrowing.ts";
+import { askState, narrowing } from "../src/session/narrowing.ts";
 import { readFileSync } from "node:fs";
 
 const findings = [];
@@ -340,6 +340,29 @@ try {
   is(narrowing(15, 0), "15 fps", "frames given up");
   is(narrowing(0, 1280), "1280px", "size given up");
   is(narrowing(15, 1280), "15 fps, 1280px", "both, in the order a ladder spends them");
+}
+
+/*
+  Where an ask for a screen stands.
+
+  A switch is a round trip, a decision at the host and then a keyframe, so the
+  ask is acknowledged where it was made. What matters is what settles it:
+  **agreement, never the clock alone** — a slow host reported as a refusal it
+  did not give is worse than an ask that took a moment — and asking for the
+  screen already on show is settled from the start, because chrome that said
+  otherwise would be reporting progress towards where it already is.
+*/
+{
+  is(askState(null, [0], false), "settled", "nothing asked is nothing to say");
+  is(askState(1, [0], false), "asking", "asked, and not there yet");
+  is(askState(1, [1], false), "settled", "the session arrived at what was asked for");
+  is(askState(1, [1], true), "settled", "and late does not unsettle an ask that was met");
+  is(askState(1, [0], true), "kept", "late and still not there is the host keeping its own");
+  is(askState(0, [0], false), "settled", "asking for the one on show is settled from the start");
+  // Several screens at once is a session showing a desktop rather than a
+  // screen: an ask for one of them has not been met while the picture is
+  // still of both.
+  is(askState(1, [0, 1], false), "asking", "one of two is not the one asked for");
 }
 
 // A floor: a run that asserted nothing passes everything.

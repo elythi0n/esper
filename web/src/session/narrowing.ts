@@ -25,3 +25,34 @@ export function narrowing(askedFps: number, askedLongEdge: number): string {
     .filter(Boolean)
     .join(", ");
 }
+
+/** What an ask for a screen is doing, as the chrome has to say it. */
+export type AskState =
+  /** Nothing was asked, or what was asked for is what is on screen. */
+  | "settled"
+  /** Asked, and the session has not changed to it yet. */
+  | "asking"
+  /** Asked long enough ago that the honest answer is the host kept its own. */
+  | "kept";
+
+/**
+ * Where an ask for a screen stands.
+ *
+ * A switch is a round trip, a decision at the host and then a keyframe, so a
+ * person who clicks and sees nothing clicks again — which is why an ask is
+ * acknowledged where it was made rather than when it comes back.
+ *
+ * Settled by **agreement**, never by the clock alone: `late` only turns a
+ * pending ask into a plain statement that the host kept what it had, and a
+ * session that has arrived at the screen asked for is settled however late it
+ * was. A slow host must never be reported as a refusal it did not give.
+ *
+ * Asking for the screen already on show is settled from the start. There is
+ * nothing to wait for, and chrome that said otherwise would be reporting
+ * progress towards where it already is.
+ */
+export function askState(asked: number | null, showing: readonly number[], late: boolean): AskState {
+  if (asked === null) return "settled";
+  if (showing.length === 1 && showing[0] === asked) return "settled";
+  return late ? "kept" : "asking";
+}

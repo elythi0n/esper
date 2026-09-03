@@ -8,11 +8,20 @@ import { Presence, SessionChrome, SessionRoot } from "@/session/chrome";
 import { type Fit, FIT_NAMES, FITS } from "@/session/fitting";
 import { showScreens, wantQuality, type Hand } from "@/session/hand";
 import { RemoteScreen } from "@/session/RemoteScreen";
-import { narrowing } from "@/session/narrowing";
+import { askState, narrowing } from "@/session/narrowing";
 import { IDLE, type ViewerState } from "@/session/video";
 
 /** How often to ask the window to put a session back while there is no picture. */
 const ASK_AGAIN_MS = 5_000;
+
+/**
+ * How long an ask may go unanswered before it stops being a pending one.
+ *
+ * A switch costs a round trip, a decision at the host and then a keyframe, so
+ * this is generous on purpose: an ask reported as refused while it was merely
+ * in flight would be worse than one that took a moment.
+ */
+const ASK_IS_LATE_MS = 4_000;
 
 /**
  * What a person can ask a session to be.
@@ -117,13 +126,42 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
     now.
   */
   const screens: MenuAction[] = picture.screens.map((screen) => ({
-    label: `${screen.name}${screen.primary ? " (primary)" : ""} — ${screen.width}x${screen.height}`,
+    label:
+      `${screen.name}${screen.primary ? " (primary)" : ""} — ${screen.width}x${screen.height}` +
+      (picture.showing.includes(screen.id) ? " · showing" : ""),
     icon: Monitor,
     disabled: !drivable,
-    onSelect: () => hand.current?.ask(showScreens([screen.id])),
+    onSelect: () => {
+      setAsked(screen.id);
+      hand.current?.ask(showScreens([screen.id]));
+    },
   }));
 
   const narrowed = narrowing(picture.askedFps, picture.askedLongEdge);
+
+  /*
+    **What was asked for, said here before the far machine says anything.**
+
+    A monitor switch is a round trip and then a keyframe, and a person who
+    clicks and sees nothing clicks again. So the ask is acknowledged where it
+    was made: the control says what it is asking for the moment it is asked,
+    and stops saying it when the session shows that thing — or when it has
+    waited long enough that the honest answer is that the host kept what it
+    had.
+
+    Cleared by *agreement*, not by a timer alone: the timer only turns a
+    pending ask into a plain one, so a slow host is never reported as a
+    refusal it did not give.
+  */
+  const [asked, setAsked] = useState<number | null>(null);
+  const [late, setLate] = useState(false);
+  const stands = askState(asked, picture.showing, late);
+  useEffect(() => {
+    if (asked === null) return undefined;
+    setLate(false);
+    const timer = setTimeout(() => setLate(true), ASK_IS_LATE_MS);
+    return () => clearTimeout(timer);
+  }, [asked]);
 
   const qualities: MenuAction[] = PROFILES.map(({ label, profile, sharpness }) => ({
     label,
@@ -263,6 +301,18 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
           somebody chose. It says the number in force and the reason in one
           line, and it is not there at all while nothing has been given up.
         */}
+        {/*
+          The ask, acknowledged where it was made. It names the screen rather
+          than saying "working", because a person who asked for one of three
+          screens wants to know which one is coming.
+        */}
+        {stands !== "settled" && (
+          <span role="status" data-asking="" className="shrink-0 text-xs text-text-3">
+            {stands === "kept"
+              ? "The host kept the screen it had"
+              : `Asking for ${picture.screens.find((s) => s.id === asked)?.name ?? "another screen"}`}
+          </span>
+        )}
         {narrowed && (
           <Tooltip label="The link could not carry what the host was sending, so this session asked for less">
             <span

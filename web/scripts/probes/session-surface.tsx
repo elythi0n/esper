@@ -364,10 +364,16 @@ const report = (r: unknown) =>
       open(switcher);
       await sleep(400);
       const items = [...document.querySelectorAll('[role="menuitem"]')];
-      seen.screensOffered = items.map((el) => (el.textContent ?? "").trim());
+      const surfaceScreens = items.map((el) => (el.textContent ?? "").trim());
+      seen.screensOffered = surfaceScreens;
       const first = items[0] as HTMLElement | undefined;
       if (first) choose(first);
       await sleep(400);
+      // Asking for the screen already on show has nothing to acknowledge, so
+      // the chrome says nothing. An acknowledgement that appeared here would
+      // be reporting progress towards where the session already is.
+      seen.acknowledged = box.querySelector("[data-asking]") !== null;
+      seen.saysWhichIsShowing = (surfaceScreens ?? []).some((label) => /showing/i.test(label));
     }
 
     const quality = named(/^quality$/i);

@@ -942,6 +942,15 @@ if (surface) {
     } else if ((surface.screensOffered ?? []).length === 0) {
       findings.push("the monitor switcher opened on an empty list");
     }
+    if (surface.acknowledged) {
+      findings.push(
+        "the window acknowledged an ask for the screen it is already showing — there is nothing to wait for, " +
+          "and chrome that says otherwise is reporting progress towards where it already is",
+      );
+    }
+    if (!surface.saysWhichIsShowing) {
+      findings.push("the switcher does not say which screen the session is already showing");
+    }
     if (!surface.quality?.offered) {
       findings.push("the quality control is disabled on a live session, so nothing can be asked for");
     }
