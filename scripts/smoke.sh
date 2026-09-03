@@ -537,7 +537,7 @@ cleanup_terminal() {
              "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}" \
              "${mk_host:-}" "${mk_client:-}" "${na_host:-}" "${la_host:-}" \
              "${bd_host:-}" "${wd_host:-}" "${wd_client:-}" "${wd_win:-}" \
-             "${wd_xev:-}" "${wd_x:-}"; do
+             "${wd_xev:-}" "${wd_x:-}" "${wd_x2:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -2342,13 +2342,27 @@ print(s.getsockname()[1]); s.close()')
         done
       fi
       if [ -n "${wd_d:-}" ]; then
+        # A second display for the controller, so the clipboard has two ends.
+        # The window's own clipboard *is* this display's: a webview copying
+        # puts it on the system clipboard, which is what the session carries.
+        wd_d2=""
+        for d in $(seq 71 99); do
+          [ "$d" = "$wd_d" ] && continue
+          [ -e "/tmp/.X${d}-lock" ] && continue
+          wd_d2=$d; break
+        done
         Xvfb ":$wd_d" -screen 0 800x600x24 >/dev/null 2>&1 &
         wd_x=$!
+        if [ -n "$wd_d2" ]; then
+          Xvfb ":$wd_d2" -screen 0 800x600x24 >/dev/null 2>&1 &
+          wd_x2=$!
+        fi
         sleep 1
         # Control, and unattended so nobody has to be there to allow the
         # session — this check is about what happens *after* it is allowed.
         ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" control >/dev/null
         ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null
+        ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" clipboard-out clipboard-in >/dev/null
         DISPLAY=":$wd_d" ESPER_HOME="$term_a" \
           timeout 90 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
           > "$term_a/window.log" 2>&1 &
@@ -2443,7 +2457,7 @@ event(7, bytes([1, 1]))
 time.sleep(1)
 event(6, bytes([1]) + (99).to_bytes(4, "big"))
 print("asked for a quality and a screen", flush=True)
-time.sleep(5)
+time.sleep(20)
 # The last word, and the one the check reads: what kinds of record a real
 # session sent this window.
 print("records %s" % sorted(seen["kinds"].items()), flush=True)
@@ -2451,9 +2465,15 @@ WINDOW
           wd_win=$!
           DISPLAY=":$wd_d" xev -root -event keyboard > "$term_b/xev.log" 2>&1 &
           wd_xev=$!
-          env -u XAUTHORITY ESPER_HOME="$term_b" \
+          # Something on the window's own clipboard before the session opens,
+          # so what the host reads cannot be something that was already there.
+          from_window="esper-from-window-$$-$(date +%s)"
+          if [ -n "${wd_d2:-}" ] && command -v xclip >/dev/null 2>&1; then
+            printf '%s' "$from_window" | DISPLAY=":$wd_d2" xclip -selection clipboard 2>/dev/null
+          fi
+          env -u XAUTHORITY DISPLAY="${wd_d2:+:$wd_d2}" ESPER_HOME="$term_b" \
             timeout 60 "$BIN/esper-engine" connect "$wd_addr" \
-            --viewer "$wd_sock" --control --seconds 14 \
+            --viewer "$wd_sock" --control --seconds 30 \
             > "$term_b/window-client.log" 2>&1 &
           wd_client=$!
           typed=""
@@ -2468,6 +2488,44 @@ WINDOW
             grep -iE 'control|viewer' "$term_b/window-client.log" 2>/dev/null | sed 's/^/      /' || true
             tail -4 "$term_b/window-socket.log" 2>/dev/null | sed 's/^/      /' || true
             fail=1
+          fi
+          # **And the clipboard, in the arrangement the window actually uses.**
+          # The suite checks a clipboard between two plain sessions elsewhere;
+          # what it has never checked is a session with a *window* on it —
+          # which is the only arrangement the desktop application has, and the
+          # one where the person copying is looking at a webview.
+          if [ -n "${wd_d2:-}" ] && command -v xclip >/dev/null 2>&1; then
+            landed=""
+            for _ in $(seq 1 80); do
+              landed=$(DISPLAY=":$wd_d" timeout 5 xclip -selection clipboard -o 2>/dev/null || true)
+              [ "$landed" = "$from_window" ] && break
+              sleep 0.25
+            done
+            if [ "$landed" = "$from_window" ]; then
+              printf '  ✓ a copy on the window'"'"'s own machine reached the host through the session\n'
+            else
+              printf '  ✗ the window'"'"'s clipboard never reached the host (got %s)\n' "${landed:-nothing}"
+              grep -i clipboard "$term_b/window-client.log" 2>/dev/null | sed 's/^/      /' || true
+              fail=1
+            fi
+            # And the other way, which is the half somebody pastes *into* a
+            # window: copy at the host, and it turns up where the window is.
+            from_far="esper-from-host-window-$$-$(date +%s)"
+            printf '%s' "$from_far" | DISPLAY=":$wd_d" xclip -selection clipboard 2>/dev/null
+            returned=""
+            for _ in $(seq 1 80); do
+              returned=$(DISPLAY=":$wd_d2" timeout 5 xclip -selection clipboard -o 2>/dev/null || true)
+              [ "$returned" = "$from_far" ] && break
+              sleep 0.25
+            done
+            if [ "$returned" = "$from_far" ]; then
+              printf '  ✓ and a copy on the host reached the machine the window is on\n'
+            else
+              printf '  ✗ the host'"'"'s clipboard never reached the window (got %s)\n' "${returned:-nothing}"
+              fail=1
+            fi
+          else
+            printf '  — skipped the window clipboard checks: needs a second display and xclip\n'
           fi
           # And the controller says so rather than leaving somebody to guess
           # why their typing does nothing.
@@ -2528,8 +2586,9 @@ WINDOW
         fi
         kill "$wd_host" 2>/dev/null || true
         wait "$wd_host" 2>/dev/null || true
-        kill "$wd_x" 2>/dev/null || true
-        wd_host=""; wd_x=""
+        kill "$wd_x" "${wd_x2:-}" 2>/dev/null || true
+        wd_host=""; wd_x=""; wd_x2=""
+        ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" clipboard-out clipboard-in >/dev/null 2>&1 || true
         ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" control >/dev/null 2>&1 || true
       else
         printf '  — skipped the window-drives check: needs Xvfb and xev\n'
