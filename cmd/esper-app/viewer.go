@@ -61,6 +61,8 @@ type viewer struct {
 	// the window owns the socket, so the window is what can name it on a
 	// command line.
 	sessions running
+	// What has been dropped on this window and sent to the far machine.
+	drops transfers
 	// The session's connection, kept so what the page does can go back down
 	// it. Guarded because the reader and the writer are different requests.
 	mu      sync.Mutex
@@ -137,6 +139,7 @@ func (v *viewer) route(mux *http.ServeMux) {
 	})
 
 	v.routeSession(mux)
+	v.routeTransfers(mux)
 
 	/*
 		What the person did, on its way back down the same socket.

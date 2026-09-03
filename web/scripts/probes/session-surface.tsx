@@ -290,6 +290,12 @@ const report = (r: unknown) =>
       engine decides which, so the window is checked for doing what it was
       told rather than for deciding again.
     */
+    // A file may be dropped on the picture: the window reads this property to
+    // tell a drop meant for the product from one meant for the webview.
+    seen.dropTarget = getComputedStyle(canvas).getPropertyValue("--wails-drop-target").trim();
+    const onItsWay = box.querySelector("[data-transfers]");
+    seen.transfers = onItsWay ? (onItsWay.textContent ?? "").replace(/\s+/g, " ").trim() : "";
+
     // What the HUD says was given up, which on a loopback is nothing at all.
     const gave = box.querySelector("[data-narrowed]");
     seen.narrowed = gave ? (gave.textContent ?? "").trim() : null;

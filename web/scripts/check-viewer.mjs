@@ -312,6 +312,27 @@ const server = createServer(async (req, res) => {
     component fetches `/shell/video`. A gate that passed it a different URL
     would be checking a path the product does not take.
   */
+  /*
+    What the window says it is sending, which the session screen shows.
+
+    Fabricated here on purpose: the transfer itself belongs to the engine and
+    has its own session, its own permission and its own checks. What this leg
+    is for is the other half — that a window saying it is sending something
+    reaches the screen, and that a failure arrives as the host's sentence
+    rather than as silence.
+  */
+  if (path === "/shell/transfers") {
+    res.writeHead(200, { "Content-Type": "application/json" }).end(
+      JSON.stringify({
+        transfers: [
+          { id: 1, name: "notes.txt", state: "sent" },
+          { id: 2, name: "a photo.png", state: "sending" },
+          { id: 3, name: "big.iso", state: "failed", trouble: "the host does not allow files in" },
+        ],
+      }),
+    );
+    return;
+  }
   if (path === "/shell/video/socket") {
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ path: liveSocket }));
     return;
@@ -942,6 +963,26 @@ if (surface) {
     } else if ((surface.screensOffered ?? []).length === 0) {
       findings.push("the monitor switcher opened on an empty list");
     }
+    /*
+      **A file may be dropped on the picture, and the window is told so in
+      CSS.**
+
+      That property is the whole of the page's part in a drop: the window
+      reads it to decide whether a drop is for the product or for the webview,
+      so a surface that does not declare it is a surface a file falls through.
+    */
+    if (surface.dropTarget !== "drop") {
+      findings.push(
+        `the picture declares --wails-drop-target as ${JSON.stringify(surface.dropTarget)}, and the window ` +
+          `reads "drop" — a file dropped on it would be handled by the webview instead`,
+      );
+    }
+    for (const wanted of ["Sent notes.txt", "Sending a photo.png", "the host does not allow files in"]) {
+      if (!(surface.transfers ?? "").includes(wanted)) {
+        findings.push(`the session screen does not say ${JSON.stringify(wanted)} while the window is sending it`);
+      }
+    }
+
     if (surface.acknowledged) {
       findings.push(
         "the window acknowledged an ask for the screen it is already showing — there is nothing to wait for, " +

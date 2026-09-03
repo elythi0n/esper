@@ -198,6 +198,12 @@ var engineCommands = map[string]bool{
 	// Waking a machine is the one verb that does not need the far end to be
 	// running, which is exactly why it exists.
 	"wake": true,
+	// What this machine could inject keys and pointer moves with, and what
+	// was tried before it. A question about *this* machine, like `doctor`,
+	// and the answer somebody needs when a session watches but will not
+	// drive — which makes it exactly the verb a person reaches for through
+	// the front door rather than through the engine they have never run.
+	"input": true,
 }
 
 func isEngineCommand(name string) bool { return engineCommands[name] }

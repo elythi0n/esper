@@ -14,6 +14,17 @@ import { IDLE, type ViewerState } from "@/session/video";
 /** How often to ask the window to put a session back while there is no picture. */
 const ASK_AGAIN_MS = 5_000;
 
+/** How often to ask the window what it is sending. */
+const TRANSFERS_EVERY_MS = 1_000;
+
+/** A file dropped on this session, as the window reports it. */
+interface Transfer {
+  id: number;
+  name: string;
+  state: "sending" | "sent" | "failed";
+  trouble?: string;
+}
+
 /**
  * How long an ask may go unanswered before it stops being a pending one.
  *
@@ -140,6 +151,36 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
   const narrowed = narrowing(picture.askedFps, picture.askedLongEdge);
 
   /*
+    What has been dropped on this session and sent to the far machine.
+
+    Polled rather than pushed: a transfer is a rare thing a person does
+    deliberately, and a second channel from the window to the page — an event
+    stream for a list that is empty almost always — would be a second thing to
+    connect and a second thing to fail. Polled *only while a session is on
+    screen*, and slowly.
+  */
+  const [sending, setSending] = useState<Transfer[]>([]);
+  useEffect(() => {
+    let live = true;
+    const look = () => {
+      fetch("/shell/transfers")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body: { transfers?: Transfer[] } | null) => {
+          if (live && body?.transfers) setSending(body.transfers);
+        })
+        .catch(() => {
+          // A tab, or a window without the route. Nothing to add.
+        });
+    };
+    look();
+    const timer = setInterval(look, TRANSFERS_EVERY_MS);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  /*
     **What was asked for, said here before the far machine says anything.**
 
     A monitor switch is a round trip and then a keyframe, and a person who
@@ -242,6 +283,14 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
 
   return (
     <SessionRoot ref={root} className="h-full w-full">
+      {/*
+        **The surface is what a file may be dropped on, and it says so in
+        CSS.** The window reads this property to decide whether a drop is for
+        the product or for the webview — see `drop.go` — so the declaration is
+        the whole of the page's part in it. Nothing else in the window is a
+        target, because nothing else has a machine on the other end of it.
+      */}
+      <style>{`[data-session] canvas { --wails-drop-target: drop; }`}</style>
       <RemoteScreen
         device={name}
         onState={setPicture}
@@ -311,6 +360,21 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
             {stands === "kept"
               ? "The host kept the screen it had"
               : `Asking for ${picture.screens.find((s) => s.id === asked)?.name ?? "another screen"}`}
+          </span>
+        )}
+        {/*
+          What is on its way, and what happened to it. Said in the HUD rather
+          than over the picture: a transfer is not about the screen, and a
+          panel over somebody's desktop for a file that is already moving
+          would be chrome in the way of the thing it is reporting.
+        */}
+        {sending.length > 0 && (
+          <span role="status" data-transfers="" className="min-w-0 shrink-0 truncate text-xs text-text-3">
+            {sending
+              .map((t) =>
+                t.state === "sending" ? `Sending ${t.name}` : t.state === "sent" ? `Sent ${t.name}` : `${t.name}: ${t.trouble}`,
+              )
+              .join(" · ")}
           </span>
         )}
         {narrowed && (

@@ -94,6 +94,16 @@ func (r *running) start(device, socket string) error {
 	return nil
 }
 
+// showing is the device this window has a session with, or "".
+func (r *running) showing() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cmd == nil || r.cmd.ProcessState != nil {
+		return ""
+	}
+	return r.device
+}
+
 // stop ends the session this window started, if there is one.
 func (r *running) stop() {
 	r.mu.Lock()

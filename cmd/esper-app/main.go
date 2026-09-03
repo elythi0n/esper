@@ -209,8 +209,33 @@ func run() int {
 		// frameless and the page draws its own — see window.go for the
 		// buttons that then become ours to provide.
 		Frameless: true,
+		/*
+			**A file dropped on the session goes to the machine on the other
+			end of it.**
+
+			Wails reports the *paths* of a drop, which is the whole reason
+			this is here rather than in the page: a webview hands JavaScript a
+			`File` with no path, and sending one from there would mean reading
+			somebody's file into a renderer, posting it back to this process
+			and writing it out again — a copy through a browser for a transfer
+			the engine can do from the original.
+
+			The target is declared in CSS by the element that is one, so the
+			session surface is a target and nothing else in the window is.
+			`DisableWebViewDrop` for the rest: a file dropped on a page that
+			is not expecting one is a page navigating away from the product.
+		*/
+		DragAndDrop: &options.DragAndDrop{
+			EnableFileDrop:     true,
+			DisableWebViewDrop: true,
+			CSSDropProperty:    "--wails-drop-target",
+			CSSDropValue:       "drop",
+		},
 		OnStartup: func(ctx context.Context) {
 			win.set(ctx)
+			if pictures != nil {
+				pictures.watchDrops(ctx)
+			}
 			if secondary {
 				return
 			}
