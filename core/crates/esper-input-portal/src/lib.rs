@@ -67,10 +67,30 @@ const BTN_SIDE: i32 = 0x113;
 const BTN_EXTRA: i32 = 0x114;
 
 /// An input channel the compositor granted.
+/// How long a portal grant should last, in the portal's own numbering.
+///
+/// `2` is "until revoked". The alternatives are 0, which persists nothing, and
+/// 1, which lasts as long as the application runs — and an engine that is
+/// restarted by a service manager at every boot is exactly the application for
+/// which "as long as it runs" is no persistence at all.
+const PERSIST_UNTIL_REVOKED: u32 = 2;
+
 #[derive(Debug)]
 pub struct PortalInput {
     bus: Connection,
     session: String,
+    /// What the compositor gave back to reopen this grant without asking again.
+    ///
+    /// **This is what makes unattended access possible on a portal desktop.**
+    /// Without it every session puts a dialog on somebody's screen, so a
+    /// machine nobody is sitting at can be granted unattended access and still
+    /// refuse every session — which is a promise broken at three in the
+    /// morning, when nobody is there to click it.
+    ///
+    /// `None` when the portal would not persist the grant. Kept rather than
+    /// written here: what this crate knows is the token, and where an engine
+    /// keeps its files is the engine's business.
+    restore_token: Option<String>,
     held: Held,
     /// The stream the compositor gave us to position against, if any.
     ///
@@ -97,12 +117,49 @@ impl PortalInput {
         Self::open_on(Connection::session().map_err(no_backend)?, CONSENT_PATIENCE)
     }
 
+    /// The same, reopening a grant somebody gave once.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`]. A token the compositor no longer honours is not an
+    /// error here: the portal falls back to asking, which is what it does for
+    /// a client it has never seen.
+    pub fn reopen(token: Option<&str>) -> Result<Self, InputError> {
+        Self::open_with(
+            Connection::session().map_err(no_backend)?,
+            CONSENT_PATIENCE,
+            token,
+        )
+    }
+
+    /// What the compositor gave back to reopen this grant without asking.
+    ///
+    /// `None` when it would not persist one, which is the answer that decides
+    /// whether this machine can honour unattended access.
+    #[must_use]
+    pub fn restore_token(&self) -> Option<&str> {
+        self.restore_token.as_deref()
+    }
+
     /// The same, on a connection somebody else made.
     ///
     /// # Errors
     ///
     /// As [`Self::open`].
-    pub fn open_on(mut bus: Connection, consent: Duration) -> Result<Self, InputError> {
+    pub fn open_on(bus: Connection, consent: Duration) -> Result<Self, InputError> {
+        Self::open_with(bus, consent, None)
+    }
+
+    /// The whole of it: a connection, how long to wait, and a grant to reuse.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`].
+    pub fn open_with(
+        mut bus: Connection,
+        consent: Duration,
+        token: Option<&str>,
+    ) -> Result<Self, InputError> {
         // Signals are broadcast and a connection receives only what it asked
         // for. Without this the portal answers and nothing hears it, which
         // looks exactly like a portal that never answered.
@@ -112,12 +169,13 @@ impl PortalInput {
         .map_err(no_backend)?;
 
         let session = Self::create_session(&mut bus)?;
-        Self::select_devices(&mut bus, &session)?;
-        let stream = Self::start(&mut bus, &session, consent)?;
+        Self::select_devices(&mut bus, &session, token)?;
+        let (stream, restore_token) = Self::start(&mut bus, &session, consent)?;
 
         Ok(Self {
             bus,
             session,
+            restore_token,
             held: Held::new(),
             stream,
             at: None,
@@ -227,13 +285,32 @@ impl PortalInput {
             })
     }
 
-    fn select_devices(bus: &mut Connection, session: &str) -> Result<(), InputError> {
+    /*
+        Which devices, and — the part that decides whether this machine can be
+        reached at three in the morning — whether the grant may be kept.
+
+        `persist_mode` and `restore_token` go on **this** call and not on
+        `Start`, which is the portal's arrangement and not an obvious one: the
+        question of what may be done is asked here, and `Start` only puts it to
+        the person. A token sent here that the compositor no longer honours is
+        not an error either — it falls back to asking, exactly as it does for a
+        client it has never seen.
+    */
+    fn select_devices(
+        bus: &mut Connection,
+        session: &str,
+        token: Option<&str>,
+    ) -> Result<(), InputError> {
+        let mut extra = vec![("persist_mode", Value::Uint32(PERSIST_UNTIL_REVOKED))];
+        if let Some(token) = token.filter(|t| !t.is_empty()) {
+            extra.push(("restore_token", Value::Str(token.to_owned())));
+        }
         Self::ask(
             bus,
             "SelectDevices",
             vec![Value::Path(session.to_owned())],
             "esper_devices",
-            vec![],
+            extra,
             Duration::from_secs(10),
         )?;
         Ok(())
@@ -243,7 +320,7 @@ impl PortalInput {
         bus: &mut Connection,
         session: &str,
         consent: Duration,
-    ) -> Result<Option<u32>, InputError> {
+    ) -> Result<(Option<u32>, Option<String>), InputError> {
         let results = Self::ask(
             bus,
             "Start",
@@ -281,7 +358,21 @@ impl PortalInput {
                 Value::Struct(fields) => fields.first().and_then(Value::as_u32),
                 _ => None,
             });
-        Ok(stream)
+
+        /*
+            And the token, when the compositor agreed to keep the grant.
+
+            Its absence is a fact about this machine rather than a failure:
+            some portals do not persist, and a session that works today and
+            asks again tomorrow is exactly what unattended access must not
+            promise. The engine reads it to decide what it may advertise.
+        */
+        let restore_token = results
+            .get("restore_token")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .filter(|t| !t.is_empty());
+        Ok((stream, restore_token))
     }
 
     /// Whether this channel can put the pointer at a place rather than nudge it.

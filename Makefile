@@ -506,6 +506,17 @@ check-wayland:
 ## ~188,000 lines. A format you write yourself agrees with itself by
 ## construction, so it is asked the same questions as `dbus-send` on a real
 ## session bus. Needs docker.
+## The half of the portal conversation a container cannot reach
+##
+## `check-wayland` runs the client against a real portal and can only establish
+## *where* the conversation stops, because a container has nobody in it to
+## answer a consent dialog. Everything past that dialog — the grant, the token
+## it hands back, that token being sent again — is what unattended access rests
+## on, and this is where it is checked: against a portal that answers.
+.PHONY: check-portal
+check-portal:
+	@./scripts/check-portal.sh
+
 .PHONY: check-dbus
 check-dbus:
 	@./scripts/check-dbus.sh
@@ -800,7 +811,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-one-place check-messages check-images check-unsafe fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-one-place check-messages check-images check-unsafe check-portal fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

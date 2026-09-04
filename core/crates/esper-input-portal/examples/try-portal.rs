@@ -7,7 +7,11 @@
 //! somebody. The first would mean the client is wrong; the second means the
 //! client is right and the rig has nobody in it.
 //!
-//! Run inside a session: `try-portal`
+//! Run inside a session: `try-portal [seconds] [restore-token]`
+//!
+//! A token is passed to reopen a grant somebody gave once, and the one the
+//! portal hands back is printed — which is the whole of what decides whether
+//! this machine can honour unattended access.
 // Unix only, like the crate it exercises. An example still has to have a
 // `main` on every target it is type-checked for, so the gate goes round the
 // body rather than round the file.
@@ -35,9 +39,18 @@ mod unix_only {
             }
         };
 
-        match PortalInput::open_on(bus, Duration::from_secs(seconds)) {
+        // A grant somebody gave once, to be reopened without asking again.
+        let token = std::env::args().nth(2).filter(|t| !t.is_empty());
+
+        match PortalInput::open_with(bus, Duration::from_secs(seconds), token.as_deref()) {
             Ok(input) => {
                 println!("granted");
+                match input.restore_token() {
+                    Some(token) => println!("restore-token={token}"),
+                    // Said rather than left out: the absence is the answer to
+                    // "can this machine be reached when nobody is at it".
+                    None => println!("restore-token=none"),
+                }
                 println!(
                     "absolute-pointer={}",
                     if input.can_point_absolutely() {
