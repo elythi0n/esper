@@ -22,18 +22,17 @@
 //! installs a panic hook as well.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use esper_crypto::identity::KEY_LEN;
 use esper_proto::{
-    Hello, Permission, Role, SessionId, SessionRequest, TerminalData, TerminalMessage,
-    TerminalOpen, TerminalResume, TerminalStart, TerminalStarted,
+    Permission, SessionId, SessionRequest, TerminalData, TerminalMessage, TerminalOpen,
+    TerminalResume, TerminalStart, TerminalStarted,
 };
 use esper_pty::RawMode;
 use esper_transport::{
-    AnyOf, Control, Ended, Endpoint, EscapeWatcher, Grants, NoPeers, OnlyPeer, PeerAuthority,
-    Session, TerminalService, Typed, request_session, send_resize,
+    Control, Ended, EscapeWatcher, Grants, Session, TerminalService, Typed, request_session,
+    send_resize,
 };
 use tokio::io::AsyncWriteExt as _;
 
@@ -128,15 +127,37 @@ pub struct Finished {
 /// What `terminal` was asked to do.
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// The host to reach.
-    pub addr: SocketAddr,
+    /// Where the host is, when somebody said.
+    pub addr: Option<SocketAddr>,
+    /// Which paired host, by name or fingerprint prefix.
+    pub named: Option<String>,
+    /// A broker to be introduced through, when nothing direct works.
+    pub via: Option<esper_rendezvous::Via>,
+    /// Ask the local network where the host is.
+    pub mdns: bool,
     /// A session left behind, to return to rather than opening a new shell.
     pub resume: Option<SessionId>,
 }
 
-/// Parse `terminal <addr> [--resume <id>]`.
+/*
+    Parse `terminal <device|addr> [--resume <id>]`.
+
+    **A name, like every other verb that reaches a host.** This one took an
+    address and nothing else — it dialled a socket itself rather than going
+    through `reach`, so a shell was the one thing in this product you could not
+    open on `elythion`: no name, no fingerprint prefix, no remembered address, no
+    mDNS, no broker, and no connectivity ladder. Typing an address is still
+    allowed, because it is how a host is reached the first time and before it
+    has ever been seen.
+*/
 pub fn parse(args: &[String]) -> Result<Options, String> {
     let mut addr: Option<SocketAddr> = None;
+    let mut named: Option<String> = None;
+    let mut via_addr: Option<SocketAddr> = None;
+    let mut via_key: Option<[u8; 32]> = None;
+    // The setting, like every other verb: a machine whose operator turned mDNS
+    // off has turned it off here too.
+    let mut mdns = crate::settings::flag("discovery.mdns", true);
     let mut resume: Option<SessionId> = None;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
@@ -147,19 +168,38 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
                     .ok_or_else(|| "--resume needs the session id the host printed".to_owned())?;
                 resume = Some(parse_session_id(hex)?);
             }
-            other if !other.starts_with('-') && addr.is_none() => {
-                addr = Some(net::parse_addr(other)?);
+            "--via" => {
+                let addr = rest
+                    .next()
+                    .ok_or_else(|| "--via needs the broker's address".to_owned())?;
+                via_addr = Some(net::parse_addr(addr)?);
+            }
+            "--broker-key" => {
+                let key = rest
+                    .next()
+                    .ok_or_else(|| "--broker-key needs the broker's key".to_owned())?;
+                via_key = Some(crate::broker_cmd::parse_key(key)?);
+            }
+            "--no-mdns" => mdns = false,
+            other if !other.starts_with('-') && addr.is_none() && named.is_none() => {
+                // An address if it parses as one, and a device otherwise. The
+                // same rule `connect` uses, so one word means the same thing
+                // to both.
+                match net::parse_addr(other) {
+                    Ok(parsed) => addr = Some(parsed),
+                    Err(_) => named = Some(other.to_owned()),
+                }
             }
             other => return Err(format!("unknown option {other:?}")),
         }
     }
-    let addr = addr.ok_or_else(|| {
-        format!(
-            "terminal needs the host's address: {} terminal <addr> [--resume <id>]",
-            crate::net::me()
-        )
-    })?;
-    Ok(Options { addr, resume })
+    Ok(Options {
+        addr,
+        named,
+        via: crate::session_cmd::broker_from(via_addr, via_key)?,
+        mdns,
+        resume,
+    })
 }
 
 /// Read a session id from the hex the host printed.
@@ -187,37 +227,35 @@ fn parse_session_id(hex: &str) -> Result<SessionId, String> {
 pub fn run(o: &Options) -> Result<(), String> {
     net::install_crypto();
     let identity = paths::identity()?;
-    let (store, keys) = session_cmd::paired()?;
-
-    let dial: Arc<dyn PeerAuthority> = if let [only] = keys.as_slice() {
-        Arc::new(OnlyPeer::new(*only))
-    } else {
-        Arc::new(AnyOf::new(keys.clone()))
-    };
-
-    println!("⌨️  esper terminal {}", o.addr);
-    println!();
 
     net::runtime()?.block_on(async {
-        let endpoint = Endpoint::bind(&identity, net::any_port(o.addr), Arc::new(NoPeers), dial)
-            .map_err(|e| format!("binding a local port: {e}"))?;
-        let conn = endpoint.connect(o.addr).await.map_err(|e| e.to_string())?;
-        let mut session = Session::open(
-            conn,
-            Hello::new(Role::Controller, identity.public_key(), &net::this_device()),
-        )
-        .await
-        .map_err(|(e, _)| crate::session_cmd::opening_failed(e))?;
+        /*
+            **Reached the way every other verb reaches a host.**
 
-        let known = store
-            .iter()
-            .find(|d| d.public_key == *session.peer_key())
-            .map(|d| d.name.clone());
-        println!(
-            "  host       {}",
-            known.unwrap_or_else(|| "unknown".to_owned())
-        );
-        println!("      {}", session.peer_fingerprint().hex());
+            This dialled a socket of its own: `Endpoint::bind`, `connect`, and
+            an address somebody had to type. Everything the rest of the
+            product learned about finding a machine — a name, a fingerprint
+            prefix, the address it was last seen at, mDNS, a broker, the
+            connectivity ladder and the tier it ended up on — was written once
+            in `reach` and this was the one caller that did not use it.
+        */
+        let session_cmd::Reached {
+            endpoint,
+            mut session,
+            // Printed by `reach` itself, along with everything else it tried.
+            tier: _,
+        } = session_cmd::reach(
+            &identity,
+            &session_cmd::Reaching {
+                label: "⌨️  esper terminal",
+                addr: o.addr,
+                named: o.named.as_deref(),
+                via: o.via,
+                mdns: o.mdns,
+                aside: false,
+            },
+        )
+        .await?;
 
         let mut control = session
             .take_control()
@@ -517,15 +555,21 @@ fn window_changes() -> tokio::sync::mpsc::Receiver<()> {
 pub fn usage() -> String {
     let me = crate::net::me();
     format!(
-        "usage: {me} terminal <addr> [--resume <session>]\n\
+        "usage: {me} terminal <device|addr> [--resume <session>]\n\
          \n\
          Open a shell on a paired host. The host decides whether it may be\n\
          asked at all, and a session it allows is recorded on its own trail.\n\
          \n\
+         A device is named, or a fingerprint prefix, or an address when this\n\
+         machine has not met it yet. With one device paired, it is the one.\n\
+         \n\
          \x20 --resume <session>   rejoin a session the host parked, by the id\n\
          \x20                      it printed when the link dropped\n\
+         \x20 --via <broker>       be introduced by a broker when nothing direct works\n\
+         \x20 --broker-key <key>   the broker's key, when it is not remembered\n\
+         \x20 --no-mdns            do not ask the local network where the host is\n\
          \n\
-         for example: {me} terminal 192.168.1.24:7420"
+         for example: {me} terminal elythion"
     )
 }
 
@@ -555,22 +599,70 @@ mod tests {
         assert!(e.contains("not hex"), "{e}");
     }
 
+    /// A device, an address, or neither — the same word `connect` takes.
+    ///
+    /// Neither is not an error *here*: which device somebody meant is settled
+    /// by `reach`, which is the only thing that knows what is paired, and it
+    /// answers "one is paired, so it is that one" or names the others. A
+    /// refusal written at this end would have to know the store to be right.
     #[test]
-    fn terminal_needs_an_address_and_takes_a_session_to_resume() {
-        assert!(parse(&[]).is_err());
-        let o = parse(&["127.0.0.1:7645".to_owned()]).unwrap();
-        assert!(o.resume.is_none());
+    fn terminal_takes_a_device_or_an_address() {
+        let o = parse(&[]).unwrap();
+        assert!(o.addr.is_none() && o.named.is_none());
 
+        let o = parse(&["127.0.0.1:7645".to_owned()]).unwrap();
+        assert_eq!(o.addr, Some("127.0.0.1:7645".parse().unwrap()));
+        assert!(o.named.is_none(), "an address is not a name");
+
+        // A word that is not an address is a device: a name, or a fingerprint
+        // prefix. Reading it as an address would refuse `elythion` as malformed.
+        let o = parse(&["elythion".to_owned()]).unwrap();
+        assert_eq!(o.named.as_deref(), Some("elythion"));
+        assert!(o.addr.is_none());
+        let o = parse(&["8a0f18d8".to_owned()]).unwrap();
+        assert_eq!(o.named.as_deref(), Some("8a0f18d8"));
+    }
+
+    #[test]
+    fn terminal_takes_a_session_to_resume() {
         let id = SessionId::from_bytes([7u8; 16]);
-        let o = parse(&[
-            "127.0.0.1:7645".to_owned(),
-            "--resume".to_owned(),
-            id.to_string(),
-        ])
-        .unwrap();
+        let o = parse(&["elythion".to_owned(), "--resume".to_owned(), id.to_string()]).unwrap();
         assert_eq!(o.resume, Some(id));
 
         // A flag with nothing after it is a mistake worth naming.
-        assert!(parse(&["127.0.0.1:7645".to_owned(), "--resume".to_owned()]).is_err());
+        assert!(parse(&["elythion".to_owned(), "--resume".to_owned()]).is_err());
+    }
+
+    /// The ways to be reached that this verb never had.
+    ///
+    /// A broker needs both halves or neither, which is `broker_from`'s rule
+    /// and is shared rather than restated: a `--via` with no key would be a
+    /// broker nobody had pinned.
+    #[test]
+    fn terminal_can_be_introduced_and_can_be_told_not_to_ask_the_network() {
+        assert!(
+            parse(&["elythion".to_owned(), "--no-mdns".to_owned()])
+                .unwrap()
+                .mdns
+                .eq(&false)
+        );
+        assert!(
+            parse(&[
+                "elythion".to_owned(),
+                "--via".to_owned(),
+                "127.0.0.1:7443".to_owned()
+            ])
+            .is_err(),
+            "a broker with no key is a broker nobody pinned"
+        );
+        let o = parse(&[
+            "elythion".to_owned(),
+            "--via".to_owned(),
+            "127.0.0.1:7443".to_owned(),
+            "--broker-key".to_owned(),
+            "a".repeat(64),
+        ])
+        .unwrap();
+        assert!(o.via.is_some());
     }
 }

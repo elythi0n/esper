@@ -652,33 +652,15 @@ else
       sed 's/^/      /' "$term_a/host.log"
       fail=1
     else
-      out=$(printf 'echo smoke-shell-$((6*7))\nexit 3\n' | \
-        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" TERM=dumb \
-        timeout 60 "$BIN/esper-engine" terminal "$host_addr" 2>&1 || true)
-      # The command ran on the far side: the shell expanded the arithmetic,
-      # so the marker proves a real shell rather than an echo of the input.
-      if printf '%s' "$out" | grep -q 'smoke-shell-42'; then
-        printf '  ✓ a shell ran a command on the host and sent its output back\n'
-      else
-        printf '  ✗ no output came back from the remote shell\n'
-        printf '%s\n' "$out" | sed 's/^/      /'
-        fail=1
-      fi
-      # And the exit status came back, which is most of what scripting a
-      # server needs.
-      if printf '%s' "$out" | grep -q 'the shell exited: code 3'; then
-        printf '  ✓ the shell'"'"'s exit status reached the controller\n'
-      else
-        printf '  ✗ the exit status did not arrive\n'
-        printf '%s\n' "$out" | sed 's/^/      /'
-        fail=1
-      fi
-
-      # **A host reached through a broker, with no address for it.** Tier 3
-      # of the connectivity ladder, as far as one machine can prove it: the
-      # rendezvous, the pinning, the introduction and the direct path are all
-      # exercised; the hole punch is not, because there is no router between
-      # two sockets on one host.
+      # **Before anything has taught this machine where the host is.**
+      #
+      # This has to come first, and it did not always have to: the ladder
+      # prefers the address a host answered on last time, which is right —
+      # a broker is a last resort and bytes crossing a third machine are
+      # worse than bytes that do not. So the moment any earlier check has
+      # reached this host directly, tier 1 answers and no introduction
+      # happens. It moved here the day `terminal` started going through
+      # `reach` like every other verb, and so started remembering.
       echo "  — reaching a host through a broker, given no address for it"
       timeout 120 "$BIN/esper-broker" serve --listen 127.0.0.1:0 \
         --identity "$term_a/broker.key" > "$term_a/broker.log" 2>&1 &
@@ -867,6 +849,34 @@ else
       fi
       kill "$broker_pid" 2>/dev/null || true
 
+      out=$(printf 'echo smoke-shell-$((6*7))\nexit 3\n' | \
+        env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" TERM=dumb \
+        timeout 60 "$BIN/esper-engine" terminal "$host_addr" 2>&1 || true)
+      # The command ran on the far side: the shell expanded the arithmetic,
+      # so the marker proves a real shell rather than an echo of the input.
+      if printf '%s' "$out" | grep -q 'smoke-shell-42'; then
+        printf '  ✓ a shell ran a command on the host and sent its output back\n'
+      else
+        printf '  ✗ no output came back from the remote shell\n'
+        printf '%s\n' "$out" | sed 's/^/      /'
+        fail=1
+      fi
+      # And the exit status came back, which is most of what scripting a
+      # server needs.
+      if printf '%s' "$out" | grep -q 'the shell exited: code 3'; then
+        printf '  ✓ the shell'"'"'s exit status reached the controller\n'
+      else
+        printf '  ✗ the exit status did not arrive\n'
+        printf '%s\n' "$out" | sed 's/^/      /'
+        fail=1
+      fi
+
+      # **A host reached through a broker, with no address for it.** Tier 3
+      # of the connectivity ladder, as far as one machine can prove it: the
+      # rendezvous, the pinning, the introduction and the direct path are all
+      # exercised; the hole punch is not, because there is no router between
+      # two sockets on one host.
+
       # **A machine reached by name, with no address anywhere.** Where a
       # machine *is* changes; which machine it is does not. The address it
       # answered on the first time is remembered, and that is what makes the
@@ -902,6 +912,33 @@ else
         else
           printf '  ✗ connecting by name did not use the remembered address\n'
           printf '%s\n' "$out" | sed 's/^/      /'
+          fail=1
+        fi
+        # **And by name, which this verb could not do at all.**
+        #
+        # `terminal` dialled a socket of its own — `Endpoint::bind`, `connect`,
+        # and an address somebody had to type — so it was the one verb in the
+        # product that could not reach `elythion`: no name, no fingerprint prefix,
+        # no remembered address, no mDNS, no broker, no ladder. It goes through
+        # `reach` now like everything else, and this is the proof: the same
+        # host, with nothing but its name, and the rung it was found on said out
+        # loud.
+        ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" terminal >/dev/null 2>&1 || true
+        named_shell=$(printf 'echo smoke-named-$((6*7))\nexit 0\n' | \
+          env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" TERM=dumb \
+          timeout 60 "$BIN/esper-engine" terminal "$peer_name" --no-mdns 2>&1 || true)
+        if printf '%s' "$named_shell" | grep -q 'smoke-named-42'; then
+          printf '  ✓ and a shell opened on the host by name, with no address anywhere\n'
+        else
+          printf '  ✗ a shell could not be opened by name\n'
+          printf '%s\n' "$named_shell" | sed 's/^/        /'
+          fail=1
+        fi
+        if printf '%s' "$named_shell" | grep -q 'where it was last time'; then
+          printf '  ✓ and it used the address it was last seen at, which is the ladder'"'"'s first rung\n'
+        else
+          printf '  ✗ reaching by name did not use the remembered address\n'
+          printf '%s\n' "$named_shell" | grep -iE 'reached|tried' | sed 's/^/        /'
           fail=1
         fi
       fi
