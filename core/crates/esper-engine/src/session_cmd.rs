@@ -5058,6 +5058,36 @@ fn asked_of_the_host(link: &esper_link::ControllerLink) -> (u16, u32) {
     )
 }
 
+/// What the reassembler made of what arrived, when it is worth saying.
+///
+/// `None` on a session where nothing unusual happened, which is most of them:
+/// a line of zeroes in a summary is a line people learn to skip, and these
+/// three numbers are only interesting when they are not zero.
+///
+/// **Refused first**, because it is the one that is not about the network: a
+/// packet turned away before reassembly is something sending this machine
+/// bytes it did not ask for — a stale stream, a misdirected one, or somebody
+/// trying it on.
+fn reassembly(stats: &esper_media::depacketize::Stats) -> Option<String> {
+    let mut parts = Vec::new();
+    if stats.rejected > 0 {
+        parts.push(format!("{} refused as not this session's", stats.rejected));
+    }
+    if stats.abandoned > 0 {
+        parts.push(format!("{} frame(s) given up on", stats.abandoned));
+    }
+    if stats.reordered > 0 {
+        parts.push(format!(
+            "{} arrived out of order and in time",
+            stats.reordered
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join(", "))
+}
+
 /// The host's screens, as a window needs to know them.
 fn screens_for_window(
     monitors: &[esper_proto::MonitorDescription],
@@ -6446,6 +6476,13 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             "  frames     {} lost, {} keyframes asked for{silent}",
             stats.frames_lost, stats.keyframes_requested
         );
+        // **What the reassembler made of what arrived**, when it made anything
+        // of note. Counted all along and reported nowhere: a packet refused
+        // before reassembly is something sending this machine bytes it did not
+        // ask for, and a session that saw some should say so.
+        if let Some(line) = reassembly(&link.media_stats()) {
+            println!("  packets    {line}");
+        }
         println!(
             "  received   {} datagrams, {} KiB, {:.0} kbit/s",
             stats.datagrams,
@@ -6573,6 +6610,53 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A summary says what happened, and nothing when nothing did.
+    ///
+    /// A line of zeroes is a line people learn to skip, and these three
+    /// numbers are only interesting when they are not zero — so a quiet
+    /// session has to produce no line at all rather than a reassuring one.
+    #[test]
+    fn the_reassembler_is_reported_only_when_it_has_something_to_say() {
+        use esper_media::depacketize::Stats;
+
+        let quiet = Stats {
+            packets: 9_000,
+            frames: 300,
+            ..Stats::default()
+        };
+        assert_eq!(
+            super::reassembly(&quiet),
+            None,
+            "an ordinary session has nothing to report about its packets"
+        );
+
+        // Refused comes first: it is the one that is not about the network.
+        let odd = Stats {
+            rejected: 3,
+            abandoned: 1,
+            reordered: 12,
+            ..Stats::default()
+        };
+        let line = super::reassembly(&odd).expect("something happened");
+        assert!(
+            line.starts_with("3 refused as not this session's"),
+            "{line}"
+        );
+        assert!(line.contains("1 frame(s) given up on"), "{line}");
+        assert!(line.contains("12 arrived out of order"), "{line}");
+
+        // And one of the three on its own is one clause, not three with two
+        // zeroes in them.
+        let one = Stats {
+            reordered: 4,
+            ..Stats::default()
+        };
+        assert_eq!(
+            super::reassembly(&one).as_deref(),
+            Some("4 arrived out of order and in time")
+        );
+    }
 
     /// **Two reasons to stop the picture, and neither cancels the other.**
     ///

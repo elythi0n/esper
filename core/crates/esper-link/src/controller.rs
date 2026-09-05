@@ -118,6 +118,18 @@ impl ControllerLink {
         self.stream.stats()
     }
 
+    /// What the reassembler made of what arrived.
+    ///
+    /// Separate from [`Self::stats`] because it counts a different thing:
+    /// those are the session's, these are the *packets'* — refused, reordered,
+    /// abandoned. The first of those is the one worth surfacing: a packet
+    /// refused before reassembly is something sending this machine bytes it
+    /// did not ask for.
+    #[must_use]
+    pub fn media_stats(&self) -> esper_media::depacketize::Stats {
+        self.stream.media_stats()
+    }
+
     /// How long to wait before deciding the frame in hand is complete.
     ///
     /// `None` when nothing is waiting, so a caller may block indefinitely.
