@@ -118,6 +118,26 @@ impl SandboxReport {
         self.seccomp && self.enforcing && self.address_space && self.no_new_privs
     }
 
+    /// The whole line, label and all, so the two cannot disagree.
+    ///
+    /// **Because they did.** The caller wrote `"decoder sandboxed — {}"` and
+    /// passed [`Self::describe`], so a decoder with no filter loaded announced
+    /// itself as `decoder sandboxed — NOT SANDBOXED: no seccomp filter is
+    /// loaded`: a line whose first word contradicts its last, on the one claim
+    /// somebody reads a session summary to check. A label chosen by the same
+    /// value it labels cannot do that.
+    ///
+    /// Held to [`Self::is_enforcing`] rather than to seccomp alone, because an
+    /// audit-only filter logs what a decoder did and stops nothing.
+    #[must_use]
+    pub fn headline(&self) -> String {
+        if self.is_enforcing() {
+            format!("sandboxed — {}", self.describe())
+        } else {
+            format!("⚠ NOT SANDBOXED — {}", self.describe())
+        }
+    }
+
     /// A line for the log and the session HUD.
     #[must_use]
     pub fn describe(&self) -> String {
@@ -529,6 +549,53 @@ mod tests {
             audit.describe().contains("AUDIT ONLY"),
             "{}",
             audit.describe()
+        );
+    }
+
+    /// The label and the value are one string, because they used to disagree.
+    ///
+    /// `"decoder sandboxed — {describe}"` read `decoder sandboxed — NOT
+    /// SANDBOXED: no seccomp filter is loaded` on a machine where none could
+    /// be applied: a line whose first word contradicts its last, on the one
+    /// claim somebody reads a session summary to check.
+    #[test]
+    fn a_report_labels_itself() {
+        let none = SandboxReport::default();
+        let line = none.headline();
+        assert!(
+            line.starts_with("⚠ NOT SANDBOXED"),
+            "a report with nothing applied read {line:?}"
+        );
+        assert!(!none.is_enforcing());
+
+        // Audit-only is a measurement, not a confinement: the filter is
+        // loaded and it stops nothing.
+        let audit = SandboxReport {
+            seccomp: true,
+            enforcing: false,
+            ..SandboxReport::default()
+        };
+        assert!(!audit.is_enforcing());
+        assert!(
+            audit.headline().starts_with("⚠ NOT SANDBOXED"),
+            "audit-only read {:?}",
+            audit.headline()
+        );
+
+        let real = SandboxReport {
+            seccomp: true,
+            enforcing: true,
+            landlock: true,
+            address_space: true,
+            open_files: true,
+            no_new_privs: true,
+        };
+        assert!(real.is_enforcing());
+        let line = real.headline();
+        assert!(line.starts_with("sandboxed — "), "a jail read {line:?}");
+        assert!(
+            !line.contains("NOT SANDBOXED"),
+            "a jail described itself as none: {line:?}"
         );
     }
 

@@ -5250,7 +5250,10 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
             &esper_decode::decoder::DecoderConfig::default(),
         )
         .map_err(|e| format!("{e}"))?;
-        println!("  decoder    sandboxed — {}", worker.report().describe());
+        // The label comes from the report rather than from the line, because
+        // this once read "sandboxed — NOT SANDBOXED: no seccomp filter is
+        // loaded" on a machine where none could be applied.
+        println!("  decoder    {}", worker.report().headline());
         let mut link =
             link.with_decoder(Box::new(worker) as Box<dyn esper_decode::decoder::VideoDecoder>);
         // **Pinned before a single frame is assembled**, if this machine's
@@ -6088,12 +6091,12 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 match crate::playback_task::start(esper_audio::Format::of(&announced)) {
                     Ok(speaker) => match esper_decode::SandboxedAudio::spawn_self(&announced) {
                         Ok(worker) => {
-                            let jail = worker.report().describe();
+                            let jail = worker.report().headline();
                             match link.with_sound(&announced, Box::new(worker)) {
                                 Ok(()) => {
                                     println!(
-                                        "  sound      {} Hz, {} channel(s) — decoder sandboxed \
-                                         ({jail}), playing through {}",
+                                        "  sound      {} Hz, {} channel(s) — decoder {jail}, \
+                                         playing through {}",
                                         announced.sample_rate_hz,
                                         announced.channels,
                                         speaker.backend()
