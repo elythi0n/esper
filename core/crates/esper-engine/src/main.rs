@@ -40,6 +40,10 @@ mod pairing;
 mod paths;
 mod permits;
 mod playback_task;
+/// The portal grant this machine holds, which is what unattended access on a
+/// Wayland desktop rests on.
+#[cfg(target_os = "linux")]
+mod portal_grant;
 mod presence_task;
 mod put_back;
 mod record_task;

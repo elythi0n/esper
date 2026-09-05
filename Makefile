@@ -508,6 +508,11 @@ check-wayland:
 ## session bus. Needs docker.
 ## The half of the portal conversation a container cannot reach
 ##
+## After `build`, because its last four checks drive the engine itself — a
+## grant kept, offered back and let go of is the engine's behaviour, not the
+## client's, and the client can be right about all of it while the engine
+## keeps nothing.
+##
 ## `check-wayland` runs the client against a real portal and can only establish
 ## *where* the conversation stops, because a container has nobody in it to
 ## answer a consent dialog. Everything past that dialog — the grant, the token
@@ -811,7 +816,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-one-place check-messages check-images check-unsafe check-portal fmt-check lint test check-coverage check-web build check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-one-place check-messages check-images check-unsafe fmt-check lint test check-coverage check-web build check-portal check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

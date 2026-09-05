@@ -531,7 +531,7 @@ cleanup_terminal() {
              "${pace_host:-}" "${pace_wire:-}" "${pace_client:-}" "${retain_pid:-}" \
              "${priv_host:-}" "${priv_client:-}" "${priv_x:-}" "${api_pid:-}" \
              "${bye_pid:-}" "${bye_client:-}" "${seen_host:-}" "${seen_client:-}" \
-             "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" \
+             "${bound_host:-}" "${unat_host:-}" "${unat_client:-}" "${un_host:-}" \
              "${dark_host:-}" "${dark_client:-}" "${mid_host:-}" "${mid_client:-}" \
              "${seat_host:-}" "${switch_x:-}" "${lk_host:-}" "${wk_listener:-}" \
              "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}" \
@@ -3622,6 +3622,66 @@ print(s.getsockname()[1]); s.close()')
       # session on a host with nobody at it. Now the host asks, and a host with
       # no terminal to ask at refuses — which is the answer that makes the
       # permission mean something.
+      # **Whether unattended access is a promise this machine can keep.**
+      #
+      # A desktop whose only way to inject input is the `RemoteDesktop` portal
+      # asks before any program may, so a device holding `unattended` can walk
+      # in at three in the morning, be let in, and find it may watch and not
+      # drive — with nobody there to answer the dialog. The host says which of
+      # the two it is when it starts, rather than leaving somebody to find out
+      # then.
+      echo "  — saying whether unattended access is a promise this machine can keep"
+      ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null
+      env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_a" \
+        timeout 20 "$BIN/esper-engine" host --listen 127.0.0.1:0 --no-mdns \
+        > "$term_a/unattended-none.log" 2>&1 &
+      un_host=$!
+      for _ in $(seq 1 100); do
+        grep -q '^  consent ' "$term_a/unattended-none.log" 2>/dev/null && break
+        sleep 0.1
+      done
+      kill "$un_host" 2>/dev/null || true
+      wait "$un_host" 2>/dev/null || true
+      un_host=""
+      if grep -q 'unattended ⚠ can watch and not drive' "$term_a/unattended-none.log"; then
+        printf '  ✓ a machine that cannot inject input unasked says so when it starts\n'
+      else
+        printf '  ✗ a machine with no way to inject input promised unattended access anyway\n'
+        grep -iE 'unattended|consent' "$term_a/unattended-none.log" | sed 's/^/      /' || true
+        fail=1
+      fi
+      # And it names the one thing that changes it, which is the whole reason
+      # to say it at all.
+      if grep -q 'input`' "$term_a/unattended-none.log"; then
+        printf '  ✓ and names the command that agrees to it once\n'
+      else
+        printf '  ✗ it said unattended was broken and not what to do about it\n'
+        fail=1
+      fi
+      # And a machine that *can* says which way in it has, so the two answers
+      # cannot be told apart only by one of them being silent.
+      if [ -n "${DISPLAY:-}" ]; then
+        ESPER_HOME="$term_a" timeout 20 "$BIN/esper-engine" host \
+          --listen 127.0.0.1:0 --no-mdns > "$term_a/unattended-can.log" 2>&1 &
+        un_host=$!
+        for _ in $(seq 1 100); do
+          grep -q '^  consent ' "$term_a/unattended-can.log" 2>/dev/null && break
+          sleep 0.1
+        done
+        kill "$un_host" 2>/dev/null || true
+        wait "$un_host" 2>/dev/null || true
+        un_host=""
+        if grep -q 'unattended can drive this machine with' "$term_a/unattended-can.log"; then
+          printf '  ✓ and one that can says which way in it has\n'
+        else
+          printf '  ✗ a machine that can inject input did not say so\n'
+          grep -i unattended "$term_a/unattended-can.log" | sed 's/^/      /' || true
+          fail=1
+        fi
+      else
+        printf '  — skipped the other half: this machine has no display to be driven through\n'
+      fi
+
       echo "  — a session nobody is there to allow"
       ESPER_HOME="$term_a" "$BIN/esper-engine" revoke "$fp" unattended >/dev/null
       # The host reads the store per session, so this needs no restart.

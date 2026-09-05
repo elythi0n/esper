@@ -810,6 +810,41 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
         println!("  consent    nothing to ask at: only devices holding `unattended` may connect");
     }
 
+    /*
+        **Whether unattended access is a promise this machine can keep.**
+
+        Said when it starts, not at three in the morning. On a desktop whose
+        only way to inject input is the `RemoteDesktop` portal, every session
+        puts a dialog on the screen until somebody has agreed once — so a
+        device holding `unattended` can walk in, be let in, and then find it
+        may watch and not drive, with nobody there to fix it.
+
+        Checked without opening the portal, which is the rung that prompts: a
+        host that probed it at startup would be a host that prompts every time
+        it starts. And said only where it is *owed* — a machine nobody has
+        granted unattended access to is not making the promise.
+    */
+    #[cfg(target_os = "linux")]
+    if paths::devices().is_ok_and(|(store, _)| {
+        store
+            .iter()
+            .any(|d| d.may(esper_crypto::Permission::Unattended))
+    }) {
+        match crate::injector::unattended_input() {
+            Ok(backend) => println!("  unattended can drive this machine with {backend}"),
+            Err(()) => {
+                println!(
+                    "  unattended ⚠ can watch and not drive: this desktop asks before any program"
+                );
+                println!(
+                    "             may inject input, and nobody has agreed yet. Run `{} input`",
+                    net::me()
+                );
+                println!("             once while you are here, and the agreement is kept.");
+            }
+        }
+    }
+
     // **Terminal sessions outlive their connections**, so the service that
     // owns them belongs to the host and not to one session: a shell parked
     // when a link dropped is resumed by the *next* connection from the same

@@ -158,7 +158,90 @@ else
   fail=1
 fi
 
+# ── 4. And the engine, which is what actually holds the grant ────────────
+#
+# The client can ask for a grant and read one back and still be useless: what
+# makes a machine reachable at three in the morning is the *engine* keeping it
+# and offering it next time. `esper-engine input` opens a sink and says which
+# rung it got in on, which is the whole ladder exercised in one word.
+kill "$stub_pid" 2>/dev/null
+wait "$stub_pid" 2>/dev/null
+rm -f "$tmp/asked.json"
+python3 "$root/scripts/stub-portal.py" "$tmp/asked.json" > "$tmp/stub3.log" 2>&1 &
+stub_pid=$!
+for _ in $(seq 1 50); do
+  grep -q "ready" "$tmp/stub3.log" 2>/dev/null && break
+  sleep 0.1
+done
+
+engine="$root/build/esper-engine"
+if [ ! -x "$engine" ]; then
+  printf '  — skipped the engine checks: %s is not built\n' "$engine"
+else
+  home="$tmp/home"
+  # No display of any kind, so the ladder has to reach the portal rung: X11 and
+  # wlroots are tried first and are the right answer where they work.
+  first=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$home" \
+    "$engine" input 2>&1)
+  if printf '%s' "$first" | grep -q 'in use     wayland-portal'; then
+    printf '  ✓ and the engine reaches the portal when nothing else is there\n'
+  else
+    printf '  ✗ portal: the engine did not get in through the portal\n'
+    printf '%s\n' "$first" | sed 's/^/      /'
+    fail=1
+  fi
+  kept=$(cat "$home/portal.token" 2>/dev/null || true)
+  if [ -n "$kept" ]; then
+    printf '  ✓ and keeps the grant it was given\n'
+  else
+    printf '  ✗ portal: the engine was given a grant and kept none\n'
+    fail=1
+  fi
+  # A grant is the compositor's word that *this machine's* Esper may take the
+  # keyboard. It sits beside the identity, at the same permissions.
+  mode=$(stat -c '%a' "$home/portal.token" 2>/dev/null || echo "none")
+  if [ "$mode" = "600" ]; then
+    printf '  ✓ and keeps it where nobody else can read it\n'
+  else
+    printf '  ✗ portal: the grant is at mode %s, and it should be 600\n' "$mode"
+    fail=1
+  fi
+
+  rm -f "$tmp/asked.json"
+  env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$home" \
+    "$engine" input > /dev/null 2>&1
+  again=$(python3 - "$tmp/asked.json" <<'PY'
+import json, sys
+asked = json.load(open(sys.argv[1]))
+picks = [a["options"].get("restore_token") for a in asked if a["member"] == "SelectDevices"]
+print(str(picks[-1]) if picks else "nothing")
+PY
+)
+  if [ "$again" = "$kept" ]; then
+    printf '  ✓ and offers it back rather than putting a dialog on somebody'"'"'s screen\n'
+  else
+    printf '  ✗ portal: a second run offered %s, and the grant it holds is %s\n' "$again" "$kept"
+    fail=1
+  fi
+
+  # **A grant that did not get us in is not a grant.** Kept, it would go on
+  # making this machine look reachable when it is not — so a refusal has to
+  # take it away. The stub is replaced with nothing at all, which is what a
+  # desktop with no portal looks like.
+  kill "$stub_pid" 2>/dev/null
+  wait "$stub_pid" 2>/dev/null
+  stub_pid=""
+  env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$home" \
+    "$engine" input > /dev/null 2>&1
+  if [ ! -e "$home/portal.token" ]; then
+    printf '  ✓ and lets go of one the compositor will not honour\n'
+  else
+    printf '  ✗ portal: a grant that was refused is still being kept\n'
+    fail=1
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then
   exit 1
 fi
-printf '  ✓ portal: a grant asked for, kept, offered back, and its absence reported\n'
+printf '  ✓ portal: a grant asked for, kept, offered back, let go of when refused, and its absence reported\n'

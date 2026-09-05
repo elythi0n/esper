@@ -25,6 +25,60 @@ impl std::fmt::Debug for Chosen {
     }
 }
 
+/// Keep what the portal handed back, when it is not what we already had.
+///
+/// Written only on a change: a portal that returns the same token every
+/// session would otherwise rewrite the file on every session, and a file
+/// rewritten for no reason is a file that can be lost for no reason.
+#[cfg(target_os = "linux")]
+fn remember(kept: Option<&str>, held: Option<&str>, attempts: &mut Vec<String>) {
+    let Some(token) = kept else {
+        return;
+    };
+    if held == Some(token) {
+        return;
+    }
+    if let Err(e) = crate::portal_grant::keep(token) {
+        // Not fatal: the session works, and only the *next* one pays for it.
+        attempts.push(format!("the grant could not be kept: {e}"));
+    }
+}
+
+/// What an unattended session would be able to do here, without asking anybody.
+///
+/// **Asked without opening the portal**, which is the whole point: the portal
+/// is the rung that can put a dialog on somebody's screen, and a host that
+/// probed it at startup would be a host that prompts every time it starts.
+///
+/// `Ok(backend)` when input needs nobody's agreement — X11's XTEST, or a
+/// wlroots compositor's virtual devices, either of which an unattended session
+/// can use at three in the morning. `Err(())` when the only way in is a portal
+/// and this machine holds no grant for it, which is a promise the host must
+/// not make.
+#[cfg(target_os = "linux")]
+pub fn unattended_input() -> Result<String, ()> {
+    // Opened and dropped: what is being established is whether it *can* be
+    // opened, and a session that starts a moment later opens its own.
+    if let Ok(injector) = esper_input_x11::X11Injector::open() {
+        let name = injector.backend().to_owned();
+        drop(injector);
+        return Ok(name);
+    }
+    if let Ok(injector) = esper_input_wlr::WlrInput::open() {
+        let name = injector.backend().to_owned();
+        drop(injector);
+        return Ok(name);
+    }
+    // A grant somebody gave once is as good as a backend that never asks.
+    match crate::portal_grant::held() {
+        Some(_) => Ok(format!(
+            "{} (a grant somebody gave once)",
+            esper_input_portal::BACKEND
+        )),
+        None => Err(()),
+    }
+}
+
 /// Open an input sink for this machine.
 ///
 /// **Never falls back to a sink that silently discards input.** A host that
@@ -72,6 +126,55 @@ pub fn open() -> Chosen {
                 };
             }
             Err(e) => attempts.push(format!("{}: {e}", esper_input_wlr::BACKEND)),
+        }
+
+        /*
+            And the portal, last.
+
+            Last because it is the one that can put a dialog on somebody's
+            screen. X11 works under XWayland and wlroots grants its virtual
+            devices to anything that can open the compositor's socket, so a
+            machine that reaches this rung is one where neither was there —
+            GNOME without XWayland, most often — and there the portal is the
+            only way in at all.
+
+            **The grant this machine already holds is offered first.** Without
+            it every session asks, which is a dialog nobody is there to answer
+            on exactly the machines unattended access is for. A token the
+            compositor no longer honours is let go of rather than kept: a
+            token that is refused is worse than none, because it is a reason
+            to believe a session will start when it will not.
+        */
+        let held = crate::portal_grant::held();
+        match esper_input_portal::PortalInput::reopen(held.as_deref()) {
+            Ok(injector) => {
+                let kept = injector.restore_token().map(str::to_owned);
+                attempts.push(format!(
+                    "{}: in use{}",
+                    esper_input_portal::BACKEND,
+                    match &kept {
+                        Some(_) => ", and the grant is kept",
+                        None =>
+                            ", and the compositor keeps no grant, so the next session asks again",
+                    }
+                ));
+                remember(kept.as_deref(), held.as_deref(), &mut attempts);
+                return Chosen {
+                    sink: Box::new(injector),
+                    attempts,
+                    real: true,
+                };
+            }
+            Err(e) => {
+                attempts.push(format!("{}: {e}", esper_input_portal::BACKEND));
+                // A grant that did not get us in is not a grant. Kept, it
+                // would go on making this machine look reachable.
+                if held.is_some()
+                    && let Err(why) = crate::portal_grant::forget()
+                {
+                    attempts.push(format!("could not let go of a refused grant: {why}"));
+                }
+            }
         }
     }
     #[cfg(target_os = "windows")]

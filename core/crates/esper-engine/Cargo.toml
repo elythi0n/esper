@@ -75,6 +75,7 @@ esper-capture-wlr.workspace = true
 esper-capture-x11.workspace = true
 esper-present-x11.workspace = true
 esper-input-wlr.workspace = true
+esper-input-portal.workspace = true
 esper-input-x11.workspace = true
 esper-clipboard-x11.workspace = true
 esper-presence-wlr.workspace = true

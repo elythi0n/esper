@@ -576,6 +576,7 @@ dependencies = [
  "esper-encode",
  "esper-files",
  "esper-input",
+ "esper-input-portal",
  "esper-input-win",
  "esper-input-wlr",
  "esper-input-x11",
