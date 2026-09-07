@@ -259,6 +259,16 @@ impl HostPump {
         self.sink.stats()
     }
 
+    /// How many frames were encoded, and how many the damage gate held back.
+    ///
+    /// The pair this side's whole design is judged on: a static screen should
+    /// be almost all skips, and a host that never reported it could not be
+    /// told from one that captured fewer frames.
+    #[must_use]
+    pub fn gate_counts(&self) -> (u64, u64) {
+        self.stream.pipeline().gate_counts()
+    }
+
     /// Whether the connection is still up.
     #[must_use]
     pub fn is_open(&self) -> bool {

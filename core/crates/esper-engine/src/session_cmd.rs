@@ -4556,6 +4556,9 @@ async fn serve(
     let Ok((frames, sent, pump)) = sending.join() else {
         return Err(("the sending thread panicked".to_owned(), parked));
     };
+    // Read here because parking moves the pump, and this is the last moment
+    // both the count and the summary can see it.
+    let (_encoded, held_back) = pump.gate_counts();
 
     // Whether this session is worth keeping turns entirely on *who ended it*.
     // A reason means somebody decided, and a decision is not something to
@@ -4611,8 +4614,23 @@ async fn serve(
         (Some(new), None) => Some(new),
         (None, waiting) => waiting,
     };
+    /*
+        **And what was not sent**, which on this side is the number the design
+        is judged on.
+
+        The damage gate has counted it since the day it was written — "a
+        static screen should be almost all skips", says the function that
+        returns it — and the host's own summary has never said it. The
+        controller can only ever report what arrived, so a session that saved
+        nine frames in ten looked exactly like one that captured nine fewer.
+
+        Said even when it is zero, unlike the packet counts above: zero here
+        is a real answer about the screen rather than the absence of an
+        anomaly, and it means the picture never stopped moving.
+    */
     let mut stats = format!(
-        "{frames} frames, {} datagrams, {} KiB",
+        "{frames} frames, {held_back} not sent because nothing had changed, \
+         {} datagrams, {} KiB",
         sent.datagrams,
         sent.bytes / 1024
     );

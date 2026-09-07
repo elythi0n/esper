@@ -1286,6 +1286,20 @@ except OSError:
         grep -iE 'record' "$term_a/host.log" | sed 's/^/      /' | head -3
         fail=1
       fi
+      # **And what it did not send.** The damage gate has counted the frames
+      # it held back since the day it was written — "a static screen should be
+      # almost all skips", says the function that returns it — and the host's
+      # own summary never said the number. The controller can only report what
+      # arrived, so a host saving nine frames in ten looked exactly like one
+      # capturing nine fewer.
+      if grep -q 'not sent because nothing had changed' "$term_a/host.log" 2>/dev/null; then
+        printf '  ✓ and the host says how many frames it held back\n'
+      else
+        printf '  ✗ the host never said what its damage gate saved\n'
+        grep -E 'frames,' "$term_a/host.log" | sed 's/^/      /' | head -2
+        fail=1
+      fi
+
       # And wrote it down, because a recording outlives the session and the
       # trail is what remains of it.
       if grep -q '"event":"recording"' "$term_a/sessions.log" 2>/dev/null; then
