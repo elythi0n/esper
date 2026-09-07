@@ -41,6 +41,18 @@ func main() { os.Exit(run(os.Args[1:])) }
 // run dispatches argv without the program name and returns an exit code.
 func run(args []string) int {
 	if len(args) == 0 {
+		// Somebody at a terminal with machines paired gets the machines. See
+		// interactive.go — with no terminal, or nothing paired, this is the
+		// help it has always been.
+		if chosen, handled := interactive(os.Stdin, os.Stdout); handled {
+			if chosen == nil {
+				return 0
+			}
+			// Handed over rather than wrapped, like every other verb here: a
+			// session owns a terminal, and a parent forwarding signals will
+			// eventually forward one wrongly.
+			return handOff("esper-engine", chosen)
+		}
 		printHelp()
 		return 0
 	}

@@ -877,6 +877,44 @@ else
       # exercised; the hole punch is not, because there is no router between
       # two sockets on one host.
 
+      # **`esper` on its own, at a terminal.**
+      #
+      # With nobody there it prints its help, which is what a script running
+      # it with no arguments needs and what it did before this existed. With
+      # somebody there and machines paired, it offers the machines — because
+      # the product's whole promise is one step from a name to a screen, and
+      # the terminal should not be the place that promise is hardest to keep.
+      #
+      # Driven under a pty, since the question is whether *stdin* is a
+      # terminal: the branch cannot be reached through a pipe by definition.
+      echo "  — esper on its own, with somebody there and machines paired"
+      if command -v script >/dev/null 2>&1; then
+        bare_piped=$(ESPER_HOME="$term_b" "$BIN/esper" < /dev/null 2>&1 || true)
+        if printf '%s' "$bare_piped" | grep -q 'Usage:'; then
+          printf '  ✓ with nobody there it prints its help\n'
+        else
+          printf '  ✗ `esper` with no terminal did not print its help\n'
+          printf '%s\n' "$bare_piped" | head -4 | sed 's/^/      /'
+          fail=1
+        fi
+
+        bare_tty=$(printf 'q\n' | ESPER_HOME="$term_b" script -qec "$BIN/esper" /dev/null 2>&1 || true)
+        if printf '%s' "$bare_tty" | grep -q 'Paired machines'; then
+          printf '  ✓ and with somebody there it offers the machines\n'
+        else
+          printf '  ✗ `esper` at a terminal did not list the paired machines\n'
+          printf '%s\n' "$bare_tty" | head -6 | sed 's/^/      /'
+          fail=1
+        fi
+
+        # What a chosen machine turns into is checked in Go, where the answer
+        # can be read without an `exec` replacing the test. Running it here
+        # would start a session with no bound on it, in the middle of a suite
+        # that has a host to share.
+      else
+        printf '  — skipped: `script` is needed to give it a terminal\n'
+      fi
+
       # **A machine reached by name, with no address anywhere.** Where a
       # machine *is* changes; which machine it is does not. The address it
       # answered on the first time is remembered, and that is what makes the
