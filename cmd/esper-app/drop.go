@@ -116,8 +116,19 @@ func (t *transfers) send(front, device, path string) {
 	// `<device>:` with no path after it means the far machine's own file
 	// directory, which is the only place a transfer may land — see the
 	// engine's `cp`, where the confinement is enforced rather than trusted.
-	cmd := exec.Command(front, "cp", path, device+":") // #nosec G204 -- device is a fingerprint matched against aFingerprint, path comes from the window manager's drop, and front is resolved beside this binary
+	// **Bounded**, because a transfer that hangs holds this slot for as long
+	// as the window lives and the list the page reads would show it sending
+	// for ever. Generous on purpose: a file is as big as it is and a link is
+	// as fast as it is, so this is a bound on a *stuck* transfer rather than
+	// on a slow one.
+	ctx, done := context.WithTimeout(context.Background(), transferPatience)
+	defer done()
+	cmd := exec.CommandContext(ctx, front, "cp", path, device+":") // #nosec G204 -- device is a fingerprint matched against aFingerprint, path comes from the window manager's drop, and front is resolved beside this binary
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.finish(item, errors.New("the transfer was still going after "+transferPatience.String()+", so it was stopped"))
+		return
+	}
 	if err != nil {
 		t.finish(item, errors.New(lastSentence(string(out))))
 		return

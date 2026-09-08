@@ -30,10 +30,46 @@ linters:
 
   settings:
     misspell:
-      # Use US locale: third-party APIs we depend on (e.g. lipgloss.Color)
-      # are American-spelled, so a UK locale would generate hundreds of false
-      # positives we can't fix. Keep our own prose American to match.
+      # **US locale, and the project's own British prose spelled out below.**
+      #
+      # Neither locale describes this codebase and neither ever will. Under UK
+      # it flags `status.Signaled()` (the standard library's), `systemd-analyze`
+      # (a tool's name), and `armor`, `fiber`, `rumor`, `savory` — words in the
+      # *fingerprint wordlist*, which is data shared with the Rust side and can
+      # never change without changing what every device is called. Under US it
+      # flags the prose, which is British throughout: the design system, the
+      # ADRs, every comment in this tree.
+      #
+      # So: US, which leaves the data and the borrowed names alone, plus the
+      # British spellings this project uses on purpose. What is left is what
+      # misspell is actually for — a real typo — and the linter is green, which
+      # is the difference between a rule and a line people have learned to
+      # scroll past.
+      #
+      # `permissons` is in the list because it is deliberate: a test fixture
+      # for a JSON key that is *wrong*, checking that an unknown field is
+      # refused rather than ignored.
       locale: US
+      ignore-rules:
+        - behaviour
+        - cancelled
+        - defence
+        - dialled
+        - dialling
+        - honour
+        - honoured
+        - honouring
+        - maximise
+        - maximised
+        - minimise
+        - minimised
+        - misspelt
+        - permissons
+        - randomises
+        - recognise
+        - sanitised
+        - serialised
+        - unauthorised
 
     revive:
       # Note: the `exported` rule (requires godoc on every exported symbol)

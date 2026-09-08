@@ -176,7 +176,9 @@ func handTo(home, route string) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	// The socket is the whole of what this function owns, and its close
+	// can only fail for a peer that has already gone.
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	_, err = conn.Write([]byte(route + "\n"))
 	return err

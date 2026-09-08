@@ -69,7 +69,9 @@ func whoIsThere(addr string, token server.Token) occupant {
 	if err != nil {
 		return stranger
 	}
-	defer answer.Body.Close()
+	// Closing a body this function has finished reading fails only if the
+	// connection was already gone, which is what it is about to report.
+	defer func() { _ = answer.Body.Close() }()
 	if answer.StatusCode == http.StatusOK {
 		return ours
 	}

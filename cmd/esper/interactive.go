@@ -94,15 +94,15 @@ func interactive(in io.Reader, out io.Writer) (run []string, handled bool) {
 		return nil, false
 	}
 
-	fmt.Fprint(out, listing(paired))
+	say(out, listing(paired))
 	reader := bufio.NewReader(in)
 	for {
-		fmt.Fprintf(out, "\n  1–%d to connect · p to pair · q to quit: ", len(paired))
+		sayf(out, "\n  1–%d to connect · p to pair · q to quit: ", len(paired))
 		line, err := reader.ReadString('\n')
 		if err != nil && line == "" {
 			// The terminal went away mid-question, which is an ordinary way
 			// for this to end: somebody pressed Ctrl-D.
-			fmt.Fprintln(out)
+			say(out, "\n")
 			return nil, true
 		}
 		switch answer := strings.ToLower(strings.TrimSpace(line)); answer {
@@ -116,16 +116,33 @@ func interactive(in io.Reader, out io.Writer) (run []string, handled bool) {
 		default:
 			n, err := strconv.Atoi(answer)
 			if err != nil || n < 1 || n > len(paired) {
-				fmt.Fprintf(out, "  %q is not one of them.\n", answer)
+				sayf(out, "  %q is not one of them.\n", answer)
 				continue
 			}
 			// By name rather than by number: what is run is a command somebody
 			// could have typed, and the next thing they type will be that.
 			name := paired[n-1].Name
-			fmt.Fprintf(out, "\n  esper connect %s\n\n", name)
+			sayf(out, "\n  esper connect %s\n\n", name)
 			return []string{"connect", name}, true
 		}
 	}
+}
+
+/*
+say writes to the terminal, and has nothing to do when it cannot.
+
+`fmt.Fprintf`'s error here is a terminal that has gone away mid-question —
+somebody closed the window, or the pipe on the other end of a `script` ended.
+There is nothing to report and nowhere to report it, and the loop finds out
+anyway on its next read. Named so that is a decision rather than an ignored
+return value.
+*/
+func say(out io.Writer, text string) {
+	_, _ = io.WriteString(out, text)
+}
+
+func sayf(out io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(out, format, args...)
 }
 
 // listing is the machines, as a person reads them.
@@ -144,7 +161,7 @@ func listing(paired []devices.Device) string {
 		}
 		// The fingerprint under the name, because two machines may share a
 		// name and the key is what decides which one this is.
-		b.WriteString(fmt.Sprintf("    %d  %-24s %s\n", i+1, name, d.PublicKey.String()[:16]))
+		fmt.Fprintf(&b, "    %d  %-24s %s\n", i+1, name, d.PublicKey.String()[:16])
 	}
 	return b.String()
 }

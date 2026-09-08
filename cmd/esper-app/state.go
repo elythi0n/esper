@@ -114,10 +114,12 @@ func onAScreen(ctx context.Context, state windowState) bool {
 	}
 	sizes := make([]screenSize, 0, len(screens))
 	for _, s := range screens {
+		// `Size` is where Wails keeps this now. The flat `Width`/`Height` pair
+		// it replaced was read here as a fallback — for a Wails older than the
+		// one this builds against, which cannot happen: the version is pinned
+		// in go.mod. Reading a deprecated field for a case the build cannot
+		// produce is a field that gets removed from under us for no benefit.
 		w, h := s.Size.Width, s.Size.Height
-		if w == 0 || h == 0 {
-			w, h = s.Width, s.Height
-		}
 		sizes = append(sizes, screenSize{Width: w, Height: h})
 	}
 	return withinScreens(state, sizes)

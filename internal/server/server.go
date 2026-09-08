@@ -323,7 +323,7 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 //
 // A 501 rather than a 404 when this control plane does not own the engine:
 // the route exists, and the honest answer is that this process cannot do it.
-func (s *Server) restartEngine(w http.ResponseWriter, r *http.Request) {
+func (s *Server) restartEngine(w http.ResponseWriter, _ *http.Request) {
 	restarts, ok := s.engine.(Restarter)
 	if !ok {
 		http.Error(w,

@@ -68,7 +68,9 @@ func proxyToAPI(addr string, token server.Token) (http.Handler, error) {
 				return nil
 			}
 			said := "Another Esper is answering on " + addr + " and it does not take this machine's token."
-			answer.Body.Close()
+			// Replaced below, so the only thing this close can fail at is a
+			// body that was already finished with.
+			_ = answer.Body.Close()
 			answer.Body = io.NopCloser(strings.NewReader(said))
 			answer.ContentLength = int64(len(said))
 			answer.Header.Set("Content-Type", "text/plain; charset=utf-8")
