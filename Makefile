@@ -506,6 +506,17 @@ check-wayland:
 ## ~188,000 lines. A format you write yourself agrees with itself by
 ## construction, so it is asked the same questions as `dbus-send` on a real
 ## session bus. Needs docker.
+## What an idle screen costs, which is most of most sessions
+##
+## Every other measurement in this tree drives a pattern that changes on every
+## frame, so the one thing the capture path is most optimised for was the one
+## thing never measured. Paints a still on a display of its own and asks what a
+## session of it costs.
+.PHONY: bench-idle
+bench-idle:
+	@./scripts/bench-idle.sh 3840x2160 20
+	@./scripts/bench-idle.sh 1920x1080 20
+
 ## The half of the portal conversation a container cannot reach
 ##
 ## After `build`, because its last four checks drive the engine itself — a
