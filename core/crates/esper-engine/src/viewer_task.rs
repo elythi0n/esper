@@ -312,6 +312,22 @@ impl Viewer {
         }
     }
 
+    /// What the link is doing, for the window's own readout.
+    ///
+    /// A window sees pictures arriving on a socket on its own machine; the
+    /// whole of the session is on the other side of that, so every number
+    /// here is one it cannot work out for itself — including the one with a
+    /// privacy consequence, which is whether the bytes are crossing a machine
+    /// that is not an endpoint.
+    pub fn link(&mut self, real: bool, degraded: bool, tier: u8, rtt_ms: u16, kbps: u32) {
+        if self.gone {
+            return;
+        }
+        if let Err(e) = self.stream.link(real, degraded, tier, rtt_ms, kbps) {
+            self.stop(&e);
+        }
+    }
+
     /// The window went away. Said once, and never again.
     ///
     /// Not an error the session ends on: a viewer closing its window is an

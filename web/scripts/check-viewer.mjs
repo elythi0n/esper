@@ -928,6 +928,22 @@ if (surface) {
       held to doing what it was told.
     */
     const pointer = surface.pointer ?? {};
+    /*
+      **A session with no peer says nothing about a path it does not have.**
+
+      The loopback reports `real: false` — no round trip, no cost, no tier —
+      and the honest rendering of that is nothing at all. A panel of zeroes, or
+      a badge saying "Direct" about a session with no far end, is a readout
+      that teaches people to stop reading the one fact on it that matters:
+      whether the bytes are crossing a machine that is not an endpoint.
+    */
+    if (surface.stats) {
+      findings.push("the session drew its readouts panel on a session with no path to report");
+    }
+    if (surface.tierBadge) {
+      findings.push("the session claimed a path — the badge says how a far machine was reached, and there is no far machine");
+    }
+
     // Nothing was given up on a loopback with no link, so the readout that
     // says what was given up is *not there*. An indicator that is always on
     // says nothing at all.
@@ -1105,6 +1121,11 @@ if (surface) {
     if (surface.cameBackMs === null) {
       findings.push("a new engine started and the picture never came back, so the reconnect is not automatic");
     }
+    console.log(
+      `    path: the engine said ${JSON.stringify(surface.pathSaid)}, ` +
+        `readouts ${surface.stats ? "drawn" : "not drawn"}, ` +
+        `tier badge ${surface.tierBadge ? "drawn" : "not drawn"}`,
+    );
     console.log(
       `    pointer: worn as a ${surface.shapeSize ?? "16x16"} shape with its hotspot, ` +
         `and drawn over the picture, following the engine's position`,

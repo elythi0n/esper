@@ -369,6 +369,24 @@ pub fn run(o: &Options) -> Result<(), String> {
                         // to be short of anything.
                         (0, 0),
                     );
+                    /*
+                        And a link record that says there is no link.
+
+                        Said rather than left out. A window with no record at
+                        all cannot tell "this session has not reported yet"
+                        from "this session has nothing to report", and the
+                        first of those is a readout somebody waits for. The
+                        flag is clear and every number is zero, which is the
+                        honest description of a loopback: no peer, no path, no
+                        round trip.
+                    */
+                    window.link(
+                        false,
+                        false,
+                        esper_media::viewer_stream::tier::UNKNOWN,
+                        0,
+                        0,
+                    );
                     Some(window)
                 }
                 Err(e) => {

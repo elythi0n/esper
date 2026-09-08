@@ -296,6 +296,18 @@ const report = (r: unknown) =>
     const onItsWay = box.querySelector("[data-transfers]");
     seen.transfers = onItsWay ? (onItsWay.textContent ?? "").replace(/\s+/g, " ").trim() : "";
 
+    // The readouts panel, which on a loopback is *not there*: a session with
+    // no peer has no round trip, no cost and no path, and a panel of zeroes is
+    // a panel that teaches people to stop reading it.
+    seen.stats = box.querySelector("[data-stats]") !== null;
+    // What the engine actually said about the path, so a check that finds no
+    // panel can tell "the window did not draw one" from "there was nothing to
+    // draw".
+    seen.pathSaid = (window as unknown as { __esperPath?: unknown }).__esperPath ?? null;
+    seen.tierBadge = (box.textContent ?? "").includes("On this network") ||
+      (box.textContent ?? "").includes("Relayed") ||
+      (box.textContent ?? "").includes("Direct");
+
     // What the HUD says was given up, which on a loopback is nothing at all.
     const gave = box.querySelector("[data-narrowed]");
     seen.narrowed = gave ? (gave.textContent ?? "").trim() : null;

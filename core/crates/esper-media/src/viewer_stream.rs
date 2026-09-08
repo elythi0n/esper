@@ -55,6 +55,16 @@
 //!                                this person's hand, so the window has to
 //!                                show where it is
 //!     x i32, y i32         where it is, in picture pixels
+//!   kind 6, link:
+//!     flags u8             bit 0 the numbers are real; clear means there is
+//!                                no peer, as on a loopback
+//!                          bit 1 something has been given up — software
+//!                                encode, heavy loss, a queue
+//!     tier  u8             0 unknown, 1 this network, 2 a private network,
+//!                          3 direct, 4 relayed
+//!     rtt   u16            milliseconds, the round trip with nothing queued
+//!     kbps  u32            what the session is costing, as the controller
+//!                          measures it
 //!   kind 5, pointer shape:
 //!     flags u8             bit 0 there is an image; 0 means hidden
 //!     hot_x u16, hot_y u16
@@ -157,7 +167,35 @@ pub mod record {
     pub const POINTER: u8 = 4;
     /// What the host's pointer looks like. Sent on change, never on a move.
     pub const POINTER_SHAPE: u8 = 5;
+    /// What the link is doing: how it was reached, and what it costs.
+    pub const LINK: u8 = 6;
 }
+
+/// How a session reached the far machine, as a window says it.
+///
+/// **Not the engine's own five rungs.** Those answer "which rung found it" —
+/// given, heard, remembered, overlay, introduced — and a window is answering a
+/// different question: what the path *is*, and above all whether bytes cross a
+/// machine that is not an endpoint. A person is entitled to see that without
+/// looking for it.
+pub mod tier {
+    /// Nothing has been established. A loopback, or a session before its first
+    /// report.
+    pub const UNKNOWN: u8 = 0;
+    /// Found and reached on this network.
+    pub const LAN: u8 = 1;
+    /// Over a network the person already runs — WireGuard, Tailscale.
+    pub const PRIVATE: u8 = 2;
+    /// Straight there.
+    pub const DIRECT: u8 = 3;
+    /// Through a machine that is not an endpoint.
+    pub const RELAYED: u8 = 4;
+}
+
+/// Set when the numbers in a link record are measurements rather than zeroes.
+pub const FLAG_HAS_LINK: u8 = 0b0000_0001;
+/// Set when something has been given up to keep the session going.
+pub const FLAG_DEGRADED: u8 = 0b0000_0010;
 
 /// Set on a picture a decoder can begin at.
 pub const FLAG_KEYFRAME: u8 = 0b0000_0001;
@@ -371,6 +409,34 @@ impl<W: Write> Writer<W> {
         body.extend_from_slice(&len.to_be_bytes());
         body.extend_from_slice(rgba.get(..len as usize).unwrap_or_default());
         self.record(record::POINTER_SHAPE, &body)
+    }
+
+    /// What the link is doing: how it was reached, and what it costs.
+    ///
+    /// Sent about once a second. A window cannot work any of this out for
+    /// itself — it sees pictures arriving on a socket on its own machine, and
+    /// the whole of the session is on the other side of that.
+    pub fn link(
+        &mut self,
+        real: bool,
+        degraded: bool,
+        tier: u8,
+        rtt_ms: u16,
+        kbps: u32,
+    ) -> io::Result<()> {
+        let mut flags = 0;
+        if real {
+            flags |= FLAG_HAS_LINK;
+        }
+        if degraded {
+            flags |= FLAG_DEGRADED;
+        }
+        let mut body = Vec::with_capacity(8);
+        body.push(flags);
+        body.push(tier);
+        body.extend_from_slice(&rtt_ms.to_be_bytes());
+        body.extend_from_slice(&kbps.to_be_bytes());
+        self.record(record::LINK, &body)
     }
 
     /// The writer's sink, for a caller that has to close it.

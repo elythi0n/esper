@@ -1,6 +1,8 @@
 import { Maximize2, Minimize2, Monitor, MousePointer2, MousePointerBan, Ratio, Settings2, TrendingDown } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/button";
+import { TierBadge } from "@/components/badge";
+import { SessionHUD } from "@/components/hud";
 import { MenuUnder, type MenuAction } from "@/components/menu";
 import { Tooltip } from "@/components/tooltip";
 import { Figure } from "@/screens/parts";
@@ -338,6 +340,39 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
       )}
 
       {/*
+        **The readouts, in the corner, as the design system drew them.**
+
+        A panel rather than more numbers on the bar: `SessionHUD` was built in
+        Phase 10 for exactly this and reached no screen, so this window grew a
+        smaller readout of its own and the design ended up with two versions of
+        one thing. It goes with the chrome, because it is over somebody's
+        desktop and the rule about chrome over a desktop is not about which
+        element it is.
+
+        Only where there is something to say: a loopback reports no path, and a
+        panel of zeroes teaches people to stop reading it.
+      */}
+      {picture.path?.real && (
+        <div
+          data-stats=""
+          className="absolute bottom-[calc(var(--topbar-h)+0.75rem)] left-3 z-[var(--z-session-hud)]"
+        >
+          <SessionHUD
+            className="bg-surface-0/90"
+            stats={{
+              rttMs: picture.path.rttMs,
+              bitrateKbps: picture.path.kbps,
+              fps: picture.fps,
+              encoder: picture.codec ?? "—",
+              tier: picture.path.tier === "unknown" ? "direct" : picture.path.tier,
+              degraded: picture.path.degraded,
+              ...(picture.hopMs === null ? {} : { hopMs: picture.hopMs }),
+            }}
+          />
+        </div>
+      )}
+
+      {/*
         The HUD, over the picture, retracting — the design system's own chrome
         rather than a second implementation of it. It was one: the same timer,
         the same transition and the same hidden state were written again here,
@@ -354,6 +389,16 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
           picture took to get from the engine onto it. Tabular and still, like
           every other readout in this product.
         */}
+        {/*
+          How the far machine was reached, which is the one fact on this bar
+          with a privacy consequence: `relayed` means the bytes cross a machine
+          that is not an endpoint, and a person is entitled to see that without
+          looking for it. Not drawn until the engine has said — an unknown
+          badge on every session would teach people to ignore it.
+        */}
+        {picture.path?.real && picture.path.tier !== "unknown" && (
+          <TierBadge tier={picture.path.tier} degraded={picture.path.degraded} className="shrink-0" />
+        )}
         {picture.pictures > 0 && (
           <span className="flex shrink-0 items-center gap-3 text-xs text-text-3">
             <Figure value={picture.fps} unit="fps" className="text-xs" />

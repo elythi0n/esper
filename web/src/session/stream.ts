@@ -26,11 +26,26 @@ const PICTURE = 2;
 const SESSION = 3;
 const POINTER = 4;
 const POINTER_SHAPE = 5;
+const LINK = 6;
 const FLAG_KEYFRAME = 0b0000_0001;
 const FLAG_PRIMARY = 0b0000_0001;
 const FLAG_IN_PICTURE = 0b0000_0001;
 const FLAG_DRAW_POINTER = 0b0000_0010;
 const FLAG_HAS_IMAGE = 0b0000_0001;
+const FLAG_HAS_LINK = 0b0000_0001;
+const FLAG_DEGRADED = 0b0000_0010;
+
+/**
+ * How a session reached the far machine, as a person reads it.
+ *
+ * The engine has five rungs and they answer a different question — which one
+ * *found* the machine. This is what the path is, and the one that matters is
+ * `relayed`: bytes crossing a machine that is not an endpoint is the fact a
+ * person is entitled to see without looking for it.
+ */
+export type LinkTier = "unknown" | "lan" | "private" | "direct" | "relayed";
+
+const TIERS: readonly LinkTier[] = ["unknown", "lan", "private", "direct", "relayed"];
 
 /** Configure the decoder: a new size, codec or parameter set. */
 export interface Configuration {
@@ -133,6 +148,23 @@ export interface PointerShape {
   image: { width: number; height: number; hotX: number; hotY: number; rgba: Uint8Array } | null;
 }
 
+/**
+ * What the link is doing: how it was reached, and what it costs.
+ *
+ * `real` is false on a session with no peer — a loopback — where every number
+ * is zero and saying so is the point: a window with no record at all cannot
+ * tell "has not reported yet" from "has nothing to report", and the first of
+ * those is a readout somebody waits for.
+ */
+export interface Link {
+  kind: "link";
+  real: boolean;
+  degraded: boolean;
+  tier: LinkTier;
+  rttMs: number;
+  kbps: number;
+}
+
 /** A record from a version that knows more than this reader does. */
 export interface Unknown {
   kind: "unknown";
@@ -140,7 +172,7 @@ export interface Unknown {
   record: number;
 }
 
-export type Record = Configuration | Picture | SessionRecord | Pointer | PointerShape | Unknown;
+export type Record = Configuration | Picture | SessionRecord | Pointer | PointerShape | Link | Unknown;
 
 export class StreamError extends Error {}
 
@@ -315,6 +347,23 @@ export async function* readViewerStream(
           // Copied, not a view: the buffer it came from is reused, and the
           // pixels outlive this turn — they become an image the surface wears.
           image: { width, height, hotX, hotY, rgba: new Uint8Array(body.subarray(13, 13 + bytes)) },
+        };
+        continue;
+      }
+
+      if (kind === LINK) {
+        const fixed = view(body);
+        const flags = fixed.getUint8(0);
+        yield {
+          kind: "link",
+          real: (flags & FLAG_HAS_LINK) !== 0,
+          degraded: (flags & FLAG_DEGRADED) !== 0,
+          // A tier this reader does not know reads as unknown rather than as
+          // the nearest one it does: guessing here would be guessing about
+          // whether somebody's bytes are crossing a third machine.
+          tier: TIERS[fixed.getUint8(1)] ?? "unknown",
+          rttMs: fixed.getUint16(2),
+          kbps: fixed.getUint32(4),
         };
         continue;
       }

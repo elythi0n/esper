@@ -2512,6 +2512,15 @@ def drain():
             if len(buf) < 5 + length:
                 break
             seen["kinds"][kind] = seen["kinds"].get(kind, 0) + 1
+            if kind == 6 and length >= 8:
+                body = buf[5 : 5 + length]
+                seen["link"] = {
+                    "real": bool(body[0] & 1),
+                    "degraded": bool(body[0] & 2),
+                    "tier": body[1],
+                    "rtt": int.from_bytes(body[2:4], "big"),
+                    "kbps": int.from_bytes(body[4:8], "big"),
+                }
             buf = buf[5 + length :]
 
 
@@ -2550,6 +2559,7 @@ time.sleep(20)
 # The last word, and the one the check reads: what kinds of record a real
 # session sent this window.
 print("records %s" % sorted(seen["kinds"].items()), flush=True)
+print("link %s" % seen.get("link"), flush=True)
 WINDOW
           wd_win=$!
           DISPLAY=":$wd_d" xev -root -event keyboard > "$term_b/xev.log" 2>&1 &
@@ -2668,6 +2678,27 @@ WINDOW
             printf '  ✗ the window got no pointer from the host: %s\n' "${got:-nothing}"
             fail=1
           fi
+          # **And what the link is doing, which a window cannot work out.**
+          #
+          # A window sees pictures arriving on a socket on its own machine; the
+          # round trip, what the session costs, and — the one with a privacy
+          # consequence — whether the bytes cross a machine that is not an
+          # endpoint are all on the other side of that socket. The command line
+          # has printed them since Phase 8 and the window could say none of it.
+          #
+          # Reached by address on this machine, so the honest answer is
+          # `direct`: tier 3. A relayed session would be 4, and the badge
+          # exists so that one cannot be missed.
+          said_link=$( { grep -m1 '^link ' "$term_b/window-socket.log" 2>/dev/null || true; } )
+          if printf '%s' "$said_link" | grep -q "'real': True" &&
+            printf '%s' "$said_link" | grep -q "'tier': 3"; then
+            printf '  ✓ and the window was told what the path is: %s\n' \
+              "$(printf '%s' "$said_link" | sed 's/^link //')"
+          else
+            printf '  ✗ the window was not told what the path is: %s\n' "${said_link:-nothing}"
+            fail=1
+          fi
+
           kill "$wd_client" "$wd_win" 2>/dev/null || true
           wait "$wd_client" 2>/dev/null || true
           kill "$wd_xev" 2>/dev/null || true

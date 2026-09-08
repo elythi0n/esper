@@ -17,7 +17,7 @@
  * canvas also gives the session what a remote desktop needs and a media
  * element fights — no buffering, no smoothing, no catch-up after a stall.
  */
-import { readViewerStream, type Configuration, type Screen } from "./stream";
+import { readViewerStream, type Configuration, type LinkTier, type Screen } from "./stream";
 
 /** What the picture path is doing, which the notice over the picture renders. */
 export type LinkState = "live" | "reconnecting" | "lost";
@@ -98,6 +98,21 @@ export interface ViewerState {
   pointer: { inPicture: boolean; draw: boolean; x: number; y: number } | null;
   cursor: { url: string; hotX: number; hotY: number } | null;
   /**
+   * What the *path* is doing, as the engine last said: how the far machine was
+   * reached, what the round trip is, and what the session costs.
+   *
+   * Named apart from `link` above, which is this window's own connection to
+   * its pictures. These are two different questions with two different
+   * answers — a session can be reconnecting on a path that is perfectly
+   * direct — and the command line has always kept them apart too.
+   *
+   * `null` until the engine has said anything at all, which is not the same as
+   * a session with nothing to report: a readout that conflated them would show
+   * "unknown" for a second at the start of every session and for ever on a
+   * loopback.
+   */
+  path: { real: boolean; degraded: boolean; tier: LinkTier; rttMs: number; kbps: number } | null;
+  /**
    * How many times the pictures have started arriving.
    *
    * One per *connection*, not per configuration — a parameter-set change
@@ -129,6 +144,7 @@ export const IDLE: ViewerState = {
   askedLongEdge: 0,
   pointer: null,
   cursor: null,
+  path: null,
   connection: 0,
 };
 
@@ -351,6 +367,22 @@ export function showTheScreen(
             screens: record.screens,
             askedFps: record.askedFps,
             askedLongEdge: record.askedLongEdge,
+          });
+          continue;
+        }
+        if (record.kind === "link") {
+          // Left where a check can read it: a gate that finds no readouts
+          // panel needs to tell a window that drew nothing from a session that
+          // had nothing to draw, and the record is the only thing that knows.
+          (globalThis as unknown as { __esperPath?: unknown }).__esperPath = record;
+          say({
+            path: {
+              real: record.real,
+              degraded: record.degraded,
+              tier: record.tier,
+              rttMs: record.rttMs,
+              kbps: record.kbps,
+            },
           });
           continue;
         }

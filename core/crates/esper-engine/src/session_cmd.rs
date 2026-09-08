@@ -5063,6 +5063,30 @@ fn sharpness_from_number(n: u8) -> Option<Option<Sharpness>> {
     }
 }
 
+/// How this session reached the far machine, as a window says it.
+///
+/// The engine's five rungs answer "which one found it"; a window is answering
+/// what the path *is*. The two that matter are the two a person would act on:
+/// a private network they already run, and **a machine that is not an
+/// endpoint**.
+///
+/// `Broker` maps to relayed, and that is a deliberate overstatement. A broker
+/// introduces two machines and the path *may* then be direct — the hole punch
+/// is written and, as the tracker says, untested, because two sockets on one
+/// host have no router between them. Until this end can prove the path became
+/// direct, saying "relayed" is wrong in the safe direction: the badge exists
+/// so that bytes crossing a third machine cannot be missed, and a claim of
+/// "direct" that turned out false is the one failure it must not have.
+const fn tier_number(tier: crate::ladder::Tier) -> u8 {
+    use esper_media::viewer_stream::tier as said;
+    match tier {
+        crate::ladder::Tier::Lan => said::LAN,
+        crate::ladder::Tier::Overlay => said::PRIVATE,
+        crate::ladder::Tier::Given | crate::ladder::Tier::Remembered => said::DIRECT,
+        crate::ladder::Tier::Broker => said::RELAYED,
+    }
+}
+
 /// What a ladder is asking the host for, as a window is told it.
 ///
 /// Zero for "nothing asked", which is the ordinary state of a link that is
@@ -5362,6 +5386,8 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
         // What a ladder was last asking for, so the window is told when it
         // moves rather than only when something else happens to announce.
         let mut last_asked = (0u16, 0u32);
+        // When the window was last told what the link is doing.
+        let mut said_link = Instant::now();
         let mut asked_for: Option<Vec<u32>> = None;
         // Which screens the picture is of, so a layout change can be told
         // apart from a switch — the host sends one message for both.
@@ -6085,6 +6111,42 @@ pub fn run_connect(o: &ConnectOptions) -> Result<(), String> {
                 it is watched rather than waited for — and sent only when it
                 moves, because this runs every turn of the loop.
             */
+            /*
+                **And what the link is doing**, about once a second.
+
+                A window sees pictures arriving on a socket on its own machine
+                and nothing else: the round trip, what the session costs and —
+                the one with a privacy consequence — whether the bytes are
+                crossing a machine that is not an endpoint are all on the other
+                side of that socket. The command line has printed them since
+                Phase 8 and the window could not say any of it.
+
+                On its own clock rather than with an announcement, and only
+                once a second: these are numbers a person reads, and a readout
+                that changed thirty times a second would be a readout nobody
+                can read.
+            */
+            if said_link.elapsed() >= Duration::from_secs(1)
+                && let Some(window) = viewer.as_mut()
+            {
+                said_link = Instant::now();
+                let carried = link.stats();
+                let path = link.transport();
+                let seconds = started.elapsed().as_secs_f64().max(0.001);
+                let kbps = ((carried.bytes as f64 * 8.0 / 1000.0) / seconds) as u32;
+                let rtt_ms = u16::try_from(path.rtt.as_millis()).unwrap_or(u16::MAX);
+                // Degraded is the ladders having taken something away, which
+                // is the same fact the HUD's other line reports.
+                let (fps_ask, edge_ask) = asked_of_the_host(&link);
+                window.link(
+                    true,
+                    fps_ask > 0 || edge_ask > 0,
+                    tier_number(tier),
+                    rtt_ms,
+                    kbps,
+                );
+            }
+
             let now_asked = asked_of_the_host(&link);
             if now_asked != last_asked {
                 last_asked = now_asked;
