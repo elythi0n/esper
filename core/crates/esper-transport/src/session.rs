@@ -561,21 +561,21 @@ impl Session {
         Ok(crate::Control::new(s, r))
     }
 
-    /// Open a reliable unidirectional bulk stream, for file transfer.
-    pub async fn open_bulk(&self) -> Result<quinn::SendStream, SessionError> {
-        self.conn
-            .open_uni()
-            .await
-            .map_err(|e| SessionError::Stream(e.to_string()))
-    }
+    /*
+        **There is deliberately no bulk-stream pair here.**
 
-    /// Accept a bulk stream the peer opened.
-    pub async fn accept_bulk(&self) -> Result<quinn::RecvStream, SessionError> {
-        self.conn
-            .accept_uni()
-            .await
-            .map_err(|e| SessionError::Stream(e.to_string()))
-    }
+        There was: `open_bulk` and `accept_bulk`, two lines each over quinn's
+        unidirectional streams, documented "for file transfer" — and the file
+        transfer went another way. `cp` opens a *control* stream of its own,
+        which is a separate QUIC stream and so carries no head-of-line cost,
+        and speaks the same framed messages as everything else rather than a
+        second wire format for one feature.
+
+        They were removed rather than left: this is the crate that carries the
+        security boundary, and a public API nothing uses is an invitation to
+        wire the next thing onto a path with no callers, no fixtures and no
+        checks behind it.
+    */
 
     /// A handle for sending and receiving media, detached from the session.
     ///

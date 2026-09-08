@@ -453,18 +453,12 @@ async fn control_streams_and_bulk_streams_both_work() {
             .send(&"on-a-second-stream".to_owned())
             .await
             .expect("send");
-        let (h, got) = extra.await.expect("join");
+        let (_h, got) = extra.await.expect("join");
         assert_eq!(got, "on-a-second-stream");
 
-        // Bulk: unidirectional, for file transfer.
-        let bulk = tokio::spawn(async move {
-            let mut recv = h.accept_bulk().await.expect("accept bulk");
-            recv.read_to_end(1024).await.expect("read bulk")
-        });
-        let mut out = c.open_bulk().await.expect("open bulk");
-        out.write_all(b"file-contents").await.expect("write");
-        out.finish().expect("finish");
-        assert_eq!(&bulk.await.expect("join")[..], b"file-contents");
+        // There was a bulk-stream leg here, for a file transfer that went
+        // another way: `cp` opens a control stream of its own. It went with
+        // the API it was testing — see the note in `session.rs`.
     })
     .await;
 }
