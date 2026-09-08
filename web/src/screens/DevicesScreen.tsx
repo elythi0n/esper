@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
 import { useDevices, useReachable, useStatus } from "@/api/hooks";
 import { PERMISSION_LABEL, PERMISSIONS, SENSITIVE, type Permission } from "@/api/permissions";
+import { readSchedule } from "@/api/schedule";
 import { pairingState, type Device } from "@/api/types";
 import { Button } from "@/components/button";
 import { Dialog, DialogContent, DialogFooter, DialogTrigger } from "@/components/dialog";
@@ -43,14 +44,34 @@ function whenShort(unix: number): string {
   });
 }
 
-/** What a device may do, as fourteen lamps rather than fourteen sentences. */
-function Permissions({ held, onChange }: { held: readonly Permission[]; onChange?: ((p: Permission, on: boolean) => void) | undefined }) {
+/**
+ * What a device may do, as fourteen lamps rather than fourteen sentences.
+ *
+ * `when` is the bound on `unattended`, which is the one permission that can
+ * have one: a device allowed to walk in only during office hours is a
+ * different device from one allowed in at three in the morning, and a lamp
+ * that said the same for both **overstates** what most of them may do. That is
+ * the one direction a screen about trust must never be wrong in.
+ */
+function Permissions({
+  held,
+  when,
+  onChange,
+}: {
+  held: readonly Permission[];
+  when?: string | undefined;
+  onChange?: ((p: Permission, on: boolean) => void) | undefined;
+}) {
+  const hours = readSchedule(when);
   return (
     <div className="flex flex-col gap-1">
       {PERMISSIONS.map((p) => {
         const on = held.includes(p);
         const locked = SENSITIVE.has(p);
         const label = PERMISSION_LABEL[p];
+        // Said beside the permission it bounds, not in a corner of the panel:
+        // the two are one fact.
+        const bound = p === "unattended" && on && hours;
         return (
           <button
             key={p}
@@ -68,6 +89,11 @@ function Permissions({ held, onChange }: { held: readonly Permission[]; onChange
           >
             <Lamp state={on ? (locked ? "warn" : "ok") : "off"} className="gap-2">
               <span className="truncate">{label}</span>
+              {bound && (
+                <span data-bounded="" className="shrink-0 text-text-3">
+                  {hours}
+                </span>
+              )}
             </Lamp>
           </button>
         );
@@ -164,7 +190,7 @@ function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onC
 
       <Fact label="May">
         <div className={cn("mt-1", busy && "opacity-60")}>
-          <Permissions held={device.permissions} onChange={change} />
+          <Permissions held={device.permissions} when={device.unattended_when} onChange={change} />
         </div>
       </Fact>
 

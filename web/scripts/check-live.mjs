@@ -79,8 +79,12 @@ const send = (method, params = {}) =>
     pending.set(i, (m) => (m?.gone ? reject(new Error("the browser went away")) : resolve(m)));
     ws.send(JSON.stringify({ id: i, method, params }));
   });
+// `awaitPromise` so an expression may be `async`. Without it a promise comes
+// back as an object with no value, which reads as an empty page rather than as
+// "this check does not know how to wait".
 const evaluate = async (expression) =>
-  (await send("Runtime.evaluate", { expression, returnByValue: true })).result?.result?.value;
+  (await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result?.result
+    ?.value;
 
 const findings = [];
 const rows = [];
@@ -306,6 +310,73 @@ try {
     await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
     await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
     await sleep(300);
+  }
+
+  /*
+    **A bounded permission does not read as an unbounded one.**
+
+    `unattended` is the permission that removes the question — a device holding
+    it walks in with nobody at the host being asked — and it can be bounded to
+    hours. The screen showed one lamp for both, which overstates what most such
+    devices may do, and overstating a permission is the one direction a screen
+    about trust must never be wrong in.
+
+    Driven on the real Devices screen against the rig's own store, where one
+    device has held `weekdays 09:00-17:00` all along with nothing showing it.
+  */
+  const bounded = await evaluate(`(async () => {
+    if (!location.hash.startsWith("#/devices")) {
+      location.hash = "#/devices";
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    // The row for the device the fixture bounds, opened the way a person opens
+    // it: the bound is in the panel beside the list, which is where what a
+    // device may do is said.
+    // The row's name is inside a button, which is what carries the selection —
+    // see device-row.tsx. Matching on the button rather than on anything
+    // that contains the word means this clicks the thing a person clicks.
+    // Waited for rather than assumed: the list arrives from the control plane,
+    // and a probe that looked while one row was on the page would report a
+    // missing device as a missing feature.
+    const rowFor = (name) =>
+      [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim().startsWith(name));
+    let row = null;
+    for (let waited = 0; waited < 8000; waited += 200) {
+      row = rowFor("rack");
+      if (row) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (!row) {
+      return JSON.stringify({
+        why: "no row for the device the fixture bounds",
+        saw: [...document.querySelectorAll("button")].slice(0, 12).map((b) => (b.textContent || "").trim().slice(0, 40)),
+      });
+    }
+    row.click();
+    await new Promise((r) => setTimeout(r, 700));
+    const bound = document.querySelector("[data-bounded]");
+    const unattended = [...document.querySelectorAll("*")].find(
+      (el) => el.children.length === 0 && /Connect unasked/.test(el.textContent || ""),
+    );
+    return JSON.stringify({
+      said: bound ? (bound.textContent || "").trim() : null,
+      hasUnattended: Boolean(unattended),
+    });
+  })()`);
+  {
+    const seen = JSON.parse(bounded ?? "{}");
+    if (seen.why) {
+      findings.push(`${seen.why}${seen.saw ? ` — the buttons on the page were ${JSON.stringify(seen.saw)}` : ""}`);
+    } else if (!seen.hasUnattended) {
+      findings.push("the device panel never showed the unattended permission, so its bound is unmeasured");
+    } else if (!seen.said) {
+      findings.push(
+        "a device whose unattended access is bounded to weekday hours reads the same as one that may " +
+          "walk in at three in the morning — the screen overstates what it may do",
+      );
+    } else if (!/09:00/.test(seen.said) || !/Weekdays/i.test(seen.said)) {
+      findings.push(`the bound reads ${JSON.stringify(seen.said)}, and the store says weekdays 09:00-17:00`);
+    }
   }
 
   // ── 3. The wordmark's letters are in five places ───────────────────────

@@ -40,6 +40,7 @@ import { readViewerStream } from "../src/session/stream.ts";
 import { FIT_CLASS, FITS, inPicture, placement } from "../src/session/fitting.ts";
 import { askState, narrowing } from "../src/session/narrowing.ts";
 import { checklist, stepsFor } from "../src/screens/permissions.ts";
+import { readSchedule } from "../src/api/schedule.ts";
 import { readFileSync } from "node:fs";
 
 const findings = [];
@@ -370,6 +371,37 @@ try {
   // screen: an ask for one of them has not been met while the picture is
   // still of both.
   is(askState(1, [0, 1], false), "asking", "one of two is not the one asked for");
+}
+
+/*
+  When a device may walk in, as a screen says it.
+
+  `unattended` is the permission that removes the question, and it can be
+  bounded. A screen that showed the same lamp for "may walk in at three in the
+  morning" and "may walk in on weekday afternoons" **overstates** most of them,
+  which is the one direction a screen about trust must never be wrong in.
+
+  Nothing here re-derives the engine's rule: what is checked is that what the
+  engine stored is read back as the same thing, and that the two answers a
+  person must not confuse — no bound, and a window through midnight — are not
+  the same sentence.
+*/
+{
+  is(readSchedule(undefined), null, "no schedule is no sentence");
+  is(readSchedule(""), null, "and neither is an empty one");
+  // `always` is what the engine writes for an unbounded grant, and the lamp
+  // being on already says it.
+  is(readSchedule("always"), null, "always is what the lamp already says");
+  is(readSchedule("weekdays 08:00-18:00"), "Weekdays 08:00–18:00", "office hours");
+  is(readSchedule("weekends 10:00-23:00"), "Weekends 10:00–23:00", "the other half of a week");
+  is(readSchedule("mon,wed,fri 09:00-17:00"), "Mon, Wed, Fri 09:00–17:00", "named days");
+  // Eight hours, not sixteen: a window whose end is at or before its start
+  // runs through midnight, and a reader who takes it for an ordinary range
+  // has it backwards.
+  is(readSchedule("daily 22:00-06:00"), "Every day 22:00–06:00 (overnight)", "through midnight");
+  is(readSchedule("daily 08:00-18:00"), "Every day 08:00–18:00", "and a day that does not");
+  // Seven named days is every day, however it was written.
+  is(readSchedule("mon,tue,wed,thu,fri,sat,sun 0-24"), "Every day 0–24", "all seven is every day");
 }
 
 /*
