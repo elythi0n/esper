@@ -2,7 +2,8 @@ import { ArrowRight, Infinity, MonitorSmartphone, Plus, SlidersHorizontal, Trash
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
 import { useDevices, useReachable, useStatus } from "@/api/hooks";
-import { PERMISSION_LABEL, PERMISSIONS, SENSITIVE, type Permission } from "@/api/permissions";
+import { PERMISSIONS, type Permission } from "@/api/permissions";
+import { heldFrom, PermissionGrid } from "@/components/permission-grid";
 import { asWhen, asWindow, readSchedule, type Window } from "@/api/schedule";
 import { ScheduleInput } from "@/components/form-controls";
 import { pairingState, type Device } from "@/api/types";
@@ -11,7 +12,6 @@ import { Dialog, DialogContent, DialogFooter, DialogTrigger } from "@/components
 import { CopyField } from "@/components/copy-field";
 import { DeviceRow } from "@/components/device-row";
 import { Identicon } from "@/components/identicon";
-import { Lamp } from "@/components/lamp";
 import type { MenuAction } from "@/components/menu";
 import { EmptyState, Skeleton } from "@/components/states";
 import { PermissionChecklist } from "@/screens/PermissionChecklist";
@@ -43,64 +43,6 @@ function whenShort(unix: number): string {
   return new Date(unix * 1000).toLocaleString(undefined, {
     day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
   });
-}
-
-/**
- * What a device may do, as fourteen lamps rather than fourteen sentences.
- *
- * `when` is the bound on `unattended`, which is the one permission that can
- * have one: a device allowed to walk in only during office hours is a
- * different device from one allowed in at three in the morning, and a lamp
- * that said the same for both **overstates** what most of them may do. That is
- * the one direction a screen about trust must never be wrong in.
- */
-function Permissions({
-  held,
-  when,
-  onChange,
-}: {
-  held: readonly Permission[];
-  when?: string | undefined;
-  onChange?: ((p: Permission, on: boolean) => void) | undefined;
-}) {
-  const hours = readSchedule(when);
-  return (
-    <div className="flex flex-col gap-1">
-      {PERMISSIONS.map((p) => {
-        const on = held.includes(p);
-        const locked = SENSITIVE.has(p);
-        const label = PERMISSION_LABEL[p];
-        // Said beside the permission it bounds, not in a corner of the panel:
-        // the two are one fact.
-        const bound = p === "unattended" && on && hours;
-        return (
-          <button
-            key={p}
-            type="button"
-            disabled={!onChange || locked}
-            title={locked ? "Only somebody at that machine can grant this" : undefined}
-            onClick={() => onChange?.(p, !on)}
-            className={cn(
-              "flex items-center gap-2 text-left text-xs",
-              "transition-[color] duration-[var(--dur-fast)]",
-              on ? "text-text" : "text-text-3",
-              onChange && !locked && "cursor-pointer hover:text-text",
-              !onChange || locked ? "cursor-default" : "",
-            )}
-          >
-            <Lamp state={on ? (locked ? "warn" : "ok") : "off"} className="gap-2">
-              <span className="truncate">{label}</span>
-              {bound && (
-                <span data-bounded="" className="shrink-0 text-text-3">
-                  {hours}
-                </span>
-              )}
-            </Lamp>
-          </button>
-        );
-      })}
-    </div>
-  );
 }
 
 function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onClose: () => void; onChanged: () => void; onConnect: () => void }) {
@@ -222,7 +164,32 @@ function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onC
 
       <Fact label="May">
         <div className={cn("mt-1", busy && "opacity-60")}>
-          <Permissions held={device.permissions} when={device.unattended_when} onChange={change} />
+          {/*
+            **The design system's own grid**, not a second version of it.
+
+            This screen had fourteen lamps of its own, with the "granted at the
+            machine" rule in a `title` — invisible on a touchscreen and to
+            anybody who does not hover. `PermissionGrid` was built in Phase 10
+            for exactly this list, says "at the host" in words, and switches
+            what a lamp could only be clicked. It reached no screen until now.
+          */}
+          <PermissionGrid
+            value={heldFrom(device.permissions)}
+            when={device.unattended_when}
+            disabled={busy}
+            onChange={(next) => {
+              // The grid answers with the whole set; this screen grants and
+              // revokes one at a time, because that is what the API does and
+              // what the trail records.
+              for (const p of PERMISSIONS) {
+                const had = device.permissions.includes(p);
+                if (had !== next.has(p)) {
+                  void change(p, !had);
+                  return;
+                }
+              }
+            }}
+          />
 
           {/*
             And the hours, for a device that may walk in at all. The control

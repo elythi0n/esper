@@ -1,6 +1,7 @@
 import { Switch } from "./switch";
 import { cn } from "@/lib/cn";
 import { PERMISSIONS, PERMISSION_LABEL, SENSITIVE, type Permission } from "@/api/permissions";
+import { readSchedule } from "@/api/schedule";
 
 export type Held = ReadonlySet<Permission>;
 
@@ -8,6 +9,15 @@ export interface PermissionGridProps {
   value: Held;
   onChange: (next: Held) => void;
   disabled?: boolean | undefined;
+  /**
+   * When `unattended` applies, said beside the switch it bounds.
+   *
+   * `unattended` is the one permission here that can be bounded to hours, and
+   * a row that read the same for "may walk in on weekday afternoons" and "may
+   * walk in at three in the morning" **overstates** what most devices holding
+   * it may do. Absent means no bound, which is what a bare grant means.
+   */
+  when?: string | undefined;
   className?: string | undefined;
 }
 
@@ -23,7 +33,8 @@ export interface PermissionGridProps {
  * (`ErrHostOnly`), so a switch that offered them would be one that always
  * fails, and it says where they are granted instead.
  */
-export function PermissionGrid({ value, onChange, disabled = false, className }: PermissionGridProps) {
+export function PermissionGrid({ value, onChange, disabled = false, when, className }: PermissionGridProps) {
+  const hours = readSchedule(when);
   return (
     <ul className={cn("flex flex-col divide-y divide-border border-y border-border", className)}>
       {PERMISSIONS.map((p) => {
@@ -36,6 +47,11 @@ export function PermissionGrid({ value, onChange, disabled = false, className }:
               {PERMISSION_LABEL[p]}
             </label>
             <span className="flex shrink-0 items-center gap-3">
+              {p === "unattended" && value.has(p) && hours && (
+                <span data-bounded="" className="text-xs text-text-3">
+                  {hours}
+                </span>
+              )}
               {hostOnly && <span className="font-mono text-xs uppercase tracking-[0.14em] text-text-3">at the host</span>}
               {always && <span className="font-mono text-xs uppercase tracking-[0.14em] text-text-3">always</span>}
               <Switch
