@@ -175,9 +175,18 @@ export function Presence({ label = "Screen shared" }: { label?: string | undefin
  * switch, not on reconnect. `--dur-video` is 0 and this sets it anyway, so a
  * transition utility added by mistake still resolves to nothing.
  */
-export function VideoSurface({ className, children, ...props }: HTMLAttributes<HTMLDivElement>) {
+export function VideoSurface({
+  className,
+  children,
+  ref,
+  ...props
+}: HTMLAttributes<HTMLDivElement> & { ref?: Ref<HTMLDivElement> | undefined }) {
   return (
-    <div className={cn("absolute inset-0 grid place-items-center bg-video [transition-duration:var(--dur-video)]", className)} {...props}>
+    <div
+      ref={ref}
+      className={cn("absolute inset-0 grid place-items-center bg-video [transition-duration:var(--dur-video)]", className)}
+      {...props}
+    >
       {children}
     </div>
   );

@@ -4,12 +4,31 @@ import { Button } from "@/components/button";
 import { MenuUnder, type MenuAction } from "@/components/menu";
 import { Tooltip } from "@/components/tooltip";
 import { Figure } from "@/screens/parts";
-import { Presence, SessionChrome, SessionRoot } from "@/session/chrome";
+import { SessionChrome, SessionRoot } from "@/session/chrome";
 import { type Fit, FIT_NAMES, FITS } from "@/session/fitting";
 import { showScreens, wantQuality, type Hand } from "@/session/hand";
 import { RemoteScreen } from "@/session/RemoteScreen";
 import { askState, narrowing } from "@/session/narrowing";
 import { IDLE, type ViewerState } from "@/session/video";
+
+/*
+    **The presence badge is not drawn here, and that is the point of it.**
+
+    It is the *host-side* session badge — a product surface with a security
+    function, says the design system, and the function is that the person whose
+    screen is being shared can see that it is. This is the other end: the
+    window of the person doing the watching, over a picture of somebody else's
+    machine. A badge here said "Screen shared" about a machine that was sharing
+    nothing, in the exact shape and place the host's own indicator takes, which
+    weakens the one badge that has to mean something.
+
+    The real one is drawn by the engine on the host, natively — see
+    `esper-presence-x11` and `esper-presence-wlr` — because a badge that a
+    webview draws is a badge that closing a webview removes.
+
+    What a controller needs is to know which machine it is looking at, and the
+    chrome says that by name.
+*/
 
 /** How often to ask the window to put a session back while there is no picture. */
 const ASK_AGAIN_MS = 5_000;
@@ -455,8 +474,6 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
           </Tooltip>
         </div>
       </SessionChrome>
-
-      <Presence />
     </SessionRoot>
   );
 }

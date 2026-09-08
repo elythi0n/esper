@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { CopyField } from "@/components/copy-field";
 import { Key } from "@/screens/parts";
-import { ReconnectNotice } from "./chrome";
+import { ReconnectNotice, VideoSurface } from "./chrome";
 import { type Fit, FIT_CLASS, placement } from "./fitting";
 import { driveWith, type Hand } from "./hand";
 import { IDLE, showTheScreen, type ViewerState } from "./video";
@@ -201,7 +201,7 @@ export function RemoteScreen({
   const away = state.link !== "live" && state.pictures > 0;
   const wayOut = `${id}-way-out`;
   return (
-    <div ref={box} className="absolute inset-0 grid place-items-center bg-video [transition-duration:var(--dur-video)]">
+    <VideoSurface ref={box}>
       {/*
         Always mounted, and hidden rather than unmounted while it waits: a
         canvas that appears when the first picture arrives is a canvas that
@@ -272,6 +272,6 @@ export function RemoteScreen({
           )}
         </div>
       )}
-    </div>
+    </VideoSurface>
   );
 }
