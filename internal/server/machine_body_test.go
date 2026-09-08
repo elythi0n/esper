@@ -79,3 +79,36 @@ func TestAMisspeltFieldIsTheRequestsFaultNotTheEngines(t *testing.T) {
 		t.Error("a body the server could not read was handed to the engine anyway")
 	}
 }
+
+/*
+A schedule arriving over the network, and what may not.
+
+The route exists because the engine has had `schedule` since Phase 14 and
+nothing reached it — so a device's hours could be read in the app and changed
+only in a terminal. What arrives is the engine's own vocabulary, and what this
+checks is that a body which is not that is refused here rather than handed on.
+*/
+func TestAScheduleIsCheckedBeforeItReachesTheEngine(t *testing.T) {
+	engine, _ := anEngineThat(t, 0, "")
+	s, token, store := serverThatCanWrite(t, engine)
+	fp := theFingerprint(t, store)
+
+	for _, bad := range []struct {
+		what string
+		body string
+	}{
+		{"a field this build does not know", `{"schedule":"always"}`},
+		{"a when that is a flag", `{"when":"--yes"}`},
+		{"a when with a shell in it", `{"when":"always; rm -rf /"}`},
+		{"no when at all", `{"when":""}`},
+		{"not an object", `"always"`},
+	} {
+		w := askWith(t, s, http.MethodPost, "/devices/"+fp+"/schedule", token, bad.body)
+		if w.Code == http.StatusOK {
+			t.Fatalf("%s (%s) was accepted", bad.what, bad.body)
+		}
+		if w.Code >= 500 && w.Code != http.StatusBadGateway {
+			t.Fatalf("%s answered %d, which blames the server for the request", bad.what, w.Code)
+		}
+	}
+}

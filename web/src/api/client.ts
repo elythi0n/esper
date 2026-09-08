@@ -96,6 +96,18 @@ export const api = {
     call<{ forgotten: string; read_from: string }>(`/devices/${fingerprint}`, { method: "DELETE" }),
   /** Turn a one-session pairing into a lasting one. The screen showed `once` and could do nothing. */
   keep: (fingerprint: string) => call<DevicesAnswer>(`/devices/${fingerprint}/keep`, { method: "POST" }),
+  /**
+   * When a device's unattended access applies.
+   *
+   * `when` is the engine's own vocabulary — `weekdays 08:00-18:00`, `always`,
+   * `clear` — passed through rather than translated, so there is one grammar
+   * and the thing that decides what a schedule means is the engine's parser.
+   */
+  schedule: (fingerprint: string, when: string) =>
+    call<DevicesAnswer>(`/devices/${fingerprint}/schedule`, {
+      method: "POST",
+      body: JSON.stringify({ when }),
+    }),
 
   // Pairing, both directions. An offer waits, so it has a lifetime: started,
   // polled, and either paired, lapsed or cancelled.

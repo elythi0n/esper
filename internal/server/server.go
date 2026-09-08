@@ -178,6 +178,10 @@ func New(o Options) (*Server, error) {
 	mux.HandleFunc("POST /devices/{fingerprint}/revoke", s.guard(s.revoke))
 	mux.HandleFunc("DELETE /devices/{fingerprint}", s.guard(s.forget))
 	mux.HandleFunc("POST /devices/{fingerprint}/keep", s.guard(s.keepDevice))
+	// When a device's unattended access applies. The engine has had the verb
+	// since Phase 14 and nothing reached it, so the hours could be seen in the
+	// app and changed only in a terminal.
+	mux.HandleFunc("POST /devices/{fingerprint}/schedule", s.guard(s.scheduleDevice))
 	mux.HandleFunc("GET /events", s.guard(s.stream))
 
 	// Pairing, in both directions, so it is something a window can do rather

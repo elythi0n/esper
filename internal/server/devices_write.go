@@ -34,6 +34,35 @@ func (s *Server) forget(w http.ResponseWriter, r *http.Request) {
 	s.change(w, r, devices.Forget)
 }
 
+/*
+scheduleDevice bounds when a device's unattended access applies.
+
+The engine has had the verb since Phase 14 and no route reached it, so a
+device's hours could be *seen* in the app and changed only in a terminal —
+which is the thing this window exists to stop being necessary.
+
+**Not gated the way a grant is.** `unattended` itself is granted at the
+machine and stays that way; this narrows the hours inside which it counts, and
+every schedule is a subset of the `always` a bare grant means. There is no
+version of this that gives a device more than it already had.
+*/
+func (s *Server) scheduleDevice(w http.ResponseWriter, r *http.Request) {
+	var asked struct {
+		// The engine's own vocabulary, passed through: `weekdays 08:00-18:00`,
+		// `daily 22:00-06:00`, `always`, `clear`. A second grammar here would
+		// be a second thing to keep in step with the parser that decides.
+		When string `json:"when"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&asked); err != nil {
+		http.Error(w, "the body should be {\"when\": \"weekdays 08:00-18:00\"}: "+err.Error(),
+			http.StatusBadRequest)
+		return
+	}
+	s.changeWith(w, r, devices.Schedule, []devices.Permission{devices.Permission(asked.When)})
+}
+
 // keepDevice turns a one-session pairing into a lasting one.
 //
 // The Devices screen has shown `once` and `spent` since it was written and
@@ -52,10 +81,25 @@ func (s *Server) keepDevice(w http.ResponseWriter, r *http.Request) {
 // has learnt nothing; a caller shown what the store says has learnt whether it
 // worked. It is also the only way a partial change would be visible.
 func (s *Server) change(w http.ResponseWriter, r *http.Request, what devices.Change) {
+	s.changeWith(w, r, what, nil)
+}
+
+// changeWith is `change` for a caller that has already read the body.
+//
+// A schedule's body is a `when` rather than a list of permissions, and the
+// alternative to this seam was a second copy of everything below it: the
+// timeout, the four ways it can fail, and reading the device back from the
+// store rather than describing what was asked for.
+func (s *Server) changeWith(
+	w http.ResponseWriter,
+	r *http.Request,
+	what devices.Change,
+	already []devices.Permission,
+) {
 	fingerprint := r.PathValue("fingerprint")
 
-	var wanted whatToChange
-	if what != devices.Forget && what != devices.Keep {
+	wanted := whatToChange{Permissions: already}
+	if already == nil && what != devices.Forget && what != devices.Keep {
 		// A field this does not know is a request this does not understand.
 		// Without it, `{"permissons": [...]}` decoded to an empty list, the
 		// engine refused with "needs at least one permission", and the caller

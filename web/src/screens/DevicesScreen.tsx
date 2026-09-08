@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
 import { useDevices, useReachable, useStatus } from "@/api/hooks";
 import { PERMISSION_LABEL, PERMISSIONS, SENSITIVE, type Permission } from "@/api/permissions";
-import { readSchedule } from "@/api/schedule";
+import { asWhen, asWindow, readSchedule, type Window } from "@/api/schedule";
+import { ScheduleInput } from "@/components/form-controls";
 import { pairingState, type Device } from "@/api/types";
 import { Button } from "@/components/button";
 import { Dialog, DialogContent, DialogFooter, DialogTrigger } from "@/components/dialog";
@@ -17,7 +18,7 @@ import { PermissionChecklist } from "@/screens/PermissionChecklist";
 import { useToast } from "@/components/toast";
 import { cn } from "@/lib/cn";
 import { PageBody, Topbar } from "@/shell/AppShell";
-import { Fact, Figure, Fingerprint, Heading, Trouble } from "./parts";
+import { Fact, Figure, Fingerprint, Heading, Key, Trouble } from "./parts";
 
 /*
   Devices — the home, and the product.
@@ -119,6 +120,37 @@ function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onC
     }
   };
 
+  /*
+    When that unattended access applies.
+
+    Only offered for a device that *holds* it: a schedule on a device that
+    cannot walk in unasked is a control that changes nothing, and a screen full
+    of those is a screen where the ones that matter are harder to find.
+
+    What is sent is the engine's own vocabulary, built by `asWhen` — one
+    grammar, and the thing that decides what a schedule means is the parser
+    that has always decided it.
+  */
+  const setWhen = async (window: Window) => {
+    setBusy(true);
+    try {
+      const when = asWhen(window);
+      await api.schedule(device.fingerprint.hex, when);
+      toast.show({
+        title:
+          when === "always"
+            ? `${device.name} may connect unasked at any time`
+            : `${device.name} may connect unasked ${readSchedule(when) ?? when}`,
+        tone: "ok",
+      });
+      onChanged();
+    } catch (cause) {
+      toast.show({ title: cause instanceof Error ? cause.message : String(cause), tone: "warn" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const keep = async () => {
     setBusy(true);
     try {
@@ -191,6 +223,19 @@ function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onC
       <Fact label="May">
         <div className={cn("mt-1", busy && "opacity-60")}>
           <Permissions held={device.permissions} when={device.unattended_when} onChange={change} />
+
+          {/*
+            And the hours, for a device that may walk in at all. The control
+            was built in Phase 10 and reached no screen: the only way to bound
+            unattended access was `esper schedule` in a terminal, which is the
+            thing this window exists to stop being necessary.
+          */}
+          {device.permissions.includes("unattended") && (
+            <div data-when="" className="flex flex-col gap-2 pt-1">
+              <Key>When it may connect unasked</Key>
+              <ScheduleInput value={asWindow(device.unattended_when)} onChange={setWhen} disabled={busy} />
+            </div>
+          )}
         </div>
       </Fact>
 

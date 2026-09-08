@@ -18,6 +18,14 @@ const (
 	Revoke
 	// Forget removes the device entirely.
 	Forget
+	// Schedule bounds *when* `unattended` applies.
+	//
+	// **Narrowing, never widening — which is why it is not gated the way a
+	// grant is.** The permission itself is granted at the machine and stays
+	// that way; this says the hours inside which it counts, and every
+	// schedule is a subset of the `always` a bare grant means. There is no
+	// version of this that gives a device more than it already had.
+	Schedule
 	// Keep turns a one-session pairing into a lasting one.
 	//
 	// **A grant of a different kind, and it takes no permissions.** What it
@@ -40,6 +48,8 @@ func (c Change) verb() string {
 		return "forget"
 	case Keep:
 		return "keep"
+	case Schedule:
+		return "schedule"
 	}
 	return ""
 }
@@ -68,6 +78,16 @@ var ErrNoSuchDevice = errors.New("that is not a device fingerprint")
 // this requires the whole thing.
 const FingerprintHex = FingerprintWords * 2
 
+// MostScheduleChars bounds what may be put on the engine's command line.
+//
+// The longest honest one is seven day names and a window — `mon,tue,wed,thu,
+// fri,sat,sun 08:00-18:00`, which is 39 — so this is that with room and
+// nothing like enough for a second schedule glued onto the first. It is here
+// because the string comes from a caller, and the engine's parser is the thing
+// that decides what a schedule *means*: this only decides what is worth
+// handing it.
+const MostScheduleChars = 48
+
 // command builds the engine's argv for a change, or refuses it.
 //
 // **Every decision this package makes about a change is here**, and the call
@@ -86,6 +106,43 @@ func command(what Change, fingerprint string, perms []Permission) ([]string, err
 				"device list, all of it",
 			ErrNoSuchDevice, fingerprint, FingerprintHex,
 		)
+	}
+
+	// A schedule names a device and a when, and the when is one argument.
+	if what == Schedule {
+		if len(perms) != 1 {
+			return nil, errors.New("schedule takes exactly one when, like `weekdays 08:00-18:00`")
+		}
+		when := strings.TrimSpace(string(perms[0]))
+		if when == "" {
+			return nil, errors.New("schedule needs a when, or `clear` to take one off")
+		}
+		if len(when) > MostScheduleChars {
+			return nil, fmt.Errorf("a schedule of %d characters is not one", len(when))
+		}
+		// **It has to start with a letter**, because every schedule does —
+		// `weekdays`, `daily`, `always`, `clear`, `mon` — and because a `when`
+		// beginning with `-` is not a schedule the engine reads, it is a
+		// *flag* it reads. The character allowlist below admits `--yes`
+		// happily; this is what stops it being an argument.
+		if c := when[0]; c < 'a' || c > 'z' {
+			return nil, fmt.Errorf(
+				"a schedule starts with a day or a word like `weekdays`; %q does not", when)
+		}
+		// **An allowlist of the shape a schedule has, not an escape.** It
+		// reaches a command line, and what a schedule is made of is day names,
+		// digits, colons, commas, a hyphen and one space. Anything else is
+		// refused here rather than sanitised — the engine's parser is what
+		// decides whether those characters spell a schedule it knows.
+		for _, c := range when {
+			ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+				c == ':' || c == ',' || c == '-' || c == ' '
+			if !ok {
+				return nil, fmt.Errorf(
+					"a schedule is day names, hours and `-`; %q is not part of one", c)
+			}
+		}
+		return []string{what.verb(), fingerprint, when}, nil
 	}
 
 	// The two that name a device and nothing else.

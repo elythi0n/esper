@@ -236,3 +236,67 @@ func TestKeepNamesADeviceAndNothingElse(t *testing.T) {
 		t.Errorf("keep should refuse a fingerprint that is not one, got %v", err)
 	}
 }
+
+/*
+What a schedule may put on a command line.
+
+The `when` comes from a caller and reaches the engine's argv, so the shape it
+has to have is decided here — an allowlist of what a schedule is made of, not
+an attempt to remove what is dangerous. The engine's parser is what decides
+whether those characters spell a schedule it *knows*; this decides what is
+worth handing it at all.
+*/
+func TestOnlyAScheduleShapedWhenReachesTheEngine(t *testing.T) {
+	const fp = "827aabec450ddf13"
+
+	for _, good := range []string{
+		"always",
+		"clear",
+		"weekdays 08:00-18:00",
+		"weekends 10:00-23:00",
+		"daily 22:00-06:00",
+		"mon,wed,fri 9-17",
+	} {
+		args, err := command(Schedule, fp, []Permission{Permission(good)})
+		if err != nil {
+			t.Fatalf("%q was refused: %v", good, err)
+		}
+		if len(args) != 3 || args[0] != "schedule" || args[1] != fp || args[2] != good {
+			t.Fatalf("%q became %v", good, args)
+		}
+	}
+
+	for _, bad := range []struct {
+		what string
+		when string
+	}{
+		{"empty", ""},
+		{"only spaces", "   "},
+		{"a flag", "--yes"},
+		{"shell metacharacters", "weekdays 08:00-18:00; rm -rf /"},
+		{"a pipe", "always|sh"},
+		{"a newline and a second argument", "always\nforget 827aabec450ddf13"},
+		{"a nul", "always\x00"},
+		{"backticks", "`id`"},
+		{"a dollar", "$(id)"},
+		{"uppercase, which the engine does not write", "WEEKDAYS 08:00-18:00"},
+		{"longer than any schedule", "mon," + "tue," + "wed," + "thu," + "fri," + "sat," + "sun," + "mon,tue,wed 08:00-18:00"},
+	} {
+		if _, err := command(Schedule, fp, []Permission{Permission(bad.when)}); err == nil {
+			t.Fatalf("%s (%q) was accepted onto a command line", bad.what, bad.when)
+		}
+	}
+
+	// And a schedule names exactly one when: two would be two arguments the
+	// engine reads as a day list and something else.
+	if _, err := command(Schedule, fp, nil); err == nil {
+		t.Fatal("a schedule with no when was accepted")
+	}
+	if _, err := command(Schedule, fp, []Permission{"always", "clear"}); err == nil {
+		t.Fatal("a schedule with two whens was accepted")
+	}
+	// The fingerprint rule is the same one every other change uses.
+	if _, err := command(Schedule, "827aabec", []Permission{"always"}); err == nil {
+		t.Fatal("a fingerprint prefix was accepted")
+	}
+}

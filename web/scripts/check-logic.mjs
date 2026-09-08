@@ -40,7 +40,7 @@ import { readViewerStream } from "../src/session/stream.ts";
 import { FIT_CLASS, FITS, inPicture, placement } from "../src/session/fitting.ts";
 import { askState, narrowing } from "../src/session/narrowing.ts";
 import { checklist, stepsFor } from "../src/screens/permissions.ts";
-import { readSchedule } from "../src/api/schedule.ts";
+import { asWhen, asWindow, readSchedule } from "../src/api/schedule.ts";
 import { readFileSync } from "node:fs";
 
 const findings = [];
@@ -402,6 +402,36 @@ try {
   is(readSchedule("daily 08:00-18:00"), "Every day 08:00–18:00", "and a day that does not");
   // Seven named days is every day, however it was written.
   is(readSchedule("mon,tue,wed,thu,fri,sat,sun 0-24"), "Every day 0–24", "all seven is every day");
+}
+
+/*
+  And back again, because a control that cannot write what it read is a control
+  that changes something every time it is opened.
+
+  The engine's vocabulary is words — `weekdays`, `daily`, a day list — and the
+  form control's is day numbers and two times. Every schedule somebody can
+  store has to survive both translations unchanged, or opening a device's panel
+  and saving it without touching anything would quietly rewrite the bound.
+*/
+{
+  for (const when of [
+    "weekdays 08:00-18:00",
+    "weekends 10:00-23:00",
+    "daily 22:00-06:00",
+    "mon,wed,fri 09:00-17:00",
+    "tue 00:00-23:59",
+  ]) {
+    is(asWhen(asWindow(when)), when, `${when} survives the round trip`);
+  }
+  // No bound is `always` in both directions, and never a schedule naming every
+  // hour of every week — which would make an unbounded grant look bounded.
+  is(asWhen(asWindow(undefined)), "always", "no bound stays no bound");
+  is(asWhen(asWindow("always")), "always", "and always stays always");
+  // Hours a person typed are hours the engine writes: it stores `09:00`.
+  is(asWhen(asWindow("mon,wed,fri 9-17")), "mon,wed,fri 09:00-17:00", "a typed hour is padded");
+  // Seven named days is `daily` when the hours are bounded, and `always` when
+  // they are not — the engine's own two words for the two different facts.
+  is(asWhen(asWindow("mon,tue,wed,thu,fri,sat,sun 08:00-18:00")), "daily 08:00-18:00", "seven days is daily");
 }
 
 /*
