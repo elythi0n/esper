@@ -381,7 +381,10 @@ const report = (r: unknown) =>
     if (switcher && !switcher.hasAttribute("disabled")) {
       open(switcher);
       await sleep(400);
-      const items = [...document.querySelectorAll('[role="menuitem"]')];
+      // A radio group, not a menu: each screen is drawn at its own aspect
+      // ratio, which is a panel rather than a list of words. See
+      // MonitorSwitcher.
+      const items = [...document.querySelectorAll('[role="radio"]')];
       const surfaceScreens = items.map((el) => (el.textContent ?? "").trim());
       seen.screensOffered = surfaceScreens;
       const first = items[0] as HTMLElement | undefined;
@@ -391,7 +394,11 @@ const report = (r: unknown) =>
       // the chrome says nothing. An acknowledgement that appeared here would
       // be reporting progress towards where the session already is.
       seen.acknowledged = box.querySelector("[data-asking]") !== null;
-      seen.saysWhichIsShowing = (surfaceScreens ?? []).some((label) => /showing/i.test(label));
+      // Which one the session is on: `aria-checked`, which is how a radio
+      // group says it and what a screen reader reads. A word in the label
+      // would be a second way of saying the same thing, and only one of the
+      // two reaches somebody who cannot see the border.
+      seen.saysWhichIsShowing = items.some((el) => el.getAttribute("aria-checked") === "true");
     }
 
     const quality = named(/^quality$/i);

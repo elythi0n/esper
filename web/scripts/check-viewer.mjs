@@ -1006,7 +1006,10 @@ if (surface) {
       );
     }
     if (!surface.saysWhichIsShowing) {
-      findings.push("the switcher does not say which screen the session is already showing");
+      findings.push(
+        "no screen in the switcher is marked as the one being shown — a list of screens with nothing " +
+          "checked makes somebody guess which one they are looking at",
+      );
     }
     if (!surface.quality?.offered) {
       findings.push("the quality control is disabled on a live session, so nothing can be asked for");

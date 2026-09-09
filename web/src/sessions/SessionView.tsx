@@ -4,6 +4,8 @@ import { Button } from "@/components/button";
 import { TierBadge } from "@/components/badge";
 import { SessionHUD } from "@/components/hud";
 import { MenuUnder, type MenuAction } from "@/components/menu";
+import { MonitorSwitcher } from "@/components/monitor-switcher";
+import { Popover } from "@/components/popover";
 import { Tooltip } from "@/components/tooltip";
 import { Figure } from "@/screens/parts";
 import { SessionChrome, SessionRoot } from "@/session/chrome";
@@ -149,25 +151,27 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
   const nextFit = () => setFit((was) => FITS[(FITS.indexOf(was) + 1) % FITS.length] ?? "fit");
 
   /*
-    One screen at a time from this menu.
+    One screen at a time.
 
     The protocol carries a set and the host can serve several at once, which
-    is what `--monitor 0,1` asks for. A menu of single screens is what a
-    person picking one from a list means, and a multi-select over somebody
-    else's desktop is a control for a later day rather than one to guess at
-    now.
+    is what `--monitor 0,1` asks for. One screen is what a person picking from
+    a list of screens means, and a multi-select over somebody else's desktop is
+    a control for a later day rather than one to guess at now.
   */
-  const screens: MenuAction[] = picture.screens.map((screen) => ({
-    label:
-      `${screen.name}${screen.primary ? " (primary)" : ""} — ${screen.width}x${screen.height}` +
-      (picture.showing.includes(screen.id) ? " · showing" : ""),
-    icon: Monitor,
-    disabled: !drivable,
-    onSelect: () => {
-      setAsked(screen.id);
-      hand.current?.ask(showScreens([screen.id]));
-    },
+  const screens = picture.screens.map((screen) => ({
+    id: String(screen.id),
+    label: screen.name,
+    width: screen.width,
+    height: screen.height,
+    primary: screen.primary,
   }));
+
+  const pickScreen = (id: string) => {
+    const chosen = Number(id);
+    if (!Number.isInteger(chosen)) return;
+    setAsked(chosen);
+    hand.current?.ask(showScreens([chosen]));
+  };
 
   const narrowed = narrowing(picture.askedFps, picture.askedLongEdge);
 
@@ -455,24 +459,37 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
         )}
         <div className="flex shrink-0 items-center gap-1">
           {/*
-            The host's screens, from the host.
+            The host's screens, from the host, drawn the way the design system
+            draws them: each option at its **own aspect ratio** with its size
+            beside it, because "Monitor 2" tells nobody which one that is. A
+            text menu here was a second version of a control that already
+            existed — `MonitorSwitcher`, built in Phase 10, reaching no screen.
 
-            Disabled until the engine has said what there is — and it says so
-            on the picture stream, which is the only place a window learns it.
-            A switcher built from anything else would be a second idea of
-            what is plugged in to somebody else's machine.
+            In a popover rather than a menu, because it is a panel: a menu
+            dismisses itself on the first click, and a radio group inside one
+            would let somebody change exactly one thing.
+
+            Disabled until the engine has said what there is; a switcher built
+            from anything else would be a second idea of what is plugged in to
+            somebody else's machine.
           */}
-          <MenuUnder actions={screens}>
-            <Button
-              variant="ghost"
-              size="sm"
-              aria-label="Switch screen"
-              className="px-1.5"
-              disabled={screens.length === 0}
-            >
-              <Monitor aria-hidden size={16} />
-            </Button>
-          </MenuUnder>
+          <Popover
+            label="Switch screen"
+            side="top"
+            trigger={
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label="Switch screen"
+                className="px-1.5"
+                disabled={screens.length === 0 || !drivable}
+              >
+                <Monitor aria-hidden size={16} />
+              </Button>
+            }
+          >
+            <MonitorSwitcher monitors={screens} value={String(picture.showing[0] ?? "")} onChange={pickScreen} />
+          </Popover>
           <MenuUnder actions={qualities}>
             <Button
               variant="ghost"
