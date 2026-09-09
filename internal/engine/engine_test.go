@@ -541,3 +541,90 @@ func eventually(patience time.Duration, holds func() bool) bool {
 	}
 	return holds()
 }
+
+/*
+An engine that refuses to start says why, and the reason survives.
+
+# Why this needs a test of its own
+
+Because what the control plane *sees* when the engine dies at startup is a
+pipe ending: "reading engine hello: stream ended mid-frame, wanted 4 bytes,
+got 0". That is a true sentence about a stream and a useless one about a
+machine. The engine had already said the real reason — a configuration file
+with a typo, a home it cannot read — on a stderr that goes into a log.
+
+So `esper doctor` reported a framing error to somebody whose mistake was a
+line in a file, and nothing failed anywhere.
+
+The stand-in here says something and exits, which is exactly what the engine
+does with a file it cannot read.
+*/
+func TestTheEnginesOwnReasonSurvivesAFailedHandshake(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "esper-engine")
+	script := "#!/bin/sh\n" +
+		"echo 'esper-engine: /home/somebody/.esper/config.toml, line 2: sections are not used here' >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing the stand-in engine: %v", err)
+	}
+
+	s, err := New(Options{Path: fake})
+	if err != nil {
+		t.Fatalf("a supervisor: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	began := time.Now()
+	err = s.Start(ctx, controlPlaneHello())
+	if err == nil {
+		t.Fatal("an engine that exited was reported as started")
+	}
+	if !strings.Contains(err.Error(), "line 2: sections are not used here") {
+		t.Fatalf("the engine's own reason was lost: %v", err)
+	}
+	// The reason leads: somebody reading this has a typo in a file, and the
+	// stream detail is for whoever is reading the code.
+	if !strings.HasPrefix(err.Error(), "the engine stopped before it could answer:") {
+		t.Fatalf("the reason is not what the message leads with: %v", err)
+	}
+	// And the framing error is still wrapped, so anything matching on it still
+	// matches.
+	if !strings.Contains(err.Error(), "reading engine hello") {
+		t.Fatalf("what actually happened to the stream was dropped: %v", err)
+	}
+	// **Bounded.** A hung engine fails this handshake too and has said
+	// nothing; waiting on it would turn a fast failure into a slow one.
+	if waited := time.Since(began); waited > 5*time.Second {
+		t.Fatalf("a failed handshake took %s", waited)
+	}
+}
+
+// And an engine that says nothing and hangs does not make the failure slow.
+func TestAHandshakeThatHangsIsNotMadeSlowerByWaitingForWords(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "esper-engine")
+	// Reads nothing, says nothing, holds its pipes open.
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nsleep 30\n"), 0o700); err != nil {
+		t.Fatalf("writing the stand-in engine: %v", err)
+	}
+
+	s, err := New(Options{Path: fake})
+	if err != nil {
+		t.Fatalf("a supervisor: %v", err)
+	}
+	// The context is what bounds a handshake that never answers; this checks
+	// that looking for last words does not add to it.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	began := time.Now()
+	if err := s.Start(ctx, controlPlaneHello()); err == nil {
+		t.Fatal("an engine that never answered was reported as started")
+	}
+	_ = s.Stop()
+	if waited := time.Since(began); waited > 10*time.Second {
+		t.Fatalf("a hung handshake took %s, so something is waiting on a silent engine", waited)
+	}
+}

@@ -67,6 +67,12 @@ type Supervisor struct {
 	// asked means this side ended it, so the reaper below knows an exit is
 	// the shutdown finishing rather than a crash.
 	asked bool
+	// saidMu guards `said` alone. See `keep` for why it is not `mu`.
+	saidMu sync.Mutex
+	// relayed closes when the engine's stderr has been read to the end, which
+	// is when the process has exited and everything it said has been kept.
+	// Waited on where the engine's own words are the answer.
+	relayed chan struct{}
 	// reaped carries the one Wait for the running process. One waiter,
 	// because calling Wait twice on an exec.Cmd is an error, and both the
 	// reaper and a caller stopping the engine need the result.
@@ -206,14 +212,42 @@ func (s *Supervisor) Start(ctx context.Context, local proto.Hello) error {
 		return fmt.Errorf("starting %s: %w", s.path, err)
 	}
 	s.cmd, s.stdin, s.stdout, s.running = cmd, stdin, stdout, true
-	s.asked, s.trouble, s.said, s.greet, s.life = false, nil, nil, local, ctx
+	s.asked, s.trouble, s.greet, s.life = false, nil, local, ctx
+	s.forgetWhatItSaid()
 	s.reaped = make(chan error, 1)
+	s.relayed = make(chan struct{})
 	s.log("engine started: %s (pid %d)", s.path, cmd.Process.Pid)
-	go s.relay(stderr)
+	relayed := s.relayed
+	go func() {
+		s.relay(stderr)
+		close(relayed)
+	}()
 	go s.reap(cmd, s.reaped)
 
 	remote, err := s.handshake(local)
 	if err != nil {
+		/*
+			**What the engine said, not what the pipe did.**
+
+			An engine that refuses to start says why and exits — a
+			configuration file with a typo in it, a home directory it cannot
+			read — and what reaches here is the *stream* ending: "reading
+			engine hello: stream ended mid-frame, wanted 4 bytes, got 0".
+			Somebody with a mistyped setting was told about a protocol frame,
+			and the sentence naming their file and its line number went into a
+			log they were not reading.
+
+			The relay has it. Waiting for stderr to reach its end is waiting
+			for the process to have exited and everything it said to have been
+			kept — bounded, because a *hung* engine also fails this handshake
+			and must not add a wait of any consequence to the failure.
+		*/
+		if said := s.whatItSaid(relayed); said != "" {
+			// The engine's words first. A person reading this has a typo in a
+			// file; the framing detail is for whoever is reading the code, and
+			// it stays wrapped so `errors.Is` still finds what it always did.
+			err = fmt.Errorf("the engine stopped before it could answer: %s (%w)", said, err)
+		}
 		_ = s.stopLocked()
 		return err
 	}
@@ -241,6 +275,43 @@ func (s *Supervisor) relay(stderr io.Reader) {
 	}
 }
 
+// howLongToWaitForLastWords bounds the wait for the engine's own explanation.
+//
+// Short, because this is on the path where the engine has almost certainly
+// already exited: its stderr closes when it does. A hung engine fails the
+// handshake too and has said nothing, and waiting on it would turn a fast
+// failure into a slow one.
+const howLongToWaitForLastWords = 500 * time.Millisecond
+
+// whatItSaid is the engine's last non-empty line, once it has finished saying
+// things — or nothing, if it has not finished in the time allowed.
+//
+// Safe to call with `mu` held: the relay takes `saidMu` and never `mu`.
+func (s *Supervisor) whatItSaid(relayed <-chan struct{}) string {
+	select {
+	case <-relayed:
+	case <-time.After(howLongToWaitForLastWords):
+		// Still talking, or not talking at all. Either way there is nothing
+		// settled to report.
+		return ""
+	}
+	s.saidMu.Lock()
+	defer s.saidMu.Unlock()
+	for i := len(s.said) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(s.said[i]); line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+// forgetWhatItSaid clears the kept lines, for an engine that is starting again.
+func (s *Supervisor) forgetWhatItSaid() {
+	s.saidMu.Lock()
+	defer s.saidMu.Unlock()
+	s.said = nil
+}
+
 // maxLogLine bounds one relayed line.
 const maxLogLine = 16 * 1024
 
@@ -252,9 +323,15 @@ const maxLogLine = 16 * 1024
 const keepLast = 10
 
 // keep remembers one line of the engine's stderr.
+//
+// **Its own lock, not the supervisor's.** `Start` holds `mu` across the
+// handshake, and the handshake's failure path wants to know what the engine
+// said on the way out — so a relay that took `mu` to record a line would be
+// blocked by the very code waiting for it, and the wait would always time
+// out. Nothing here ever takes `mu`, so there is no order to get wrong.
 func (s *Supervisor) keep(line string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.saidMu.Lock()
+	defer s.saidMu.Unlock()
 	s.said = append(s.said, line)
 	if len(s.said) > keepLast {
 		s.said = s.said[len(s.said)-keepLast:]
@@ -322,6 +399,8 @@ func (s *Supervisor) lastWordsFor(err error) string {
 	if !itsOwnDoing(err) {
 		return ""
 	}
+	s.saidMu.Lock()
+	defer s.saidMu.Unlock()
 	for i := len(s.said) - 1; i >= 0; i-- {
 		if strings.TrimSpace(s.said[i]) != "" {
 			return ", last: " + s.said[i]

@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -271,6 +274,121 @@ func TestSessionsAnswersWithWhatHappened(t *testing.T) {
 	})
 	if bad.Code != http.StatusBadRequest {
 		t.Errorf("most=lots answered %d, wanted 400", bad.Code)
+	}
+}
+
+// **What is reported is what was bound, not what was asked for.**
+//
+// `--listen 127.0.0.1:0` means "pick a port", and a report printed before the
+// bind says `:0` — which is the one thing the person who asked for a port of
+// nought cannot work out for themselves. It is also what the `Host` check
+// compares against, so a caller told `:0` cannot address this server at all.
+func TestTheAddressReportedIsTheAddressBound(t *testing.T) {
+	s, _ := serverForTest(t)
+
+	told := make(chan string, 1)
+	s.listening = func(bound string) { told <- bound }
+	s.bound = "127.0.0.1:0"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx) }()
+
+	var bound string
+	select {
+	case bound = <-told:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("nothing was told the address, so a caller asking for port 0 never learns one")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serving: %v", err)
+	}
+
+	if bound == "127.0.0.1:0" || strings.HasSuffix(bound, ":0") {
+		t.Fatalf("the report says %q, which is the request and not the answer", bound)
+	}
+	_, port, err := net.SplitHostPort(bound)
+	if err != nil {
+		t.Fatalf("%q is not an address and a port: %v", bound, err)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n <= 0 {
+		t.Errorf("the reported port is %q", port)
+	}
+	// And the server agrees with what it said, because the `Host` check is
+	// what compares against it.
+	if s.Bound() != bound {
+		t.Errorf("the server says it is at %q and told the caller %q", s.Bound(), bound)
+	}
+}
+
+// **One stream too many is refused with a status, not with a stream.**
+//
+// A 200 followed by an error in the body is what every SSE client reads as a
+// connection that opened — so the refusal has to come out before a single
+// header of the stream does, and it has to say what to do about it.
+func TestTheStreamPastTheCeilingIsRefusedBeforeItOpens(t *testing.T) {
+	s, token := serverForTest(t)
+	live := httptest.NewServer(s.http.Handler)
+	defer live.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	open := func() (*http.Response, error) {
+		r, err := http.NewRequestWithContext(ctx, http.MethodGet, live.URL+"/events", nil)
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("Authorization", "Bearer "+token.String())
+		return live.Client().Do(r)
+	}
+
+	// Held open, because a stream that closed would give its slot back and
+	// there would be no ceiling to reach.
+	held := make([]*http.Response, 0, atMost)
+	defer func() {
+		for _, resp := range held {
+			_ = resp.Body.Close()
+		}
+	}()
+	for i := range atMost {
+		resp, err := open()
+		if err != nil {
+			t.Fatalf("opening stream %d: %v", i+1, err)
+		}
+		held = append(held, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("stream %d of %d answered %d", i+1, atMost, resp.StatusCode)
+		}
+		// Read the opening comment, so the handler has certainly joined
+		// before the next one asks.
+		if _, err := bufio.NewReader(resp.Body).ReadString('\n'); err != nil {
+			t.Fatalf("reading stream %d: %v", i+1, err)
+		}
+	}
+
+	resp, err := open()
+	if err != nil {
+		t.Fatalf("opening one too many: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("one stream too many answered %d, wanted 503", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); strings.Contains(got, "event-stream") {
+		t.Errorf("a refusal was sent as a stream: %q", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the refusal: %v", err)
+	}
+	said := string(body)
+	if !strings.Contains(said, strconv.Itoa(atMost)) {
+		t.Errorf("the refusal does not say how many is too many: %q", said)
+	}
+	if !strings.Contains(said, "close") {
+		t.Errorf("the refusal does not say what to do about it: %q", said)
 	}
 }
 

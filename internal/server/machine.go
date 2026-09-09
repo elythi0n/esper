@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
@@ -20,8 +20,16 @@ const howLongIdentityTakes = 5 * time.Second
 
 // Identity is what this machine is, to anybody who has paired with it.
 type Identity struct {
-	// Key is the short fingerprint, the same form the device store uses.
+	// Key is the short fingerprint, the same form the device store uses and
+	// the form every screen shows.
 	Key string `json:"key"`
+	// PublicKey is the whole key, which is what a peer pins.
+	//
+	// **Both, and each called what it is.** The fingerprint is sixty-four
+	// bits: it names a device on a screen and in a command, and comparing it
+	// is comparing a birthday bound. A caller that wants to pin something
+	// wants this one.
+	PublicKey string `json:"public_key,omitempty"`
 	// Words are what somebody reads aloud to check it. The half of pairing a
 	// code cannot do: a code proves the same code was typed, and these prove
 	// the machine at the other end is the one that was meant.
@@ -30,21 +38,21 @@ type Identity struct {
 	File string `json:"file,omitempty"`
 }
 
-// keyLine and wordLine read the engine's own printing of the identity.
-//
-// # Why this parses rather than reading the file
+// # Why this asks the engine rather than reading the file
 //
 // The identity is a key file, and turning a key into a fingerprint is the
 // engine's arithmetic — one hash, one alphabet, one word list. A control
 // plane doing it independently would be a second implementation of the thing
 // two people read aloud to each other, and the day the two disagreed the
 // disagreement would look like an attack.
-var (
-	keyLine  = regexp.MustCompile(`(?m)^\s*key\s+([0-9a-f]{8,64})\s*$`)
-	fileLine = regexp.MustCompile(`(?m)^\s*file\s+(\S.*?)\s*$`)
-	wordLine = regexp.MustCompile(`(?m)^\s{4,}([a-z]+(?: [a-z]+){1,7})\s*$`)
-)
-
+//
+// # Why it asks for the object and not the report
+//
+// The printed report is written for a person and is free to change — and did:
+// the line named `key` came to hold the whole key rather than the
+// fingerprint, and a control plane scraping it went on calling the result a
+// fingerprint. Every screen in the window draws an identicon from that value.
+// `--json` is the shape that is a contract.
 func (s *Server) identity(ctx context.Context) (*Identity, error) {
 	if s.writer.Engine == "" {
 		return nil, errors.New("no engine to ask: the identity is the engine's, and there is none beside this control plane")
@@ -52,26 +60,33 @@ func (s *Server) identity(ctx context.Context) (*Identity, error) {
 	runCtx, cancel := context.WithTimeout(ctx, howLongIdentityTakes)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, s.writer.Engine, "identity") // #nosec G204 -- operator's own engine, no arguments
+	cmd := exec.CommandContext(runCtx, s.writer.Engine, "identity", "--json") // #nosec G204 -- operator's own engine, no arguments
 	cmd.Env = append(os.Environ(), "ESPER_HOME="+s.writer.Home)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, errors.New(lastSentence(string(out)))
 	}
 
-	said := string(bytes.TrimSpace(out))
-	key := keyLine.FindStringSubmatch(said)
-	if key == nil {
-		return nil, errors.New("the engine printed no fingerprint")
+	var said struct {
+		PublicKey   string `json:"public_key"`
+		Fingerprint struct {
+			Hex   string   `json:"hex"`
+			Words []string `json:"words"`
+		} `json:"fingerprint"`
+		File string `json:"file"`
 	}
-	answer := &Identity{Key: key[1]}
-	if file := fileLine.FindStringSubmatch(said); file != nil {
-		answer.File = file[1]
+	if err := json.Unmarshal(out, &said); err != nil {
+		return nil, fmt.Errorf("the engine's identity could not be read: %w", err)
 	}
-	for _, line := range wordLine.FindAllStringSubmatch(said, -1) {
-		answer.Words = append(answer.Words, strings.Fields(line[1])...)
+	if said.Fingerprint.Hex == "" {
+		return nil, errors.New("the engine answered with no fingerprint")
 	}
-	return answer, nil
+	return &Identity{
+		Key:       said.Fingerprint.Hex,
+		PublicKey: said.PublicKey,
+		Words:     said.Fingerprint.Words,
+		File:      said.File,
+	}, nil
 }
 
 func (s *Server) machineIdentity(w http.ResponseWriter, r *http.Request) {

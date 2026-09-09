@@ -14,6 +14,7 @@ import (
 	"github.com/elythi0n/esper/internal/devices"
 	"github.com/elythi0n/esper/internal/home"
 	"github.com/elythi0n/esper/internal/proto"
+	"github.com/elythi0n/esper/internal/settings"
 )
 
 // DefaultAddr is where the API listens unless somebody says otherwise.
@@ -63,7 +64,9 @@ type Server struct {
 	// check compares against: a caller may only address this server as the
 	// thing it bound, never as a name.
 	bound string
-	http  *http.Server
+	// listening is told the address actually bound, once, when it is bound.
+	listening func(addr string)
+	http      *http.Server
 	// events is where session lines are published for the SSE stream.
 	events *fanout
 	// store is the device store's path, re-read on every request.
@@ -71,6 +74,9 @@ type Server struct {
 	// writer changes the store by asking the engine to. Nothing here opens it
 	// for writing; see `internal/devices`.
 	writer devices.Writer
+	// settings reads and changes what this machine is configured to do, by
+	// asking the engine — which owns the registry and is the only writer.
+	settings settings.Writer
 	// pairing is the one code this machine may be showing. See pairing.go.
 	pairing pairing
 	// The one invitation this machine may be offering, held for the same
@@ -107,6 +113,14 @@ type Options struct {
 	// mistypes an address gets a refusal rather than a listener on their
 	// office network, and somebody who means it says so twice.
 	Exposed bool
+	// Listening is called once, with the address actually bound, the moment
+	// the listener is up and before anything is served.
+	//
+	// **The address asked for is not the address bound.** `--listen
+	// 127.0.0.1:0` means "pick a port", and a report printed before the bind
+	// says `:0` — which is the one thing the person who asked for a port of
+	// nought cannot work out for themselves. Nil discards it.
+	Listening func(addr string)
 }
 
 // New builds the API without listening.
@@ -149,12 +163,17 @@ func New(o Options) (*Server, error) {
 		store = devices.PathIn(dir)
 	}
 	s := &Server{
-		engine: o.Engine,
-		token:  o.Token,
-		bound:  addr,
-		events: newFanout(),
-		store:  store,
+		engine:    o.Engine,
+		token:     o.Token,
+		bound:     addr,
+		listening: o.Listening,
+		events:    newFanout(),
+		store:     store,
 		writer: devices.Writer{
+			Engine: o.EngineBinary,
+			Home:   filepath.Dir(store),
+		},
+		settings: settings.Writer{
 			Engine: o.EngineBinary,
 			Home:   filepath.Dir(store),
 		},
@@ -182,6 +201,24 @@ func New(o Options) (*Server, error) {
 	// since Phase 14 and nothing reached it, so the hours could be seen in the
 	// app and changed only in a terminal.
 	mux.HandleFunc("POST /devices/{fingerprint}/schedule", s.guard(s.scheduleDevice))
+	// What a session with one device leaves the screen as. Same story: the
+	// panel showed the answer and only a terminal could change it.
+	mux.HandleFunc("POST /devices/{fingerprint}/lock-after", s.guard(s.lockAfterDevice))
+	// A magic packet to a device asleep on this network. The engine has had
+	// the verb since Phase 12 and only a terminal could send one.
+	mux.HandleFunc("POST /devices/{fingerprint}/wake", s.guard(s.wakeDevice))
+	// And the three that act on the far machine, each behind a permission that
+	// host granted this one. The window could list a device and not lock it.
+	mux.HandleFunc("POST /devices/{fingerprint}/lock", s.guard(s.lockHost))
+	mux.HandleFunc("POST /devices/{fingerprint}/logoff", s.guard(s.logOffHost))
+	mux.HandleFunc("POST /devices/{fingerprint}/reboot", s.guard(s.restartHost))
+	// Which groups a device is in. The panel could show them and change none.
+	mux.HandleFunc("POST /devices/{fingerprint}/groups", s.guard(s.groupDevice))
+	// What this machine is configured to do. Every setting the product has
+	// was a file somebody edited by hand until this: `config` listed
+	// thirty-two of them and offered no way to change one.
+	mux.HandleFunc("GET /config", s.guard(s.config))
+	mux.HandleFunc("POST /config", s.guard(s.setSetting))
 	mux.HandleFunc("GET /events", s.guard(s.stream))
 
 	// Pairing, in both directions, so it is something a window can do rather
@@ -219,6 +256,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	// the port was zero — and the `Host` check has to compare against what a
 	// caller can actually reach.
 	s.bound = listener.Addr().String()
+	// Said here rather than by the caller before this: here is the first
+	// moment the answer exists. Called on this goroutine, so nothing reads
+	// `bound` while it is being written.
+	if s.listening != nil {
+		s.listening(s.bound)
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)

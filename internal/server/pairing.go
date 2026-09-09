@@ -51,16 +51,27 @@ const howLongAnOfferRuns = 3 * time.Minute
 // howLongJoiningMayTake bounds the other direction.
 const howLongJoiningMayTake = 60 * time.Second
 
-// theOffer reads the engine's offer out of what it prints.
+// offered is one line of the engine's `pair --json` stream.
 //
-// The engine prints the command to run on the other machine, which carries
-// the port and the code; the fingerprint words follow, indented, for reading
-// aloud. Parsed rather than reinvented — the engine decides what a code is.
-var (
-	offerLine   = regexp.MustCompile(`pair \S*:(\d+) --code ([A-Z0-9-]+)`)
-	wordsLine   = regexp.MustCompile(`^\s{6,}([a-z]+(?: [a-z]+)+)\s*$`)
-	expiresLine = regexp.MustCompile(`expires\s+in (\d+) seconds`)
-)
+// # Why the object and not the printed report
+//
+// The printed report is written for the person reading a code off one screen
+// and typing it into another, and it is free to change. Something parsing it
+// with a regular expression is holding an unmarked contract over prose — and
+// what it would get wrong is the code somebody types and the words they read
+// aloud to confirm a machine, which is the whole of what pairing is.
+//
+// The engine still decides what a code is; nothing here mints one.
+type offered struct {
+	Event       string `json:"event"`
+	Code        string `json:"code"`
+	Port        int    `json:"port"`
+	ExpiresIn   int64  `json:"expires_in"`
+	Fingerprint struct {
+		Hex   string   `json:"hex"`
+		Words []string `json:"words"`
+	} `json:"fingerprint"`
+}
 
 // Offer is a pairing code this machine is currently showing.
 type Offer struct {
@@ -137,7 +148,7 @@ func (s *Server) offerCode(ctx context.Context) (*Offer, error) {
 	// **Every interface, because the other machine has to reach this one.**
 	// Port zero so nothing on this machine is displaced, and the engine
 	// prints what it took.
-	cmd := exec.CommandContext(runCtx, s.writer.Engine, "pair", "--listen", "0.0.0.0:0") // #nosec G204 -- the path is the operator's own engine
+	cmd := exec.CommandContext(runCtx, s.writer.Engine, "pair", "--listen", "0.0.0.0:0", "--json") // #nosec G204 -- the path is the operator's own engine
 	cmd.Env = append(os.Environ(), "ESPER_HOME="+s.writer.Home)
 	said, err := cmd.StdoutPipe()
 	if err != nil {
@@ -187,35 +198,41 @@ func (s *Server) mu()   { s.pairing.mu.Lock() }
 func (s *Server) unmu() { s.pairing.mu.Unlock() }
 
 // readOffer reads until the engine has said what it is offering.
+//
+// One object per line; the first that says `offering` is the answer. A line
+// this build cannot read is skipped rather than fatal, so an engine that grows
+// a new event does not stop an older control plane pairing.
 func readOffer(from io.Reader) (*Offer, error) {
-	offer := &Offer{State: "offering"}
 	scanner := bufio.NewScanner(from)
 	seen := make([]string, 0, 16)
 	for scanner.Scan() {
 		line := scanner.Text()
-		seen = append(seen, line)
-		if m := expiresLine.FindStringSubmatch(line); m != nil {
-			var secs int
-			if _, err := fmt.Sscanf(m[1], "%d", &secs); err == nil {
-				offer.ExpiresAt = time.Now().Add(time.Duration(secs) * time.Second).Unix()
-			}
-		}
-		if m := offerLine.FindStringSubmatch(line); m != nil {
-			_, _ = fmt.Sscanf(m[1], "%d", &offer.Port)
-			offer.Code = m[2]
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		// The words follow the offer, two indented lines of them.
-		if offer.Code != "" {
-			if m := wordsLine.FindStringSubmatch(line); m != nil {
-				offer.Words = append(offer.Words, strings.Fields(m[1])...)
-				if len(offer.Words) >= 8 {
-					return offer, nil
-				}
-			}
+		seen = append(seen, line)
+		var said offered
+		if err := json.Unmarshal([]byte(line), &said); err != nil {
+			continue
 		}
-	}
-	if offer.Code != "" {
+		if said.Event != "offering" {
+			continue
+		}
+		// **Every part of it, or none.** A code with no words is a screen
+		// asking somebody to read aloud a fingerprint it does not have, and a
+		// code with no port is one nothing can connect to.
+		if said.Code == "" || said.Port == 0 || len(said.Fingerprint.Words) == 0 {
+			return nil, fmt.Errorf("the engine's offer is missing part of itself: %s", line)
+		}
+		offer := &Offer{
+			State: "offering",
+			Code:  said.Code,
+			Port:  said.Port,
+			Words: said.Fingerprint.Words,
+		}
+		if said.ExpiresIn > 0 {
+			offer.ExpiresAt = time.Now().Add(time.Duration(said.ExpiresIn) * time.Second).Unix()
+		}
 		return offer, nil
 	}
 	return nil, fmt.Errorf("the engine offered no code: %s", lastSentence(strings.Join(seen, "; ")))

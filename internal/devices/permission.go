@@ -72,8 +72,14 @@ var AllPermissions = []Permission{
 // local API — see [ErrHostOnly].
 func (p Permission) Sensitive() bool {
 	switch p {
-	// Removes the question a session is otherwise held up by.
-	case Unattended,
+	// A shell as the user who owns this machine's Esper state: it can read
+	// the identity key and this API's own token, rewrite the device list
+	// without asking, and edit the record. Granting it grants every case
+	// below whether or not anybody grants them — so it is the one that most
+	// needs a person at the machine, and it is the one that was missing.
+	case Terminal,
+		// Removes the question a session is otherwise held up by.
+		Unattended,
 		// Writes to this machine's filesystem.
 		FilesIn,
 		// Keeps a copy of somebody's screen after the session.
@@ -83,7 +89,7 @@ func (p Permission) Sensitive() bool {
 		// Takes the machine away, and every other session on it.
 		Reboot:
 		return true
-	case View, Control, ClipboardOut, ClipboardIn, FilesOut, Audio, Terminal, Forward, Lock:
+	case View, Control, ClipboardOut, ClipboardIn, FilesOut, Audio, Forward, Lock:
 		return false
 	}
 	return false

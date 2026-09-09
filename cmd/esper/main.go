@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -108,11 +109,12 @@ func run(args []string) int {
 
 // sessionsUsage is what `esper sessions` takes.
 func sessionsUsage() string {
-	return "usage: esper sessions [<lines>]\n\n" +
+	return "usage: esper sessions [<lines>] [--json]\n\n" +
 		"  What has happened on this machine: sessions, pairings and refusals,\n" +
 		"  most recent last. The default is 20 lines.\n\n" +
 		"  This is what was recorded, not what is happening now — a session in\n" +
-		"  progress appears here when it ends.\n"
+		"  progress appears here when it ends.\n\n" +
+		"    --json   one object, for a script rather than a person\n"
 }
 
 // doctorUsage is what `esper doctor` takes, for `--help` and for a refusal.
@@ -120,13 +122,15 @@ func sessionsUsage() string {
 // One copy, because a usage printed on error that disagrees with the one
 // printed on request is two answers to one question.
 func doctorUsage() string {
-	return "usage: esper doctor [--session]\n\n" +
+	return "usage: esper doctor [--session] [--json]\n\n" +
 		"  Say what this machine can do and how it can be reached, and name\n" +
 		"  what is missing. Nothing is changed: it reads this machine and the\n" +
 		"  engine beside it.\n\n" +
 		"    --session   hold a real session with this machine — pairing,\n" +
 		"                transport, capture, encode and decode — and time it.\n" +
-		"                A few seconds\n"
+		"                A few seconds\n" +
+		"    --json      one object, for a script rather than a person. The\n" +
+		"                exit status is the same either way\n"
 }
 
 // versionUsage is what `esper version` takes.
@@ -215,7 +219,17 @@ var engineCommands = map[string]bool{
 	// and the answer somebody needs when a session watches but will not
 	// drive — which makes it exactly the verb a person reaches for through
 	// the front door rather than through the engine they have never run.
-	"input": true,
+	"input":   true,
+	"sandbox": true,
+	// What a session with one device leaves this machine's screen as. It sits
+	// beside `schedule`: both are a per-device answer to a host-wide rule, and
+	// a front door that offered one and not the other sent somebody to a
+	// binary it tells them not to run.
+	"lock-after": true,
+	// One picture of a paired host's screen. The verb somebody reaches for to
+	// check a machine without watching it, and the only way to get one
+	// without a session.
+	"screenshot": true,
 }
 
 func isEngineCommand(name string) bool { return engineCommands[name] }
@@ -252,14 +266,71 @@ func cmdVersion(args []string) int {
 		}
 	}
 	if len(args) > 0 && args[0] == "--json" {
-		fmt.Printf("{\"version\":%q,\"buildTime\":%q,\"protocol\":%d}\n",
-			version, buildTime, proto.ProtocolVersion)
+		/*
+			Through the encoder, not `%q`.
+
+			Go's `%q` is Go's quoting, not JSON's: a byte it has no short
+			escape for comes out as `\x01`, which JSON has no such escape for
+			and every parser rejects. These two strings arrive from `-ldflags`
+			at link time, so a release built from an odd tag — or a downstream
+			packager stamping something unexpected — turned the one output
+			meant for a script into text no script can read.
+		*/
+		out := struct {
+			Version   string `json:"version"`
+			BuildTime string `json:"buildTime"`
+			Protocol  uint16 `json:"protocol"`
+		}{version, buildTime, proto.ProtocolVersion}
+		if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+			fmt.Fprintf(os.Stderr, "esper version: %v\n", err)
+			return 1
+		}
 		return 0
 	}
 	fmt.Printf("esper %s\n", version)
 	fmt.Printf("  built     %s\n", displayOrDash(buildTime))
 	fmt.Printf("  protocol  %d\n", proto.ProtocolVersion)
 	return 0
+}
+
+/*
+sayWhereTheStateIs prints this machine's Esper directory.
+
+# Why a diagnostic has to say this
+
+Because "my devices have disappeared" is almost always two directories. The
+state lives in `$ESPER_HOME` when that is set and beside the user's config when
+it is not, and both are invisible: a shell with the variable exported, a
+service unit that sets it, a `sudo` that does not carry it, and the same
+command on the same machine answers about a different store.
+
+`config` names its file and `identity` names the key, so the two things a
+person is sent to look at are already findable — and the directory holding
+them, the devices and the trail was the one thing nothing printed.
+
+Marked when the environment chose it, because that is the case somebody is
+surprised by.
+*/
+func sayWhereTheStateIs() {
+	dir, err := home.Dir()
+	if err != nil {
+		// A machine with nowhere to put state is a real answer, and one the
+		// commands that need it give in their own words.
+		folded("  state    ", "           ", fmt.Sprintf("none — %v", err), terminalWidth())
+		return
+	}
+	from := ""
+	if os.Getenv(home.Variable) != "" {
+		from = " (from " + home.Variable + ")"
+	}
+	folded("  state    ", "           ", dir+from, terminalWidth())
+	// **And what protects it when nothing is running.** That directory holds
+	// this machine's identity key, this API's token, the device list and the
+	// record — so a copy of it *is* this machine to every device that has
+	// paired with it. Permissions stop another account and stop nothing once
+	// the disk leaves the building, and full-disk encryption is the answer
+	// that is not Esper's to provide and is Esper's to say out loud.
+	folded("  at rest  ", "           ", home.StateAtRest(dir).Describe(), terminalWidth())
 }
 
 // displayOrDash renders an unstamped field as an em dash rather than an empty
@@ -275,18 +346,28 @@ func displayOrDash(s string) string {
 // causes, so the diagnostic grows with each phase; today it covers the seam
 // between the control plane and the engine, which is the only moving part.
 func cmdDoctor(args []string) int {
-	deep := false
+	deep, asJSON := false, false
 	for _, a := range args {
 		// **Refused rather than ignored.** This ran the ordinary diagnostic for
 		// anything it did not know, so somebody who asked for a deeper check by
 		// a name it does not have got the shallow one and no sign of it — and
 		// the whole point of this command is to be believed about what it
 		// checked.
-		if a != "--session" {
+		switch a {
+		case "--session":
+			deep = true
+		case "--json":
+			asJSON = true
+		default:
 			fmt.Fprintf(os.Stderr, "esper doctor: unknown option %q\n\n%s", a, doctorUsage())
 			return 1
 		}
-		deep = true
+	}
+	if asJSON {
+		if deep {
+			return doctorSessionAsJSON()
+		}
+		return doctorAsJSON()
 	}
 	fmt.Println("🩺  esper doctor")
 	fmt.Println()
@@ -342,6 +423,7 @@ func cmdDoctor(args []string) int {
 	// and not counted against readiness.
 	_ = capability("input   ", status.Input)
 	fmt.Printf("  paired   %d device(s)\n", status.Paired)
+	sayWhereTheStateIs()
 	fmt.Println()
 
 	reachTiers(status)
@@ -368,7 +450,8 @@ func cmdDoctor(args []string) int {
 		// The engine this process started holds the control socket; the self
 		// test starts its own, so let this one go first.
 		_ = sup.Stop()
-		return selfTest(sup.Path())
+		fmt.Println("A session with itself")
+		return selfTest(sup.Path(), printing{})
 	}
 	fmt.Println("✓ ready")
 	fmt.Println()
@@ -393,35 +476,79 @@ func cmdDoctor(args []string) int {
 func reachTiers(status *proto.Status) {
 	fmt.Println("Ways in, in the order they are tried")
 
-	tier := func(name, detail string, have bool, without string) {
-		if have {
-			fmt.Printf("  ✓ %-10s %s\n", name, detail)
-			return
+	// The indent a rung's second line sits under, which is the width of
+	// "  · remembered ".
+	const under = "               "
+	width := terminalWidth()
+	for _, r := range waysIn(status) {
+		mark := "·"
+		if r.Available != nil && *r.Available {
+			mark = "✓"
 		}
-		fmt.Printf("  · %-10s unavailable — %s\n", name, without)
+		folded(fmt.Sprintf("  %s %-10s ", mark, r.Name), under, r.Detail, width)
 	}
 
-	// Always available: it needs nothing of this machine but a socket, which
-	// is why it is the rung everything else is a fallback from.
-	tier("given", "an address somebody types always works, if it routes", true, "")
-	tier("lan", "found by asking this network", status.MDNS,
-		"discovery.mdns is off, so this machine answers no broadcast")
-	// Remembered is a property of the *controller's* store, not of this
-	// machine — a host cannot know whether somebody else remembers it.
-	fmt.Printf("  · %-10s %s\n", "remembered",
-		"decided by the controller, which is where the address is kept")
-	tier("overlay", strings.Join(status.Overlays, ", "), len(status.Overlays) > 0,
-		"no WireGuard, Tailscale or other overlay interface on this machine")
-	tier("broker", brokerOf(status), status.Broker != nil,
-		"none configured, and Esper ships no default: run one, or be reachable another way")
-
-	if !status.MDNS && len(status.Overlays) == 0 && status.Broker == nil {
+	if onlyAnAddress(status) {
 		fmt.Println()
 		fmt.Println("⚠  the only way in is an address somebody already knows. That is a")
 		fmt.Println("   working setup on a fixed address and nothing else — there is no")
 		fmt.Println("   rung left if this machine moves.")
 	}
 	fmt.Println()
+}
+
+// A rung of the connectivity ladder: a way this machine can be reached, or
+// cannot be.
+type rung struct {
+	Name string `json:"name"`
+	// Whether this machine offers it. Nil where this machine cannot know:
+	// `remembered` belongs to the *controller's* store, and a host cannot see
+	// whether somebody else remembers it.
+	Available *bool `json:"available"`
+	// What was found, or how to have it. Shown to a person; never parsed.
+	Detail string `json:"detail"`
+}
+
+// waysIn is the ladder itself, in the order `esper connect` walks it: an
+// address you typed, this network, where it was last time, a private network
+// you already run, an introduction.
+//
+// One list, read by the report a person sees and by the one a script reads, so
+// the two cannot come to disagree about what this machine offers.
+func waysIn(status *proto.Status) []rung {
+	yes, no := true, false
+	tier := func(name, detail string, have bool, without string) rung {
+		if have {
+			return rung{Name: name, Available: &yes, Detail: detail}
+		}
+		return rung{Name: name, Available: &no, Detail: "unavailable — " + without}
+	}
+	return []rung{
+		// Always available: it needs nothing of this machine but a socket,
+		// which is why it is the rung everything else is a fallback from.
+		{Name: "given", Available: &yes, Detail: "an address somebody types always works, if it routes"},
+		tier("lan", "found by asking this network", status.MDNS,
+			"discovery.mdns is off, so this machine answers no broadcast"),
+		{Name: "remembered", Detail: "decided by the controller, which is where the address is kept"},
+		tier("overlay", strings.Join(status.Overlays, ", "), len(status.Overlays) > 0,
+			"no WireGuard, Tailscale or other overlay interface on this machine"),
+		tier("broker", brokerOf(status), status.Broker != nil,
+			"none configured, and Esper ships no default: run one, or be reachable another way"),
+	}
+}
+
+// onlyAnAddress is true where nothing but a typed address can reach this
+// machine — a working setup on a fixed address, and nothing else.
+func onlyAnAddress(status *proto.Status) bool {
+	return !status.MDNS && len(status.Overlays) == 0 && status.Broker == nil
+}
+
+// hostReady is whether this machine can host a screen session.
+//
+// Input is deliberately not counted: a machine that can be watched and not
+// driven is a machine somebody can still read a log on.
+func hostReady(status *proto.Status) bool {
+	return status.Capture.Available && status.Encoder.Available
 }
 
 // brokerOf is the configured broker, for a line that only prints when there is
@@ -439,8 +566,76 @@ func capability(label string, c proto.Capability) bool {
 	if !c.Available {
 		mark = "✗"
 	}
-	fmt.Printf("  %s %s %s\n", label, mark, c.Detail)
+	// The indent every line after the first sits under, which is the width of
+	// "  label ✓ ".
+	const under = "             "
+	width := terminalWidth()
+	folded(fmt.Sprintf("  %s %s ", label, mark), under, c.Detail, width)
+	// What was tried, one line each, and only when something is missing. A
+	// working backend's rejected alternatives are noise; a missing one's are
+	// the whole answer.
+	if !c.Available {
+		for _, attempt := range c.Attempts {
+			folded(under, under+"  ", attempt, width)
+		}
+	}
 	return c.Available
+}
+
+// folded prints text so that no line — lead or indent included — is wider than
+// width. The first line goes after lead and the rest under it.
+func folded(lead, under, text string, width int) {
+	room := width - utf8.RuneCountInString(under)
+	if first := width - utf8.RuneCountInString(lead); first < room {
+		room = first
+	}
+	lines := wrapped(text, room)
+	if len(lines) == 0 {
+		fmt.Println(strings.TrimRight(lead, " "))
+		return
+	}
+	fmt.Printf("%s%s\n", lead, lines[0])
+	for _, line := range lines[1:] {
+		fmt.Printf("%s%s\n", under, line)
+	}
+}
+
+// The width to fold long diagnostic lines at.
+//
+// Eighty when nothing says otherwise, because that is what a terminal is
+// unless somebody has changed it and the environment is the only thing that
+// can tell us here.
+func terminalWidth() int {
+	if raw := os.Getenv("COLUMNS"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 40 {
+			return n
+		}
+	}
+	return 80
+}
+
+// wrapped breaks text on spaces so no line is longer than width.
+//
+// A word longer than the whole width — a path, a URL — is left on a line of
+// its own rather than cut, because half a path helps nobody.
+func wrapped(text string, width int) []string {
+	if width < 20 {
+		width = 20
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return nil
+	}
+	lines := []string{words[0]}
+	for _, word := range words[1:] {
+		last := len(lines) - 1
+		if utf8.RuneCountInString(lines[last])+1+utf8.RuneCountInString(word) <= width {
+			lines[last] += " " + word
+			continue
+		}
+		lines = append(lines, word)
+	}
+	return lines
 }
 
 // otherBinariesOnPath finds every executable called name on PATH, in order.
@@ -637,15 +832,37 @@ func cmdAPI(args []string) int {
 		EngineBinary: enginePath,
 		Engine:       asking,
 		Exposed:      exposed,
+		// **Reported when it is true, not when it was asked for.** `--listen
+		// 127.0.0.1:0` means "pick a port", and a report printed before the
+		// bind says `:0` — which is the one thing the person who asked for a
+		// port of nought cannot work out for themselves.
+		Listening: func(bound string) {
+			sayWhatTheAPIIs(bound, home, engineTrouble, exposed)
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
 		return 1
 	}
 
+	if err := api.Serve(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
+		return 1
+	}
+	fmt.Println("  · stopped")
+	return 0
+}
+
+// sayWhatTheAPIIs is the report `esper api` prints once it is listening.
+//
+// Everything a person needs to use it or to decide they should not have
+// started it: where it answers, where the token is, what it will answer, and —
+// loudly, every time — whether what it bound is reachable from anywhere but
+// this machine.
+func sayWhatTheAPIIs(bound, home string, engineTrouble error, exposed bool) {
 	fmt.Println("🔌 esper api")
 	fmt.Println()
-	fmt.Printf("  listening  %s\n", addr)
+	fmt.Printf("  listening  %s\n", bound)
 	fmt.Printf("  token      %s/%s (mode 0600)\n", home, server.TokenFile)
 	fmt.Println("  answers    what this machine can do, which devices are paired,")
 	fmt.Println("             and what has happened on it")
@@ -668,13 +885,6 @@ func cmdAPI(args []string) int {
 		fmt.Println("  reachable  from this machine only, by whatever can read the token")
 	}
 	fmt.Println()
-
-	if err := api.Serve(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "esper api: %v\n", err)
-		return 1
-	}
-	fmt.Println("  · stopped")
-	return 0
 }
 
 // esperHome is where this machine's Esper state lives.
@@ -693,19 +903,24 @@ func apiUsage() string {
 
 func cmdSessions(args []string) int {
 	most := uint32(20)
-	if len(args) > 0 {
-		// **An option and a bad number are different mistakes.** `--json` is
-		// not "not a number of lines" — it is an option this does not have,
-		// and saying the first sends somebody looking for the number they
-		// typed. Anything starting with a dash is the second kind.
-		if strings.HasPrefix(args[0], "-") {
-			fmt.Fprintf(os.Stderr, "esper sessions: unknown option %q\n\n%s", args[0], sessionsUsage())
+	asJSON := false
+	for _, arg := range args {
+		// **An option and a bad number are different mistakes.** An option
+		// this does not have is not "not a number of lines", and saying the
+		// second sends somebody looking for the number they typed. Anything
+		// starting with a dash is the first kind.
+		if strings.HasPrefix(arg, "-") {
+			if arg == "--json" {
+				asJSON = true
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "esper sessions: unknown option %q\n\n%s", arg, sessionsUsage())
 			return 1
 		}
-		n, err := strconv.ParseUint(args[0], 10, 32)
+		n, err := strconv.ParseUint(arg, 10, 32)
 		if err != nil || n == 0 {
 			fmt.Fprintf(os.Stderr, "esper sessions: %q is not a number of lines\n\n%s",
-				args[0], sessionsUsage())
+				arg, sessionsUsage())
 			return 1
 		}
 		most = uint32(n)
@@ -730,6 +945,23 @@ func cmdSessions(args []string) int {
 		return 1
 	}
 
+	/*
+		For a program rather than a person.
+
+		The trail is the one record this product keeps and the only one that
+		had no machine-readable form: `devices`, `identity`, `config` and
+		`version` all answer `--json`, and anything auditing what happened had
+		to parse a table laid out for reading — or find the file, whose path
+		this command did not print either.
+
+		One object, not a stream of lines, because the count is part of the
+		answer: a caller that asked for twenty and got three has learnt that
+		there were only three.
+	*/
+	if asJSON {
+		return printSessionsAsJSON(happenings, most)
+	}
+
 	fmt.Println("🗂  esper sessions")
 	fmt.Println()
 	if len(happenings) == 0 {
@@ -747,6 +979,62 @@ func cmdSessions(args []string) int {
 	fmt.Println()
 	fmt.Println("  This is what was recorded, not what is happening now: a session in")
 	fmt.Println("  progress appears here when it ends.")
+	sayWhereTheTrailIs()
+	return 0
+}
+
+/*
+sayWhereTheTrailIs prints the file, when there is one to print.
+
+The trail is the record somebody reaches for when something has gone wrong,
+and this command showed twenty lines of it and never said where the rest was.
+Twenty is a default, the file holds months, and the answer to "show me
+everything that device ever did" is `grep` — which needs a path.
+
+Quiet where there is no home to name: a machine with nowhere to put state is
+one where the commands that need it say so in their own words, and a second
+sentence about a directory that does not exist is noise on a failure.
+
+**Nothing here checks the file exists**, because there is no reachable case
+where it does not: this runs only where the engine answered with lines, and
+the engine read them out of that file. A machine with an empty trail returns
+above this and never asks. The property is held by the test, which runs the
+command on a home with nothing in it.
+*/
+func sayWhereTheTrailIs() {
+	dir, err := home.Dir()
+	if err != nil {
+		return
+	}
+	trail := filepath.Join(dir, "sessions.log")
+	fmt.Println()
+	fmt.Printf("  The whole record is %s — one line of JSON each.\n", trail)
+}
+
+// printSessionsAsJSON writes the trail as one object a program can read.
+//
+// The engine's own field names, passed through rather than renamed: a caller
+// reading this and a person reading `sessions.log` are looking at the same
+// words, which is what makes one answer checkable against the other.
+func printSessionsAsJSON(happenings []proto.Happening, asked uint32) int {
+	out := struct {
+		// How many were asked for, so a caller can tell "there were only
+		// three" from "the answer was cut".
+		Asked      uint32            `json:"asked"`
+		Count      int               `json:"count"`
+		Happenings []proto.Happening `json:"happenings"`
+	}{Asked: asked, Count: len(happenings), Happenings: happenings}
+	// **No guard against a null list, because there cannot be one.**
+	// `Sessions` refuses an answer that is not a list rather than returning
+	// nothing, so an empty trail arrives here as an empty slice and is written
+	// as `[]`. A guard here would be two lines nothing can reach, and the
+	// property is held by the test instead — which fails if that ever changes.
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(out); err != nil {
+		fmt.Fprintf(os.Stderr, "esper sessions: %v\n", err)
+		return 1
+	}
 	return 0
 }
 
@@ -756,6 +1044,12 @@ func cmdSessions(args []string) int {
 // apart — and where a device has been unpaired since, the key alone, because
 // the honest answer to "who was that" is that this machine no longer knows.
 func who(h proto.Happening) string {
+	// A line about no peer at all — somebody at the keyboard changed a
+	// setting. The column is what a reader scans, so it says so rather than
+	// being blank, which reads as a line that lost its device.
+	if h.Key == "" {
+		return fmt.Sprintf("%-*s", whoWide, "this machine")
+	}
 	if h.Device == "" {
 		// A prefix, not a cut name. Eight characters of a fingerprint is how
 		// this product names a device everywhere, and a mark after them would
@@ -854,20 +1148,31 @@ Using a machine
   terminal           open a shell on a paired host
   forward            reach a port on a paired host, ssh -L style
   cp                 copy one file to or from a paired host
+  screenshot         one picture of a paired host's screen, as a PNG
   host               serve this machine's screen to a paired device
   host enable        start the host now and at login
   host disable       stop it, and stop it starting at login
+
+Doing something to a machine
+  lock               lock a paired host's screen, and nothing else
+  logoff             end the login session on a paired host
+  reboot             restart a paired host
+  wake               send a magic packet to a paired device that is asleep
 
 Deciding who may
   grant              give a paired device a permission
   revoke             take a permission away
   schedule           when a device may connect unattended, in local time
+  lock-after         whether a session with a device leaves this screen locked
+  group              put devices in a group, for applying a policy at once
   keep               make a one-session pairing last
   forget             unpair a device entirely
 
 This machine
-  config             show every setting and where its value came from
+  config             show every setting, change one, or take one back out
   identity           print this device's fingerprint
+  input              which injection backend this machine can use
+  sandbox            the jail a peer's video is decoded in, and what it stops
   doctor             check what this machine can do, and what it cannot
   sessions [n]       what has happened here: sessions, pairings, refusals
   broker             run an introducer for your own machines

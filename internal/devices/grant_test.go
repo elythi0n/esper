@@ -61,8 +61,17 @@ func TestASensitivePermissionIsNotGrantedFromHere(t *testing.T) {
 			t.Errorf("the refusal for %q should name it: %v", p, err)
 		}
 	}
-	if sensitive != 5 {
-		t.Fatalf("five permissions need a person at the machine, this counts %d", sensitive)
+	if sensitive != 6 {
+		t.Fatalf("six permissions need a person at the machine, this counts %d", sensitive)
+	}
+	// **And `terminal` is one of them**, which it was not. A shell runs as the
+	// user who owns this machine's Esper state: it can read the identity key
+	// and this API's own token, rewrite the device list without going near
+	// `grant`, and edit the record. So it grants every other permission on
+	// this list whether or not anybody grants them — and it was the one the
+	// window could switch on by itself.
+	if !Terminal.Sensitive() {
+		t.Error("granting a shell from this API needs nobody at the machine")
 	}
 }
 
@@ -298,5 +307,254 @@ func TestOnlyAScheduleShapedWhenReachesTheEngine(t *testing.T) {
 	// The fingerprint rule is the same one every other change uses.
 	if _, err := command(Schedule, "827aabec", []Permission{"always"}); err == nil {
 		t.Fatal("a fingerprint prefix was accepted")
+	}
+}
+
+/*
+Four words reach the engine, and nothing else does.
+
+A lock-after is a closed set rather than a grammar, so unlike a schedule it is
+checked here: what a caller sends is one of the words this build knows or it
+is refused by name. That makes the set the thing under test — a build that
+grew a fourth choice in Rust and not here would refuse a word the engine
+understands, and a build that let anything through would be putting a caller's
+string on a command line.
+*/
+func TestOnlyAKnownLockAfterWordReachesTheEngine(t *testing.T) {
+	const fp = "827aabec450ddf13"
+
+	// Every choice this build knows, plus the one that takes the answer off.
+	want := make([]string, 0, len(AllLockAfter)+1)
+	for _, a := range AllLockAfter {
+		want = append(want, string(a))
+	}
+	want = append(want, LockDefault)
+	for _, good := range want {
+		args, err := command(LockAfterChange, fp, []Permission{Permission(good)})
+		if err != nil {
+			t.Fatalf("%q was refused: %v", good, err)
+		}
+		if len(args) != 3 || args[0] != "lock-after" || args[1] != fp || args[2] != good {
+			t.Fatalf("%q became %v", good, args)
+		}
+	}
+
+	for _, bad := range []struct {
+		what string
+		word string
+	}{
+		{"empty", ""},
+		{"a flag", "--yes"},
+		{"the engine's other spelling, which this side does not take", "host"},
+		{"a word nobody knows", "sometimes"},
+		{"shell metacharacters", "always; rm -rf /"},
+		{"a newline and a second argument", "always\nforget 827aabec450ddf13"},
+		{"a nul", "always\x00"},
+		{"uppercase, which the store does not hold", "ALWAYS"},
+	} {
+		if _, err := command(LockAfterChange, fp, []Permission{Permission(bad.word)}); err == nil {
+			t.Fatalf("%s (%q) was accepted onto a command line", bad.what, bad.word)
+		}
+	}
+
+	// One word, never none and never two.
+	if _, err := command(LockAfterChange, fp, nil); err == nil {
+		t.Fatal("a lock-after with no word was accepted")
+	}
+	if _, err := command(LockAfterChange, fp, []Permission{"always", "never"}); err == nil {
+		t.Fatal("a lock-after with two words was accepted")
+	}
+	// The fingerprint rule is the same one every other change uses.
+	if _, err := command(LockAfterChange, "827aabec", []Permission{"always"}); err == nil {
+		t.Fatal("a fingerprint prefix was accepted")
+	}
+}
+
+// And the refusal says what the words are, because a caller that guessed wrong
+// has no other way to find out.
+func TestARefusedLockAfterNamesTheChoices(t *testing.T) {
+	_, err := command(LockAfterChange, "827aabec450ddf13", []Permission{"sometimes"})
+	if err == nil {
+		t.Fatal("an unknown word was accepted")
+	}
+	for _, a := range AllLockAfter {
+		if !strings.Contains(err.Error(), string(a)) {
+			t.Fatalf("the refusal does not name %q: %v", a, err)
+		}
+	}
+	if !strings.Contains(err.Error(), LockDefault) {
+		t.Fatalf("the refusal does not say how to take the answer off: %v", err)
+	}
+}
+
+/*
+A wake names a device and nothing else, and never names a destination.
+
+The engine takes `--to <address>` for a segment this machine is not on. The
+control plane does not pass it, and this is what says so: a caller that could
+name where a packet goes could use this machine to send packets somewhere of
+its choosing, and the only difference between that and a wake is one argument.
+*/
+func TestAWakeNamesADeviceAndNoDestination(t *testing.T) {
+	const fp = "827aabec450ddf13"
+
+	args, err := command(Wake, fp, nil)
+	if err != nil {
+		t.Fatalf("a wake was refused: %v", err)
+	}
+	if len(args) != 2 || args[0] != "wake" || args[1] != fp {
+		t.Fatalf("a wake became %v, and it is the verb and the device", args)
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			t.Fatalf("a wake carries the flag %q", arg)
+		}
+	}
+
+	// Nothing may be smuggled alongside it. `command` takes permissions, and
+	// a wake that quietly accepted one would be putting a caller's string
+	// after the fingerprint — which for `wake` is where `--to` goes.
+	for _, extra := range []Permission{"view", "--to", "--to 10.0.0.1", ""} {
+		if _, err := command(Wake, fp, []Permission{extra}); err == nil {
+			t.Fatalf("a wake carrying %q was accepted", extra)
+		}
+	}
+
+	// The fingerprint rule is the same one every other change uses.
+	if _, err := command(Wake, "827aabec", nil); err == nil {
+		t.Fatal("a fingerprint prefix was accepted")
+	}
+	if _, err := command(Wake, "827aabec450ddf1Z", nil); err == nil {
+		t.Fatal("a fingerprint that is not hex was accepted")
+	}
+}
+
+/*
+The three that reach another machine name a device and nothing else.
+
+Like a wake, and for the same reason: the argv is where a caller's string
+would become a flag if anything unchecked reached it. What is different is
+that these can *do* something at the other end, so the shape of what runs is
+worth pinning rather than assuming.
+*/
+func TestTheReachingActionsNameADeviceAndNothingElse(t *testing.T) {
+	const fp = "827aabec450ddf13"
+
+	for what, verb := range map[Change]string{
+		LockScreen: "lock",
+		LogOff:     "logoff",
+		Restart:    "reboot",
+	} {
+		args, err := command(what, fp, nil)
+		if err != nil {
+			t.Fatalf("%s was refused: %v", verb, err)
+		}
+		if len(args) != 2 || args[0] != verb || args[1] != fp {
+			t.Fatalf("%s became %v, and it is the verb and the device", verb, args)
+		}
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-") {
+				t.Fatalf("%s carries the flag %q", verb, arg)
+			}
+		}
+		// Nothing may be smuggled alongside: `--via` and `--broker-key` are
+		// where a caller could name where this machine connects to.
+		for _, extra := range []Permission{"view", "--via", "--via 10.0.0.1:1", ""} {
+			if _, err := command(what, fp, []Permission{extra}); err == nil {
+				t.Fatalf("%s carrying %q was accepted", verb, extra)
+			}
+		}
+		if _, err := command(what, "827aabec", nil); err == nil {
+			t.Fatalf("%s took a fingerprint prefix", verb)
+		}
+		if !what.Reaching() {
+			t.Fatalf("%s is not counted as an action on another machine, so it gets a file write's patience", verb)
+		}
+	}
+
+	// And the ones that only touch this machine's own store are not.
+	for _, local := range []Change{Grant, Revoke, Forget, Keep, Schedule, LockAfterChange} {
+		if local.Reaching() {
+			t.Fatalf("%s is counted as reaching another machine, which it does not", local.verb())
+		}
+	}
+}
+
+/*
+A group names the group first, and only a name reaches that position.
+
+`group <name> <fingerprint>...` reads its first argument as the group — so a
+name beginning with `-` would be a flag there, and one with a space would be
+two arguments, the second of which the engine reads as a fingerprint. That is
+a different trap from the other changes here, where the fingerprint comes
+first and is checked to be hex.
+*/
+func TestOnlyAGroupShapedNameReachesTheEngine(t *testing.T) {
+	const fp = "827aabec450ddf13"
+
+	// Any script, because the device list already holds a group named in one:
+	// a name the window can show and never change is not a name it supports.
+	for _, good := range []string{"ops", "the-lab", "site_2", "A1", "東京", "mköbenhavn"} {
+		args, err := command(Group, fp, []Permission{Permission(good)})
+		if err != nil {
+			t.Fatalf("%q was refused: %v", good, err)
+		}
+		if len(args) != 3 || args[0] != "group" || args[1] != good || args[2] != fp {
+			t.Fatalf("%q became %v, and it is the verb, the group and the device", good, args)
+		}
+		out, err := command(Ungroup, fp, []Permission{Permission(good)})
+		if err != nil {
+			t.Fatalf("removing from %q was refused: %v", good, err)
+		}
+		if len(out) != 4 || out[3] != "--remove" {
+			t.Fatalf("removing from %q became %v", good, out)
+		}
+	}
+
+	for _, bad := range []struct {
+		what string
+		name string
+	}{
+		{"empty", ""},
+		{"only spaces", "   "},
+		{"a flag", "--remove"},
+		{"a flag in the group's place", "-x"},
+		{"two arguments", "ops elythion"},
+		{"shell metacharacters", "ops; rm -rf /"},
+		{"a pipe", "ops|sh"},
+		{"a newline and a second argument", "ops\nforget 827aabec450ddf13"},
+		{"a nul", "ops\x00"},
+		{"backticks", "`id`"},
+		{"a dollar", "$(id)"},
+		{"a path", "../ops"},
+		{"longer than a name", strings.Repeat("o", MostGroupChars+1)},
+		// Bytes are not characters: a name of this many letters in a
+		// three-byte script is the same length as one in a one-byte script.
+		{"longer than a name in another script", strings.Repeat("東", MostGroupChars+1)},
+		{"a right-to-left override, which makes a name display as another", "op\u202eslo"},
+		{"a zero-width space", "op\u200bs"},
+		{"a non-breaking space", "op\u00a0s"},
+	} {
+		if _, err := command(Group, fp, []Permission{Permission(bad.name)}); err == nil {
+			t.Fatalf("%s (%q) was accepted onto a command line", bad.what, bad.name)
+		}
+		if _, err := command(Ungroup, fp, []Permission{Permission(bad.name)}); err == nil {
+			t.Fatalf("%s (%q) was accepted when removing", bad.what, bad.name)
+		}
+	}
+
+	// Exactly one group, and a whole fingerprint, like everything else here.
+	if _, err := command(Group, fp, nil); err == nil {
+		t.Fatal("a group change with no group was accepted")
+	}
+	if _, err := command(Group, fp, []Permission{"ops", "lab"}); err == nil {
+		t.Fatal("a group change naming two groups was accepted")
+	}
+	if _, err := command(Group, "827aabec", []Permission{"ops"}); err == nil {
+		t.Fatal("a fingerprint prefix was accepted")
+	}
+	// And a group is not an action on another machine: it is a file write.
+	if Group.Reaching() || Ungroup.Reaching() {
+		t.Fatal("a group change is counted as reaching another machine")
 	}
 }

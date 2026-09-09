@@ -1,6 +1,8 @@
 package server
 
 import (
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,7 +52,10 @@ func TestClosingTheFanoutEndsEveryReader(t *testing.T) {
 	ids := make([]int, 0, 3)
 	channels := make([]chan proto.Happening, 0, 3)
 	for range 3 {
-		id, ch := f.join()
+		id, ch, err := f.join()
+		if err != nil {
+			t.Fatalf("joining: %v", err)
+		}
 		ids = append(ids, id)
 		channels = append(channels, ch)
 	}
@@ -72,7 +77,10 @@ func TestClosingTheFanoutEndsEveryReader(t *testing.T) {
 
 	// Joining afterwards gets a channel that has already ended, so a request
 	// arriving mid-shutdown finishes rather than waiting for a line.
-	id, ch := f.join()
+	id, ch, err := f.join()
+	if err != nil {
+		t.Fatalf("a stream joining after shutdown was refused rather than ended: %v", err)
+	}
 	if id != -1 {
 		t.Errorf("a stream that joined after shutdown was given id %d", id)
 	}
@@ -101,11 +109,82 @@ The lines are a notification and `/sessions` is the record, so a stream nobody
 is reading drops rather than grows — otherwise one paused browser tab is a
 control plane whose memory climbs until something kills it.
 */
+// **There is a ceiling on open streams, and it is said out loud.**
+//
+// A browser limits connections per origin; a program holding the token does
+// not, and every stream is a goroutine, a buffer and a slot `publish` walks
+// while holding the lock. Without a ceiling, enough of them make every session
+// line slow for everybody — and nothing in the product would say why.
+func TestOnlySoManyStreamsMayBeOpenAtOnce(t *testing.T) {
+	f := newFanout()
+	defer f.close()
+
+	for i := range atMost {
+		if _, _, err := f.join(); err != nil {
+			t.Fatalf("stream %d of %d was refused: %v", i+1, atMost, err)
+		}
+	}
+	_, ch, err := f.join()
+	if err == nil {
+		t.Fatal("a stream past the ceiling was let in, so there is no ceiling")
+	}
+	if ch != nil {
+		t.Error("a refused stream was given a channel to read anyway")
+	}
+	// The refusal names the limit and what to do, because "service
+	// unavailable" on a machine that is plainly running is not an answer.
+	if !strings.Contains(err.Error(), strconv.Itoa(atMost)) {
+		t.Errorf("the refusal does not say how many is too many: %v", err)
+	}
+
+	// And a stream that leaves makes room, so this is a ceiling and not a
+	// budget spent once.
+	f.leave(0)
+	if _, _, err := f.join(); err != nil {
+		t.Errorf("nothing could join after a stream left: %v", err)
+	}
+}
+
+// A line published while the fanout is full still reaches everybody in it: the
+// ceiling refuses new readers and changes nothing about the ones already
+// reading.
+func TestAFullFanoutStillDeliversToEveryoneInIt(t *testing.T) {
+	f := newFanout()
+	defer f.close()
+
+	channels := make([]chan proto.Happening, 0, atMost)
+	for range atMost {
+		_, ch, err := f.join()
+		if err != nil {
+			t.Fatalf("joining: %v", err)
+		}
+		channels = append(channels, ch)
+	}
+	if _, _, err := f.join(); err == nil {
+		t.Fatal("the fanout is not full, so this measures nothing")
+	}
+
+	f.publish(proto.Happening{Key: "019a1125", At: 7})
+	for i, ch := range channels {
+		select {
+		case got := <-ch:
+			if got.At != 7 {
+				t.Errorf("stream %d received %+v", i, got)
+			}
+		default:
+			t.Errorf("stream %d received nothing while the fanout was full", i)
+		}
+	}
+}
+
 func TestASlowReaderLosesLinesRatherThanHoldingThemUp(t *testing.T) {
 	f := newFanout()
 	defer f.close()
 
-	_, ch := f.join()
+	_, ch, err := f.join()
+	if err != nil {
+		t.Fatalf("joining: %v", err)
+	}
 	within(t, 5*time.Second, "publishing to a stream nobody is draining", func() {
 		for i := range deep * 4 {
 			f.publish(proto.Happening{Key: "019a1125", At: uint64(i)})

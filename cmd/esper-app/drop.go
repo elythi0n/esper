@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,6 +45,10 @@ what gets shown.
 // anything a person would notice.
 const transferPatience = 30 * time.Minute
 
+// How much of the engine's output a window keeps, for the sentence a failure
+// ends with and for the progress the page shows.
+const tailKept = 4096
+
 // How long a finished transfer stays in the list the page reads.
 //
 // Long enough that a window which was in the background still shows what
@@ -57,11 +64,42 @@ type transfer struct {
 	Name string `json:"name"`
 	// "sending", "sent" or "failed".
 	State string `json:"state"`
+	// How far along, in bytes, as the engine reports it.
+	//
+	// **Read from `cp`'s own progress rather than by watching the file.** The
+	// engine is what knows how much has been acknowledged at the far end, and
+	// a window counting bytes off a disk would be reporting how fast it can
+	// read rather than how fast the session can send.
+	Bytes int64 `json:"bytes"`
+	Total int64 `json:"total"`
 	// The reason, when it failed. The host's sentence where there is one.
 	Trouble string `json:"trouble,omitempty"`
 	started time.Time
 	done    time.Time
 }
+
+// progressOf reads `N of M bytes` out of whatever the engine has printed.
+//
+// The window starts `cp --progress`, which prints one plain line per report
+// because a bar drawn with carriage returns is invisible through a pipe. The
+// **last** pair in what has arrived is the current one. Returns false when
+// there is no pair at all, which is every line before the first block goes
+// out.
+func progressOf(said string) (sent, total int64, ok bool) {
+	for _, m := range progressLine.FindAllStringSubmatch(said, -1) {
+		a, err1 := strconv.ParseInt(m[1], 10, 64)
+		b, err2 := strconv.ParseInt(m[2], 10, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		sent, total, ok = a, b, true
+	}
+	return sent, total, ok
+}
+
+// What a progress line carries. See `Progress` in `cp_cmd.rs`, which writes
+// this shape both plainly and inside the bar a terminal gets.
+var progressLine = regexp.MustCompile(`(\d+) of (\d+) bytes`)
 
 // transfers is what this window has sent, and what it is sending.
 type transfers struct {
@@ -82,6 +120,14 @@ func (t *transfers) begin(name string) *transfer {
 	return item
 }
 
+// progress records how far along a transfer is.
+func (t *transfers) progress(item *transfer, sent, total int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	item.Bytes = sent
+	item.Total = total
+}
+
 func (t *transfers) finish(item *transfer, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -92,6 +138,12 @@ func (t *transfers) finish(item *transfer, err error) {
 		return
 	}
 	item.State = "sent"
+	// A finished transfer is *all* of it, whatever the last progress line
+	// happened to say: the engine stops drawing when the far end has it, and a
+	// queue showing "sent" beside 98% would be a queue nobody believes.
+	if item.Total > 0 {
+		item.Bytes = item.Total
+	}
 }
 
 // list is what the page reads, oldest first, with the long-finished dropped.
@@ -123,14 +175,71 @@ func (t *transfers) send(front, device, path string) {
 	// on a slow one.
 	ctx, done := context.WithTimeout(context.Background(), transferPatience)
 	defer done()
-	cmd := exec.CommandContext(ctx, front, "cp", path, device+":") // #nosec G204 -- device is a fingerprint matched against aFingerprint, path comes from the window manager's drop, and front is resolved beside this binary
-	out, err := cmd.CombinedOutput()
+	cmd := exec.CommandContext(ctx, front, "cp", "--progress", path, device+":") // #nosec G204 -- device is a fingerprint matched against aFingerprint, path comes from the window manager's drop, and front is resolved beside this binary
+
+	/*
+		Read as it goes rather than collected at the end.
+
+		`CombinedOutput` waits for the process, so a window using it knows
+		nothing until the transfer is over — which for a large file is the
+		whole time somebody is looking at it. The engine draws its progress to
+		stderr as it goes, and reading that is how a window can say how far
+		along a file is without counting bytes off a disk itself.
+	*/
+	// **One pipe for both streams**, which is what `CombinedOutput` gave. The
+	// engine says everything on standard error so a script's standard output
+	// is its own, but a window that read only one of them would be a window
+	// that loses whichever sentence moves.
+	said, writes, err := os.Pipe()
+	if err != nil {
+		t.finish(item, err)
+		return
+	}
+	cmd.Stdout = writes
+	cmd.Stderr = writes
+	if err := cmd.Start(); err != nil {
+		_ = writes.Close()
+		_ = said.Close()
+		t.finish(item, err)
+		return
+	}
+	// Closed here, or the read below never reaches the end: the child holds
+	// the only other copy once it has started.
+	_ = writes.Close()
+	defer func() { _ = said.Close() }()
+
+	// The tail, for the sentence a failure ends with. Bounded: a transfer that
+	// printed for an hour must not be held in memory by a window.
+	//
+	// Progress is read out of the tail rather than out of the chunk that just
+	// arrived, because a read boundary falls wherever the pipe says it does —
+	// `12345 of 67` in one read and `890 bytes` in the next matches nothing in
+	// either half, and the tail is where the two are next to each other again.
+	tail := make([]byte, 0, tailKept)
+	buf := make([]byte, 1024)
+	for {
+		n, readErr := said.Read(buf)
+		if n > 0 {
+			tail = append(tail, buf[:n]...)
+			if len(tail) > tailKept {
+				tail = tail[len(tail)-tailKept:]
+			}
+			if sent, total, ok := progressOf(string(tail)); ok {
+				t.progress(item, sent, total)
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	err = cmd.Wait()
 	if ctx.Err() != nil {
 		t.finish(item, errors.New("the transfer was still going after "+transferPatience.String()+", so it was stopped"))
 		return
 	}
 	if err != nil {
-		t.finish(item, errors.New(lastSentence(string(out))))
+		t.finish(item, errors.New(lastSentence(string(tail))))
 		return
 	}
 	t.finish(item, nil)

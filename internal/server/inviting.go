@@ -48,12 +48,18 @@ machine.
 // waiting at a broker for ever.
 const howLongAnInvitationRuns = 35 * time.Minute
 
-// The engine's own printing of an invitation.
-var (
-	linkPrinted    = regexp.MustCompile(`(esper://join/[A-Za-z0-9_-]{16,512})`)
-	expiresMinutes = regexp.MustCompile(`expires\s+in (\d+) minute`)
-	brokerPrinted  = regexp.MustCompile(`(?m)^\s*broker\s+(\S+)\s*$`)
-)
+// invited is one line of the engine's `invite --json` stream.
+//
+// The object and not the printed report, for the same reason pairing reads
+// one: the report is written for the person sending a link, and something
+// parsing it with a regular expression holds an unmarked contract over prose
+// that is free to change. What it would get wrong here is the link itself.
+type invited struct {
+	Event     string `json:"event"`
+	Link      string `json:"link"`
+	Broker    string `json:"broker"`
+	ExpiresAt int64  `json:"expires_at"`
+}
 
 // Invitation is a way in that this machine is currently offering.
 type Invitation struct {
@@ -132,7 +138,7 @@ func (s *Server) offerInvitation(ctx context.Context, who string) (*Invitation, 
 	}
 	s.inviting.stop()
 
-	args := []string{"invite"}
+	args := []string{"invite", "--json"}
 	if who != "" {
 		args = append(args, "--for", who)
 	}
@@ -186,27 +192,39 @@ func (s *Server) offerInvitation(ctx context.Context, who string) (*Invitation, 
 	return offered, nil
 }
 
-// readInvitation reads until the engine has printed the link.
+// readInvitation reads until the engine has offered the link.
+//
+// One object per line; the first that says `offering` is the answer. A line
+// this build cannot read is skipped rather than fatal, so an engine that grows
+// a new event does not stop an older control plane inviting.
 func readInvitation(from io.Reader, who string) (*Invitation, error) {
-	offered := &Invitation{State: "offering", For: who}
 	scanner := bufio.NewScanner(from)
 	seen := make([]string, 0, 16)
 	for scanner.Scan() {
 		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 		seen = append(seen, line)
-		if m := brokerPrinted.FindStringSubmatch(line); m != nil {
-			offered.Broker = m[1]
+		var said invited
+		if err := json.Unmarshal([]byte(line), &said); err != nil {
+			continue
 		}
-		if m := expiresMinutes.FindStringSubmatch(line); m != nil {
-			var minutes int
-			if _, err := fmt.Sscanf(m[1], "%d", &minutes); err == nil {
-				offered.ExpiresAt = time.Now().Add(time.Duration(minutes) * time.Minute).Unix()
-			}
+		if said.Event != "offering" {
+			continue
 		}
-		if m := linkPrinted.FindStringSubmatch(line); m != nil {
-			offered.Link = m[1]
-			return offered, nil
+		// **The link, or nothing.** An invitation screen with no link on it
+		// is a screen showing somebody a way in they cannot send.
+		if !strings.HasPrefix(said.Link, "esper://join/") {
+			return nil, fmt.Errorf("the engine's invitation carries no link: %s", line)
 		}
+		return &Invitation{
+			State:     "offering",
+			For:       who,
+			Link:      said.Link,
+			Broker:    said.Broker,
+			ExpiresAt: said.ExpiresAt,
+		}, nil
 	}
 	// **The failure is the useful part here.** With no broker configured the
 	// engine explains exactly that, and passing its sentence on is what makes

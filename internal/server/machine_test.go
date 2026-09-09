@@ -17,16 +17,18 @@ words. The day the two disagree about what the fingerprint is, the
 disagreement looks like an attack — which is why the words come from the
 engine rather than being derived a second time here.
 
-The text below is what the engine prints, captured from a real
-`esper-engine identity`.
+The text below is what the engine answers, captured from a real
+`esper-engine identity --json`.
+
+**The object and not the printed report.** The report is written for a person
+and is free to change; a control plane that scraped it went on calling the
+whole key a fingerprint the day the report started printing both, and every
+screen in the window draws an identicon from that value.
 */
-const engineIdentified = `device fingerprint
-
-    kelp nest jersey hydrant
-    chorus fiber office nest
-
-  key   6b8b665f2149958b
-  file  /home/somebody/.esper/identity.key
+const engineIdentified = `{"public_key":"6b8b665f2149958b3b1a4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f",` +
+	`"fingerprint":{"hex":"6b8b665f2149958b",` +
+	`"words":["kelp","nest","jersey","hydrant","chorus","fiber","office","nest"]},` +
+	`"file":"/home/somebody/.esper/identity.key"}
 `
 
 // anEngineSaying writes a stand-in `esper-engine` that prints a fixed text.
@@ -53,6 +55,15 @@ func TestWhatTheEngineSaysItIsIsWhatIsRead(t *testing.T) {
 	}
 	if who.File != "/home/somebody/.esper/identity.key" {
 		t.Errorf("file %q", who.File)
+	}
+	// **Both, and each in its own field.** The short one is what a screen
+	// shows and what an identicon is drawn from; the whole one is what a peer
+	// pins. A reader that had only one of them would have to guess which.
+	if len(who.Key) != 16 {
+		t.Errorf("the key field is %d characters, and a fingerprint is 16: %q", len(who.Key), who.Key)
+	}
+	if len(who.PublicKey) != 64 {
+		t.Errorf("the public key is %d characters, and a key is 64: %q", len(who.PublicKey), who.PublicKey)
 	}
 
 	// Eight words in the order they are said, because that order is the check
@@ -105,6 +116,12 @@ machine they have not checked.
 */
 func TestAnEngineThatPrintsNoFingerprintIsRefused(t *testing.T) {
 	for _, said := range []string{
+		// An object with everything but the thing a person reads.
+		`{"public_key":"6b8b","file":"/tmp/identity.key"}` + "\n",
+		// An empty fingerprint, which is the plausible-looking one.
+		`{"fingerprint":{"hex":"","words":[]}}` + "\n",
+		// The printed report, which is no longer what is asked for — and
+		// which an engine from an older build would answer with.
 		"device fingerprint\n\n    kelp nest jersey hydrant\n",
 		"esper-engine identity: no identity key here yet\n",
 		"",

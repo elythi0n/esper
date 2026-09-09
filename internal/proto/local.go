@@ -55,9 +55,16 @@ type Capability struct {
 	// Available says whether it works now, established by trying it where
 	// trying is cheap.
 	Available bool `cbor:"available" json:"available"`
-	// Detail is what was found, or why nothing was. Shown to a person; never
-	// parsed.
+	// Detail is what was found, or why nothing was. One short line. Shown to
+	// a person; never parsed.
 	Detail string `cbor:"detail" json:"detail"`
+	// Attempts is every backend that was tried, in the order they were tried,
+	// one line each. Empty where there was nothing to choose between.
+	//
+	// Kept apart from Detail so a reader gets one sentence, and a reader who
+	// needs the whole story gets it on its own lines rather than as one very
+	// long one.
+	Attempts []string `cbor:"attempts,omitempty" json:"attempts,omitempty"`
 }
 
 // Status is everything `esper doctor` needs to say what this machine can do.

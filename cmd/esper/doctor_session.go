@@ -3,11 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +28,132 @@ const howLongASelfTestMayTake = 90 * time.Second
 // figure that means something, short enough that nobody wonders whether
 // `esper doctor` has hung.
 const howLongToWatch = 3 * time.Second
+
+// Where a self test says what it just did.
+//
+// Two of these: one prints each step as it happens, because the test takes
+// several seconds and silence in the middle of it reads as a hang; one
+// collects them for `--json`. Everything the test says goes through here, so
+// the two reports cannot come to disagree about what it found.
+type sayer interface {
+	// step is one thing the test did, and how it went. A detail may carry
+	// newlines, and every line after the first sits under the first.
+	step(name string, ok bool, detail string)
+	// evidence is the raw output a failed step produced, unedited.
+	evidence(lines []string)
+	// figures are the numbers behind the step just reported, for a reader
+	// that would otherwise have to parse a sentence written for a person.
+	figures(of map[string]float64)
+	// warn is what a person needs to know after a failure: which half of the
+	// path is proven, and which half is the thing to look into.
+	warn(text string)
+	// verdict is the sentence at the end, and the whole test's answer.
+	verdict(ok bool, text string)
+}
+
+// printing is the self test as a person watching it reads it.
+type printing struct{}
+
+func (printing) step(name string, ok bool, detail string) {
+	if !ok {
+		fmt.Printf("  ✗ %s\n", detail)
+		return
+	}
+	lines := strings.Split(detail, "\n")
+	fmt.Printf("  ✓ %-9s %s\n", name, lines[0])
+	for _, line := range lines[1:] {
+		fmt.Printf("              %s\n", line)
+	}
+}
+
+func (printing) evidence(lines []string) { showSome(lines) }
+
+// A person reads the numbers in the sentence.
+func (printing) figures(map[string]float64) {}
+
+func (printing) warn(text string) {
+	fmt.Println()
+	for i, line := range strings.Split(text, "\n") {
+		if i == 0 {
+			fmt.Printf("⚠  %s\n", line)
+			continue
+		}
+		fmt.Printf("   %s\n", line)
+	}
+}
+
+func (printing) verdict(ok bool, text string) {
+	if !ok {
+		return
+	}
+	fmt.Println()
+	for i, line := range strings.Split(text, "\n") {
+		if i == 0 {
+			fmt.Printf("✓ %s\n", line)
+			continue
+		}
+		fmt.Printf("  %s\n", line)
+	}
+}
+
+// One thing the self test did, and how it went.
+type selfStep struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+	// The raw output behind a failed step, where there was any.
+	Evidence []string `json:"evidence,omitempty"`
+	// The numbers behind the detail, where the step measured any.
+	Figures map[string]float64 `json:"figures,omitempty"`
+}
+
+// collecting is the same test, kept rather than printed.
+type collecting struct {
+	Steps    []selfStep `json:"steps"`
+	Warnings []string   `json:"warnings"`
+	Verdict  string     `json:"verdict"`
+	OK       bool       `json:"ok"`
+}
+
+func (c *collecting) step(name string, ok bool, detail string) {
+	c.Steps = append(c.Steps, selfStep{Name: name, OK: ok, Detail: oneLine(detail)})
+}
+
+// figures belong to the step they measure, which is always the last one.
+func (c *collecting) figures(of map[string]float64) {
+	if len(c.Steps) == 0 {
+		return
+	}
+	c.Steps[len(c.Steps)-1].Figures = of
+}
+
+// oneLine folds a detail written to be read down a column into one sentence.
+func oneLine(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+// evidence belongs to the step it explains, which is always the last one.
+func (c *collecting) evidence(lines []string) {
+	if len(c.Steps) == 0 {
+		return
+	}
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			kept = append(kept, line)
+		}
+	}
+	c.Steps[len(c.Steps)-1].Evidence = kept
+}
+
+func (c *collecting) warn(text string) {
+	c.Warnings = append(c.Warnings, oneLine(text))
+}
+
+func (c *collecting) verdict(ok bool, text string) {
+	c.OK = ok
+	c.Verdict = oneLine(text)
+}
 
 // selfTest runs a real session between two throwaway identities on this
 // machine, and times it.
@@ -57,18 +187,16 @@ const howLongToWatch = 3 * time.Second
 // It starts four processes and takes several seconds. `esper doctor` is what
 // somebody runs when something is wrong, and it should answer quickly; this is
 // `esper doctor --session` for when the quick answers were all fine.
-func selfTest(enginePath string) int {
-	fmt.Println("A session with itself")
-
+func selfTest(enginePath string, say sayer) int {
 	hostHome, err := os.MkdirTemp("", "esper-doctor-host-")
 	if err != nil {
-		fmt.Printf("  ✗ nowhere to put a temporary identity: %v\n", err)
+		say.step("homes", false, fmt.Sprintf("nowhere to put a temporary identity: %v", err))
 		return 1
 	}
 	defer func() { _ = os.RemoveAll(hostHome) }()
 	viewerHome, err := os.MkdirTemp("", "esper-doctor-viewer-")
 	if err != nil {
-		fmt.Printf("  ✗ nowhere to put a temporary identity: %v\n", err)
+		say.step("homes", false, fmt.Sprintf("nowhere to put a temporary identity: %v", err))
 		return 1
 	}
 	defer func() { _ = os.RemoveAll(viewerHome) }()
@@ -78,13 +206,13 @@ func selfTest(enginePath string) int {
 
 	began := time.Now()
 	if err := pairTwo(ctx, enginePath, hostHome, viewerHome); err != nil {
-		fmt.Printf("  ✗ the two ends could not pair: %v\n", err)
-		fmt.Println()
-		fmt.Println("⚠  pairing is the first thing a session does, so nothing else here")
-		fmt.Println("   would have worked either.")
+		say.step("paired", false, fmt.Sprintf("the two ends could not pair: %v", err))
+		say.warn("pairing is the first thing a session does, so nothing else here\nwould have worked either.")
 		return 1
 	}
-	fmt.Printf("  ✓ paired    two identities, in %s\n", took(time.Since(began)))
+	paired := time.Since(began)
+	say.step("paired", true, fmt.Sprintf("two identities, in %s", took(paired)))
+	say.figures(map[string]float64{"seconds": paired.Seconds()})
 
 	// **`unattended`, on a store that exists for the next four seconds.**
 	// Without it the host stops and asks whoever is at the machine to allow
@@ -95,7 +223,7 @@ func selfTest(enginePath string) int {
 	// the device in it is this command's own, and both are deleted when it
 	// returns.
 	if err := allowUnattended(ctx, enginePath, hostHome); err != nil {
-		fmt.Printf("  ✗ the temporary host would not allow its own viewer: %v\n", err)
+		say.step("allowed", false, fmt.Sprintf("the temporary host would not allow its own viewer: %v", err))
 		return 1
 	}
 
@@ -106,12 +234,12 @@ func selfTest(enginePath string) int {
 	host.Env = append(os.Environ(), "ESPER_HOME="+hostHome)
 	hostSaid, err := host.StdoutPipe()
 	if err != nil {
-		fmt.Printf("  ✗ could not read the host's output: %v\n", err)
+		say.step("listening", false, fmt.Sprintf("could not read the host's output: %v", err))
 		return 1
 	}
 	host.Stderr = nil
 	if err := host.Start(); err != nil {
-		fmt.Printf("  ✗ the host would not start: %v\n", err)
+		say.step("listening", false, fmt.Sprintf("the host would not start: %v", err))
 		return 1
 	}
 	defer func() {
@@ -123,18 +251,19 @@ func selfTest(enginePath string) int {
 	// so there are two of them, and a regex written from the sentence rather
 	// than from the output does not match.
 	listening := regexp.MustCompile(`listening\s+(?:on\s+)?(\S+:\d+)`)
-	line, hostLines := waitForMatch(hostSaid, listening, ctx.Done())
+	hostWatch := watch(hostSaid, listening)
+	line := hostWatch.waitFor(ctx.Done())
 	found := listening.FindStringSubmatch(line)
 	addr := ""
 	if len(found) == 2 {
 		addr = found[1]
 	}
 	if addr == "" {
-		fmt.Println("  ✗ the host never said what it was listening on")
-		showSome(hostLines)
+		say.step("listening", false, "the host never said what it was listening on")
+		say.evidence(hostWatch.lines())
 		return 1
 	}
-	fmt.Printf("  ✓ listening %s\n", addr)
+	say.step("listening", true, addr)
 
 	opened := time.Now()
 	viewer := exec.CommandContext(ctx, enginePath, // #nosec G204 -- the path is ours
@@ -143,8 +272,8 @@ func selfTest(enginePath string) int {
 	out, err := viewer.CombinedOutput()
 	said := string(out)
 	if err != nil && !strings.Contains(said, "pictures") {
-		fmt.Printf("  ✗ the session did not open: %v\n", err)
-		showSome(strings.Split(said, "\n"))
+		say.step("session", false, fmt.Sprintf("the session did not open: %v", err))
+		say.evidence(strings.Split(said, "\n"))
 		return 1
 	}
 
@@ -157,24 +286,29 @@ func selfTest(enginePath string) int {
 		// indicator, which is none of those three. A diagnostic that invents
 		// a cause is worse than one that reports a code.
 		if why := endedBecause(said); why != "" {
-			fmt.Printf("  ✗ the host ended it: %s\n", why)
-			fmt.Println()
-			fmt.Println("⚠  the two ends found each other and agreed a session, so the")
-			fmt.Println("   network and the pairing are fine. The line above is the host")
-			fmt.Println("   saying why it stopped, and is the thing to look into.")
+			say.step("session", false, "the host ended it: "+why)
+			// **And what the host itself said about it.** The code names the
+			// kind of refusal; the host's own lines name the cause — which
+			// screen, which permission, what was read back. Without them this
+			// printed a number under a sentence calling it the thing to look
+			// into.
+			say.evidence(hostWatch.lines())
+			say.warn("the two ends found each other and agreed a session, so the\nnetwork and the pairing are fine. The line above is the host\nsaying why it stopped, and is the thing to look into.")
 			return 1
 		}
-		fmt.Println("  ✗ the session opened and no picture ever arrived")
-		showSome(strings.Split(said, "\n"))
-		fmt.Println()
-		fmt.Println("⚠  the two ends found each other and agreed a session, and the host")
-		fmt.Println("   gave no reason for stopping — so this is the capture, the encoder")
-		fmt.Println("   or the decoder.")
+		say.step("session", false, "the session opened and no picture ever arrived")
+		say.evidence(strings.Split(said, "\n"))
+		say.warn("the two ends found each other and agreed a session, and the host\ngave no reason for stopping — so this is the capture, the encoder\nor the decoder.")
 		return 1
 	}
 
 	elapsed := time.Since(opened)
-	fmt.Printf("  ✓ session   %d picture(s) in %s, %d discarded\n", shown, took(elapsed), notShown)
+	say.step("session", true, fmt.Sprintf("%d picture(s) in %s, %d discarded", shown, took(elapsed), notShown))
+	say.figures(map[string]float64{
+		"pictures":  float64(shown),
+		"discarded": float64(notShown),
+		"seconds":   elapsed.Seconds(),
+	})
 
 	// **A low count on a still screen is the right answer, and has to say so.**
 	// The damage gate sends nothing when nothing changes, so a machine with a
@@ -185,37 +319,51 @@ func selfTest(enginePath string) int {
 	if secs := elapsed.Seconds(); secs > 0 {
 		rate := float64(shown) / secs
 		if rate < 1.0 {
-			fmt.Printf("  ✓ rate      %.1f a second — the screen was not changing, which is\n", rate)
-			fmt.Printf("              what an idle desktop costs: the gate sends the periodic\n")
-			fmt.Printf("              keyframe and nothing else\n")
+			say.step("rate", true, fmt.Sprintf("%.1f a second — the screen was not changing, which is\nwhat an idle desktop costs: the gate sends the periodic\nkeyframe and nothing else", rate))
 		} else {
-			fmt.Printf("  ✓ rate      %.0f pictures a second, end to end on this machine\n", rate)
+			say.step("rate", true, fmt.Sprintf("%.0f pictures a second, end to end on this machine", rate))
 		}
+		say.figures(map[string]float64{"a_second": rate})
 	}
-	fmt.Println()
-	fmt.Println("✓ this machine can hold a session with itself: pairing, transport,")
-	fmt.Println("  capture, encode and decode all work. What that does not prove is")
-	fmt.Println("  that your own device list does — see `esper devices`.")
+	say.verdict(true, "this machine can hold a session with itself: pairing, transport,\ncapture, encode and decode all work. What that does not prove is\nthat your own device list does — see `esper devices`.")
 	return 0
 }
 
 // allowUnattended grants the one paired device everything the self test needs.
 func allowUnattended(ctx context.Context, enginePath, hostHome string) error {
-	list := exec.CommandContext(ctx, enginePath, "devices") // #nosec G204 -- the path is ours
+	// **The list as an object.** Scraping the printed one for the first
+	// sixteen hex characters is a diagnostic that breaks the day somebody
+	// changes an indent — and the thing it would then grant a permission to
+	// is whatever else on the line happened to look like a fingerprint.
+	list := exec.CommandContext(ctx, enginePath, "devices", "--json") // #nosec G204 -- the path is ours
 	list.Env = append(os.Environ(), "ESPER_HOME="+hostHome)
 	out, err := list.Output()
 	if err != nil {
 		return fmt.Errorf("reading the temporary device list: %w", err)
 	}
-	found := fingerprintLine.FindStringSubmatch(string(out))
-	if len(found) != 2 {
-		return fmt.Errorf("the pairing left no device in the list")
+	var listed struct {
+		Devices []struct {
+			Fingerprint struct {
+				Hex string `json:"hex"`
+			} `json:"fingerprint"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(out, &listed); err != nil {
+		return fmt.Errorf("the temporary device list could not be read: %w", err)
+	}
+	if len(listed.Devices) != 1 {
+		return fmt.Errorf("the pairing left %d device(s) in the list, and it should leave one",
+			len(listed.Devices))
+	}
+	who := listed.Devices[0].Fingerprint.Hex
+	if who == "" {
+		return fmt.Errorf("the device the pairing left has no fingerprint")
 	}
 
 	// `view` because the session is a screen session, `unattended` because
 	// there is nobody to ask.
 	grant := exec.CommandContext(ctx, enginePath, // #nosec G204 -- the path is ours
-		"grant", found[1], "view", "unattended", "--yes")
+		"grant", who, "view", "unattended", "--yes")
 	grant.Env = append(os.Environ(), "ESPER_HOME="+hostHome)
 	if out, err := grant.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
@@ -223,13 +371,10 @@ func allowUnattended(ctx context.Context, enginePath, hostHome string) error {
 	return nil
 }
 
-// The first fingerprint in `esper-engine devices` output.
-var fingerprintLine = regexp.MustCompile(`(?m)^\s+([0-9a-f]{16})\b`)
-
 // pairTwo pairs two homes over loopback, the way a person would.
 func pairTwo(ctx context.Context, enginePath, hostHome, viewerHome string) error {
 	listener := exec.CommandContext(ctx, enginePath, // #nosec G204 -- the path is ours
-		"pair", "--listen", "127.0.0.1:0")
+		"pair", "--listen", "127.0.0.1:0", "--json")
 	listener.Env = append(os.Environ(), "ESPER_HOME="+hostHome)
 	said, err := listener.StdoutPipe()
 	if err != nil {
@@ -243,26 +388,32 @@ func pairTwo(ctx context.Context, enginePath, hostHome, viewerHome string) error
 		_ = listener.Wait()
 	}()
 
-	// The listener prints the command to run at the other end, which carries
-	// both the port it took and the code it generated. Read rather than
-	// chosen: picking a port here would race whatever else is on this machine,
-	// and inventing a code is not how pairing works.
-	// **The port from the offer, and loopback for the host part.** What the
-	// listener prints is the command to run on the *other machine*, so the
-	// host in it is a placeholder — `<this-machine>` — rather than an address
-	// anything can dial. The port is real and is the only part needed here.
-	invite := regexp.MustCompile(`pair \S*:(\d+) --code ([A-Z0-9-]+)`)
-	line, lines := waitForMatch(said, invite, ctx.Done())
+	// **The offer as an object, not as the sentence a person reads.** The
+	// listener's printed form is the command to run on the *other machine*,
+	// so the host in it is a placeholder rather than an address anything can
+	// dial — and a diagnostic parsing prose is the thing that breaks the day
+	// somebody rewords it. Read rather than chosen: picking a port here would
+	// race whatever else is on this machine, and inventing a code is not how
+	// pairing works.
+	anOffer := regexp.MustCompile(`"event"\s*:\s*"offering"`)
+	offering := watch(said, anOffer)
+	line := offering.waitFor(ctx.Done())
 	if line == "" {
-		return fmt.Errorf("no code was offered: %s", strings.Join(lastFew(lines), "; "))
+		return fmt.Errorf("no code was offered: %s", strings.Join(lastFew(offering.lines()), "; "))
 	}
-	found := invite.FindStringSubmatch(line)
-	if len(found) != 3 {
+	var offer struct {
+		Code string `json:"code"`
+		Port int    `json:"port"`
+	}
+	if err := json.Unmarshal([]byte(line), &offer); err != nil {
 		return fmt.Errorf("the pairing offer could not be read: %q", line)
+	}
+	if offer.Code == "" || offer.Port == 0 {
+		return fmt.Errorf("the pairing offer is missing part of itself: %q", line)
 	}
 
 	joiner := exec.CommandContext(ctx, enginePath, // #nosec G204 -- the path is ours
-		"pair", "127.0.0.1:"+found[1], "--code", found[2])
+		"pair", "127.0.0.1:"+strconv.Itoa(offer.Port), "--code", offer.Code)
 	joiner.Env = append(os.Environ(), "ESPER_HOME="+viewerHome)
 	if out, err := joiner.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
@@ -270,32 +421,72 @@ func pairTwo(ctx context.Context, enginePath, hostHome, viewerHome string) error
 	return nil
 }
 
-// waitForMatch reads lines until one matches, and returns it with everything
-// read so far.
-//
-// Everything read is returned even on success, because the lines before a
-// match are what a person needs when the match was the wrong one.
-func waitForMatch(from interface{ Read([]byte) (int, error) }, what *regexp.Regexp, done <-chan struct{}) (string, []string) {
-	var seen []string
-	found := make(chan string, 1)
+/*
+listener reads a child's output, for a match now and for its reasons later.
+
+# Why it keeps reading after the match
+
+Two things went wrong when it stopped. The obvious one is a **full pipe**: a
+host writes a line for every permission, every screen and every refusal, and a
+process whose output nobody is reading blocks once the kernel's buffer fills —
+which looks from here like a host that hung.
+
+The other is worse, because it was silent. The only line this waits for is
+"listening", and everything the host says about *why it stopped* comes after
+it. So a diagnostic whose whole purpose is to report the host's own reason was
+throwing that reason away and printing a numeric code instead, right under a
+sentence telling somebody it was the thing to look into.
+*/
+type listener struct {
+	mu    sync.Mutex
+	seen  []string
+	found chan string
+}
+
+// How many of a child's lines to keep. Enough for the tail a person is shown,
+// bounded because a session that ran for an hour must not be held in memory.
+const mostLinesKept = 200
+
+func watch(from io.Reader, what *regexp.Regexp) *listener {
+	l := &listener{found: make(chan string, 1)}
 	go func() {
+		matched := false
 		scanner := bufio.NewScanner(from)
 		for scanner.Scan() {
 			line := scanner.Text()
-			seen = append(seen, line)
-			if what.MatchString(line) {
-				found <- line
-				return
+			l.mu.Lock()
+			l.seen = append(l.seen, line)
+			if len(l.seen) > mostLinesKept {
+				l.seen = l.seen[len(l.seen)-mostLinesKept:]
+			}
+			l.mu.Unlock()
+			if !matched && what.MatchString(line) {
+				matched = true
+				l.found <- line
 			}
 		}
-		found <- ""
+		if !matched {
+			l.found <- ""
+		}
 	}()
+	return l
+}
+
+// waitFor returns the matching line, or "" if the output ended or time ran out.
+func (l *listener) waitFor(done <-chan struct{}) string {
 	select {
-	case line := <-found:
-		return line, seen
+	case line := <-l.found:
+		return line
 	case <-done:
-		return "", seen
+		return ""
 	}
+}
+
+// lines is what has been read so far, copied so the reader can carry on.
+func (l *listener) lines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.seen...)
 }
 
 // picturesIn reads the controller's own summary line.

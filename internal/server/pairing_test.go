@@ -7,41 +7,32 @@ import (
 )
 
 /*
-The seam between two programs, which is a regular expression.
+The seam between two programs, and what it is made of.
 
-Pairing belongs to the engine, so the control plane starts it and *reads what
-it prints*. That makes the engine's output a wire format nobody declared: the
-day somebody reindents a line or rewords "expires in", this control plane
-stops finding a code and the screen shows a spinner for ever with nothing in
-any log to say why.
+Pairing belongs to the engine, so the control plane starts it and reads what it
+says. It used to read what the engine *printed* — a regular expression over
+prose written for the person holding a code — which made the engine's layout a
+wire format nobody declared. `--json` is the declared one: one object per line,
+as it happens, because a code that arrived only when the process ended would be
+a code nobody could read out.
 
-So the text below is what the engine actually prints — captured from
-`esper-engine pair --listen`, not written from memory — and these tests are the
-thing that fails when it changes.
+The text below is what the engine actually answers, captured from
+`esper-engine pair --listen --json`, not written from memory.
 */
-const engineOffered = `🔗 pairing
-
-  code       74Y4-QNKK
-  listening  127.0.0.1:51110
-  expires    in 59 seconds
-
-  On the other machine:
-      esper-engine pair <this-machine>:51110 --code 74Y4-QNKK
-
-  This device's fingerprint — read it aloud and check it matches:
-      zinc benign rainbow liberty
-      debate signal bunker viking
+const engineOffered = `{"event":"offering","code":"74Y4-QNKK","address":"127.0.0.1:51110",` +
+	`"port":51110,"expires_in":59,"fingerprint":{"hex":"3f2a1b0c9d8e7f60",` +
+	`"words":["zinc","benign","rainbow","liberty","debate","signal","bunker","viking"]}}
 `
 
 func TestWhatTheEngineOffersIsWhatIsRead(t *testing.T) {
 	before := time.Now()
 	offer, err := readOffer(strings.NewReader(engineOffered))
 	if err != nil {
-		t.Fatalf("reading what the engine printed: %v", err)
+		t.Fatalf("reading what the engine answered: %v", err)
 	}
 
 	if offer.Code != "74Y4-QNKK" {
-		t.Errorf("code %q, and the engine printed 74Y4-QNKK", offer.Code)
+		t.Errorf("code %q, and the engine offered 74Y4-QNKK", offer.Code)
 	}
 	if offer.Port != 51110 {
 		t.Errorf("port %d, and the engine is listening on 51110", offer.Port)
@@ -50,9 +41,9 @@ func TestWhatTheEngineOffersIsWhatIsRead(t *testing.T) {
 		t.Errorf("state %q before anybody has paired", offer.State)
 	}
 
-	// Eight words, in the order they were read, because that is the order they
-	// are said aloud and a pair of machines comparing them out of order is two
-	// people disagreeing about a machine that is fine.
+	// Eight words, in the order they were given, because that is the order
+	// they are said aloud and a pair of machines comparing them out of order
+	// is two people disagreeing about a machine that is fine.
 	want := []string{"zinc", "benign", "rainbow", "liberty", "debate", "signal", "bunker", "viking"}
 	if len(offer.Words) != len(want) {
 		t.Fatalf("read %d words, and a fingerprint is %d: %v", len(offer.Words), len(want), offer.Words)
@@ -63,9 +54,9 @@ func TestWhatTheEngineOffersIsWhatIsRead(t *testing.T) {
 		}
 	}
 
-	// "expires in 59 seconds" is a duration, and what a screen counts down is
-	// an instant — so the reading is turned into one against this machine's
-	// clock as the line is read.
+	// `expires_in` is a duration, and what a screen counts down is an instant
+	// — so the reading is turned into one against this machine's clock as the
+	// line is read.
 	expires := time.Unix(offer.ExpiresAt, 0)
 	if expires.Before(before.Add(58*time.Second)) || expires.After(time.Now().Add(60*time.Second)) {
 		t.Errorf("expires at %v, and the engine said 59 seconds from about %v", expires, before)
@@ -73,28 +64,25 @@ func TestWhatTheEngineOffersIsWhatIsRead(t *testing.T) {
 }
 
 /*
-A code is only read once there is one to read.
+Anything before the offer is not the offer.
 
-The offer line and the fingerprint are both indented, and the fingerprint's
-lines are just words — so anything word-shaped that arrives *before* the code
-would be collected as part of it. The parser will not start on the words until
-it has a code, and this is the line that proves it: a machine name that looks
-exactly like a fingerprint line.
+A process writes to one stream, and a library, a warning or a note about the
+device list can land on it before the engine has anything to say. A line that
+is not an offer is skipped — and one that is not JSON at all is skipped too,
+rather than stopping a pairing that is about to work.
 */
-func TestWordsBeforeACodeAreNotAFingerprint(t *testing.T) {
+func TestALineThatIsNotTheOfferIsSkipped(t *testing.T) {
 	offer, err := readOffer(strings.NewReader(
-		"      some machine said something first\n" + engineOffered,
+		"  · the device list needed correcting: one record was dropped\n" +
+			`{"event":"joining","address":"127.0.0.1:1"}` + "\n" +
+			"\n" +
+			engineOffered,
 	))
 	if err != nil {
 		t.Fatalf("reading: %v", err)
 	}
-	for _, w := range offer.Words {
-		if w == "some" || w == "machine" {
-			t.Fatalf("a line before the code was read as part of the fingerprint: %v", offer.Words)
-		}
-	}
-	if len(offer.Words) != 8 {
-		t.Errorf("read %d words after an early line: %v", len(offer.Words), offer.Words)
+	if offer.Code != "74Y4-QNKK" || len(offer.Words) != 8 {
+		t.Errorf("the offer did not survive the lines before it: %+v", offer)
 	}
 }
 
@@ -107,7 +95,7 @@ printed has to survive into the error rather than being replaced by "pairing
 failed".
 */
 func TestAnEngineThatOffersNoCodeSaysWhy(t *testing.T) {
-	said := "pair: either `pair --listen <addr>` to offer a code, " +
+	said := "esper-engine pair: either `pair --listen <addr>` to offer a code, " +
 		"or `pair <addr> --code <code>` to use one"
 	offer, err := readOffer(strings.NewReader(said + "\n"))
 	if err == nil {
@@ -120,32 +108,29 @@ func TestAnEngineThatOffersNoCodeSaysWhy(t *testing.T) {
 	// And nothing at all is still an error, not an empty offer somebody polls
 	// for ever.
 	if _, err := readOffer(strings.NewReader("")); err == nil {
-		t.Error("an engine that printed nothing produced an offer")
+		t.Error("an engine that answered with nothing produced an offer")
 	}
 }
 
 /*
-Half an offer is still an offer.
+Half an offer is not an offer.
 
-The engine prints the code before the fingerprint, and the reader returns as
-soon as it has both — but if the engine is killed between the two, what it did
-say is worth keeping: a code with no words is a code somebody can still use,
-and refusing it would turn a partial read into no pairing at all.
+One line carries the whole of it, so there is no reason to accept part: a code
+with no words is a screen asking somebody to read aloud a fingerprint it does
+not have, and a code with no port is one nothing can connect to. Both would
+look like a working pairing screen right up until the moment they matter.
 */
-func TestACodeWithoutItsWordsIsStillUsable(t *testing.T) {
-	cut := strings.Index(engineOffered, "  This device's fingerprint")
-	if cut < 0 {
-		t.Fatal("the captured output no longer has a fingerprint section")
-	}
-	offer, err := readOffer(strings.NewReader(engineOffered[:cut]))
-	if err != nil {
-		t.Fatalf("reading an offer that stopped early: %v", err)
-	}
-	if offer.Code != "74Y4-QNKK" || offer.Port != 51110 {
-		t.Errorf("the code and port did not survive a short read: %+v", offer)
-	}
-	if len(offer.Words) != 0 {
-		t.Errorf("words appeared where the engine printed none: %v", offer.Words)
+func TestHalfAnOfferIsRefused(t *testing.T) {
+	for _, said := range []string{
+		`{"event":"offering","port":51110,"fingerprint":{"words":["zinc"]}}`,
+		`{"event":"offering","code":"74Y4-QNKK","fingerprint":{"words":["zinc"]}}`,
+		`{"event":"offering","code":"74Y4-QNKK","port":51110}`,
+		`{"event":"offering","code":"74Y4-QNKK","port":51110,"fingerprint":{"words":[]}}`,
+	} {
+		offer, err := readOffer(strings.NewReader(said + "\n"))
+		if err == nil {
+			t.Errorf("%s was read as a usable offer: %+v", said, offer)
+		}
 	}
 }
 

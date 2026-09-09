@@ -91,16 +91,45 @@ func TestHelloFieldOrderIsLocked(t *testing.T) {
 func expectedStatus() Report {
 	broker := "broker.example.com:7443"
 	return Report{Status: &Status{
-		Engine:   "0.0.0",
-		Capture:  Capability{Available: true, Detail: "x11"},
-		Encoder:  Capability{Available: false, Detail: "openh264 starts and cannot encode"},
-		Input:    Capability{Available: true, Detail: "x11 xtest: in use"},
+		Engine: "0.0.0",
+		// Three shapes on purpose: one that chose between backends, one with
+		// nothing to choose between, and one that tried everything and found
+		// nothing.
+		Capture: Capability{Available: true, Detail: "x11", Attempts: []string{
+			"wlr: the Wayland display: Could not find wayland compositor",
+			"x11: in use",
+		}},
+		Encoder: Capability{Available: false, Detail: "openh264 starts and cannot encode"},
+		Input: Capability{Available: false, Detail: "nothing — this machine is view only", Attempts: []string{
+			"x11 xtest: no input backend: X11 via DISPLAY: Failed to parse value ''",
+			"wayland-portal: no input backend: the RemoteDesktop portal refused",
+		}},
 		Overlays: []string{"wg0", "tailscale0"},
 		MDNS:     true,
 		Broker:   &broker,
 		Paired:   3,
 		Platform: Platform{OS: "linux", Display: "wayland"},
 	}}
+}
+
+// sameCapability compares a capability including everything that was tried.
+//
+// The attempts are the half a person reads when something is missing, so a
+// comparison that skipped them would pass over a decoder that dropped the
+// list entirely.
+func sameCapability(got, want Capability) bool {
+	if got.Available != want.Available || got.Detail != want.Detail {
+		return false
+	}
+	if len(got.Attempts) != len(want.Attempts) {
+		return false
+	}
+	for i := range got.Attempts {
+		if got.Attempts[i] != want.Attempts[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestFixtureStatusDecodesToExpectedValue(t *testing.T) {
@@ -119,8 +148,17 @@ func TestFixtureStatusDecodesToExpectedValue(t *testing.T) {
 	if g.Engine != w.Engine || g.MDNS != w.MDNS || g.Paired != w.Paired {
 		t.Fatalf("status decoded to %+v, want %+v", g, w)
 	}
-	if g.Capture != w.Capture || g.Encoder != w.Encoder || g.Input != w.Input {
-		t.Fatalf("capabilities decoded to %+v, want %+v", g, w)
+	for _, pair := range []struct {
+		name      string
+		got, want Capability
+	}{
+		{"capture", g.Capture, w.Capture},
+		{"encoder", g.Encoder, w.Encoder},
+		{"input", g.Input, w.Input},
+	} {
+		if !sameCapability(pair.got, pair.want) {
+			t.Fatalf("%s decoded to %+v, want %+v", pair.name, pair.got, pair.want)
+		}
 	}
 	if strings.Join(g.Overlays, ",") != strings.Join(w.Overlays, ",") {
 		t.Fatalf("overlays decoded to %v, want %v", g.Overlays, w.Overlays)

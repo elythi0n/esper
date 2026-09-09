@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"os"
@@ -389,6 +391,86 @@ func TestACapabilityLineSaysWhichWayItWent(t *testing.T) {
 	}
 }
 
+// A missing capability says what was tried, one attempt per line, and none of
+// those lines runs past a terminal's width.
+//
+// The attempts are the half somebody acts on: "no input backend" is a fault,
+// and "the RemoteDesktop portal is not installed" is an errand.
+func TestAMissingCapabilitySaysWhatWasTried(t *testing.T) {
+	t.Setenv("COLUMNS", "80")
+	cap := proto.Capability{
+		Available: false,
+		Detail:    "nothing — this machine is view only",
+		Attempts: []string{
+			"x11 xtest: no input backend: X11 via DISPLAY: Failed to parse value ''",
+			"wayland-portal: no input backend: the RemoteDesktop portal refused CreateSession: org.freedesktop.DBus.Error.UnknownMethod — No such interface on object at path /org/freedesktop/portal/desktop",
+		},
+	}
+	out := printed(t, func() { capability("input   ", cap) })
+
+	for _, attempt := range cap.Attempts {
+		first, _, _ := strings.Cut(attempt, " ")
+		if !strings.Contains(out, first) {
+			t.Errorf("the attempt beginning %q is not in the report:\n%s", first, out)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if n := utf8.RuneCountInString(line); n > 80 {
+			t.Errorf("a line is %d columns wide, which a terminal folds where it likes:\n%s", n, line)
+		}
+	}
+	// Every line after the first sits under the detail, so the block reads as
+	// one answer rather than as new report lines.
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("two attempts folded to %d line(s):\n%s", len(lines), out)
+	}
+	for _, line := range lines[1:] {
+		if !strings.HasPrefix(line, "           ") {
+			t.Errorf("a continuation line is not indented under the detail: %q", line)
+		}
+	}
+}
+
+// A capability that works keeps its rejected alternatives to itself: they are
+// noise beside a backend that is in use.
+func TestAWorkingCapabilityDoesNotListWhatItRejected(t *testing.T) {
+	out := printed(t, func() {
+		capability("input   ", proto.Capability{
+			Available: true,
+			Detail:    "x11-xtest",
+			Attempts:  []string{"wayland-wlr: could not find wayland compositor", "x11 xtest: in use"},
+		})
+	})
+	if strings.Contains(out, "wayland-wlr") {
+		t.Errorf("a working capability listed a backend it never needed:\n%s", out)
+	}
+	if !strings.Contains(out, "x11-xtest") {
+		t.Errorf("a working capability did not say which backend it is using:\n%s", out)
+	}
+}
+
+// Folding breaks on spaces, and leaves a word longer than the whole width
+// alone: half a path helps nobody.
+func TestFoldingLeavesAnUnbreakableWordWhole(t *testing.T) {
+	long := "/a/very/long/path/that/has/no/spaces/in/it/at/all/and/keeps/going/for/a/while"
+	got := wrapped("looked in "+long+" and found nothing", 30)
+	found := false
+	for _, line := range got {
+		if line == long {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the long word was broken up: %q", got)
+	}
+	for _, line := range got {
+		if strings.Contains(line, " ") && utf8.RuneCountInString(line) > 30 {
+			t.Errorf("a foldable line is %d wide: %q", utf8.RuneCountInString(line), line)
+		}
+	}
+}
+
 // No broker is the ordinary answer — Esper ships no default anywhere — so it
 // is an empty string rather than a word somebody might read as an address.
 func TestNoBrokerIsNothingRatherThanAName(t *testing.T) {
@@ -475,7 +557,7 @@ func TestAFlagThisDoesNotKnowIsRefused(t *testing.T) {
 		bad  string
 		good []string
 	}{
-		{"doctor", cmdDoctor, "--json", []string{"--session"}},
+		{"doctor", cmdDoctor, "--porcelain", []string{"--session", "--json"}},
 		{"version", cmdVersion, "--porcelain", []string{"--json"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -504,8 +586,13 @@ func TestAFlagThisDoesNotKnowIsRefused(t *testing.T) {
 					// usage below is what says it exists.
 					continue
 				}
-				if code := c.run([]string{ok}); code != 0 {
-					t.Errorf("%s refused %q, which it takes", c.name, ok)
+				// Read from what it said here too. `doctor` exits non-zero on
+				// a machine with no engine beside it, which is every machine a
+				// unit test runs on — so the exit code cannot tell "refused
+				// the flag" from "ran and found nothing".
+				said := toStderr(t, func() { _ = c.run([]string{ok}) })
+				if strings.Contains(said, "unknown option") {
+					t.Errorf("%s refused %q, which it takes: %s", c.name, ok, said)
 				}
 			}
 		})
@@ -537,5 +624,265 @@ func TestTheUsageOnAnErrorIsTheUsageOnRequest(t *testing.T) {
 			t.Errorf("`esper %s` takes %s and its usage does not mention it:\n%s",
 				c.command, c.mention, asked)
 		}
+	}
+}
+
+// builtEsper is the front door, skipped where it has not been built.
+//
+// A real process, because what is being checked is the *streams*: an engine
+// line on standard output is only visible from outside the program.
+func builtEsper(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(root, "build", "esper")
+	if _, err := os.Stat(p); err != nil {
+		t.Skip("no built front door at build/esper — run 'make build'")
+	}
+	return p
+}
+
+// runWithHome runs it against a home of this test's own, and separates the
+// streams — which is the whole point of the first test below.
+func runWithHome(t *testing.T, esper, home string, args ...string) (out, errOut string, code int) {
+	t.Helper()
+	cmd := exec.Command(esper, args...) // #nosec G204 -- the binary is this repository's own build
+	cmd.Env = append(os.Environ(), "ESPER_HOME="+home)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exited *exec.ExitError
+	if errors.As(err, &exited) {
+		code = exited.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running %v: %v", args, err)
+	}
+	return stdout.String(), stderr.String(), code
+}
+
+/*
+`sessions --json` is one object a program can read, on a clean standard output.
+
+# Why both halves matter
+
+The trail is the one record this product keeps, and it was the only one with no
+machine-readable form — `devices`, `identity`, `config` and `version` all answer
+`--json`. Anything auditing what happened had to parse a table laid out for a
+person to read.
+
+The second half is what makes the first usable: the engine writes its own lines
+while this runs, and a single "engine started" on standard output makes the
+answer unparseable. That is why the supervisor relays rather than inherits, and
+this is what says so.
+*/
+func TestSessionsAsJSONIsOneObjectOnACleanStandardOutput(t *testing.T) {
+	esper := builtEsper(t)
+	home := t.TempDir()
+
+	out, errOut, code := runWithHome(t, esper, home, "sessions", "--json")
+	if code != 0 {
+		t.Fatalf("sessions --json exited %d: %s", code, errOut)
+	}
+	var answer struct {
+		Asked      uint32 `json:"asked"`
+		Count      int    `json:"count"`
+		Happenings []struct {
+			At    uint64 `json:"at"`
+			Event string `json:"event"`
+		} `json:"happenings"`
+	}
+	if err := json.Unmarshal([]byte(out), &answer); err != nil {
+		t.Fatalf("standard output is not one object: %v\n%s", err, out)
+	}
+	if answer.Asked != 20 {
+		t.Errorf("the default is 20 lines and the answer says %d", answer.Asked)
+	}
+	// **An empty list, never null.** A caller looping over `happenings` on a
+	// machine where nothing has happened should get an empty loop rather than
+	// a crash. Nothing in the writer guards this — `Sessions` refuses an
+	// answer that is not a list — so this is where the property lives.
+	if answer.Happenings == nil {
+		t.Error("happenings came back as null, so a caller looping over it crashes on a quiet machine")
+	}
+	if !strings.Contains(out, `"happenings": []`) {
+		t.Errorf("an empty trail is not written as an empty list:\n%s", out)
+	}
+	// And the engine's own lines went somewhere else.
+	if strings.Contains(out, "engine started") {
+		t.Errorf("the engine's log reached standard output, so the answer cannot be parsed:\n%s", out)
+	}
+
+	// A count that was asked for travels too, so a caller can tell "there were
+	// only three" from "the answer was cut".
+	out, errOut, code = runWithHome(t, esper, home, "sessions", "5", "--json")
+	if code != 0 {
+		t.Fatalf("sessions 5 --json exited %d: %s", code, errOut)
+	}
+	if err := json.Unmarshal([]byte(out), &answer); err != nil {
+		t.Fatalf("standard output is not one object: %v\n%s", err, out)
+	}
+	if answer.Asked != 5 {
+		t.Errorf("asked for 5 lines and the answer says %d", answer.Asked)
+	}
+}
+
+// And an option this command does not have is still named as one.
+func TestSessionsStillNamesAnUnknownOption(t *testing.T) {
+	esper := builtEsper(t)
+	home := t.TempDir()
+
+	_, errOut, code := runWithHome(t, esper, home, "sessions", "--nope")
+	if code == 0 {
+		t.Fatal("an unknown option was accepted")
+	}
+	if !strings.Contains(errOut, `unknown option "--nope"`) {
+		t.Errorf("it was not named as an option: %s", errOut)
+	}
+	// A bad *number* is still the other kind of mistake.
+	_, errOut, code = runWithHome(t, esper, home, "sessions", "many")
+	if code == 0 {
+		t.Fatal("a number that is not one was accepted")
+	}
+	if !strings.Contains(errOut, "is not a number of lines") {
+		t.Errorf("a bad number was reported as something else: %s", errOut)
+	}
+}
+
+/*
+`esper sessions` says where the whole record is.
+
+Twenty lines is a default and the file holds months, so the answer to "show me
+everything that device ever did" is `grep` — which needs a path this command
+never printed. Somebody had to know that Esper keeps a `sessions.log`, and
+where its home directory is, to ask the record anything the default did not
+already show.
+
+Not printed where there is no file: a machine with nothing recorded is told
+that, and a second sentence about a file that does not exist is noise.
+*/
+func TestSessionsSaysWhereTheWholeRecordIs(t *testing.T) {
+	esper := builtEsper(t)
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(root, "testdata", "fixtures", "session_log_screens.jsonl")
+	lines, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Skipf("no session log fixture to read: %v", err)
+	}
+
+	home := t.TempDir()
+	trail := filepath.Join(home, "sessions.log")
+	if err := os.WriteFile(trail, lines, 0o600); err != nil {
+		t.Fatalf("writing a trail: %v", err)
+	}
+
+	out, errOut, code := runWithHome(t, esper, home, "sessions")
+	if code != 0 {
+		t.Fatalf("sessions exited %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, trail) {
+		t.Errorf("the record's path is not named, so nothing says what to grep:\n%s", out)
+	}
+	// And what is in it, because a path with no shape is a path somebody opens
+	// in the wrong tool.
+	if !strings.Contains(out, "JSON") {
+		t.Errorf("the path is named and its shape is not: %s", out)
+	}
+
+	// A machine with nothing recorded is told that, and nothing else.
+	empty := t.TempDir()
+	out, _, code = runWithHome(t, esper, empty, "sessions")
+	if code != 0 {
+		t.Fatalf("sessions on an empty home exited %d", code)
+	}
+	if strings.Contains(out, "sessions.log") {
+		t.Errorf("a file that does not exist was named anyway:\n%s", out)
+	}
+	if !strings.Contains(out, "nothing has happened") {
+		t.Errorf("an empty trail does not say so: %s", out)
+	}
+}
+
+/*
+`version --json` is JSON whatever was stamped into the binary.
+
+Go's `%q` is Go's quoting, not JSON's: a byte with no short escape comes out as
+`\x01`, and every JSON parser rejects that escape. The two strings here arrive
+from `-ldflags` at link time, so the one output meant for a script became text
+no script could read as soon as a tag was unusual — and nothing would have said
+so, because the human output was still fine.
+*/
+func TestVersionAsJSONSurvivesAnAwkwardStamp(t *testing.T) {
+	was := version
+	t.Cleanup(func() { version = was })
+
+	for _, stamped := range []string{
+		"v1.2.3",
+		"v1.0\x01dev",    // a control byte: `%q` writes \x01
+		`v1.0"quoted`,    // a quote
+		`v1.0\backslash`, // a backslash
+		"v1.0–en-dash",   // not ASCII
+	} {
+		version = stamped
+		out := printed(t, func() { _ = cmdVersion([]string{"--json"}) })
+		var answer struct {
+			Version  string `json:"version"`
+			Protocol int    `json:"protocol"`
+		}
+		if err := json.Unmarshal([]byte(out), &answer); err != nil {
+			t.Fatalf("a version of %q produced output no parser reads: %v\n%s", stamped, err, out)
+		}
+		if answer.Version != stamped {
+			t.Errorf("a version of %q came back as %q", stamped, answer.Version)
+		}
+	}
+}
+
+/*
+`esper doctor` names this machine's state directory, and says when the
+environment chose it.
+
+"My devices have disappeared" is almost always two directories: the state lives
+in `$ESPER_HOME` where that is set and beside the user's config where it is
+not, and both are invisible. A shell with the variable exported, a service unit
+that sets it, a `sudo` that does not carry it — the same command on the same
+machine then answers about a different store, and nothing on the diagnostic
+said which one.
+
+Driven through the real binary, because the environment is the thing under
+test and a function called in-process would be reading this test's own.
+*/
+func TestDoctorNamesTheStateDirectory(t *testing.T) {
+	esper := builtEsper(t)
+	home := t.TempDir()
+
+	out, errOut, _ := runWithHome(t, esper, home, "doctor")
+	if !strings.Contains(out, home) {
+		t.Errorf("the state directory is not named:\n%s\n%s", out, errOut)
+	}
+	// And that the environment is where it came from, because that is the
+	// case somebody is surprised by.
+	if !strings.Contains(out, "ESPER_HOME") {
+		t.Errorf("a directory chosen by the environment does not say so:\n%s", out)
+	}
+
+	// Without it, the directory is still named and the environment is not
+	// blamed for a choice it did not make.
+	cmd := exec.Command(esper, "doctor") // #nosec G204 -- this repository's own build
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+	_ = cmd.Run()
+	plain := stdout.String()
+	if !strings.Contains(plain, "state") {
+		t.Errorf("no state line at all without the variable:\n%s", plain)
+	}
+	if strings.Contains(plain, "(from ESPER_HOME)") {
+		t.Errorf("the environment was credited for a directory it did not choose:\n%s", plain)
 	}
 }
