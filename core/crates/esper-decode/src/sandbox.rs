@@ -138,6 +138,52 @@ impl SandboxReport {
         }
     }
 
+    /// What a compromised decoder could reach, given what is actually on.
+    ///
+    /// # Why this is not the same as [`Self::describe`]
+    ///
+    /// That one names the *layers* — "seccomp AUDIT ONLY, no landlock". This
+    /// one names the *consequences*, because "no landlock" is only a fact
+    /// about the kernel and "it can read this machine's identity key" is a
+    /// fact about the machine. Somebody deciding whether to run a decoder
+    /// like this is deciding the second question, and the first does not
+    /// answer it.
+    ///
+    /// **The last line is the layer that does not fail.** A sandbox contains
+    /// a compromise; it does not make the compromised thing's output
+    /// trustworthy — but a separate process is what keeps a compromise away
+    /// from the session keys and the input injector whatever else is missing,
+    /// and a list of what is reachable that left it out would read as though
+    /// everything were.
+    #[must_use]
+    pub fn what_is_reachable(&self) -> Vec<&'static str> {
+        if self.is_enforcing() {
+            return vec![
+                "nothing but the bytes it is handed: no file, no socket, no other process",
+            ];
+        }
+        let mut reachable = Vec::new();
+        if !self.seccomp {
+            reachable.push("every system call, including the network — a compromise could send what it decodes anywhere");
+        } else if !self.enforcing {
+            reachable.push("every system call, including the network — the filter logs and allows, which is a record rather than a barrier");
+        }
+        if !self.landlock && !(self.seccomp && self.enforcing) {
+            reachable.push("every file this account can read, including this machine's identity key and the local API's token");
+        }
+        if !self.address_space {
+            reachable.push("as much memory as a peer's declared picture size asks for");
+        }
+        if !self.no_new_privs {
+            reachable.push("any setuid program on this machine");
+        }
+        // The one that holds whatever else did not.
+        reachable.push(
+            "— but not the session keys and not the input injector: it is a separate process, and that layer has not failed",
+        );
+        reachable
+    }
+
     /// A line for the log and the session HUD.
     #[must_use]
     pub fn describe(&self) -> String {
@@ -528,6 +574,58 @@ mod tests {
             "{}",
             none.describe()
         );
+    }
+
+    /// **What a weakened sandbox leaves reachable, said as a consequence.**
+    ///
+    /// "No landlock" is a fact about a kernel; "it can read this machine's
+    /// identity key" is a fact about the machine, and the second is the one
+    /// somebody is deciding on.
+    #[test]
+    fn a_weakened_sandbox_says_what_it_leaves_reachable() {
+        let enforcing = SandboxReport {
+            address_space: true,
+            open_files: true,
+            no_new_privs: true,
+            landlock: true,
+            seccomp: true,
+            enforcing: true,
+        };
+        let said = enforcing.what_is_reachable();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said.first()
+                .is_some_and(|l| l.contains("nothing but the bytes")),
+            "{said:?}"
+        );
+
+        // Audit mode: every syscall, because the filter logs and allows.
+        let audit = SandboxReport {
+            enforcing: false,
+            ..enforcing
+        };
+        let said = audit.what_is_reachable().join(" | ");
+        assert!(said.contains("network"), "{said}");
+        assert!(said.contains("logs and allows"), "{said}");
+
+        // No filter at all: the files as well, and the identity key by name,
+        // because "the filesystem" is not a thing somebody weighs.
+        let none = SandboxReport::default();
+        let said = none.what_is_reachable().join(" | ");
+        assert!(said.contains("identity key"), "{said}");
+        assert!(said.contains("memory"), "{said}");
+        assert!(said.contains("setuid"), "{said}");
+
+        // **And the layer that does not fail is named every time it has not.**
+        // A list of what is reachable that left out "still a separate process"
+        // would read as though the session keys were in it.
+        for report in [audit, none] {
+            let said = report.what_is_reachable();
+            assert!(
+                said.last().is_some_and(|l| l.contains("separate process")),
+                "{said:?}"
+            );
+        }
     }
 
     /// Audit mode is not a sandbox and must never read as one.

@@ -80,6 +80,26 @@ pub enum Event {
     Paired {
         /// What the device was called at pairing. Peer-supplied.
         name: String,
+        /// How it came to be paired, in the host's own words: `a code read at
+        /// this machine`, or `an invitation link`.
+        ///
+        /// **The question an auditor asks first.** "A device paired" reads
+        /// exactly the same whether somebody was standing at the keyboard
+        /// reading a code aloud, or a link was pasted out of an email by
+        /// whoever received it — and those are the two answers the record
+        /// exists to tell apart.
+        ///
+        /// Defaulted, so a line written before this field existed still
+        /// reads; an empty one means "whoever wrote it did not know".
+        #[serde(default)]
+        how: String,
+        /// Whether the pairing lasts one session and is then gone.
+        ///
+        /// A device let in by a link is spent when its session opens, which
+        /// is a materially different thing to find in a list a year later
+        /// from a device that is still trusted.
+        #[serde(default)]
+        once: bool,
     },
     /// A device was unpaired: its key is no longer known here.
     ///
@@ -168,6 +188,43 @@ pub enum Event {
     LockAfterChanged {
         /// The word it was set to, or `None` for "whatever the host decides".
         after: Option<String>,
+    },
+    /// The retention policy removed lines from this record.
+    ///
+    /// **Written into the record it trimmed**, because a reader cannot
+    /// otherwise tell a quiet week from a week that was deleted. The host
+    /// prints the same figures when it prunes, and that line is on a terminal
+    /// nobody keeps; this one is in the file somebody reads afterwards.
+    ///
+    /// It is appended the ordinary way, after the rewrite: the trimming path
+    /// is the only one in this crate that does not append, and what it may
+    /// write stays a subset of what it read.
+    TrailTrimmed {
+        /// Removed for being older than `audit.retain`.
+        too_old: usize,
+        /// Removed to fit inside `audit.max_size`.
+        over_size: usize,
+        /// Still there afterwards, not counting this line.
+        kept: usize,
+    },
+    /// A setting was changed by somebody at this machine.
+    ///
+    /// **Recorded because the settings decide who can reach this machine and
+    /// what is kept about it.** Turning discovery on, pointing the machine at
+    /// a different broker, or shortening how long this very record is kept
+    /// are all acts an investigation asks about, and nothing else in the log
+    /// carries them. The line about shortening the record is written before
+    /// the shortening takes effect, so it is in the part that survives.
+    SettingChanged {
+        /// Which setting, by the name the file and the command both use.
+        key: String,
+        /// What it is now, or `None` where it was taken back out and the
+        /// default decides again.
+        now: Option<String>,
+        /// The answer that was in force before, whether that came from the
+        /// file, the environment or the default. `None` where whoever wrote
+        /// the line could not establish it.
+        was: Option<String>,
     },
     /// What a device may do was changed by somebody at this machine.
     ///
@@ -433,6 +490,22 @@ impl Entry {
         Self::new(peer_key, event, unix_now())
     }
 
+    /// Something somebody at this machine did that is about no peer at all.
+    ///
+    /// The peer fields are left empty rather than filled with this machine's
+    /// own key: `peer` means the other end, and changing a setting has no
+    /// other end. A reader shows these as having happened at this machine.
+    #[must_use]
+    pub fn here(event: Event) -> Self {
+        Self {
+            at: unix_now(),
+            peer: String::new(),
+            peer_key: String::new(),
+            direction: Direction::Out,
+            event,
+        }
+    }
+
     /// The same, for something **this machine** did to somebody else.
     ///
     /// A separate constructor rather than a flag on the two above, so that
@@ -464,6 +537,8 @@ impl Event {
             Self::SessionAsked { .. } => "session_asked",
             Self::LockAfterChanged { .. } => "lock_after_changed",
             Self::PermissionsChanged { .. } => "permissions_changed",
+            Self::SettingChanged { .. } => "setting_changed",
+            Self::TrailTrimmed { .. } => "trail_trimmed",
             Self::PairingKept { .. } => "pairing_kept",
             Self::ScheduleChanged { .. } => "schedule_changed",
             Self::SessionOpened { .. } => "session_opened",
@@ -497,7 +572,14 @@ impl Event {
                     "the controller said it stopped recording".to_owned()
                 }
             }
-            Self::Paired { name } => format!("paired with {name}"),
+            Self::Paired { name, how, once } => {
+                let lasts = if *once { ", for one session" } else { "" };
+                if how.is_empty() {
+                    format!("paired with {name}{lasts}")
+                } else {
+                    format!("paired with {name} through {how}{lasts}")
+                }
+            }
             Self::Unpaired { name } => format!("unpaired {name}"),
             Self::Revoked { sessions_closed } => match sessions_closed {
                 0 => "revoked, with nothing connected".to_owned(),
@@ -515,6 +597,29 @@ impl Event {
             Self::LockAfterChanged { after } => match after {
                 Some(word) => format!("sessions with it now leave this screen: {word}"),
                 None => "sessions with it now follow this host's own locking rule".to_owned(),
+            },
+            Self::TrailTrimmed {
+                too_old,
+                over_size,
+                kept,
+            } => {
+                let pruned = Pruned {
+                    too_old: *too_old,
+                    over_size: *over_size,
+                    kept: *kept,
+                };
+                match pruned.describe() {
+                    Some(what) => format!("this record was trimmed: {what}, {kept} left"),
+                    None => format!("this record was trimmed, and {kept} lines are left"),
+                }
+            }
+            Self::SettingChanged { key, now, was } => match (now, was) {
+                (Some(now), Some(was)) => format!("{key} was changed from {was} to {now}"),
+                (Some(now), None) => format!("{key} was set to {now}"),
+                (None, Some(was)) => {
+                    format!("{key} was taken back out, and had been {was}")
+                }
+                (None, None) => format!("{key} was taken back out"),
             },
             Self::SessionNarrowed { granted } => {
                 format!("a live session was narrowed to {}", names(granted))
@@ -835,8 +940,10 @@ impl Log {
         // only ever write a prefix-free subset of what it read, and
         // `retaining_rewrites_nothing_it_keeps` holds it to that.
         let tmp = self.path.with_extension("tmp");
+        // Named against the trail rather than the temporary file beside it:
+        // see the note in `device.rs` on the same write.
         write_owner_only(&tmp, text.as_bytes()).map_err(|source| AuditError::Io {
-            path: tmp.clone(),
+            path: self.path.clone(),
             source,
         })?;
         fs::rename(&tmp, &self.path).map_err(|source| {

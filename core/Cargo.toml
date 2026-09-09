@@ -101,6 +101,9 @@ wayland-protocols-misc = "0.3"
 wayland-protocols-wlr = "0.3"
 ciborium = "0.2"
 serde = { version = "1", features = ["derive"] }
+# JSON, for the answers a program reads rather than a person: the settings
+# registry the control plane serves, and the audit log's own lines.
+serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -30,19 +30,16 @@ const LISTEN: Duration = Duration::from_secs(3);
 #[derive(Debug, Clone, Copy)]
 pub struct DiscoverOptions {
     pub seconds: u64,
-    /// One line per device, tab separated, for a program rather than a person.
+    /// One line per device, tab separated, for a shell rather than a person.
     ///
-    /// # Why not JSON
-    ///
-    /// Nothing in this workspace parses or writes JSON, and adding a crate to
-    /// print four fields would be a dependency bought for a convenience.
-    /// Tab-separated is *unambiguous here* rather than merely shorter: a
-    /// fingerprint is hex, an address is an address, and neither can contain
-    /// a tab or a newline — so a reader splits on the first three tabs and
-    /// whatever remains is the name, however a peer chose to spell it. A JSON
-    /// writer of our own would need string escaping, which is the part that
-    /// gets one case wrong.
+    /// Unambiguous here rather than merely shorter: a fingerprint is hex, an
+    /// address is an address, and neither can contain a tab or a newline — so
+    /// a reader splits on the first three tabs and whatever remains is the
+    /// name, however a peer chose to spell it. `cut -f2` is the whole reader.
     pub porcelain: bool,
+    /// The same list as one object, for a program that would rather not split
+    /// on tabs. Every command that reports answers with `--json`.
+    pub as_json: bool,
 }
 
 impl Default for DiscoverOptions {
@@ -50,6 +47,7 @@ impl Default for DiscoverOptions {
         Self {
             seconds: 3,
             porcelain: false,
+            as_json: false,
         }
     }
 }
@@ -72,8 +70,19 @@ pub fn parse(args: &[String]) -> Result<DiscoverOptions, String> {
                 o.porcelain = true;
                 i += 1;
             }
+            "--json" => {
+                o.as_json = true;
+                i += 1;
+            }
             other => return Err(format!("unknown option {other:?}")),
         }
+    }
+    // Both is somebody meaning one of them and getting the other, which is
+    // the kind of thing a script is written around once and never revisited.
+    if o.porcelain && o.as_json {
+        return Err(
+            "--porcelain and --json are two shapes of the same list: ask for one".to_owned(),
+        );
     }
     Ok(o)
 }
@@ -90,7 +99,7 @@ pub fn run(o: &DiscoverOptions) -> Result<(), String> {
             .await
             .map_err(|e| format!("looking for devices: {e}"))?;
 
-        if !o.porcelain {
+        if !o.porcelain && !o.as_json {
             println!("🔎 looking for Esper devices on this network");
             println!();
         }
@@ -132,6 +141,39 @@ pub fn run(o: &DiscoverOptions) -> Result<(), String> {
             .filter(|f| !paired.iter().any(|p| p.is_same(f)))
             .cloned()
             .collect();
+
+        if o.as_json {
+            // The same two lists the printed report is in, and the same words
+            // for them: a device that is paired is one this machine can
+            // connect to, and anything else needs a code read off its screen.
+            let describe = |f: &Found, paired: bool| {
+                let fp = f.fingerprint.as_deref().unwrap_or("");
+                let name = if paired {
+                    store
+                        .iter()
+                        .find(|d| Some(Fingerprint::of(&d.public_key).hex()) == f.fingerprint)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_else(|| f.device.clone())
+                } else {
+                    f.device.clone()
+                };
+                serde_json::json!({
+                    "fingerprint": fp,
+                    "address": f.address.to_string(),
+                    "name": name,
+                })
+            };
+            let out = serde_json::json!({
+                "paired": paired.iter().map(|f| describe(f, true)).collect::<Vec<_>>(),
+                "candidates": candidates.iter().map(|f| describe(f, false)).collect::<Vec<_>>(),
+                // Packets this could not read are either another
+                // implementation doing something unexpected or somebody
+                // probing, and both are worth knowing about.
+                "unreadable": browser.dropped(),
+            });
+            println!("{out}");
+            return Ok(());
+        }
 
         if o.porcelain {
             // One line per device, and **the fingerprint is on every line**.
@@ -342,7 +384,7 @@ pub async fn advertise(bound: SocketAddr) -> Result<Announcing, String> {
 pub fn usage() -> String {
     let me = crate::net::me();
     format!(
-        "usage: {me} discover [--seconds <n>] [--porcelain]\n\
+        "usage: {me} discover [--seconds <n>] [--porcelain | --json]\n\
          \n\
          List the Esper devices answering on this network. Nothing is\n\
          contacted and nothing is paired: this is the question \"what is\n\
@@ -351,7 +393,8 @@ pub fn usage() -> String {
          \x20 --seconds <n>        how long to listen. The default waits until\n\
          \x20                      the answers stop arriving\n\
          \x20 --porcelain          one device per line, tab separated, for a\n\
-         \x20                      script rather than a person\n\
+         \x20                      shell rather than a person\n\
+         \x20 --json               the same list as one object, for a program\n\
          \n\
          for example: {me} discover --seconds 2"
     )

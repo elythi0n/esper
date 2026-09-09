@@ -42,6 +42,8 @@ fn entries_round_trip_and_keep_their_order() {
     for (i, ev) in [
         Event::Paired {
             name: "laptop".to_owned(),
+            how: "an invitation link".to_owned(),
+            once: true,
         },
         Event::SessionOpened {
             granted: vec![Permission::View, Permission::Control],
@@ -234,6 +236,59 @@ fn the_log_is_owner_only_from_the_moment_it_exists() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// **A pairing says how it happened, and the two ways do not read the same.**
+///
+/// "A device paired" is the same sentence whether somebody was standing at the
+/// keyboard reading a code aloud or a link was pasted out of an email. Those
+/// are the two answers an investigation is looking for, and a record that
+/// cannot tell them apart answers neither.
+#[test]
+fn a_code_at_the_machine_and_a_link_do_not_read_the_same() {
+    let at_the_machine = Event::Paired {
+        name: "laptop".to_owned(),
+        how: "a code read at this machine".to_owned(),
+        once: false,
+    };
+    let by_link = Event::Paired {
+        name: "laptop".to_owned(),
+        how: "an invitation link".to_owned(),
+        once: true,
+    };
+    assert_ne!(at_the_machine.detail(), by_link.detail());
+    assert!(
+        at_the_machine.detail().contains("code"),
+        "{}",
+        at_the_machine.detail()
+    );
+    assert!(
+        by_link.detail().contains("invitation"),
+        "{}",
+        by_link.detail()
+    );
+    // And a pairing that is spent when its session opens says so, because
+    // that is a materially different thing to find in a list a year later.
+    assert!(
+        by_link.detail().contains("one session"),
+        "{}",
+        by_link.detail()
+    );
+    assert!(
+        !at_the_machine.detail().contains("one session"),
+        "{}",
+        at_the_machine.detail()
+    );
+
+    // A line written before this field existed still reads, and does not
+    // claim to know: an empty `how` is "whoever wrote it did not know", not
+    // "nobody was there".
+    let older = Event::Paired {
+        name: "laptop".to_owned(),
+        how: String::new(),
+        once: false,
+    };
+    assert_eq!(older.detail(), "paired with laptop");
+}
+
 // ── the two things it must never do ─────────────────────────────────────────
 
 /// **No session content, ever.** What a person types into a shell includes
@@ -273,6 +328,8 @@ fn exhaustive_witness(e: &Event) {
         | Event::SessionAsked { .. }
         | Event::LockAfterChanged { .. }
         | Event::PermissionsChanged { .. }
+        | Event::SettingChanged { .. }
+        | Event::TrailTrimmed { .. }
         | Event::PairingKept { .. }
         | Event::ScheduleChanged { .. }
         | Event::SessionOpened { .. }
@@ -315,6 +372,8 @@ fn variants() -> Vec<Event> {
         Event::Recording { on: true },
         Event::Paired {
             name: "laptop".to_owned(),
+            how: "an invitation link".to_owned(),
+            once: true,
         },
         Event::Unpaired {
             name: "laptop".to_owned(),
@@ -333,6 +392,16 @@ fn variants() -> Vec<Event> {
         },
         Event::PermissionsChanged {
             granted: vec![Permission::View, Permission::Terminal],
+        },
+        Event::SettingChanged {
+            key: "discovery.mdns".to_owned(),
+            now: Some("false".to_owned()),
+            was: Some("true".to_owned()),
+        },
+        Event::TrailTrimmed {
+            too_old: 3,
+            over_size: 1,
+            kept: 12,
         },
         Event::SessionOpened {
             granted: vec![Permission::View],

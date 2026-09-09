@@ -80,10 +80,9 @@ fn main() -> ExitCode {
     // status of nought, not a usage line on stderr after an error.
     //
     // **And every command answers**, not only the ones with a list of their
-    // own. Four of them used to reply "unexpected argument" or "unknown flag
-    // --help" — which is a program telling somebody that asking was a
-    // mistake. Where there is nothing specific to say, the general help is
-    // the honest answer, and it is still an answer.
+    // own. Replying "unexpected argument" to `--help` is a program telling
+    // somebody that asking was a mistake. Where there is nothing specific to
+    // say, the general help is the honest answer, and it is still an answer.
     if let Some(command) = args.first().map(String::as_str)
         && args.iter().skip(1).any(|a| a == "--help" || a == "-h")
     {
@@ -96,33 +95,133 @@ fn main() -> ExitCode {
 
     match args.first().map(String::as_str) {
         None | Some("version" | "--version" | "-v") => {
-            print_version();
+            /*
+                **An argument this does not know is refused, not ignored.**
+
+                `version --json` used to print the three human lines and exit
+                zero, while the front door answered the same flag with an
+                object and the broker refused it — three binaries, three
+                answers to one question. Somebody scripting a deployment got
+                a table from one of them and no reason to look further until
+                something downstream broke on it.
+            */
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            let mut as_json = false;
+            for arg in &rest {
+                match arg.as_str() {
+                    "--json" => as_json = true,
+                    other => {
+                        eprintln!(
+                            "{} version: unknown option {other:?}\n\n{}",
+                            net::me(),
+                            version_usage()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            if as_json {
+                print_version_as_json();
+            } else {
+                print_version();
+            }
             ExitCode::SUCCESS
+        }
+        Some("sandbox") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            let mut as_json = false;
+            for arg in &rest {
+                match arg.as_str() {
+                    "--json" => as_json = true,
+                    unknown => {
+                        eprintln!(
+                            "{} sandbox: unknown option {unknown:?}\n\n{}",
+                            net::me(),
+                            sandbox_usage()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            match report_the_sandbox(as_json) {
+                Ok(enforcing) => {
+                    if enforcing {
+                        ExitCode::SUCCESS
+                    } else {
+                        // Non-zero, because a decoder that is not in a sandbox
+                        // is the finding this command exists to report and a
+                        // script watching it should see one.
+                        ExitCode::FAILURE
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{} sandbox: {e}", net::me());
+                    ExitCode::FAILURE
+                }
+            }
         }
         Some("input") => {
+            // `--help` never reaches here: the dispatcher answers it from
+            // `usage_for` before any command runs, which is what keeps one
+            // usage for one command.
             let rest: Vec<String> = std::env::args().skip(2).collect();
-            if rest.iter().any(|a| a == "--help" || a == "-h") {
-                println!("{}", input_usage());
-                return ExitCode::SUCCESS;
+            let mut as_json = false;
+            for arg in &rest {
+                match arg.as_str() {
+                    "--json" => as_json = true,
+                    unknown => {
+                        eprintln!(
+                            "{} input: unknown option {unknown:?}\n\n{}",
+                            net::me(),
+                            input_usage()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
             }
-            if let Some(unknown) = rest.first() {
-                eprintln!(
-                    "{} input: unknown option {unknown:?}\n\n{}",
-                    net::me(),
-                    input_usage()
-                );
-                return ExitCode::FAILURE;
+            if as_json {
+                print_input_as_json();
+            } else {
+                print_input();
             }
-            print_input();
             ExitCode::SUCCESS
         }
-        Some("identity") => match print_identity() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("{}: {e}", net::me());
-                ExitCode::FAILURE
+        Some("identity") => {
+            // An argument this does not know is refused, not ignored: a flag
+            // accepted and disregarded is a script that reads a table and has
+            // no reason to look further.
+            //
+            // `--help` never reaches here: the dispatcher answers it from
+            // `usage_for` before any command runs, which is what keeps one
+            // usage for one command.
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            let mut as_json = false;
+            for arg in &rest {
+                match arg.as_str() {
+                    "--json" => as_json = true,
+                    other => {
+                        eprintln!(
+                            "{} identity: unknown option {other:?}\n\n{}",
+                            net::me(),
+                            identity_usage()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
             }
-        },
+            let printed = if as_json {
+                print_identity_as_json()
+            } else {
+                print_identity()
+            };
+            match printed {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{}: {e}", net::me());
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("loopback") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             match loopback::parse(&rest).and_then(|o| loopback::run(&o)) {
@@ -209,7 +308,10 @@ fn main() -> ExitCode {
             match pairing::parse(&rest).and_then(|o| pairing::run(&o)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("pair: {e}");
+                    // Named, like every other refusal: the parser says what is
+                    // wrong and the dispatcher says which program and which
+                    // command.
+                    eprintln!("{} pair: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -292,8 +394,44 @@ fn main() -> ExitCode {
         }
         Some("config") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
-            let outcome = match rest.first().map(String::as_str) {
-                None | Some("show") => settings::show(),
+            // `--json` anywhere, including as the only word: it is a way of
+            // *showing*, not a subcommand, so `config --json` and
+            // `config show --json` are the same thing.
+            //
+            // **And nothing else is.** Any other option was taken for a
+            // subcommand that is not there, skipped, and the table printed —
+            // so `config --porcelain` answered with the listing laid out for a
+            // person and exited zero. `set` and `unset` take values that may
+            // begin with a dash, so only the words before them are examined.
+            let as_json = rest.iter().any(|a| a == "--json");
+            let verb = rest
+                .iter()
+                .map(String::as_str)
+                .find(|a| !a.starts_with("--"));
+            let options_before_the_verb = rest
+                .iter()
+                .take_while(|a| a.starts_with("--"))
+                .filter(|a| *a != "--json");
+            if let Some(unknown) = options_before_the_verb.clone().next() {
+                eprintln!(
+                    "{} config: unknown option {unknown:?}\n\n\
+                     usage: {} config [show] [--json] | set <key> <value> | unset <key> | example | path",
+                    net::me(),
+                    net::me()
+                );
+                return ExitCode::FAILURE;
+            }
+            let first = verb;
+            let outcome = match first {
+                None | Some("show") => {
+                    // For a program, the table for a person. The control plane
+                    // reads this, so the registry has exactly one owner.
+                    if as_json {
+                        settings::show_as_json()
+                    } else {
+                        settings::show()
+                    }
+                }
                 Some("example") => {
                     settings::print_example();
                     Ok(())
@@ -305,8 +443,25 @@ fn main() -> ExitCode {
                     }
                     Err(e) => Err(e),
                 },
+                Some("set") => match (rest.get(1), rest.get(2)) {
+                    (Some(key), Some(value)) => settings::set(key, value),
+                    _ => Err(format!(
+                        "usage: {} config set <key> <value>\n\n\
+                         `{} config` lists every setting and what it is now.",
+                        net::me(),
+                        net::me()
+                    )),
+                },
+                Some("unset") => match rest.get(1) {
+                    Some(key) => settings::unset(key),
+                    None => Err(format!(
+                        "usage: {} config unset <key>\n\n\
+                         Takes a setting out of the file, so the default decides again.",
+                        net::me()
+                    )),
+                },
                 Some(other) => Err(format!(
-                    "unknown: `config {other}` — try `show`, `example` or `path`"
+                    "unknown: `config {other}` — try `show`, `set`, `unset`, `example` or `path`"
                 )),
             };
             match outcome {
@@ -317,13 +472,49 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some("devices") => match devices_cmd::list() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("{} devices: {e}", net::me());
-                ExitCode::FAILURE
+        Some("devices") => {
+            /*
+                **An argument this does not understand is refused.**
+
+                It used to take none and ignore every one: `devices --json` was
+                accepted, answered with the table laid out for a person, and
+                exited zero. A script asking for JSON got a listing and no
+                indication that anything was wrong, which is worse than the
+                flag not existing.
+            */
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            let mut as_json = false;
+            let mut refused = None;
+            for arg in &rest {
+                match arg.as_str() {
+                    "--json" => as_json = true,
+                    // `--help` never reaches here: the dispatcher answers it
+                    // from `usage_for` before any command runs, which is what
+                    // keeps one usage for one command.
+                    other => refused = Some(other.to_owned()),
+                }
             }
-        },
+            if let Some(other) = refused {
+                eprintln!(
+                    "{} devices: unknown option {other:?}\n\n{}",
+                    net::me(),
+                    devices_cmd::list_usage()
+                );
+                return ExitCode::FAILURE;
+            }
+            let done = if as_json {
+                devices_cmd::list_as_json()
+            } else {
+                devices_cmd::list()
+            };
+            match done {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{} devices: {e}", net::me());
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Some("grant") => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             match devices_cmd::change(&rest, devices_cmd::Change::Grant) {
@@ -467,14 +658,116 @@ fn print_input() {
 }
 
 fn input_usage() -> String {
-    "usage: esper-engine input\n\
+    let me = net::me();
+    format!(
+        "usage: {me} input [--json]\n\
      \n\
      Print which backend this machine would inject keys and pointer moves\n\
      with, and what was tried before it. A host that can be seen and not\n\
      controlled is view only, and this says why.\n\
      \n\
-     Nothing is injected and no session is started."
-        .to_owned()
+     Nothing is injected and no session is started.\n\
+     \n\
+     options:\n  \
+     \x20 --json   one object, for a script rather than a person"
+    )
+}
+
+/// The same answer, in the shape `esper doctor --json` reports it.
+///
+/// The same two keys the local API uses for this capability — `detail` for
+/// the one line, `attempts` for what was tried — so a reader that knows one
+/// knows the other.
+fn sandbox_usage() -> String {
+    let me = net::me();
+    format!(
+        "usage: {me} sandbox [--json]\n\
+         \n\
+         Start the decoder the way a session does and report the jail it ran\n\
+         in — which layers applied, and what a compromised decoder could\n\
+         reach if any of them did not.\n\
+         \n\
+         Nothing decodes a peer's bitstream here and no session is started.\n\
+         \n\
+         With ESPER_SANDBOX_AUDIT=1 the syscall filter logs instead of\n\
+         killing, which is how a syscall missing from it is found rather than\n\
+         guessed at. That is a diagnostic: a session still refuses a decoder\n\
+         that is not enforcing, whatever is set here.\n\
+         \n\
+         options:\n  \
+         \x20 --json   one object, for a script rather than a person"
+    )
+}
+
+/// Report the jail the decoder runs in, and what is reachable if it is not on.
+///
+/// **The escape hatch, made reachable.** `ESPER_SANDBOX_AUDIT=1` exists so a
+/// syscall missing from the filter can be found rather than guessed at — and
+/// with a session refusing any decoder that is not enforcing, turning it on
+/// taught nobody anything. This is where it is allowed to mean something,
+/// because there is no peer here: the worker is started, it reports, and it
+/// is stopped.
+///
+/// Returns whether the sandbox is actually in force.
+fn report_the_sandbox(as_json: bool) -> Result<bool, String> {
+    let config = esper_decode::decoder::DecoderConfig::default();
+    let worker = esper_decode::SandboxedDecoder::spawn_self_for_diagnosis(&config)
+        .map_err(|e| e.to_string())?;
+    let report = *worker.report();
+    drop(worker);
+
+    let audit_set = std::env::var_os(esper_decode::sandbox::AUDIT_ENV).is_some();
+    if as_json {
+        let out = serde_json::json!({
+            "enforcing": report.is_enforcing(),
+            "layers": {
+                "address_space": report.address_space,
+                "open_files": report.open_files,
+                "no_new_privs": report.no_new_privs,
+                "landlock": report.landlock,
+                "seccomp": report.seccomp,
+                "killing": report.enforcing,
+            },
+            "detail": report.describe(),
+            "reachable": report.what_is_reachable(),
+            "audit_requested": audit_set,
+        });
+        println!("{out}");
+        return Ok(report.is_enforcing());
+    }
+
+    println!("decoder sandbox");
+    println!();
+    println!("  {}", report.headline());
+    println!();
+    println!("  what a compromised decoder could reach");
+    for line in report.what_is_reachable() {
+        println!("      {line}");
+    }
+    if audit_set {
+        println!();
+        println!(
+            "  {} is set, so the filter logs instead of killing.",
+            esper_decode::sandbox::AUDIT_ENV
+        );
+        println!("  A session refuses a decoder in this state; this command does not,");
+        println!("  because the only bitstream here is this machine's own.");
+    }
+    Ok(report.is_enforcing())
+}
+
+fn print_input_as_json() {
+    let chosen = injector::open();
+    let out = serde_json::json!({
+        "available": chosen.real,
+        "detail": if chosen.real {
+            chosen.sink.backend().to_owned()
+        } else {
+            "nothing — this machine is view only".to_owned()
+        },
+        "attempts": chosen.attempts,
+    });
+    println!("{out}");
 }
 
 /// Load or create this device's identity and print its fingerprint.
@@ -491,8 +784,49 @@ fn print_identity() -> Result<(), Box<dyn std::error::Error>> {
         println!("    {line}");
     }
     println!();
-    println!("  key   {}", id.fingerprint().hex());
-    println!("  file  {}", path.display());
+    // **Both, and each called what it is.** The fingerprint is sixty-four
+    // bits, for a person to read aloud and for naming a device on a command
+    // line; the key is what a peer actually pins, and labelling the short one
+    // "key" is how somebody comes to compare sixty-four bits and believe they
+    // have checked a machine. `esper-broker identity` prints the whole key
+    // under the same word, so the word has to mean one thing.
+    println!("  fingerprint  {}", id.fingerprint().hex());
+    println!(
+        "  key          {}",
+        id.public_key().iter().fold(String::new(), |mut acc, b| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+    );
+    println!("  file         {}", path.display());
+    Ok(())
+}
+
+/// This device, as one object.
+///
+/// The same field names `devices --json` uses for the same three facts — the
+/// key a peer pins, and the fingerprint derived from it in both the form a
+/// script compares and the form a person reads aloud. One vocabulary, so a
+/// reader that knows the device list knows this too.
+fn print_identity_as_json() -> Result<(), Box<dyn std::error::Error>> {
+    use std::fmt::Write as _;
+
+    let path = identity_path()?;
+    let id = esper_crypto::Identity::load_or_create(&path)?;
+    let key = id.public_key().iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+    let out = serde_json::json!({
+        "public_key": key,
+        "fingerprint": {
+            "hex": id.fingerprint().hex(),
+            "words": id.fingerprint().words(),
+        },
+        "file": path.display().to_string(),
+    });
+    println!("{out}");
     Ok(())
 }
 
@@ -510,9 +844,12 @@ fn identity_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
 
 /// What a command takes, for the commands that take anything.
 ///
-/// `None` for the ones that take no options at all — `devices`, `identity` —
-/// where a person asking for help should get the general help rather than an
-/// empty list, which is what falling through to the dispatcher gives them.
+/// `None` only where there is genuinely nothing to say about a command on its
+/// own; the general help is then the honest answer, and it is still an answer.
+/// A command that takes *anything* — a flag, a subcommand, or nothing at all
+/// where that is worth stating — belongs here. Without an entry, `--help`
+/// answers with a list of thirty-two commands, none of which says what the one
+/// that was asked about takes.
 fn usage_for(command: &str) -> Option<String> {
     match command {
         "connect" => Some(session_cmd::connect_usage()),
@@ -532,14 +869,67 @@ fn usage_for(command: &str) -> Option<String> {
         "revoke" => Some(devices_cmd::change_usage(devices_cmd::Change::Revoke)),
         "schedule" => Some(devices_cmd::schedule_usage()),
         "lock-after" => Some(devices_cmd::lock_after_usage()),
+        "devices" => Some(devices_cmd::list_usage()),
+        "version" => Some(version_usage()),
+        "config" => Some(settings::usage()),
+        "identity" => Some(identity_usage()),
+        "input" => Some(input_usage()),
+        "sandbox" => Some(sandbox_usage()),
+        "pair" => Some(pairing::usage()),
+        "join" => Some(invite_cmd::join_usage()),
+        "keep" => Some(devices_cmd::keep_usage()),
+        "forget" => Some(devices_cmd::forget_usage()),
+        "serve" => Some(serve::usage()),
         _ => None,
     }
+}
+
+/// What `identity` takes.
+fn identity_usage() -> String {
+    let me = net::me();
+    format!(
+        "usage: {me} identity [--json]\n\
+         \n\
+         This machine's own fingerprint, in hex and in the words somebody\n\
+         reads out loud to confirm it.\n\
+         \n\
+         options:\n  \
+         \x20 --json   one object, for a script rather than a person\n"
+    )
 }
 
 fn print_version() {
     println!("esper-engine {VERSION}");
     println!("  built     {BUILD_TIME}");
     println!("  protocol  {}", esper_proto::PROTOCOL_VERSION);
+}
+
+/// The same three facts, in the shape the other two binaries answer with.
+///
+/// One object with the same three keys, so a deployment asking all three what
+/// they are gets three answers it can compare rather than three formats.
+fn print_version_as_json() {
+    let out = serde_json::json!({
+        "version": VERSION,
+        "buildTime": BUILD_TIME,
+        "protocol": esper_proto::PROTOCOL_VERSION,
+    });
+    println!("{out}");
+}
+
+/// What `version` takes.
+#[must_use]
+pub fn version_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} version [--json]\n\
+         \n\
+         The release, when it was built, and the protocol version two machines\n\
+         have to agree on.\n\
+         \n\
+         options:\n  \
+         \x20 --json   one object, for a script rather than a person\n"
+    )
 }
 
 fn print_help() {
@@ -552,9 +942,10 @@ fn print_help() {
          Commands:\n  \
            identity   print this device's fingerprint\n  \
            input      which injection backend this machine can use\n  \
+           sandbox    the jail a peer's video is decoded in, and what it stops\n  \
            discover   list the Esper devices on this network\n  \
            pair       pair with another device, in either direction\n  \
-           config     show every setting and where its value came from\n  \
+           config     show every setting, change one, or take one back out\n  \
            devices    list paired devices and what they may do\n  \
            group      put devices in a group, for applying a policy at once\n  \
            wake       send a magic packet to a paired device that is asleep\n  \

@@ -255,12 +255,29 @@ impl Permission {
 
     /// Whether granting this permission should require explicit confirmation at
     /// the host rather than a checkbox.
+    ///
+    /// # Why `terminal` is on this list, and is the one that matters
+    ///
+    /// A shell on this machine runs as the user who owns `~/.esper`. That user
+    /// can read the identity key and the local API's token, **rewrite the
+    /// device list**, and read or edit the record of what happened. So a
+    /// device holding `terminal` already has every permission below this line
+    /// whether or not anybody granted them — it does not need `esper grant`
+    /// at all, and a store it rewrites by hand leaves no line in the trail.
+    ///
+    /// That cannot be closed by asking a better question: the confirmation is
+    /// answered at a terminal, and a served shell *is* a terminal — measured,
+    /// not assumed. **So the gate belongs where the escalation starts.**
+    /// Handing out the shell is the deliberate, confirmed, recorded act;
+    /// everything after it is out of this machine's hands.
     #[must_use]
     pub const fn is_sensitive(self) -> bool {
         matches!(
             self,
-            // Removes the question a session is otherwise held up by.
-            Self::Unattended
+            // A shell as the owning user: every permission below, and more.
+            Self::Terminal
+                // Removes the question a session is otherwise held up by.
+                | Self::Unattended
                 // Writes to this machine's filesystem.
                 | Self::FilesIn
                 // Keeps a copy of somebody's screen after the session.
@@ -270,6 +287,27 @@ impl Permission {
                 // Takes the machine away, and every other session on it.
                 | Self::Reboot
         )
+    }
+
+    /// What granting this actually hands over, where that is more than its
+    /// name suggests. `None` where the name is the whole of it.
+    ///
+    /// Shown at the moment somebody is asked to confirm, because a question
+    /// naming only the permission is a question they cannot answer well.
+    #[must_use]
+    pub const fn what_it_really_grants(self) -> Option<&'static str> {
+        match self {
+            Self::Terminal => Some(
+                "a shell on this machine, as the user who owns it — which can read this \
+                 machine's identity key and the local API's token, rewrite the device list \
+                 without asking, and edit the record of what happened. Granting it grants \
+                 every other permission, whether or not you grant them",
+            ),
+            Self::Unattended => Some(
+                "sessions with nobody here to agree to them, held until somebody takes it away",
+            ),
+            _ => None,
+        }
     }
 }
 

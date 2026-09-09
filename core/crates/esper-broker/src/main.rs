@@ -36,14 +36,24 @@ fn main() -> ExitCode {
                 println!("{}", version_usage());
                 return ExitCode::SUCCESS;
             }
-            if let Some(unknown) = rest.first() {
-                eprintln!(
-                    "esper-broker version: unknown option {unknown:?}\n\n{}",
-                    version_usage()
-                );
-                return ExitCode::FAILURE;
+            let mut as_json = false;
+            for arg in &rest {
+                match arg.as_str() {
+                    "--json" => as_json = true,
+                    unknown => {
+                        eprintln!(
+                            "esper-broker version: unknown option {unknown:?}\n\n{}",
+                            version_usage()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
             }
-            print_version();
+            if as_json {
+                print_version_as_json();
+            } else {
+                print_version();
+            }
             ExitCode::SUCCESS
         }
         Some("identity") => {
@@ -55,14 +65,25 @@ fn main() -> ExitCode {
                 println!("{}", identity_usage());
                 return ExitCode::SUCCESS;
             }
-            if let Some(unknown) = rest.first() {
-                eprintln!(
-                    "esper-broker identity: unknown option {unknown:?}\n\n{}",
-                    identity_usage()
-                );
-                return ExitCode::FAILURE;
+            let mut as_json = false;
+            for arg in &rest {
+                match arg.as_str() {
+                    "--json" => as_json = true,
+                    unknown => {
+                        eprintln!(
+                            "esper-broker identity: unknown option {unknown:?}\n\n{}",
+                            identity_usage()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
             }
-            match print_identity() {
+            let printed = if as_json {
+                print_identity_as_json()
+            } else {
+                print_identity()
+            };
+            match printed {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("esper-broker identity: {e}");
@@ -346,6 +367,27 @@ fn print_identity() -> Result<(), String> {
     Ok(())
 }
 
+/// The same broker, as one object.
+///
+/// The field names `esper devices --json` and `esper identity --json` use for
+/// the same facts. One vocabulary across the three binaries: `public_key` is
+/// always the whole key, and `fingerprint` is always the short form derived
+/// from it.
+fn print_identity_as_json() -> Result<(), String> {
+    let path = default_identity()?;
+    let identity = identity_at(&path)?;
+    let out = serde_json::json!({
+        "public_key": hex(&identity.public_key()),
+        "fingerprint": {
+            "hex": identity.fingerprint().hex(),
+            "words": identity.fingerprint().words(),
+        },
+        "file": path.display().to_string(),
+    });
+    println!("{out}");
+    Ok(())
+}
+
 /// Wait for the operator to ask this process to stop.
 ///
 /// `SIGTERM` as well as an interrupt, because a broker is run by a service
@@ -386,6 +428,23 @@ fn print_version() {
     println!("  rendezvous {}", esper_rendezvous::RENDEZVOUS_VERSION);
 }
 
+/// The same facts, in the shape the other two binaries answer with.
+///
+/// **One object with the same keys**, so somebody asking a deployment what it
+/// is running gets three answers they can compare rather than three formats.
+/// The broker speaks a rendezvous version as well as a protocol one, and both
+/// are here: a peer and a broker that disagree about either cannot be
+/// introduced.
+fn print_version_as_json() {
+    let out = serde_json::json!({
+        "version": VERSION,
+        "buildTime": BUILD_TIME,
+        "protocol": esper_proto::PROTOCOL_VERSION,
+        "rendezvous": esper_rendezvous::RENDEZVOUS_VERSION,
+    });
+    println!("{out}");
+}
+
 /// What `serve` takes.
 ///
 /// Its own text rather than the general help, for the same reason every verb in
@@ -414,23 +473,29 @@ fn serve_usage() -> String {
 }
 
 fn identity_usage() -> String {
-    "usage: esper-broker identity\n\
+    "usage: esper-broker identity [--json]\n\
      \n\
      Print this broker's key, which peers pin with --broker-key, and the same\n\
      key as words for reading aloud. Creates the key if there is not one yet.\n\
      \n\
      The key lives beside this machine's Esper state. `serve --identity <path>`\n\
      is what puts it somewhere else, and this prints whichever one that command\n\
-     would use."
+     would use.\n\
+     \n\
+     options:\n  \
+     \x20 --json   one object, for a script rather than a person"
         .to_owned()
 }
 
 fn version_usage() -> String {
-    "usage: esper-broker version\n\
+    "usage: esper-broker version [--json]\n\
      \n\
      Print the version, the build time and the protocol versions this broker\n\
      speaks. Two peers and a broker have to agree on the protocol; the numbers\n\
-     here are what this one will accept."
+     here are what this one will accept.\n\
+     \n\
+     options:\n  \
+     \x20 --json   one object, for a script rather than a person"
         .to_owned()
 }
 

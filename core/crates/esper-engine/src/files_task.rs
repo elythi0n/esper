@@ -384,7 +384,7 @@ pub enum Going {
 /// nobody can read and a lock nobody needs. Every quarter of a mebibyte is
 /// about four reports a second on a slow link and forty on a fast one, which
 /// is the range a person reads as "moving".
-const REPORT_EVERY: u64 = 256 * 1024;
+pub const REPORT_EVERY: u64 = 256 * 1024;
 
 /// Push a file, reporting how far it has got and stopping when asked.
 ///

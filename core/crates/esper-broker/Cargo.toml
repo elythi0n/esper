@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+serde_json.workspace = true
 esper-proto.workspace = true
 esper-buildinfo.workspace = true
 esper-crypto.workspace = true

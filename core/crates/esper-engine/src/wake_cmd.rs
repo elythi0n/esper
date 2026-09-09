@@ -59,19 +59,13 @@ pub fn run(o: &WakeOptions) -> Result<(), String> {
     for line in &dropped {
         eprintln!("  · {line}");
     }
-    let wanted = o.who.trim().to_ascii_lowercase().replace([' ', ':'], "");
-    let found: Vec<&esper_crypto::Device> = store
-        .iter()
-        .filter(|d| d.fingerprint().hex().starts_with(&wanted) || d.name == o.who)
-        .collect();
-    let [device] = found.as_slice() else {
-        return Err(format!(
-            "{} paired devices match {:?} — `{} devices` lists them",
-            found.len(),
-            o.who,
-            crate::net::me()
-        ));
-    };
+    // **The same matcher every other command that names a device uses.** A
+    // second rule here means `esper lock kit` finds the kitchen machine and
+    // `esper wake kit` does not, and a second wording means one refusal reads
+    // as a sentence and the other as a count of nought. Two matchers for one
+    // question is also two places to be ambiguous in, and this one resolved
+    // nothing — it took an exact name where the other takes a prefix.
+    let device = crate::ladder::device_named(store.iter(), &o.who)?;
 
     let Some(mac) = device.last_mac.as_deref() else {
         return Err(format!(

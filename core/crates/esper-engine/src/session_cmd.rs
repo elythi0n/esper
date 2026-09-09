@@ -4706,8 +4706,9 @@ pub fn connect_usage() -> String {
          \x20                      own screen for as long as it lasts\n\
          \x20 --profile <what>     text, balanced or motion: what you are doing,\n\
          \x20                      which decides what the host gives up first\n\
-         \x20 --clipboard <what>   both, from-host, to-host or none. Nothing is ever\n\
-         \x20                      pushed: a copy offers, the other end asks (default both)\n\
+         \x20 --clipboard <what>   both, from-host, to-host or none (default both).\n\
+         \x20                      Nothing is ever pushed: a copy offers, and the\n\
+         \x20                      other end asks\n\
          \x20 --seconds <n>        stop after this long, for measuring\n\
          \x20 --via <broker>       be introduced by a broker when nothing direct works\n\
          \x20 --broker-key <key>   the broker's key, when it is not remembered\n\

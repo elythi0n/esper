@@ -81,7 +81,7 @@ pub fn parse(text: &str) -> Result<Vec<(String, String, usize)>, ParseError> {
 /// Inside quotes a `#` is a character, not a comment: an address, a name or a
 /// key may contain one, and truncating a value at it would be a setting
 /// silently changed by its own punctuation.
-fn strip_comment(line: &str) -> &str {
+pub(crate) fn strip_comment(line: &str) -> &str {
     let mut in_quotes = false;
     for (i, c) in line.char_indices() {
         match c {

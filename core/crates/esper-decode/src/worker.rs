@@ -112,11 +112,61 @@ impl std::fmt::Debug for SandboxedDecoder {
     }
 }
 
+/// Whether a caller will take a decoder that is not in a sandbox.
+///
+/// A type rather than a boolean, so the one place that says `No` reads as a
+/// decision at its call site rather than as a `false` somebody has to go and
+/// look up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Insist {
+    /// A peer's bitstream. Nothing else is acceptable.
+    OnASandbox,
+    /// A diagnostic, on a bitstream this machine made. See
+    /// [`SandboxedDecoder::spawn_for_diagnosis`].
+    No,
+}
+
 impl SandboxedDecoder {
     /// Spawn a worker and wait for it to report the sandbox is on.
     ///
     /// `worker` is the program to run — normally this engine's own executable.
     pub fn spawn(worker: &std::path::Path, config: &DecoderConfig) -> Result<Self, WorkerError> {
+        Self::start(worker, config, Insist::OnASandbox)
+    }
+
+    /// Spawn a worker **for a diagnostic**, accepting a sandbox that is not in
+    /// force.
+    ///
+    /// # Why this exists at all
+    ///
+    /// `ESPER_SANDBOX_AUDIT=1` turns the syscall filter into log-and-allow so
+    /// a syscall missing from it can be *found* rather than guessed at — which
+    /// is the documented reason it exists, and it could not serve that reason:
+    /// the report says the sandbox is not in force, [`Self::spawn`] refuses,
+    /// and whoever turned it on learns nothing. An escape hatch that is built,
+    /// documented and unreachable is worse than none, because it reads as
+    /// available.
+    ///
+    /// # Why it is a separate constructor and not a flag
+    ///
+    /// A flag on the ordinary path is how a security property becomes a
+    /// preference. This one cannot be reached from a session: it is used by
+    /// `esper doctor`, on a bitstream this machine produced a moment earlier,
+    /// and `check-one-place` holds it to that single caller. **A peer's
+    /// bitstream never reaches a decoder that is not enforcing**, whatever
+    /// anybody sets in the environment.
+    pub fn spawn_for_diagnosis(
+        worker: &std::path::Path,
+        config: &DecoderConfig,
+    ) -> Result<Self, WorkerError> {
+        Self::start(worker, config, Insist::No)
+    }
+
+    fn start(
+        worker: &std::path::Path,
+        config: &DecoderConfig,
+        insist: Insist,
+    ) -> Result<Self, WorkerError> {
         let mut child = Command::new(worker)
             .arg(WORKER_ARG)
             .env(WORKER_ENV, "1")
@@ -146,7 +196,7 @@ impl SandboxedDecoder {
         // is where that ordering is enforced from the other side.
         match me.read_reply() {
             Ok(FromDecoder::Ready { report }) => {
-                if !report.is_enforcing() {
+                if insist == Insist::OnASandbox && !report.is_enforcing() {
                     let detail = report.describe();
                     let _ = me.child.kill();
                     return Err(WorkerError::NotSandboxed { detail });
@@ -170,6 +220,12 @@ impl SandboxedDecoder {
     pub fn spawn_self(config: &DecoderConfig) -> Result<Self, WorkerError> {
         let exe = std::env::current_exe().map_err(|e| WorkerError::Spawn(e.to_string()))?;
         Self::spawn(&exe, config)
+    }
+
+    /// As [`Self::spawn_for_diagnosis`], re-executing this binary.
+    pub fn spawn_self_for_diagnosis(config: &DecoderConfig) -> Result<Self, WorkerError> {
+        let exe = std::env::current_exe().map_err(|e| WorkerError::Spawn(e.to_string()))?;
+        Self::spawn_for_diagnosis(&exe, config)
     }
 
     /// What the sandbox actually applied.

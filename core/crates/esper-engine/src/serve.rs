@@ -53,7 +53,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// why, not watch its engine exit.
 fn answer(command: &Command) -> Report {
     match command {
-        Command::Status => Report::Status(status()),
+        Command::Status => Report::Status(Box::new(status())),
         Command::Sessions { most } => sessions(*most),
         // **A `serve` engine is not hosting anything**, so there is nothing
         // for it to be alive *about*: it has no listening address, no session
@@ -125,6 +125,29 @@ fn sessions(most: u32) -> Report {
                     .unwrap_or_default(),
             })
             .collect(),
+    )
+}
+
+/// What `serve` takes, which is nothing.
+///
+/// A usage even so: it is in the engine's own help, and that help says running
+/// this binary directly is for diagnostics — so somebody reading the list will
+/// ask what this one does, and answering with the list they just read is not
+/// an answer.
+#[must_use]
+pub fn usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} serve\n\
+         \n\
+         Speak the control protocol on standard input and output. This is how\n\
+         `esper` talks to the engine it supervises: it is not a command to\n\
+         type, and run by hand it will wait for a handshake that never comes.\n\
+         \n\
+         It carries commands and state — roughly ten messages a second — and\n\
+         never a frame. Media does not cross this seam.\n\
+         \n\
+         Takes nothing."
     )
 }
 
@@ -212,9 +235,9 @@ fn capture() -> Capability {
             // reason somebody spent an afternoon wondering why their session
             // showed a test pattern.
             if name == "synthetic" {
-                Capability::missing(format!("no real screen: {}", selected.attempts.join("; ")))
+                Capability::missing("no real screen").after(selected.attempts)
             } else {
-                Capability::working(name)
+                Capability::working(name).after(selected.attempts)
             }
         }
         Err(e) => Capability::missing(e.to_string()),
@@ -254,9 +277,9 @@ fn encoder() -> Capability {
 fn input() -> Capability {
     let chosen = crate::injector::open();
     if chosen.real {
-        Capability::working(chosen.attempts.join("; "))
+        Capability::working(chosen.sink.backend()).after(chosen.attempts)
     } else {
-        Capability::missing(chosen.attempts.join("; "))
+        Capability::missing("nothing — this machine is view only").after(chosen.attempts)
     }
 }
 

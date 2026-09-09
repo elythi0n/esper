@@ -47,10 +47,12 @@
 mod parse;
 mod settings;
 mod value;
+mod write;
 
 pub use parse::{ParseError, parse};
 pub use settings::{Kind, SETTINGS, Setting};
 pub use value::Value;
+pub use write::{Changed, set_in, unset_in};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

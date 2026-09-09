@@ -100,11 +100,21 @@ fn hex(b: &[u8]) -> String {
 /// as the ones that do: two implementations of one shape drift silently, and
 /// this one is read by Go and written by Rust.
 fn expected_status() -> esper_proto::Report {
-    esper_proto::Report::Status(esper_proto::Status {
+    esper_proto::Report::Status(Box::new(esper_proto::Status {
         engine: "0.0.0".to_owned(),
-        capture: esper_proto::Capability::working("x11"),
+        // Three shapes on purpose: one that chose between backends, one with
+        // nothing to choose between, and one that tried everything and found
+        // nothing. A fixture where every capability carried the same shape
+        // would check a third of the field.
+        capture: esper_proto::Capability::working("x11").after([
+            "wlr: the Wayland display: Could not find wayland compositor".to_owned(),
+            "x11: in use".to_owned(),
+        ]),
         encoder: esper_proto::Capability::missing("openh264 starts and cannot encode"),
-        input: esper_proto::Capability::working("x11 xtest: in use"),
+        input: esper_proto::Capability::missing("nothing — this machine is view only").after([
+            "x11 xtest: no input backend: X11 via DISPLAY: Failed to parse value ''".to_owned(),
+            "wayland-portal: no input backend: the RemoteDesktop portal refused".to_owned(),
+        ]),
         overlays: vec!["wg0".to_owned(), "tailscale0".to_owned()],
         mdns: true,
         broker: Some("broker.example.com:7443".to_owned()),
@@ -116,7 +126,7 @@ fn expected_status() -> esper_proto::Report {
             os: "linux".to_owned(),
             display: "wayland".to_owned(),
         },
-    })
+    }))
 }
 
 #[test]

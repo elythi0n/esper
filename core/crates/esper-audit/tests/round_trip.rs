@@ -25,6 +25,8 @@ fn every_variant() -> Vec<Event> {
         Event::Recording { on: true },
         Event::Paired {
             name: "rack".into(),
+            how: "a code read at this machine".to_owned(),
+            once: false,
         },
         Event::Unpaired {
             name: "rack".into(),
@@ -144,4 +146,55 @@ fn no_event_field_shares_a_name_with_the_entry_around_it() {
         // stopped deriving the peer from the key fails here too.
         let _ = Entry::new(&key, event, 1);
     }
+}
+
+/// The key names other things grep for.
+///
+/// # Why a test names keys rather than trusting a round trip
+///
+/// A round trip survives any rename: the writer and the reader move together
+/// and nothing notices. What does not move with them is everything *outside*
+/// this crate that reads the log as text — the smoke suite counts refused
+/// transfers with `grep`, and an auditor at a terminal does the same.
+///
+/// A gate that greps for a key nothing writes counts zero every run and says
+/// so every run, which is a gate reporting on a field that is not there. This
+/// is the thing that fails instead — the event's own field is `way`, because
+/// `Entry` already has a `direction` and the two are flattened into one
+/// object.
+///
+/// So: the line a refused transfer writes, as text, with the keys it must
+/// carry and the one it must not.
+#[test]
+fn a_refused_transfer_is_greppable_by_the_keys_it_has_always_had() {
+    let line = serde_json::to_string(&Entry::now(
+        &[7u8; 32],
+        Event::FileTransferred {
+            way: "refused".into(),
+            path: "somewhere/else".into(),
+            size: 0,
+            outcome: "not permitted".into(),
+        },
+    ))
+    .expect("an entry");
+
+    for wanted in [
+        r#""event":"file_transferred""#,
+        r#""way":"refused""#,
+        r#""outcome":"not permitted""#,
+    ] {
+        assert!(
+            line.contains(wanted),
+            "a refused transfer does not carry {wanted} — anything grepping the log for it counts \
+             zero and cannot tell that from nothing having happened.\n{line}"
+        );
+    }
+
+    // And not the entry's own key, which is what the rename was about: an
+    // inbound entry leaves `direction` out entirely, so a check looking for
+    // `"direction":"refused"` is a check that can never match.
+    assert!(
+        !line.contains(r#""direction""#),
+        "an inbound entry wrote a direction, and the event's way is the field that says refused.\n{line}"
+    );
 }

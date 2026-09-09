@@ -45,6 +45,14 @@ pub struct CopyOptions {
     pub force: bool,
     pub via: Option<esper_rendezvous::Via>,
     pub mdns: bool,
+    /// Report progress in lines a program can read, rather than a bar.
+    ///
+    /// **For a parent process, not for a person.** The bar is drawn only onto
+    /// a terminal, so anything that starts `cp` with a pipe — the window's
+    /// drop, a script with a progress display of its own — sees nothing at all
+    /// between "started" and "finished". This asks for one line per report
+    /// instead, which survives a pipe.
+    pub plain_progress: bool,
 }
 
 /// Split `device:path` from a plain local path.
@@ -84,6 +92,7 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
     let mut via_addr = None;
     let mut via_key = None;
     let mut mdns = crate::settings::flag("discovery.mdns", true);
+    let mut plain_progress = false;
     let mut i = 0;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
@@ -93,6 +102,10 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
             }
             "--no-mdns" => {
                 mdns = false;
+                i += 1;
+            }
+            "--progress" => {
+                plain_progress = true;
                 i += 1;
             }
             "--via" => {
@@ -154,6 +167,7 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
         force,
         via,
         mdns,
+        plain_progress,
     })
 }
 
@@ -171,6 +185,7 @@ pub fn usage() -> String {
          \x20 --via <broker>       be introduced by a broker when nothing direct works\n\
          \x20 --broker-key <key>   the broker's key, when it is not remembered\n\
          \x20 --no-mdns            do not ask the local network where the host is\n\
+         \x20 --progress           report progress in lines, for a program to read\n\
          \n\
          for example: {me} cp report.pdf elythion:reports/\n\
          \x20            {me} cp elythion:logs/build.log ./"
@@ -377,20 +392,13 @@ async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result
     }
     sending.resume_at(from).map_err(|e| e.to_string())?;
 
-    // **A figure that moves, and a way to stop.** A ten-gigabyte copy used to
-    // print one line when it started and one when it finished, so the only
-    // way to tell a slow transfer from a stuck one was to watch the network.
-    //
-    // On one line, rewritten, and only when this is a terminal: a progress
-    // line written into a log or a pipe is thousands of lines of carriage
-    // returns, which is how a script's output becomes unreadable.
-    let interactive = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    // **A figure that moves, and a way to stop.** With one line at the start
+    // and one at the end, the only way to tell a ten-gigabyte copy that is
+    // slow from one that is stuck is to watch the network.
+    let progress = Progress::new("sending", o.plain_progress);
     let stop = crate::files_task::stop_on_interrupt();
     let mut report = |sent: u64, total: u64| {
-        if interactive {
-            eprint!("\r  sending    {}", progress_bar(sent, total));
-            let _ = std::io::Write::flush(&mut std::io::stderr());
-        }
+        progress.say(sent, total);
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             crate::files_task::Going::Stop
         } else {
@@ -398,9 +406,7 @@ async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result
         }
     };
     let pushed = crate::files_task::push_reporting(stream, &mut sending, &mut report).await;
-    if interactive {
-        eprintln!();
-    }
+    progress.done();
     pushed?;
 
     match stream.recv::<FileMessage>().await {
@@ -465,7 +471,13 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
         .await
         .map_err(|e| e.to_string())?;
 
+    // The same figure the sending end draws, at the same interval, so a fetch
+    // of a large file is not a command that prints one line and then looks
+    // stuck for an hour.
+    let progress = Progress::new("fetching", o.plain_progress);
     let mut buffer = vec![0u8; esper_files::AT_A_TIME];
+    let mut got_so_far = from;
+    let mut last_said = from;
     while receiving.left() > 0 {
         let got = match stream.recv_raw(&mut buffer).await {
             Ok(0) => break,
@@ -478,7 +490,14 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
         receiving
             .take(buffer.get(..got).unwrap_or_default())
             .map_err(|e| e.to_string())?;
+        got_so_far = got_so_far.saturating_add(got as u64);
+        if got_so_far.saturating_sub(last_said) >= crate::files_task::REPORT_EVERY {
+            last_said = got_so_far;
+            progress.say(got_so_far, offer.bytes);
+        }
     }
+    progress.say(got_so_far, offer.bytes);
+    progress.done();
     let end = receiving.finish(&vault);
     let _ = stream.send(&FileMessage::Done(end)).await;
     if end.is_stored() {
@@ -489,6 +508,69 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
         return Ok(offer.bytes);
     }
     Err(end.message().to_owned())
+}
+
+/// How a copy says how far it has got.
+///
+/// **A bar for a person, a line for a program.** The bar is drawn with
+/// carriage returns onto a terminal, which is unreadable in a log and
+/// invisible through a pipe — so anything that starts `cp` as a child process
+/// hears nothing at all between "started" and "finished". `--progress` asks
+/// for one plain line per report instead, which survives a pipe.
+struct Progress {
+    /// What this end is doing, for the line a person reads.
+    word: &'static str,
+    plain: bool,
+    bar: bool,
+}
+
+impl Progress {
+    fn new(word: &'static str, plain: bool) -> Self {
+        Self {
+            word,
+            plain,
+            bar: !plain && std::io::IsTerminal::is_terminal(&std::io::stderr()),
+        }
+    }
+
+    /// What to print for this report, or nothing when there is nothing to say.
+    ///
+    /// Separate from printing it so a test can ask what a pipe would be shown
+    /// without being one: the whole point of `--progress` is the case where
+    /// the bar prints nothing, and that case is invisible from inside a test
+    /// that captures stderr.
+    fn line(&self, done: u64, total: u64) -> Option<String> {
+        if self.plain {
+            return Some(format!("  progress   {done} of {total} bytes"));
+        }
+        if self.bar {
+            return Some(format!(
+                "\r  {:<10} {}",
+                self.word,
+                progress_bar(done, total)
+            ));
+        }
+        None
+    }
+
+    fn say(&self, done: u64, total: u64) {
+        let Some(line) = self.line(done, total) else {
+            return;
+        };
+        if self.plain {
+            eprintln!("{line}");
+        } else {
+            eprint!("{line}");
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        }
+    }
+
+    /// Finish the line the bar has been rewriting.
+    fn done(&self) {
+        if self.bar {
+            eprintln!();
+        }
+    }
 }
 
 /// A refusal, with what to do about it.
@@ -521,6 +603,22 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Result<CopyOptions, String> {
         parse(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    }
+
+    /// **The flag, and everything without it.** `--progress` must not change
+    /// what a copy does, only what it says.
+    #[test]
+    fn progress_is_off_unless_asked_for() {
+        assert!(
+            !parse_args(&["a.txt", "elythion:b.txt"])
+                .expect("a copy")
+                .plain_progress
+        );
+        let asked = parse_args(&["--progress", "a.txt", "elythion:b.txt"]).expect("a copy");
+        assert!(asked.plain_progress);
+        assert!(!asked.force, "--progress changed something else");
+        let after = parse_args(&["a.txt", "elythion:b.txt", "--progress"]).expect("a copy");
+        assert!(after.plain_progress, "only accepted before the paths");
     }
 
     /// **A drive letter is not a device.** `C:\\x` is somewhere on this
@@ -669,7 +767,60 @@ mod tests {
 mod progress_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::progress_bar;
+    use super::{Progress, progress_bar};
+
+    /// **The case a terminal cannot see.** `--progress` exists because the bar
+    /// is drawn only onto a terminal, so a child process started with a pipe
+    /// is told nothing at all. Asking the reporter what it would print, rather
+    /// than capturing stderr, is the only way to check the silent case.
+    #[test]
+    fn a_pipe_hears_nothing_unless_progress_is_asked_for() {
+        // What `cp` does today when a script runs it: no bar, no lines.
+        let quiet = Progress {
+            word: "sending",
+            plain: false,
+            bar: false,
+        };
+        assert_eq!(quiet.line(500, 1000), None);
+
+        // What the window and `--progress` get instead. The figures are the
+        // whole point, so both of them are in the line.
+        let asked = Progress {
+            word: "sending",
+            plain: true,
+            bar: false,
+        };
+        let said = asked.line(500, 1000).expect("a line");
+        assert!(said.contains("500 of 1000 bytes"), "{said}");
+        // One line per report, so a reader can split on newlines.
+        assert!(!said.contains('\n'), "{said}");
+        assert!(!said.contains('\r'), "{said}");
+    }
+
+    /// **The bar still looks the same.** Two callers share one reporter now,
+    /// and the padding is what lines a fetch up under a send.
+    #[test]
+    fn the_bar_is_unchanged_and_both_words_line_up() {
+        let sending = Progress {
+            word: "sending",
+            plain: false,
+            bar: true,
+        };
+        let fetching = Progress {
+            word: "fetching",
+            plain: false,
+            bar: true,
+        };
+        let a = sending.line(500, 1000).expect("a bar");
+        let b = fetching.line(500, 1000).expect("a bar");
+        assert!(a.starts_with("\r  sending    ["), "{a:?}");
+        assert!(b.starts_with("\r  fetching   ["), "{b:?}");
+        assert_eq!(
+            a.find('['),
+            b.find('['),
+            "the bars start in different columns: {a:?} {b:?}"
+        );
+    }
 
     /// **The two ends, and the middle.** A bar is the kind of thing that is
     /// obviously right and divides by zero on an empty file.

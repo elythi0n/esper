@@ -233,8 +233,10 @@ impl Identity {
         let write = write_private(&tmp, &secret);
         secret.zeroize();
 
+        // Named against the key file rather than the temporary one beside it:
+        // see the note in `device.rs` on the same write.
         write.map_err(|source| IdentityError::Io {
-            path: tmp.clone(),
+            path: path.to_owned(),
             source,
         })?;
 

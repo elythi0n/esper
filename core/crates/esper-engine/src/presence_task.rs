@@ -222,9 +222,9 @@ pub fn start() -> Result<(Indicator, Presses), String> {
         // X11 first because it works under XWayland, then wlroots' layer
         // shell for the sessions with no X server at all.
         //
-        // Both reasons are kept when both fail. "No indicator" on a Wayland
-        // desktop used to name only the X11 attempt, which sent people
-        // looking for a `DISPLAY` they were never going to find.
+        // Both reasons are kept when both fail. "No indicator" naming only
+        // the X11 attempt sends somebody on a Wayland desktop looking for a
+        // `DISPLAY` they are never going to find.
         let x11 = esper_presence_x11::X11Presence::open();
         match x11 {
             Ok(presence) => start_with(presence),
@@ -365,22 +365,45 @@ fn run<P: Presence>(
 ///
 /// **What "before a single frame goes out" costs.** A session asks for the
 /// frame and then waits here, so the picture starts a round trip to the
-/// display server later than it used to — measured in milliseconds on the
-/// machines this runs on, against a session that used to start streaming
-/// whether or not anybody could see it was being watched.
+/// display server later — milliseconds on the machines this runs on, and the
+/// price of nobody being watched without being able to see it.
 ///
 /// A patience rather than a single look, because `show` and the first
 /// verification happen on another thread: an answer that has not arrived yet
 /// is not an answer of "no".
+///
+/// # The patience is spent on a "no" as well
+///
+/// Not only on silence. A verdict of `Missing` is a reading, and a reading
+/// taken while the display server is still catching up is not the answer: a
+/// frame asked for, mapped and raised, and read back before it was painted
+/// reads as *covered by the wallpaper*, which is what the screen honestly was
+/// a few milliseconds earlier. Ending on the first no would make a session's
+/// fate turn on how far the server had got.
+///
+/// On a fast, still `Xvfb` that window is narrow enough that a suite passes.
+/// On an ordinary desktop it is wide enough to refuse sessions at random: the
+/// same machine, the same command, twice in a row, said "6 of 12 places are
+/// not its colour" and then "12 of 12" and then held a session fine.
+///
+/// So the deadline is the thing that decides. Every look after a "no" is
+/// another chance for the screen to catch up, and what is reported when the
+/// time runs out is the last reason given rather than the first — because the
+/// last one is the state the screen settled in.
+///
+/// **This does not soften the guarantee.** Nothing is sent until the screen
+/// has been read and has shown the indicator. What changes is only how long
+/// the screen is given to show it.
 pub async fn confirmed(indicator: &Indicator, patience: Duration) -> Result<usize, String> {
     let mut sightings = indicator.sightings();
     let deadline = tokio::time::Instant::now() + patience;
     let mut looks = 0usize;
+    let mut last: Option<String> = None;
     loop {
         looks = looks.saturating_add(1);
         match &*sightings.borrow_and_update() {
             Sighting::OnScreen => return Ok(looks),
-            Sighting::Missing(missing) => return Err(missing.describe()),
+            Sighting::Missing(missing) => last = Some(missing.describe()),
             // Nothing has been reported yet: the thread has not got to it.
             Sighting::Down => {}
         }
@@ -388,7 +411,9 @@ pub async fn confirmed(indicator: &Indicator, patience: Duration) -> Result<usiz
             .await
             .is_err()
         {
-            return Err("the indicator's own thread did not answer in time".to_owned());
+            return Err(last.unwrap_or_else(|| {
+                "the indicator's own thread did not answer in time".to_owned()
+            }));
         }
     }
 }
@@ -684,10 +709,10 @@ mod tests {
 
     /// **The two hotkeys are told apart, and neither becomes the other.**
     ///
-    /// The press channel used to carry `()` and the thread filtered for
-    /// `Panic`, which was right while there was one key — and would have made
-    /// the pause key end every session, which is the worst possible way for a
-    /// key called "pause" to be wrong.
+    /// The channel carries which key it was, rather than a bare `()` the
+    /// thread reads as `Panic`. With one key that distinction costs nothing;
+    /// with two it is the difference between pausing and ending every session,
+    /// which is the worst possible way for a key called "pause" to be wrong.
     #[test]
     fn a_pause_press_is_not_a_panic_press() {
         let mut presence = NullPresence::new();
@@ -797,11 +822,10 @@ mod tests {
     /// **Windows a compositor destroyed are put back, and the rebuild is what
     /// this asserts.**
     ///
-    /// Aimed at `look` rather than at the thread, because the first version of
-    /// this test proved nothing: it made the frame missing *before* asking for
-    /// it, and asking for it is itself the rebuild — so the recovery path
-    /// never ran, and removing it entirely left the test passing. Found by
-    /// sabotage, which is the only reason it was found at all.
+    /// Aimed at `look` rather than at the thread, and the order matters:
+    /// asking for the frame is itself the rebuild, so a test that makes the
+    /// frame missing *before* asking never runs the recovery path at all and
+    /// passes with that path deleted.
     #[test]
     fn windows_that_are_gone_are_rebuilt_and_then_confirmed() {
         let mut presence = NullPresence::new();
@@ -907,6 +931,104 @@ mod tests {
         drop(indicator);
         handle.join().expect("the thread ends when the handle goes");
         drop(panic_rx);
+    }
+
+    /// **A screen that is a moment behind is not a screen saying no.**
+    ///
+    /// The frame is asked for, mapped and raised, and then read back. On a
+    /// desktop those steps take long enough that the first read can land
+    /// before the server has painted it — and what comes back then is the
+    /// wallpaper, reported honestly as "something is drawn over the
+    /// indicator".
+    ///
+    /// Ending on that first no, whatever time is left, is what makes the same
+    /// machine running the same command refuse a session, then refuse it
+    /// differently, then hold one fine. The patience is spent on a no as well
+    /// as on silence, and this is the case that says so.
+    #[tokio::test]
+    async fn a_screen_that_paints_late_is_still_a_screen_that_shows_it() {
+        let (to_thread, _commands) = channel();
+        let (seen_tx, sightings) = tokio::sync::watch::channel(Sighting::Down);
+        let indicator = Indicator {
+            to_thread,
+            sightings,
+            backend: "null",
+            armed: true,
+            why_no_panic_key: None,
+            why_cannot_show: None,
+            can_show: true,
+        };
+
+        // What a not-yet-painted frame reads as: the screen, honestly
+        // reported, a moment before it shows the thing that was asked for.
+        seen_tx
+            .send(Sighting::Missing(esper_presence::Missing::Covered {
+                wrong: 12,
+                of: 12,
+                saw: [0x13, 0x25, 0x33],
+                at: (2, 300),
+            }))
+            .expect("a first verdict");
+
+        let later = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            seen_tx.send(Sighting::OnScreen).expect("painted");
+            // Held open: dropping the sender ends the watch.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            drop(seen_tx);
+        });
+
+        let looks = confirmed(&indicator, Duration::from_secs(2))
+            .await
+            .expect("a frame that arrived late is a frame on the screen");
+        assert!(looks >= 2, "it should have looked more than once: {looks}");
+        later.abort();
+    }
+
+    /// And when the screen never shows it, the reason is the *last* one.
+    ///
+    /// The state a screen settles in is what somebody has to act on. Reporting
+    /// the first reading would name whatever the screen happened to be in the
+    /// middle of.
+    #[tokio::test]
+    async fn a_screen_that_never_shows_it_is_refused_with_its_final_reason() {
+        let (to_thread, _commands) = channel();
+        let (seen_tx, sightings) = tokio::sync::watch::channel(Sighting::Down);
+        let indicator = Indicator {
+            to_thread,
+            sightings,
+            backend: "null",
+            armed: true,
+            why_no_panic_key: None,
+            why_cannot_show: None,
+            can_show: true,
+        };
+
+        seen_tx
+            .send(Sighting::Missing(esper_presence::Missing::Covered {
+                wrong: 1,
+                of: 12,
+                saw: [0x13, 0x25, 0x33],
+                at: (2, 300),
+            }))
+            .expect("a first verdict");
+        let later = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            seen_tx
+                .send(Sighting::Missing(esper_presence::Missing::Unmapped))
+                .expect("a second verdict");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            drop(seen_tx);
+        });
+
+        let why = confirmed(&indicator, Duration::from_millis(600))
+            .await
+            .expect_err("a frame that never appeared is not a confirmation");
+        assert!(
+            why.contains("not on screen"),
+            "the refusal should carry the state the screen settled in, and says: {why}"
+        );
+        later.abort();
     }
 
     /// **One press is one event.** The first version latched a flag, so every

@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+serde_json.workspace = true
 esper-clock.workspace = true
 esper-audio-pulse.workspace = true
 esper-audio.workspace = true

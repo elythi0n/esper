@@ -99,7 +99,11 @@ pub enum Command {
 #[serde(rename_all = "snake_case")]
 pub enum Report {
     /// The answer to [`Command::Status`].
-    Status(Status),
+    ///
+    /// Boxed: it is several times the size of every other variant, and
+    /// without it every `Report` anywhere — including the small ones sent ten
+    /// times a second — is as wide as this one.
+    Status(Box<Status>),
     /// The answer to [`Command::Sessions`], most recent last.
     Sessions(Vec<Happening>),
     /// The answer to [`Command::Alive`].
@@ -147,8 +151,17 @@ pub struct Capability {
     /// Whether it works **now**, established by trying it where trying is
     /// cheap.
     pub available: bool,
-    /// What was found, or why nothing was. Shown to a person; never parsed.
+    /// What was found, or why nothing was. One short line. Shown to a person;
+    /// never parsed.
     pub detail: String,
+    /// Every backend that was tried, in the order they were tried, one line
+    /// each. Empty where there was nothing to choose between.
+    ///
+    /// Kept apart from `detail` so a reader gets one sentence, and a reader
+    /// who needs the whole story gets it on its own lines rather than as one
+    /// very long one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<String>,
 }
 
 impl Capability {
@@ -158,6 +171,7 @@ impl Capability {
         Self {
             available: true,
             detail: detail.into(),
+            attempts: Vec::new(),
         }
     }
 
@@ -167,7 +181,15 @@ impl Capability {
         Self {
             available: false,
             detail: detail.into(),
+            attempts: Vec::new(),
         }
+    }
+
+    /// The same, with what was tried on the way.
+    #[must_use]
+    pub fn after(mut self, attempts: impl IntoIterator<Item = String>) -> Self {
+        self.attempts = attempts.into_iter().collect();
+        self
     }
 }
 
@@ -256,9 +278,9 @@ mod tests {
 
     #[test]
     fn a_status_survives_the_wire() {
-        let out = crate::encode(&Report::Status(status())).expect("encode");
+        let out = crate::encode(&Report::Status(Box::new(status()))).expect("encode");
         let back: Report = crate::decode(&out).expect("decode");
-        assert_eq!(back, Report::Status(status()));
+        assert_eq!(back, Report::Status(Box::new(status())));
     }
 
     #[test]

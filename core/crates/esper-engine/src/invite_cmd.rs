@@ -94,9 +94,26 @@ impl Invitation {
     /// paste the middle of it.
     pub fn parse(raw: &str) -> Result<Self, String> {
         let text = raw.trim();
-        let body = text.strip_prefix(SCHEME).unwrap_or(text);
-        let bytes = unbase64url(body)?;
-        Self::decode(&bytes)
+        // **The body on its own is accepted**, because people paste what is
+        // between the quotes rather than the whole link.
+        //
+        // What that costs is this: any word at all is then decoded as a body,
+        // and the first byte of whatever it happens to spell is read as a
+        // layout version. `join notalink` answered "that link was made by a
+        // newer version of Esper (layout 158)" — which sends somebody who
+        // mistyped off looking for an upgrade.
+        //
+        // So the reason is kept only when the text was actually addressed as
+        // a link. Without the scheme, the honest answer is that this is not
+        // one.
+        let (body, addressed) = match text.strip_prefix(SCHEME) {
+            Some(body) => (body, true),
+            None => (text, false),
+        };
+        let not_a_link =
+            || format!("that is not an Esper invitation link — they begin `{SCHEME}`").to_owned();
+        let bytes = unbase64url(body).map_err(|why| if addressed { why } else { not_a_link() })?;
+        Self::decode(&bytes).map_err(|why| if addressed { why } else { not_a_link() })
     }
 
     /// The bytes inside the link.
@@ -271,6 +288,8 @@ pub struct InviteOptions {
     pub who: Option<String>,
     /// How long the link lasts.
     pub expires: Duration,
+    /// Report as one object per line, for a program rather than a person.
+    pub as_json: bool,
 }
 
 /// Parse `invite --via <addr> --broker-key <key> [--for <name>] [--expires 30m]`.
@@ -279,6 +298,7 @@ pub fn parse_invite(args: &[String]) -> Result<InviteOptions, String> {
     let mut key = None;
     let mut who = None;
     let mut expires = DEFAULT_EXPIRY;
+    let mut as_json = false;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         let mut value = |name: &str| -> Result<String, String> {
@@ -291,6 +311,7 @@ pub fn parse_invite(args: &[String]) -> Result<InviteOptions, String> {
             "--broker-key" => key = Some(crate::broker_cmd::parse_key(&value("--broker-key")?)?),
             "--for" => who = Some(value("--for")?),
             "--expires" => expires = parse_expiry(&value("--expires")?)?,
+            "--json" => as_json = true,
             other => return Err(format!("unknown option {other:?}")),
         }
     }
@@ -327,6 +348,7 @@ pub fn parse_invite(args: &[String]) -> Result<InviteOptions, String> {
         via: esper_rendezvous::Via { addr, key },
         who,
         expires,
+        as_json,
     })
 }
 
@@ -351,29 +373,51 @@ pub fn run_invite(o: &InviteOptions) -> Result<(), String> {
         expires_at: paths::now_secs().saturating_add(o.expires.as_secs()),
     };
 
-    println!("✉️  esper invite");
-    println!();
-    if let Some(who) = &o.who {
-        println!("  for        {who}");
+    if o.as_json {
+        // **One object per line, as it happens.** An invitation runs for half
+        // an hour and says two things — here is the link, and here is who
+        // used it — so a program that wants both cannot wait for the process
+        // to end. See `pairing::say` for why a program must not read the
+        // printed form instead.
+        crate::pairing::say(
+            true,
+            &serde_json::json!({
+                "event": "offering",
+                "link": invitation.link(),
+                "broker": o.via.addr.to_string(),
+                "for": o.who,
+                "expires_at": invitation.expires_at,
+                "fingerprint": {
+                    "hex": identity.fingerprint().hex(),
+                    "words": identity.fingerprint().words(),
+                },
+            }),
+        );
+    } else {
+        println!("✉️  esper invite");
+        println!();
+        if let Some(who) = &o.who {
+            println!("  for        {who}");
+        }
+        println!("  broker     {}", o.via.addr);
+        println!("  expires    in {}", describe(o.expires));
+        println!();
+        println!("  Send them this link, and nothing else:");
+        println!();
+        println!("      {}", invitation.link());
+        println!();
+        println!("  They run:  {} join <the link>", crate::net::me());
+        println!();
+        println!("  This device's fingerprint — read it aloud and check it matches:");
+        for line in identity.fingerprint().display().lines() {
+            println!("      {line}");
+        }
+        println!();
+        println!("  Anyone holding that link can pair with this machine until it expires.");
+        println!("  Waiting…");
     }
-    println!("  broker     {}", o.via.addr);
-    println!("  expires    in {}", describe(o.expires));
-    println!();
-    println!("  Send them this link, and nothing else:");
-    println!();
-    println!("      {}", invitation.link());
-    println!();
-    println!("  They run:  {} join <the link>", crate::net::me());
-    println!();
-    println!("  This device's fingerprint — read it aloud and check it matches:");
-    for line in identity.fingerprint().display().lines() {
-        println!("      {line}");
-    }
-    println!();
-    println!("  Anyone holding that link can pair with this machine until it expires.");
-    println!("  Waiting…");
 
-    crate::net::runtime()?.block_on(wait_for_guest(identity, o.via, invitation, code))
+    crate::net::runtime()?.block_on(wait_for_guest(identity, o.via, invitation, code, o.as_json))
 }
 
 /// Wait at the broker until somebody arrives with the invitation, then pair.
@@ -382,6 +426,7 @@ async fn wait_for_guest(
     via: esper_rendezvous::Via,
     invitation: Invitation,
     code: PairingCode,
+    as_json: bool,
 ) -> Result<(), String> {
     // **The pairing authority accepts any key, and only for this.** The same
     // reasoning as `pair --listen`: it is a separate endpoint, bound for this
@@ -450,7 +495,7 @@ async fn wait_for_guest(
         // A fresh offer, whose sixty seconds start now. Whoever arrived has
         // three guesses at the code inside that window, and they have the code.
         let mut offer = Offer::with_created_at(code.clone(), Instant::now());
-        match pair_with_whoever_came(&endpoint, &identity, &mut offer).await {
+        match pair_with_whoever_came(&endpoint, &identity, &mut offer, as_json).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 // Not fatal: an attempt that failed is not the invitation
@@ -467,6 +512,7 @@ async fn pair_with_whoever_came(
     endpoint: &Endpoint,
     identity: &Identity,
     offer: &mut Offer,
+    as_json: bool,
 ) -> Result<(), String> {
     let wait = offer
         .remaining(Instant::now())
@@ -501,7 +547,11 @@ async fn pair_with_whoever_came(
     // reachable by that helper next year, and "remember to unpair them" is a
     // thing people forget while they are relieved the printer works.
     let device = crate::pairing::record_invited(peer_key, &name)?;
-    crate::pairing::report(&device);
+    if as_json {
+        crate::pairing::say(true, &crate::pairing::paired_line(&device));
+    } else {
+        crate::pairing::report(&device);
+    }
 
     // The host writes last, so the host must not close first: the exchange
     // ends with a confirmation the other side is still reading.
@@ -514,10 +564,8 @@ async fn pair_with_whoever_came(
 /// Take somebody up on an invitation.
 pub fn run_join(args: &[String]) -> Result<(), String> {
     let [link] = args else {
-        return Err(format!(
-            "join takes the link somebody sent you: {} join <link>",
-            crate::net::me()
-        ));
+        // The dispatcher has already said which program and which command.
+        return Err("takes the link somebody sent you, and nothing else".to_owned());
     };
     let invitation = Invitation::parse(link)?;
 
@@ -680,6 +728,30 @@ fn describe(d: Duration) -> String {
 }
 
 /// What `invite` takes.
+/// What `join` takes.
+#[must_use]
+pub fn join_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} join <link>\n\
+         \n\
+         Take up an invitation somebody sent you. The link carries the broker\n\
+         to meet at, the key that broker is pinned to, and a one-use code —\n\
+         so there is nothing else to type and nothing else to configure.\n\
+         \n\
+         It pairs for one session only, and the pairing then ends: somebody\n\
+         who was helped with their printer is not still reachable next year.\n\
+         Make it last with `{me} keep <fingerprint>`.\n\
+         \n\
+         Both ends print a fingerprint. Read it aloud: the link proves you\n\
+         were sent it, and only the fingerprint proves the machine at the\n\
+         other end is the one that sent it.\n\
+         \n\
+         A link lapses — half an hour by default — and is refused here\n\
+         without connecting to anything once it has."
+    )
+}
+
 pub fn usage() -> String {
     let me = crate::net::me();
     format!(
@@ -698,6 +770,8 @@ pub fn usage() -> String {
          \x20 --expires <when>     how long it lasts, as `30m` or `2h`\n\
          \x20 --via <broker>       the broker's address\n\
          \x20 --broker-key <key>   the broker's key, which is pinned\n\
+         \x20 --json               one object per line as it happens, for a\n\
+         \x20                      program rather than a person\n\
          \n\
          for example: {me} invite --for \"the new starter\" --expires 30m"
     )
@@ -751,6 +825,26 @@ mod tests {
 
     #[test]
     fn something_that_is_not_a_link_is_refused_rather_than_half_read() {
+        // **A word that is not a link is refused as one.** The body on its
+        // own is accepted, so any text at all reaches the decoder — and the
+        // first byte of whatever it spells was being reported as a layout
+        // version, which sends somebody who mistyped off looking for an
+        // upgrade they do not need.
+        for typed in ["notalink", "hello", "elythion", "https://example.test/x"] {
+            let why = Invitation::parse(typed).expect_err("not a link");
+            assert!(
+                why.contains("not an Esper invitation link"),
+                "{typed:?} was refused with {why:?}"
+            );
+        }
+        // And a text that *is* addressed as a link keeps the specific reason,
+        // because then it really is a damaged link and the reason helps.
+        let damaged = Invitation::parse("esper://join/short").expect_err("too short");
+        assert!(
+            !damaged.contains("not an Esper invitation link"),
+            "a damaged link lost its reason: {damaged:?}"
+        );
+
         assert!(Invitation::parse("").is_err());
         assert!(Invitation::parse("esper://join/").is_err());
         assert!(Invitation::parse("esper://join/!!!!").is_err());

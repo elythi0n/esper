@@ -45,9 +45,81 @@ const WAIT: Duration = Duration::from_secs(180);
 #[derive(Debug, Clone)]
 pub enum Options {
     /// Offer a code and wait for a device to use it.
-    Offer { listen: SocketAddr },
+    Offer { listen: SocketAddr, as_json: bool },
     /// Use a code somebody read out.
-    Accept { addr: SocketAddr, code: String },
+    Accept {
+        addr: SocketAddr,
+        code: String,
+        as_json: bool,
+    },
+}
+
+/// Say what just happened, as one JSON object on a line of its own.
+///
+/// # Why pairing reports this way at all
+///
+/// Pairing runs for a minute and says two things: here is the code, and here
+/// is who used it. A program that wants both cannot wait for the process to
+/// end — so this is a *stream*, one object per line, flushed as it happens.
+///
+/// # Why a program must not read the printed form
+///
+/// The printed form is written for a person, and the person is reading a code
+/// off one screen and a fingerprint aloud. Something parsing those lines with
+/// a regular expression is holding an unmarked contract over prose that is
+/// free to change — and the thing it would get wrong is the code somebody
+/// types and the words they read to confirm a machine.
+pub(crate) fn say(as_json: bool, line: &serde_json::Value) {
+    if !as_json {
+        return;
+    }
+    println!("{line}");
+    // Flushed, because the reader is waiting on this line and not on the
+    // process: a code buffered until the pairing ends is a code nobody can
+    // read out.
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+}
+
+/// A fingerprint in both its forms, for a line of the stream.
+fn fingerprint_of(fp: &esper_crypto::Fingerprint) -> serde_json::Value {
+    serde_json::json!({ "hex": fp.hex(), "words": fp.words() })
+}
+
+/// What `pair` takes, on either side of it.
+///
+/// A usage of its own, because pairing is the one moment this machine talks to
+/// a device it does not know and the two sides are typed differently — one
+/// offers a code, the other uses one. Without this, `pair --help` answers with
+/// a list of thirty-two commands, none of which says that.
+#[must_use]
+pub fn usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} pair --listen <addr>\n\
+         \x20      {me} pair <addr> --code <code>\n\
+         \n\
+         Pair two devices. One of them offers a short code and prints it;\n\
+         somebody reads it to the other machine, which uses it. After that\n\
+         each knows the other's key and neither needs a code again.\n\
+         \n\
+         The first line above is the side that offers; the second is the side\n\
+         that uses what was offered. Either machine can be either one.\n\
+         \n\
+         options:\n  \
+         \x20 --listen <addr>   offer a code and wait. A bare port means every\n  \
+         \x20                   address on this machine\n  \
+         \x20 --code <code>     the code the other side printed\n  \
+         \x20 --json            one object per line as it happens, for a\n  \
+         \x20                   program rather than a person\n\
+         \n\
+         Both sides print this device's fingerprint, and reading it aloud is\n\
+         not decoration: the code proves the same code was typed at both ends,\n\
+         and only the fingerprint proves the machine at the other end is the\n\
+         one that was meant.\n\
+         \n\
+         A code lapses in about a minute and allows three attempts."
+    )
 }
 
 /// Parse the flags.
@@ -55,9 +127,14 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
     let mut listen: Option<SocketAddr> = None;
     let mut addr: Option<SocketAddr> = None;
     let mut code: Option<String> = None;
+    let mut as_json = false;
     let mut i = 0usize;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
+            "--json" => {
+                as_json = true;
+                i += 1;
+            }
             "--listen" => {
                 let raw = args
                     .get(i + 1)
@@ -80,8 +157,12 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
         }
     }
     match (listen, addr, code) {
-        (Some(listen), None, None) => Ok(Options::Offer { listen }),
-        (None, Some(addr), Some(code)) => Ok(Options::Accept { addr, code }),
+        (Some(listen), None, None) => Ok(Options::Offer { listen, as_json }),
+        (None, Some(addr), Some(code)) => Ok(Options::Accept {
+            addr,
+            code,
+            as_json,
+        }),
         (None, Some(_), None) => {
             Err("pairing with an address needs --code, which the other side printed".to_owned())
         }
@@ -95,14 +176,18 @@ pub fn parse(args: &[String]) -> Result<Options, String> {
 pub fn run(options: &Options) -> Result<(), String> {
     crate::net::runtime()?.block_on(async {
         match options {
-            Options::Offer { listen } => offer(*listen).await,
-            Options::Accept { addr, code } => accept(*addr, code).await,
+            Options::Offer { listen, as_json } => offer(*listen, *as_json).await,
+            Options::Accept {
+                addr,
+                code,
+                as_json,
+            } => accept(*addr, code, *as_json).await,
         }
     })
 }
 
 /// Offer a code and wait for one device to use it.
-async fn offer(listen: SocketAddr) -> Result<(), String> {
+async fn offer(listen: SocketAddr, as_json: bool) -> Result<(), String> {
     crate::net::install_crypto();
     let identity = paths::identity()?;
     let mut offer = Offer::new();
@@ -118,28 +203,40 @@ async fn offer(listen: SocketAddr) -> Result<(), String> {
         .local_addr()
         .map_err(|e| format!("reading the bound address: {e}"))?;
 
-    println!("🔗 pairing");
-    println!();
-    println!("  code       {}", offer.code().display());
-    println!("  listening  {bound}");
-    println!(
-        "  expires    in {} seconds",
-        offer.remaining(Instant::now()).map_or(0, |d| d.as_secs())
-    );
-    println!();
-    println!("  On the other machine:");
-    println!(
-        "      {} pair <this-machine>:{} --code {}",
-        crate::net::me(),
-        bound.port(),
-        offer.code().display()
-    );
-    println!();
-    println!("  This device's fingerprint — read it aloud and check it matches:");
-    for line in identity.fingerprint().display().lines() {
-        println!("      {line}");
+    let seconds = offer.remaining(Instant::now()).map_or(0, |d| d.as_secs());
+    if as_json {
+        say(
+            as_json,
+            &serde_json::json!({
+                "event": "offering",
+                "code": offer.code().display(),
+                "address": bound.to_string(),
+                "port": bound.port(),
+                "expires_in": seconds,
+                "fingerprint": fingerprint_of(&identity.fingerprint()),
+            }),
+        );
+    } else {
+        println!("🔗 pairing");
+        println!();
+        println!("  code       {}", offer.code().display());
+        println!("  listening  {bound}");
+        println!("  expires    in {seconds} seconds");
+        println!();
+        println!("  On the other machine:");
+        println!(
+            "      {} pair <this-machine>:{} --code {}",
+            crate::net::me(),
+            bound.port(),
+            offer.code().display()
+        );
+        println!();
+        println!("  This device's fingerprint — read it aloud and check it matches:");
+        for line in identity.fingerprint().display().lines() {
+            println!("      {line}");
+        }
+        println!();
     }
-    println!();
 
     let conn = tokio::time::timeout(WAIT, endpoint.accept())
         .await
@@ -167,7 +264,11 @@ async fn offer(listen: SocketAddr) -> Result<(), String> {
 
     let name = session.peer_hello().name.clone();
     let device = record(peer_key, &name)?;
-    report(&device);
+    if as_json {
+        say(as_json, &paired_line(&device));
+    } else {
+        report(&device);
+    }
 
     // **The host writes last, so the host must not close first.**
     //
@@ -188,7 +289,7 @@ async fn offer(listen: SocketAddr) -> Result<(), String> {
 }
 
 /// Use a code somebody read out.
-async fn accept(addr: SocketAddr, code: &str) -> Result<(), String> {
+async fn accept(addr: SocketAddr, code: &str, as_json: bool) -> Result<(), String> {
     crate::net::install_crypto();
     let identity = paths::identity()?;
     let code = PairingCode::parse(code).map_err(|e| format!("that code cannot be used: {e}"))?;
@@ -201,8 +302,15 @@ async fn accept(addr: SocketAddr, code: &str) -> Result<(), String> {
     )
     .map_err(|e| format!("binding a local port: {e}"))?;
 
-    println!("🔗 pairing with {addr}");
-    println!();
+    if as_json {
+        say(
+            as_json,
+            &serde_json::json!({ "event": "joining", "address": addr.to_string() }),
+        );
+    } else {
+        println!("🔗 pairing with {addr}");
+        println!();
+    }
     let conn = tokio::time::timeout(WAIT, endpoint.connect(addr))
         .await
         .map_err(|_| format!("{addr} did not answer within {} seconds", WAIT.as_secs()))?
@@ -228,7 +336,11 @@ async fn accept(addr: SocketAddr, code: &str) -> Result<(), String> {
 
     let name = session.peer_hello().name.clone();
     let device = record(peer_key, &name)?;
-    report(&device);
+    if as_json {
+        say(as_json, &paired_line(&device));
+    } else {
+        report(&device);
+    }
 
     // The controller read last, so it closes — which is what releases the
     // host from the wait above.
@@ -358,6 +470,15 @@ fn record_as(public_key: [u8; 32], name: &str, invited: bool) -> Result<Device, 
             &public_key,
             esper_audit::Event::Paired {
                 name: device.name.clone(),
+                // The host's own words for how this happened, because
+                // "a device paired" reads the same either way and they are
+                // not the same event.
+                how: if invited {
+                    "an invitation link".to_owned()
+                } else {
+                    "a code read at this machine".to_owned()
+                },
+                once: invited,
             },
         );
         if let Err(e) = esper_audit::Log::at(path).append(&entry) {
@@ -371,6 +492,21 @@ fn record_as(public_key: [u8; 32], name: &str, invited: bool) -> Result<Device, 
 }
 
 /// Tell the person what happened, and what to check.
+/// The line a stream ends on when a device paired.
+///
+/// The same three facts the printed report gives — who, what they may do, and
+/// whether the pairing lasts — with the fingerprint in both forms, because a
+/// screen showing this has to put the words in front of somebody.
+pub(crate) fn paired_line(device: &Device) -> serde_json::Value {
+    serde_json::json!({
+        "event": "paired",
+        "name": device.name,
+        "fingerprint": fingerprint_of(&device.fingerprint()),
+        "granted": crate::net::permissions(device),
+        "once": device.pairing.is_once(),
+    })
+}
+
 pub(crate) fn report(device: &Device) {
     println!("  ✓ paired with {}", device.name);
     println!();

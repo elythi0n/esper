@@ -107,6 +107,49 @@ impl Kind {
         }
     }
 
+    /*
+        Read a value that is about to be **written**, which is stricter.
+
+        # Why writing and reading are not the same rule
+
+        Because a file somebody already has must keep loading. This format is
+        `key = value`, one per line, with no escapes: a value is quoted on the
+        way out and the quotes are taken off on the way in, and that is the
+        whole of it. So a newline in a value cannot survive a round trip —
+        Rust's own quoting writes it as the two characters `\n`, the parser has
+        no rule that turns them back, and `config set device.name $'one\ntwo'`
+        stored something quietly different from what was asked for. A quote is
+        worse: it closes the value early, and the rest of the line becomes
+        something the parser refuses.
+
+        Refusing those at the point somebody *writes* one costs them a second
+        attempt. Refusing them at the point the program *reads* the file costs
+        them a machine that will not start — over a file that has been loading
+        for however long, because a rule was tightened under it. So the reader
+        stays exactly as liberal as it was and this is the writer's own rule.
+
+        Refused rather than escaped, because adding escapes to this format is
+        adding a format.
+
+        # Errors
+
+        As [`Kind::read`], and for text that one line cannot hold.
+    */
+    pub fn read_for_writing(self, raw: &str) -> Result<Value, String> {
+        let value = self.read(raw)?;
+        if matches!(self, Self::Text) {
+            for bad in raw.trim().chars() {
+                if bad == '"' || bad == '\\' || bad.is_control() {
+                    return Err(format!(
+                        "cannot hold {bad:?}: this file is `key = value` with no escapes, \
+                         so a value is text on one line"
+                    ));
+                }
+            }
+        }
+        Ok(value)
+    }
+
     /// How to write one of these, for the file's own comments.
     #[must_use]
     pub fn shape(self) -> String {
@@ -783,6 +826,81 @@ mod tests {
                 "{} is declared twice",
                 setting.key
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::Kind;
+
+    /*
+    A text value is what the file can hold and give back.
+
+    The format is `key = value` with no escapes: a value is quoted and the
+    quotes are taken off again. So a newline cannot survive a round trip —
+    Rust's quoting writes it as the two characters `\n`, the parser has no rule
+    that turns them back, and what was set quietly became something else. A
+    quote is worse: it closes the value early and the rest of the line is
+    something the parser refuses, which is a file the machine will not start
+    with.
+    */
+    #[test]
+    fn text_is_what_one_line_can_hold() {
+        for good in [
+            "elythion",
+            "the one under the stairs",
+            "デスクトップ · مكتب",
+            "",
+        ] {
+            Kind::Text
+                .read_for_writing(good)
+                .unwrap_or_else(|e| panic!("{good:?}: {e}"));
+        }
+
+        // **And the reader stays liberal.** A file that has been loading is a
+        // file that keeps loading: tightening what a value may be would stop
+        // a machine starting over something written before the rule existed.
+        for already in ["one\ntwo", "say \"hello\"", "back\\slash"] {
+            Kind::Text
+                .read(already)
+                .unwrap_or_else(|e| panic!("a file holding {already:?} stopped loading: {e}"));
+        }
+        for bad in [
+            "one\ntwo",
+            "one\rtwo",
+            "one\ttwo",
+            "say \"hello\"",
+            "back\\slash",
+            "nul\0",
+        ] {
+            let refused = Kind::Text.read_for_writing(bad).expect_err(&format!(
+                "{bad:?} was accepted into a file that cannot hold it"
+            ));
+            // Says what the shape is, because the next thing somebody does is
+            // pick a different value.
+            assert!(refused.contains("one line"), "{bad:?}: {refused}");
+        }
+    }
+
+    /// And what is accepted round-trips: written as the file writes it, read
+    /// back as the parser reads it, the same text.
+    #[test]
+    fn what_is_accepted_survives_the_file() {
+        for good in [
+            "elythion",
+            "the one under the stairs",
+            "デスクトップ",
+            "a#b",
+            "a = b",
+        ] {
+            let value = Kind::Text.read_for_writing(good).expect("accepted");
+            let (written, _) = crate::set_in("", "device.name", &value);
+            let read = crate::parse(&written).expect("a file this wrote");
+            let (_, back, _) = read.last().expect("the line");
+            assert_eq!(back, good, "written as {written:?}");
         }
     }
 }

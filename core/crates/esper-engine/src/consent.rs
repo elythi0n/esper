@@ -207,6 +207,27 @@ pub struct Console {
     a_terminal: bool,
 }
 
+/// Break text on spaces so no line is wider than `width`.
+///
+/// A word longer than the whole width — a path, a fingerprint — is left on a
+/// line of its own rather than cut, because half of either helps nobody.
+fn folded(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(last) if last.chars().count() + 1 + word.chars().count() <= width => {
+                last.push(' ');
+                last.push_str(word);
+            }
+            _ => lines.push(word.to_owned()),
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 impl std::fmt::Debug for Console {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Console")
@@ -278,9 +299,18 @@ impl Console {
         while typed.try_recv().is_ok() {}
 
         println!();
-        for (i, line) in lines.iter().enumerate() {
-            let edge = if i == 0 { '┌' } else { '│' };
-            println!("  {edge} {line}");
+        // **Folded, because a question somebody cannot read is not a
+        // question.** What a permission really hands over is a sentence, not
+        // a label — `terminal` is a paragraph — and one line of two hundred
+        // and eighty characters is folded by the terminal wherever it likes,
+        // through the box rule this draws.
+        let mut first = true;
+        for line in lines {
+            for part in folded(line, 72) {
+                let edge = if first { '┌' } else { '│' };
+                println!("  {edge} {part}");
+                first = false;
+            }
         }
         print!("  └ {question} [y/N] ({}s) ", within.as_secs().max(1));
         // Flushed, because the prompt has no newline: without this it sits in

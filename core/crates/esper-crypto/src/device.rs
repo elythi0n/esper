@@ -619,8 +619,12 @@ impl DeviceStore {
         })?;
 
         let tmp = path.with_extension("tmp");
+        // **Named against the store, not the temporary file.** A failure
+        // reporting `devices.tmp` sends somebody looking for a file that
+        // exists for a few microseconds and that they have never seen; what
+        // they need to know is that the device store could not be written.
         write_owner_only(&tmp, text.as_bytes()).map_err(|source| StoreError::Io {
-            path: tmp.clone(),
+            path: path.to_owned(),
             source,
         })?;
 
@@ -1257,6 +1261,50 @@ mod tests {
             .collect();
         assert!(strays.is_empty(), "save left {strays:?} behind");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /*
+    A save that fails names the store, not the file beside it.
+
+    The store is written to `devices.tmp` and renamed over, so a reader never
+    sees half of one — and the failure on that write reported the temporary
+    name. Somebody whose directory had gone read-only was told that
+    `devices.tmp` could not be written: a file that exists for a few
+    microseconds, that they have never seen, and that they would not find if
+    they went looking for it.
+
+    The test above says the temporary file is not *left*; this says it is not
+    *named*.
+    */
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "touches the filesystem; MIRI runs with isolation")]
+    #[test]
+    fn a_save_that_fails_names_the_store() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tmpdir();
+        let shut = dir.join("shut");
+        fs::create_dir_all(&shut).expect("a directory");
+        fs::set_permissions(&shut, fs::Permissions::from_mode(0o500)).expect("closing it");
+
+        let path = shut.join("devices.json");
+        let refused = DeviceStore::new()
+            .save(&path)
+            .expect_err("a directory nothing can write in");
+
+        // Opened again before any assertion, so a failure here does not leave
+        // a directory this run cannot remove.
+        fs::set_permissions(&shut, fs::Permissions::from_mode(0o700)).expect("opening it");
+        fs::remove_dir_all(&dir).ok();
+
+        let said = refused.to_string();
+        assert!(
+            said.contains("devices.json"),
+            "does not name the store: {said}"
+        );
+        assert!(
+            !said.contains("devices.tmp"),
+            "names the temporary file, which nobody has ever seen: {said}"
+        );
     }
 
     /// Loading normalizes, so a hand-edited file is corrected at load rather

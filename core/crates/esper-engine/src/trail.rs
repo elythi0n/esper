@@ -80,16 +80,49 @@ pub fn keep_only_what_the_policy_allows() {
     if keep_secs.is_none() && max_bytes.is_none() {
         return;
     }
-    let now = crate::paths::now_secs();
-    match Log::at(path).retain(keep_secs, max_bytes, now) {
+    apply_policy(&path, keep_secs, max_bytes, crate::paths::now_secs());
+}
+
+/// The policy itself, on a trail this caller names.
+///
+/// The path is a parameter for the same reason `settings::set_in_file`'s is: a
+/// helper that reads `ESPER_HOME` is a helper every test has to arrange
+/// around, and the one that forgets trims somebody's real record.
+pub fn apply_policy(
+    path: &std::path::Path,
+    keep_secs: Option<u64>,
+    max_bytes: Option<u64>,
+    now: u64,
+) {
+    match Log::at(path.to_path_buf()).retain(keep_secs, max_bytes, now) {
         // Said only when something happened: a host that prunes daily would
         // otherwise print a line a day about nothing.
         Ok(pruned) => {
             if let Some(line) = pruned.describe() {
                 println!("      trail: {line}");
+                // **And in the record itself.** The line above is on a
+                // terminal nobody keeps; a reader of the file a week later
+                // cannot otherwise tell a quiet week from a deleted one.
+                note_the_trim(path, &pruned);
             }
         }
         Err(e) => eprintln!("      · could not apply the trail's retention: {e}"),
+    }
+}
+
+/// Append the line saying the record was trimmed.
+///
+/// After the rewrite and through the ordinary append, so the trimming path
+/// stays the one thing in `esper-audit` that only ever writes a subset of what
+/// it read.
+fn note_the_trim(path: &std::path::Path, pruned: &esper_audit::Pruned) {
+    let entry = Entry::here(Event::TrailTrimmed {
+        too_old: pruned.too_old,
+        over_size: pruned.over_size,
+        kept: pruned.kept,
+    });
+    if let Err(e) = Log::at(path.to_path_buf()).append(&entry) {
+        eprintln!("      · could not record that the trail was trimmed: {e}");
     }
 }
 
@@ -134,5 +167,92 @@ mod tests {
             "the key on the line should be the far end's"
         );
         assert!(!entry.peer.is_empty(), "and its fingerprint, for reading");
+    }
+
+    /// Every line of a trail, read off the disk.
+    fn entries_in(path: &std::path::Path) -> Vec<Entry> {
+        std::fs::read_to_string(path)
+            .expect("the record")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("one JSON line"))
+            .collect()
+    }
+
+    /// A directory of this test's own, removed when the run ends.
+    fn scratch() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("esper-trail-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        dir
+    }
+
+    /// **A trimmed record says it was trimmed.**
+    ///
+    /// Without this line a reader cannot tell a quiet week from a deleted
+    /// one, which is the difference between a record and a record that can be
+    /// relied on.
+    #[test]
+    fn trimming_leaves_a_line_saying_what_went() {
+        let dir = scratch();
+        let path = dir.join("sessions.log");
+        let log = Log::at(path.clone());
+        // Ten days of one line each, ending today.
+        let now = 10 * 86_400;
+        for day in 0..10u64 {
+            log.append(&Entry::new(&[7u8; 32], Event::TerminalOpened, day * 86_400))
+                .expect("a line");
+        }
+
+        // Keep three days.
+        apply_policy(&path, Some(3 * 86_400), None, now);
+
+        // Read as the file, not through the crate's own reader: what is on
+        // the disk afterwards is the thing being checked, and `check-trail`
+        // keeps the list of modules that open the log to read it short on
+        // purpose.
+        let left = entries_in(&path);
+        let trims: Vec<&Entry> = left
+            .iter()
+            .filter(|e| matches!(e.event, Event::TrailTrimmed { .. }))
+            .collect();
+        assert_eq!(trims.len(), 1, "one line about the trim: {left:?}");
+        let trim = trims.first().expect("the line");
+        assert_eq!(trim.peer_key, "", "nobody connected to trim a record");
+        let Event::TrailTrimmed {
+            too_old,
+            over_size,
+            kept,
+        } = &trim.event
+        else {
+            unreachable!("filtered above")
+        };
+        assert_eq!(*too_old, 7, "seven days fell outside three: {left:?}");
+        assert_eq!(*over_size, 0);
+        assert_eq!(*kept, 3, "and three were kept: {left:?}");
+        // The line counts what the record held, not itself.
+        assert_eq!(left.len(), 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pass that removes nothing writes nothing: a host prunes daily, and a
+    /// record that grew a line a day about having removed no lines would be a
+    /// record mostly about itself.
+    #[test]
+    fn a_trim_that_removes_nothing_is_not_recorded() {
+        let dir = scratch();
+        let path = dir.join("sessions.log");
+        let log = Log::at(path.clone());
+        log.append(&Entry::new(&[7u8; 32], Event::TerminalOpened, 500))
+            .expect("a line");
+
+        apply_policy(&path, Some(86_400), None, 600);
+
+        let left = entries_in(&path);
+        assert_eq!(left.len(), 1, "nothing went, so nothing was said: {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

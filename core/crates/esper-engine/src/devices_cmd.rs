@@ -108,8 +108,82 @@ fn say_what_was_dropped(dropped: &[String]) {
 }
 
 /// Print every paired device, with what it may do.
+/// What `esper devices` takes.
+///
+/// Public for the reason the schedule one is: `--help` is answered centrally.
+#[must_use]
+pub fn list_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} devices [--json]\n\
+         \n\
+         Every device paired with this machine, what each may do, and when it\n\
+         was last seen.\n\
+         \n\
+         options:\n  \
+         \x20 --json   the store's own records, for a script rather than a person\n"
+    )
+}
+
 pub fn list() -> Result<(), String> {
+    list_with(false)
+}
+
+/*
+Every paired device, as a program reads them.
+
+# Why this exists
+
+`devices` printed a table and *ignored every argument after it* — so `devices
+--json` was accepted, answered with the table, and exited zero. A script asking
+for JSON got a listing laid out for a person and no indication that anything
+was wrong, which is worse than the flag not existing.
+
+The store's own record, passed through: the same fields the file holds and the
+control plane serves, with the fingerprint added because it is derived from the
+key and is what every other part of this product names a device by.
+
+# Errors
+
+If the device store cannot be read or cannot be written as JSON.
+*/
+pub fn list_as_json() -> Result<(), String> {
+    list_with(true)
+}
+
+fn list_with(as_json: bool) -> Result<(), String> {
     let (store, dropped) = paths::devices()?;
+    if as_json {
+        // **Nothing on standard output but the answer.** A dropped record is
+        // worth saying and belongs with the other diagnostics; a line about
+        // it in the middle of a JSON document makes the document unreadable.
+        let mut devices = Vec::with_capacity(store.len());
+        for device in store.iter() {
+            let mut one = serde_json::to_value(device)
+                .map_err(|e| format!("a device could not be written as JSON: {e}"))?;
+            if let Some(object) = one.as_object_mut() {
+                // Derived from the key, and the name everything else in this
+                // product uses for a device.
+                object.insert(
+                    "fingerprint".into(),
+                    serde_json::json!({
+                        "hex": device.fingerprint().hex(),
+                        "words": device.fingerprint().words(),
+                    }),
+                );
+            }
+            devices.push(one);
+        }
+        let out = serde_json::json!({
+            "count": devices.len(),
+            "devices": devices,
+            "dropped": dropped.len(),
+        });
+        let text = serde_json::to_string_pretty(&out)
+            .map_err(|e| format!("the device list could not be written as JSON: {e}"))?;
+        println!("{text}");
+        return Ok(());
+    }
     say_what_was_dropped(&dropped);
 
     println!("📇 esper devices");
@@ -221,22 +295,50 @@ fn how_many_walk_in(store: &esper_crypto::DeviceStore) -> Option<String> {
 }
 
 /// Every permission, for help text.
+/// Every permission, wrapped to a terminal.
+///
+/// **Fourteen names on one line is 131 columns.** A help text is read in a
+/// terminal, and a line half again as wide as one wraps wherever the terminal
+/// decides — usually in the middle of a name, so the list somebody is reading
+/// to find the word they need is the one thing on the screen that is hard to
+/// read. Wrapped here, at the width the rest of these texts keep to, and
+/// indented so the continuations line up under the first name.
 fn every_permission() -> String {
-    Permission::ALL
-        .iter()
-        .map(|p| p.name())
-        .collect::<Vec<_>>()
-        .join(" ")
+    let names: Vec<&str> = Permission::ALL.iter().map(|p| p.name()).collect();
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for name in names {
+        // The label `permissions: ` is 13 columns, and the continuation indent
+        // below matches it.
+        let would_be = if line.is_empty() {
+            name.len()
+        } else {
+            line.len() + 1 + name.len()
+        };
+        if !line.is_empty() && would_be + PERMISSIONS_LABEL > WRAP_AT {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(name);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines.join(&format!("\n{}", " ".repeat(PERMISSIONS_LABEL)))
 }
+
+/// How wide a help line may be, so it does not wrap in an 80-column terminal.
+const WRAP_AT: usize = 78;
+
+/// The width of `permissions: `, which the continuations line up under.
+const PERMISSIONS_LABEL: usize = 13;
 
 /// Apply a change to one device's permissions.
 ///
 /// The arguments are a fingerprint prefix and one or more permission names.
 pub fn change(args: &[String], what: Change) -> Result<(), String> {
-    let verb = match what {
-        Change::Grant => "grant",
-        Change::Revoke => "revoke",
-    };
     // **Answering the confirmation in advance, for a machine that has nobody
     // to ask.** Provisioning a host over a pipeline has no terminal, and the
     // alternative to a flag is somebody editing the device store by hand —
@@ -254,7 +356,11 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
     let how_many = match args.as_slice() {
         [flag, _name, ..] if flag == "--group" => 2,
         [_prefix, ..] => 1,
-        [] => return Err(usage()),
+        // A complaint first and the usage under it, which is the shape every
+        // other refusal in this product has. `Err(usage())` alone arrives
+        // after the dispatcher's own prefix and reads as
+        // "grant: usage: … grant …".
+        [] => return Err(format!("needs a device and a permission\n\n{}", usage())),
     };
     let (target, names) = args.split_at(how_many);
     // What to call it in a message somebody has to act on.
@@ -262,8 +368,7 @@ pub fn change(args: &[String], what: Change) -> Result<(), String> {
     let prefix = prefix.as_str();
     if names.is_empty() {
         return Err(format!(
-            "{} {verb} needs at least one permission\npermissions: {}",
-            crate::net::me(),
+            "needs at least one permission\npermissions: {}",
             every_permission()
         ));
     }
@@ -637,10 +742,35 @@ pub fn schedule_usage() -> String {
     )
 }
 
+/// What `keep` takes.
+#[must_use]
+pub fn keep_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} keep <fingerprint>\n\
+         \n\
+         Make a one-session pairing last. A device that arrived through an\n\
+         invitation is paired for one session and then forgotten; this is what\n\
+         turns it into an ordinary pairing.\n\
+         \n\
+         It changes nothing else: the device may do exactly what it could\n\
+         before, and `{me} grant` is what changes that.\n\
+         \n\
+         The fingerprint, never a name: a name is what that device called\n\
+         itself. `{me} devices` lists them."
+    )
+}
+
 pub fn keep(args: &[String]) -> Result<(), String> {
     let [prefix] = args else {
-        return Err(format!("usage: {} keep <fingerprint>", crate::net::me()));
+        // The dispatcher has already said which program and which command;
+        // repeating them here is how a refusal comes out naming itself twice.
+        return Err(format!(
+            "takes one device's fingerprint — `{} devices` lists them",
+            crate::net::me()
+        ));
     };
+    refuse_an_option(prefix)?;
 
     let (mut store, dropped) = paths::devices()?;
     say_what_was_dropped(&dropped);
@@ -689,10 +819,34 @@ pub fn keep(args: &[String]) -> Result<(), String> {
 /// the one it already has is the host's job — it re-reads this file while it
 /// runs — and that is the half people forget, because a revocation that
 /// leaves the revoked device connected is a request rather than a revocation.
+/// What `forget` takes.
+#[must_use]
+pub fn forget_usage() -> String {
+    let me = crate::net::me();
+    format!(
+        "usage: {me} forget <fingerprint>\n\
+         \n\
+         Unpair a device entirely. It is removed from this machine's device\n\
+         list, so it cannot connect at all — the refusal happens in the TLS\n\
+         handshake, before any session code runs — and a session it already\n\
+         has closes within a second.\n\
+         \n\
+         Pairing again means a new code, read aloud, at both machines. There\n\
+         is no undo: this machine keeps nothing about a device it forgot.\n\
+         \n\
+         The fingerprint, never a name: a name is what that device called\n\
+         itself. `{me} devices` lists them."
+    )
+}
+
 pub fn forget(args: &[String]) -> Result<(), String> {
     let [prefix] = args else {
-        return Err(format!("usage: {} forget <fingerprint>", crate::net::me()));
+        return Err(format!(
+            "takes one device's fingerprint — `{} devices` lists them",
+            crate::net::me()
+        ));
     };
+    refuse_an_option(prefix)?;
 
     let (mut store, dropped) = paths::devices()?;
     say_what_was_dropped(&dropped);
@@ -730,7 +884,6 @@ fn record(key: &[u8; 32], event: Event) {
     }
 }
 
-/// The one device whose fingerprint starts with `prefix`.
 /// Put devices in a group, take them out, or show who is in one.
 ///
 /// # Why a group is a label rather than a list
@@ -751,6 +904,9 @@ pub fn group(args: &[String]) -> Result<(), String> {
     let [name, prefixes @ ..] = args.as_slice() else {
         return Err(group_usage());
     };
+    // A group's name never begins with a dash either, and without this a
+    // mistyped flag becomes the name of a group nobody meant to make.
+    refuse_an_option(name)?;
     let name = esper_crypto::Device::group_name(name);
     if name.is_empty() {
         return Err("a group needs a name".to_owned());
@@ -763,8 +919,7 @@ pub fn group(args: &[String]) -> Result<(), String> {
     if prefixes.is_empty() {
         if removing {
             return Err(format!(
-                "{} group --remove needs the devices to take out of {name:?}",
-                crate::net::me()
+                "--remove needs the devices to take out of {name:?}"
             ));
         }
         show(&store, &name);
@@ -904,6 +1059,7 @@ fn whose<'a>(store: &DeviceStore, args: &'a [String]) -> Result<(Whose, &'a [Str
     let [prefix, rest @ ..] = args else {
         return Err("no fingerprint given".to_owned());
     };
+    refuse_an_option(prefix)?;
     Ok((Whose::One(*find(store, prefix)?), rest))
 }
 
@@ -916,6 +1072,41 @@ fn members(store: &DeviceStore, group: &str) -> Vec<[u8; 32]> {
         .collect()
 }
 
+/// Refuse a word that is plainly an option where a device was wanted.
+///
+/// **A fingerprint never begins with a dash.** Without this, a mistyped flag
+/// is read as one and the answer is "no paired device's fingerprint starts
+/// with `--nonsense`" — which is a program telling somebody their typo is a
+/// machine, and the same shape as a word beginning with a dash being taken
+/// for a subcommand that is not there.
+///
+/// Worded exactly as every other refusal of an unknown option, because it is
+/// one: the dispatcher adds the program and the command.
+fn refuse_an_option(word: &str) -> Result<(), String> {
+    if word.starts_with('-') {
+        return Err(format!("unknown option {word:?}"));
+    }
+    Ok(())
+}
+
+/// The one device whose fingerprint starts with `prefix`.
+///
+/// # Why a name is not accepted here
+///
+/// A device's name is what that device called itself. Two can share one, a
+/// device can change its own, and a device that wanted to be mistaken for
+/// another could call itself whatever that one is called — so a command that
+/// *changes what a device may do* takes the fingerprint, which is derived
+/// from a key and is nobody's to choose.
+///
+/// The commands that act on a machine — `lock`, `connect`, `wake` — take
+/// either, because the worst a wrong name does there is reach the wrong
+/// machine, and the right one is one command away. A permission granted to
+/// the wrong machine is granted until somebody notices.
+///
+/// A name that *does* match is not silently refused: the message below hands
+/// over the fingerprint for it, so the rule costs one look rather than a
+/// search through `devices`.
 fn find<'a>(store: &'a DeviceStore, prefix: &str) -> Result<&'a [u8; 32], String> {
     let wanted = prefix.trim().to_ascii_lowercase().replace([' ', ':'], "");
     if wanted.is_empty() {
@@ -928,8 +1119,9 @@ fn find<'a>(store: &'a DeviceStore, prefix: &str) -> Result<&'a [u8; 32], String
     match matches.as_slice() {
         [only] => Ok(&only.public_key),
         [] => Err(format!(
-            "no paired device's fingerprint starts with {wanted:?} — `{} devices` lists them",
-            crate::net::me()
+            "no paired device's fingerprint starts with {wanted:?} — `{} devices` lists them{}",
+            crate::net::me(),
+            by_that_name(store, prefix)
         )),
         several => Err(format!(
             "{} paired devices start with {wanted:?}; give more of it:\n{}",
@@ -941,6 +1133,39 @@ fn find<'a>(store: &'a DeviceStore, prefix: &str) -> Result<&'a [u8; 32], String
                 .join("\n")
         )),
     }
+}
+
+/// What to add to a refusal when the word was a device's name.
+///
+/// Empty when nothing is called that, so an ordinary typo still gets the
+/// ordinary sentence. When something is, the fingerprint for it is handed
+/// over — and so is the reason the name was not enough, because a rule
+/// somebody meets without being told is a rule that reads as a bug.
+fn by_that_name(store: &DeviceStore, said: &str) -> String {
+    let wanted = said.trim().to_ascii_lowercase();
+    if wanted.is_empty() {
+        return String::new();
+    }
+    let named: Vec<&Device> = store
+        .iter()
+        .filter(|d| d.name.to_ascii_lowercase() == wanted)
+        .collect();
+    if named.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "\n      {said:?} is the name a device gave itself, and a name can be chosen to look\n\
+         \x20     like another device's — so what a device may do is changed by fingerprint.\n\
+         \x20     Did you mean:"
+    );
+    for device in named {
+        out.push_str(&format!(
+            "\n        {}  {}",
+            device.fingerprint().hex(),
+            device.name
+        ));
+    }
+    out
 }
 
 /// How long somebody has to confirm a sensitive grant.
@@ -979,10 +1204,18 @@ fn confirm_sensitive(prefix: &str, sensitive: &[Permission]) -> Result<(), Strin
             crate::net::me()
         ));
     }
-    let lines = vec![
-        format!("about to grant {names}"),
-        "this is held until somebody takes it away, and applies to every session".to_owned(),
-    ];
+    let mut lines = vec![format!("about to grant {names}")];
+    // **What it hands over, where that is more than its name says.** A
+    // question naming only the permission is a question somebody cannot
+    // answer well — and `terminal` is a shell as this user, which is every
+    // other permission on the list whether or not anybody granted them.
+    for p in sensitive {
+        if let Some(really) = p.what_it_really_grants() {
+            lines.push(format!("{}: {really}", p.name()));
+        }
+    }
+    lines
+        .push("this is held until somebody takes it away, and applies to every session".to_owned());
     match console.confirm(&lines, "grant it?", CONFIRM_WITHIN) {
         crate::consent::Answer::Yes => Ok(()),
         crate::consent::Answer::No => Err("nothing was changed".to_owned()),
@@ -997,6 +1230,61 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// **A name that matches is answered with the fingerprint for it.**
+    ///
+    /// A permission is changed by fingerprint because a name is what a device
+    /// called itself, and a device that wanted to be mistaken for another
+    /// could call itself whatever that one is called. That rule is right and
+    /// it is invisible: somebody who has just run `esper lock rack` and then
+    /// runs `esper grant rack view` meets a refusal that reads as a bug.
+    #[test]
+    fn a_refusal_hands_over_the_fingerprint_for_a_name_it_will_not_take() {
+        let store = a_store_with(&[("rack", [0x11u8; 32]), ("laptop", [0x22u8; 32])]);
+
+        let said = find(&store, "rack").expect_err("a name is not a fingerprint");
+        assert!(
+            said.contains("Did you mean"),
+            "the refusal offers nothing: {said}"
+        );
+        assert!(
+            said.contains(&esper_crypto::Fingerprint::of(&[0x11u8; 32]).hex()),
+            "the fingerprint for that name is not in it: {said}"
+        );
+        // And the reason, because a rule somebody meets without being told is
+        // a rule that reads as a bug.
+        assert!(said.contains("name"), "{said}");
+        assert!(
+            said.contains("fingerprint"),
+            "the refusal does not say what it wants instead: {said}"
+        );
+        // Not the other device, which is nobody's question.
+        assert!(
+            !said.contains(&esper_crypto::Fingerprint::of(&[0x22u8; 32]).hex()),
+            "a device with a different name was offered: {said}"
+        );
+    }
+
+    /// An ordinary typo gets the ordinary sentence: the paragraph above is
+    /// about a name, and printing it at everybody would make it noise.
+    #[test]
+    fn a_mistyped_fingerprint_is_refused_without_the_paragraph() {
+        let store = a_store_with(&[("rack", [0x11u8; 32])]);
+        let said = find(&store, "9zz").expect_err("no device starts with that");
+        assert!(!said.contains("Did you mean"), "{said}");
+        assert!(said.contains("9zz"), "{said}");
+    }
+
+    /// A store with the given names, for the two tests above.
+    fn a_store_with(devices: &[(&str, [u8; 32])]) -> DeviceStore {
+        let mut store = DeviceStore::new();
+        for (name, key) in devices {
+            store
+                .insert(esper_crypto::Device::new(*key, (*name).to_owned(), 0))
+                .expect("a device");
+        }
+        store
+    }
 
     /// **Which permissions need confirming is one list, and it is the
     /// protocol's.**
@@ -1025,10 +1313,44 @@ mod tests {
             Permission::Control,
             Permission::ClipboardOut,
             Permission::FilesOut,
-            Permission::Terminal,
         ] {
             assert!(!p.is_sensitive(), "{} must not need a question", p.name());
         }
+    }
+
+    /// **`terminal` is the one that grants every other one**, and it was the
+    /// one nothing asked about.
+    ///
+    /// A shell runs as the user who owns `~/.esper`: it can read the identity
+    /// key and the local API's token, rewrite the device list without going
+    /// near `esper grant`, and edit the record of what happened. Measured
+    /// rather than argued — a store rewritten by hand takes effect and leaves
+    /// no line in the trail.
+    ///
+    /// It cannot be closed downstream. The confirmation is answered at a
+    /// terminal and a served shell *is* a terminal, so the gate belongs where
+    /// the escalation starts: handing out the shell.
+    #[test]
+    fn a_shell_is_confirmed_because_it_grants_everything_else() {
+        assert!(
+            Permission::Terminal.is_sensitive(),
+            "granting a shell asks nobody, and a shell grants the rest of this list"
+        );
+        // And the question says so, rather than naming the permission and
+        // leaving somebody to work out what it means.
+        let said = Permission::Terminal
+            .what_it_really_grants()
+            .expect("a shell is more than its name");
+        for must in ["identity", "device list", "record"] {
+            assert!(
+                said.contains(must),
+                "the question does not mention {must}: {said}"
+            );
+        }
+        // Every sensitive permission either speaks for itself or says what it
+        // really is; an ordinary one needs no paragraph.
+        assert!(Permission::View.what_it_really_grants().is_none());
+        assert!(Permission::Control.what_it_really_grants().is_none());
     }
 
     /// `--yes` is taken out wherever it appears, so it cannot be read as a
@@ -1193,5 +1515,24 @@ mod tests {
             "{line}"
         );
         assert!(!line.contains("any time"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::list_usage;
+
+    /// **The usage names the flag.** A flag that exists and is not in the
+    /// usage is a flag nobody finds; one in the usage and not parsed is worse,
+    /// because it is accepted, answered with the other shape, and exits zero.
+    #[test]
+    fn the_usage_names_what_the_command_takes() {
+        let said = list_usage();
+        assert!(said.contains("--json"), "{said}");
+        assert!(said.contains("devices"), "{said}");
+        // A sentence about what it is for, not only the word.
+        assert!(said.contains("script"), "{said}");
     }
 }
