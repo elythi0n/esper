@@ -73,6 +73,24 @@ const CONTROLS = new Set([
  */
 const TAP_MIN = 44;
 
+/*
+  All three themes, because that is what Phase 10's exit criteria ask for.
+
+  "`/design` is complete, reviewed, and **passes the a11y baseline in all three
+  themes**" — and this gate ran at whichever theme the page loaded with, which
+  is dark. `check-ink` and `check-overflow` sweep themes; the one gate the
+  criterion names by its own name did not, so the criterion was asserted rather
+  than measured.
+
+  It is not a formality. High contrast is a different theme rather than a
+  filter over one: the focus ring is 3px instead of 2, soft tints are gone and
+  a callout takes a border in their place, and elevation becomes a ring. Any of
+  those can change what a control's box is — which is the tap minimum — and a
+  component that branches on theme can drop a label in one and not another.
+  Neither shows up in a sweep of dark.
+*/
+const THEMES = ["dark", "light", "hc"];
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const port = 9600 + (process.pid % 90);
@@ -126,7 +144,11 @@ let controls = 0;
 let named = 0;
 let small = 0;
 let dense = 0;
-let exempted = [];
+let exempted = new Set();
+let exemptFocus = new Set();
+let ringless = 0;
+let focusAsked = 0;
+let swept = 0;
 
 try {
   await send("Page.enable");
@@ -136,11 +158,24 @@ try {
   await send("Page.navigate", { url: base.includes("#") ? base : `${base.replace(/\/$/, "")}/#/design` });
   await sleep(5000);
 
+  for (const theme of THEMES) {
+  // Set on the document root, which is where a theme lives, and given a beat
+  // to repaint before anything is measured.
+  const applied = await evaluate(
+    `(() => { document.documentElement.dataset.theme = ${JSON.stringify(theme)};
+      return document.documentElement.dataset.theme; })()`,
+  );
+  if (applied !== theme) {
+    findings.push(`the ${theme} theme did not apply — the page reports ${applied}, so this pass measured another theme`);
+    continue;
+  }
+  await sleep(400);
+
   // Everything on the page, as the browser understands it.
   const tree = await send("Accessibility.getFullAXTree");
   const nodes = tree.result?.nodes ?? [];
   if (nodes.length < 50) {
-    findings.push(`the accessibility tree has ${nodes.length} nodes, so the page did not render`);
+    findings.push(`in ${theme}, the accessibility tree has ${nodes.length} nodes, so the page did not render`);
   }
 
   for (const node of nodes) {
@@ -169,7 +204,7 @@ try {
         where = "";
       }
     }
-    findings.push(`a ${role} has no accessible name: ${where || "(could not describe it)"}`);
+    findings.push(`in ${theme}, a ${role} has no accessible name: ${where || "(could not describe it)"}`);
   }
 
   // And the tap minimum. Measured from the DOM rather than the AX tree,
@@ -213,32 +248,112 @@ try {
   })()`);
   const measured = JSON.parse(tapped ?? '{"out":[],"narrow":0,"exemptions":[]}');
   const undersized = measured.out;
-  small = undersized.length;
-  dense = measured.narrow;
-  exempted = [...new Set(measured.exemptions ?? [])];
-  for (const why of exempted) {
+  // **Accumulated, not overwritten.** Each theme is its own measurement and a
+  // control that is right in dark and wrong in high contrast is a finding in
+  // high contrast, not a number the last pass replaces.
+  small += undersized.length;
+  dense = Math.max(dense, measured.narrow);
+  for (const why of measured.exemptions ?? []) exempted.add(why);
+  for (const why of new Set(measured.exemptions ?? [])) {
     if (why === "no reason given") {
-      findings.push("a control is exempt from the tap minimum and gives no reason for it");
+      findings.push(`in ${theme}, a control is exempt from the tap minimum and gives no reason for it`);
     }
   }
   for (const u of undersized.slice(0, 12)) {
-    findings.push(`a control is drawn ${u.w}×${u.h} and carries no data-tap-min: ${u.what}`);
+    findings.push(`in ${theme}, a control is drawn ${u.w}×${u.h} and carries no data-tap-min: ${u.what}`);
   }
   if (undersized.length > 12) {
-    findings.push(`…and ${undersized.length - 12} more under ${TAP_MIN}px with no hit area`);
+    findings.push(`…and ${undersized.length - 12} more under ${TAP_MIN}px with no hit area in ${theme}`);
   }
 
-  // Focus has to be visible, and that is one rule for everything. Checked by
-  // focusing something and reading back what the browser paints.
-  const focus = await evaluate(`(() => {
-    const el = document.querySelector("button");
-    if (!el) return JSON.stringify({ why: "nothing focusable on the page" });
-    el.focus();
-    const s = getComputedStyle(el);
-    return JSON.stringify({ outline: s.outlineStyle, width: s.outlineWidth, active: document.activeElement === el });
+  /*
+    And the focus ring, on every control, measured rather than assumed.
+
+    This is the promise the design system states most plainly — one focus
+    treatment, everywhere, never removed — and it was the one nothing checked.
+    It broke the way that promise always breaks: `outline-none` is a Tailwind
+    *utility*, the rule that paints the ring lives in `@layer base`, and a
+    utility beats a layer. Seventeen places had copied it out of a component
+    library's examples. Fifty-eight of three hundred and fifty-five controls
+    painted nothing at all, and every one of them looked completely fine.
+
+    # Why a real Tab first
+
+    `:focus-visible` is the browser's judgement about whether the person is
+    using a keyboard, so `el.focus()` from a script does not match it — the
+    first version of this check read an outline of `none` everywhere and the
+    finding was the check. One real key event puts the browser in keyboard
+    modality; after that, scripted focus does match, which is what makes it
+    possible to ask all 355 rather than only those Tab happens to reach.
+  */
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", windowsVirtualKeyCode: 9, key: "Tab", code: "Tab" });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", windowsVirtualKeyCode: 9, key: "Tab", code: "Tab" });
+  await sleep(150);
+  const rings = await evaluate(`(() => {
+    const selector = 'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"]), [role="button"], [role="tab"], [role="switch"], [role="checkbox"]';
+    const dark = [];
+    const excused = [];
+    let asked = 0;
+    let notKeyboard = 0;
+    for (const el of document.querySelectorAll(selector)) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      if (el.disabled) continue;
+      el.focus();
+      if (document.activeElement !== el) continue;
+      // If the browser does not consider this keyboard focus, the reading
+      // would be about modality rather than about the ring.
+      if (!el.matches(":focus-visible")) { notKeyboard++; continue; }
+      asked++;
+      const s = getComputedStyle(el);
+      if (s.outlineStyle !== "none" && parseFloat(s.outlineWidth) >= 1) continue;
+      // A suppression with its reason in the markup, the way the tap minimum
+      // does it: some things are not controls, and a menu moves a highlight
+      // instead of moving focus.
+      const excuse = el.closest("[data-focus-exempt]");
+      if (excuse) { excused.push(excuse.getAttribute("data-focus-exempt") || "no reason given"); continue; }
+      dark.push({
+        what: el.outerHTML.slice(0, 120).replace(/\\s+/g, " "),
+        outline: s.outlineStyle + " " + s.outlineWidth,
+      });
+    }
+    return JSON.stringify({ dark, excused, asked, notKeyboard });
   })()`);
-  const shown = JSON.parse(focus ?? "{}");
-  if (shown.why) findings.push(shown.why);
+  const ring = JSON.parse(rings ?? '{"dark":[],"excused":[],"asked":0,"notKeyboard":0}');
+  // A floor. A page that rendered nothing focusable would pass every claim
+  // below by having nothing to be wrong about.
+  if (ring.asked < 40) {
+    findings.push(`in ${theme}, only ${ring.asked} control(s) answered about focus, so the sweep did not run`);
+  }
+  if (ring.notKeyboard > 0) {
+    findings.push(
+      `in ${theme}, ${ring.notKeyboard} control(s) did not register as keyboard focus — ` +
+        `the modality tap did not take, so their rings went unmeasured`,
+    );
+  }
+  ringless += ring.dark.length;
+  for (const why of ring.excused ?? []) {
+    exemptFocus.add(why);
+    if (why === "no reason given") {
+      findings.push(`in ${theme}, a control drops the focus ring and gives no reason for it`);
+    }
+  }
+  for (const d of ring.dark.slice(0, 8)) {
+    findings.push(`in ${theme}, a focused control paints an outline of ${d.outline}: ${d.what}`);
+  }
+  if (ring.dark.length > 8) {
+    findings.push(`…and ${ring.dark.length - 8} more with no focus ring in ${theme}`);
+  }
+  focusAsked = Math.max(focusAsked, ring.asked);
+
+  swept++;
+  }
+
+  // A floor: a run that swept one theme would pass every claim above while
+  // measuring a third of what the exit criteria ask for.
+  if (swept !== THEMES.length) {
+    findings.push(`swept ${swept} theme(s) of ${THEMES.length} — the sweep did not run`);
+  }
 } finally {
   ws.close();
   chrome.kill();
@@ -251,9 +366,11 @@ if (findings.length) {
   process.exit(1);
 }
 console.log(
-  `  ✓ a11y: ${controls} controls on the gate, all ${named} named by the browser; ` +
+  `  ✓ a11y: ${controls} controls across ${swept} themes, all ${named} named by the browser; ` +
+    `${focusAsked} of them keyboard-focused in each theme and every one painting a ring; ` +
     `nothing small in both directions without a hit area ` +
     `(${dense} are short or narrow by density, which is the product's own choice)`,
 );
-for (const why of exempted) console.log(`    exempt: ${why}`);
-if (small !== 0) throw new Error("unreachable: findings above would have exited");
+for (const why of exempted) console.log(`    exempt from the tap minimum: ${why}`);
+for (const why of exemptFocus) console.log(`    focus shown another way: ${why}`);
+if (small !== 0 || ringless !== 0) throw new Error("unreachable: findings above would have exited");

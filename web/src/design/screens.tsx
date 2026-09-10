@@ -1,13 +1,15 @@
 import { useState } from "react";
+import { useDevices } from "@/api/hooks";
+import type { Device } from "@/api/types";
 import { ActivityScreen } from "@/screens/ActivityScreen";
 import { DevicesScreen } from "@/screens/DevicesScreen";
 import { FirstRun } from "@/screens/FirstRun";
 import { WelcomeScreen } from "@/screens/WelcomeScreen";
 import { InviteScreen } from "@/screens/InviteScreen";
-import { PairScreen } from "@/screens/PairScreen";
+import { PairScreen, UncheckableOffer } from "@/screens/PairScreen";
 import { SessionsScreen } from "@/sessions/SessionsScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
-import { StatusStrip } from "@/screens/StatusStrip";
+import { EngineTrouble, StatusStrip, StreamTrouble } from "@/screens/StatusStrip";
 import { AppShell, StatusBar, StatusSpacer } from "@/shell/AppShell";
 import { SCREENS } from "@/shell/screens";
 import { Section, Sub } from "./ui";
@@ -45,6 +47,21 @@ function Framed({ children, active }: { children: React.ReactNode; active: strin
         status={
           <StatusBar>
             <StatusStrip />
+            {/*
+              And the state the strip shows when the thing that does the work
+              is missing, which the real one never reaches here: the gate's own
+              engine is running. Beside it rather than instead of it, because
+              both are the strip and a gallery that showed only the failure
+              would be a gallery of one state.
+            */}
+            <EngineTrouble why="the engine is not running: engine binary not found: looked in [/usr/lib/esper/esper-engine $PATH] — esper-engine and esper ship together, so this is usually a partial install" />
+            {/*
+              And the other state the strip has that the real one does not
+              reach here: the live stream down while everything else answers.
+              It is the one that looks like a working machine, so it is the
+              one worth having on a gate.
+            */}
+            <StreamTrouble why="The event stream answered 503. This machine is already sending 64 event streams, which is as many as it keeps open. One is enough for a window: close the ones that are no longer read, or ask again" />
             <StatusSpacer />
           </StatusBar>
         }
@@ -55,8 +72,35 @@ function Framed({ children, active }: { children: React.ReactNode; active: strin
   );
 }
 
+/**
+ * A device to open the panel on, from whatever this machine actually has.
+ *
+ * Not a fingerprint written down here: a fingerprint is derived from a key,
+ * so one in this file would be a constant that is right for one store and
+ * silently wrong — an unopened panel — for every other. The one with the most
+ * to say is chosen instead, because a device with no schedule, no group and
+ * no hardware address renders a panel with half its controls absent, and that
+ * is the panel nobody needs checking.
+ */
+function useRichestDevice(): string | undefined {
+  const { data } = useDevices();
+  const best = [...(data ?? [])].sort((a, b) => weightOf(b) - weightOf(a))[0];
+  return best?.fingerprint.hex;
+}
+
+function weightOf(d: Device): number {
+  return (
+    d.permissions.length +
+    (d.unattended_when ? 4 : 0) +
+    (d.lock_after ? 2 : 0) +
+    (d.last_mac ? 2 : 0) +
+    (d.groups?.length ?? 0)
+  );
+}
+
 export function ScreensSection() {
   const nothing = () => undefined;
+  const opened = useRichestDevice();
   return (
     <Section
       id="screens"
@@ -69,6 +113,15 @@ export function ScreensSection() {
       >
         <Framed active="devices">
           <DevicesScreen onConnect={nothing} onPair={nothing} onSetUp={nothing} />
+        </Framed>
+      </Sub>
+
+      <Sub
+        title="A device, opened"
+        about="The panel beside the list, which is where everything a device may do is said and changed: the fourteen permissions with the five the host keeps, the hours an unattended device may walk in, what a session with it leaves this screen as, and the things this machine can do to that one — wake it, lock it, log it off, restart it. Rendered open here because every control in it is behind a click, and a gallery that showed only the list was checking the densest control surface in the product not at all."
+      >
+        <Framed active="devices">
+          <DevicesScreen onConnect={nothing} onPair={nothing} onSetUp={nothing} initial={opened} />
         </Framed>
       </Sub>
 
@@ -116,6 +169,15 @@ export function ScreensSection() {
           </Framed>
         </Sub>
       </div>
+
+      <Sub
+        title="A code with nothing to check it against"
+        about="The one state on the pairing screen where the wrong design costs somebody a machine. A code proves that whoever typed it was read it; only the fingerprint proves the machine at the other end is the one that was meant — so an offer that arrives without the words is not shown at all, because a blank where the check belongs reads as nothing to check. The control plane refuses such an offer as well; this is the second of two locks on the same door, and the way out is one button."
+      >
+        <div className="max-w-lg">
+          <UncheckableOffer onAgain={nothing} />
+        </div>
+      </Sub>
 
       <Sub
         title="Sessions"

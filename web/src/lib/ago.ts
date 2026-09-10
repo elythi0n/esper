@@ -32,3 +32,16 @@ export function shortAgo(seconds: number | null, now: number = Date.now()): stri
   if (hours < 24) return `${hours}h`;
   return `${Math.round(s / 86400)}d`;
 }
+
+/**
+ * The same thing, for a time in milliseconds.
+ *
+ * `TimeAgo` ticks on a millisecond instant, because that is what a `Date` is
+ * and what `<time dateTime>` wants; a device's last-seen is seconds, because
+ * that is what the control plane sends. This is the one place the two meet,
+ * so a column that has to live cannot divide by a thousand in the wrong
+ * direction somewhere else.
+ */
+export function shortAgoAt(then: number, now: number = Date.now()): string {
+  return shortAgo(Math.round(then / 1000), now);
+}

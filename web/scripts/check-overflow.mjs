@@ -57,6 +57,30 @@ const SIZES = [
 ];
 const THEMES = ["dark", "light", "hc"];
 
+/*
+  Device pixel ratios, and the fractional one is the point.
+
+  Every browser gate in this project has run at a scale factor of exactly 1,
+  and the review before Phase 11 said so as a limit: "every browser number
+  comes from this machine's Chromium at one device pixel ratio". At 1 and at 2
+  a CSS pixel lands on whole device pixels and layout arithmetic is exact.
+
+  **At 1.5 it is not**, and 1.5 is not exotic — it is GNOME's fractional
+  scaling and Windows' 150%, which is a very large share of laptops. A width
+  that exactly fills its container rounds up by half a device pixel and the
+  page gains a horizontal scrollbar; a hairline lands between two rows of
+  device pixels and the browser has to choose. The first of those is the exact
+  bug this gate was built for, reported by a person and passed by every gate
+  here at the time.
+
+  One extra pass rather than the full cross product: the rounding is a property
+  of the layout and the width, not of the palette, so a second scale factor
+  over every route and width in one theme is where a finding would be — and
+  three times the renders for a dimension that cannot interact with it would
+  be a slower gate answering the same question.
+*/
+const SCALES = [1, 1.5];
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const port = 9700 + (process.pid % 90);
 const chrome = spawn(
@@ -267,17 +291,32 @@ try {
   await send("Runtime.enable");
   await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
 
+  for (const scale of SCALES) {
   for (const size of SIZES) {
-    await send("Emulation.setDeviceMetricsOverride", { width: size.w, height: size.h, deviceScaleFactor: 1, mobile: false });
-    for (const theme of THEMES) {
+    await send("Emulation.setDeviceMetricsOverride", { width: size.w, height: size.h, deviceScaleFactor: scale, mobile: false });
+    // Only the primary theme at the second scale: see `SCALES`.
+    for (const theme of scale === 1 ? THEMES : ["dark"]) {
       for (const route of ROUTES) {
         await send("Page.navigate", { url: `${base}/#/${route}` });
         await sleep(route === "design" ? 2600 : 1100);
         await evaluate(`(() => { document.documentElement.dataset.theme = ${JSON.stringify(theme)}; return 1; })()`);
         await sleep(250);
+        // **The emulation is asked whether it took.** A scale factor the
+        // browser silently ignored would make the second pass twenty-eight
+        // more renders at exactly the ratio already swept — a gate reporting
+        // that it measured something it did not, which is the failure this
+        // whole file exists to avoid.
+        const ratio = Number(await evaluate("window.devicePixelRatio"));
+        if (Math.abs(ratio - scale) > 0.01) {
+          note(
+            `the browser reports a device pixel ratio of ${ratio} where ${scale} was asked for — ` +
+              `the emulation did not take, so this pass measured the ratio before it`,
+          );
+          continue;
+        }
         const seen = JSON.parse((await evaluate(measurePage)) ?? "{}");
         if (!seen.seen || seen.seen < 20) {
-          note(`${route} at ${size.w}px rendered ${seen.seen ?? 0} elements, so nothing was measured`);
+          note(`${route} at ${size.w}px (scale ${scale}) rendered ${seen.seen ?? 0} elements, so nothing was measured`);
           continue;
         }
         rows.push({ route, theme, w: size.w, page: seen.page, elements: seen.seen });
@@ -287,15 +326,15 @@ try {
         if (seen.page > 1) {
           const widest = seen.past.map((p) => `${p.at} (+${p.by}px)`).join(", ");
           note(
-            `${route} at ${size.w}px scrolls sideways by ${seen.page}px` +
+            `${route} at ${size.w}px (scale ${scale}) scrolls sideways by ${seen.page}px` +
               (widest ? ` — widest past the edge: ${widest}` : ""),
           );
         }
         for (const c of seen.clipped) {
-          note(`${route} at ${size.w}px: ${c.at} hides ${c.by}px of its own text with no ellipsis — "${c.text}"`);
+          note(`${route} at ${size.w}px (scale ${scale}): ${c.at} hides ${c.by}px of its own text with no ellipsis — "${c.text}"`);
         }
         for (const l of seen.long) {
-          note(`${route} at ${size.w}px: ${l.at} sets a line ${l.chars} characters wide — "${l.text}"`);
+          note(`${route} at ${size.w}px (scale ${scale}): ${l.at} sets a line ${l.chars} characters wide — "${l.text}"`);
         }
 
         /*
@@ -324,6 +363,7 @@ try {
         }
       }
     }
+  }
   }
 } finally {
   ws.close();
@@ -373,7 +413,8 @@ if (findings.length) {
 }
 const drawn = new Set([...screens.values()].flatMap((byRoute) => [...byRoute.values()]));
 console.log(
-  `  ✓ overflow: ${rows.length} renders across ${ROUTES.length} routes, ${SIZES.length} widths and ${THEMES.length} themes — ` +
+  `  ✓ overflow: ${rows.length} renders across ${ROUTES.length} routes, ${SIZES.length} widths, ` +
+    `${THEMES.length} themes and ${SCALES.length} device pixel ratios (including ${SCALES.filter((s) => s % 1 !== 0).join(", ") || "none"} fractional) — ` +
     `${drawn.size} different screens, nothing off the side, no copy clipped without an ellipsis, no line past 108 ` +
     `characters, and the scroll boundary appears on all ${boundaryChecked} page(s) long enough to have one`,
 );

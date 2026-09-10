@@ -230,6 +230,10 @@ window.__vite_plugin_react_preamble_installed__ = true;
 </script>
 <script type="module" src="/scripts/probes/session-surface.tsx"></script>`;
 
+// When the moving transfer fixture started. Set on the first ask rather than
+// at startup, so the file is not already delivered by the time a leg looks.
+let transfersFrom = null;
+
 const reports = [];
 /** Every batch of input the page posted, in order. */
 const typed = [];
@@ -322,12 +326,27 @@ const server = createServer(async (req, res) => {
     rather than as silence.
   */
   if (path === "/shell/transfers") {
+    // **It moves.** The window reports how far along a file is, and a fixture
+    // that answered with the same figure every time would let a page that
+    // never reads them past — the percentage, the rate and the estimate would
+    // all be missing and nothing would say so. So each ask advances the one
+    // that is sending, at a rate the page has to measure to know.
+    transfersFrom ??= Date.now();
+    const total = 4_000_000;
+    const sent = Math.min(total, Math.round(((Date.now() - transfersFrom) / 1000) * 400_000));
     res.writeHead(200, { "Content-Type": "application/json" }).end(
       JSON.stringify({
         transfers: [
-          { id: 1, name: "notes.txt", state: "sent" },
-          { id: 2, name: "a photo.png", state: "sending" },
-          { id: 3, name: "big.iso", state: "failed", trouble: "the host does not allow files in" },
+          { id: 1, name: "notes.txt", state: "sent", bytes: 1024, total: 1024 },
+          { id: 2, name: "a photo.png", state: "sending", bytes: sent, total },
+          {
+            id: 3,
+            name: "big.iso",
+            state: "failed",
+            bytes: 500_000,
+            total: 9_000_000,
+            trouble: "the host does not allow files in",
+          },
         ],
       }),
     );
@@ -993,9 +1012,51 @@ if (surface) {
           `reads "drop" — a file dropped on it would be handled by the webview instead`,
       );
     }
-    for (const wanted of ["Sent notes.txt", "Sending a photo.png", "the host does not allow files in"]) {
-      if (!(surface.transfers ?? "").includes(wanted)) {
-        findings.push(`the session screen does not say ${JSON.stringify(wanted)} while the window is sending it`);
+    /*
+      **The line somebody glances at, and the detail behind it.**
+
+      The failure wins the line: a readout that said "Sending a photo.png"
+      while big.iso had just been refused is a readout that buries the only
+      part needing a person.
+    */
+    if (!(surface.transfers ?? "").includes("big.iso did not send")) {
+      findings.push(
+        `while one file was refused and another was still going, the session screen says ` +
+          `${JSON.stringify(surface.transfers ?? "")} — a failure nobody is told about is a file nobody re-sends`,
+      );
+    }
+    const queue = surface.queue ?? {};
+    if (!queue.opened) {
+      findings.push("the transfers readout opened nothing — the only place a session says how far along a file is");
+    } else {
+      if (!queue.names) {
+        findings.push(`the transfer queue does not name the file that failed — it says ${JSON.stringify(queue.second)}`);
+      }
+      /*
+        **The figures are the engine's, and they move.** This is the part that
+        was missing: the window used to report a name and a state, so a
+        transfer looked identical at one percent and at ninety-nine. The
+        fixture behind this advances, so a queue whose sizes do not is a queue
+        showing something it read once and never again — and one whose total
+        is zero is a queue that was handed a name and made the rest up.
+      */
+      if (!queue.sized) {
+        findings.push(
+          `the transfer queue shows ${JSON.stringify((queue.sizes ?? [])[1])} for a 4 MB file — the engine's ` +
+            `own figures are not reaching it`,
+        );
+      }
+      if (!queue.moved) {
+        findings.push(
+          `the transfer queue read ${JSON.stringify(queue.sizes)}1.4s apart — progress that does not ` +
+            `move is a name and a spinner`,
+        );
+      }
+      if (!queue.estimated) {
+        findings.push(
+          `the transfer queue offers no estimate: ${JSON.stringify(queue.second)} — a moving file with no ` +
+            `"left" is a progress display that cannot answer the only question it is asked`,
+        );
       }
     }
 
@@ -1143,6 +1204,11 @@ if (surface) {
         `${(surface.timed ?? []).length} timed element(s) over the picture, ` +
         `fps read ${(surface.hud?.said ?? []).join("/") || "nothing"} in one node with no transition, ` +
         `chrome retracted at ${surface.retractedAfterMs}ms and came back at the edge`,
+    );
+    console.log(
+      `    transfers: readout says ${JSON.stringify(surface.transfers ?? "")}, and the queue behind it ` +
+        `read ${JSON.stringify((surface.queue ?? {}).first ?? "")} then ` +
+        `${JSON.stringify((surface.queue ?? {}).second ?? "")}`,
     );
   }
 }

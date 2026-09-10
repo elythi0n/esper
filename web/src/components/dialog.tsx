@@ -101,6 +101,7 @@ export function DialogContent({
         )}
       />
       <RD.Content
+        data-focus-exempt="a dialog panel is not a control; it takes focus on open so the next Tab starts inside it"
         aria-describedby={description ? undefined : undefined}
         onOpenAutoFocus={(event) => {
           onOpenAutoFocus?.(event);

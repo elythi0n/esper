@@ -31,14 +31,16 @@
 //      error.
 //
 // Run from web/. Exit 1 on any finding.
-import { shortAgo } from "../src/lib/ago.ts";
-import { pairingState } from "../src/api/types.ts";
+import { shortAgo, shortAgoAt } from "../src/lib/ago.ts";
+import { offerIsCheckable, pairingState, triedFor } from "../src/api/types.ts";
+import { FIRST_WAIT_MS, LONGEST_WAIT_MS, nextWait, waits } from "../src/api/retry.ts";
 import { resolveTheme, BEFORE_PAINT } from "../src/lib/first-paint.ts";
 import { cn } from "../src/lib/cn.ts";
 import { millisecondsIn, pixelsIn } from "../src/lib/css-values.ts";
 import { readViewerStream } from "../src/session/stream.ts";
 import { FIT_CLASS, FITS, inPicture, placement } from "../src/session/fitting.ts";
 import { askState, narrowing } from "../src/session/narrowing.ts";
+import { ADVICE, ORDINARY_ENDINGS, adviceFor, isOrdinary } from "../src/api/reasons.ts";
 import { checklist, stepsFor } from "../src/screens/permissions.ts";
 import { asWhen, asWindow, readSchedule } from "../src/api/schedule.ts";
 import { readFileSync } from "node:fs";
@@ -88,6 +90,19 @@ is(at(86_400 * 3), "3d", "three days");
 // negative age is a number nobody can act on.
 is(at(-5), "0s", "a device whose clock is ahead of this one");
 is(at(-100_000), "0s", "a device whose clock is a day ahead");
+
+/*
+  The milliseconds adapter, which is the shape a live column ticks on.
+
+  Two units meet here: the control plane sends seconds and `<time>` wants an
+  instant. A conversion the wrong way round reads a device seen a minute ago
+  as seen fifty-four years ago, and looks like a clock problem rather than a
+  divide.
+*/
+is(shortAgoAt(now - 1_000, now), "1s", "one second, given in milliseconds");
+is(shortAgoAt(now - 90_000, now), "2m", "ninety seconds, given in milliseconds");
+is(shortAgoAt(now - 86_400_000, now), "1d", "a day, given in milliseconds");
+is(shortAgoAt(now, now), "0s", "this instant, given in milliseconds");
 
 /*
   2. What a pairing admits.
@@ -475,6 +490,168 @@ try {
   is(forInput.size, machines.length, "every platform's input remedy is its own");
 }
 
+/*
+  ── Every reason the protocol can report has a sentence saying what to do ──
+
+  # Why this is read out of the Rust
+
+  Because the two lists are in different languages and drift silently. The page
+  answered thirty-six codes with four sentences and a fallback by range, and
+  the fallback was wrong in ways nothing could see:
+
+    - a session that simply *finished* is code 2, which is range zero, and read
+      as "Something the host reported has no sentence yet";
+    - a peer presenting a **different key** read as "pair it first", which is
+      the one thing somebody should not do when a machine's identity has
+      changed under them;
+    - a locked screen, a declined prompt and a spent asking budget all read as
+      "ask for the permission at the host", and none of them is about a
+      permission.
+
+  None of that looks wrong in a diff. The table is there, the ranges are there,
+  and every code produces *a* sentence. So this reads the codes out of
+  `codes.rs` — the declaration, not a copy — and asks the page for each one.
+*/
+{
+  const codes = readFileSync(new URL("../../core/crates/esper-proto/src/codes.rs", import.meta.url), "utf8");
+  const declared = [...codes.matchAll(/pub const ([A-Z_]+): Self = Self\((\d+)\);/g)].map((m) => ({
+    name: m[1],
+    code: Number(m[2]),
+  }));
+  // A floor, because a regex that stopped matching would verify an empty set.
+  ok(declared.length >= 30, `the protocol declares ${declared.length} reason codes, which is not this build`);
+
+  for (const { name, code } of declared) {
+    const own = ADVICE[code];
+    ok(own !== undefined, `${name} (${code}) has no sentence saying what to do about it`);
+    if (!own) continue;
+    // A sentence, not a label: the rule for this file is what to *do*, and
+    // three words cannot say it.
+    ok(own.title.length > 20, `${name}'s sentence is too short to say what to do: ${own.title}`);
+    ok(/[.?]$/.test(own.title), `${name}'s sentence does not end in a full stop: ${own.title}`);
+  }
+
+  // **The one that must never say "pair again".** A changed key is what a
+  // replaced machine looks like and what somebody in the middle looks like.
+  const changed = ADVICE[201];
+  ok(changed?.tone === "danger", "a peer presenting a different key is not reported in the danger tone");
+  ok(
+    /fingerprint/i.test(changed?.title ?? ""),
+    "a changed key does not tell somebody to check the fingerprint, which is the only safe next step",
+  );
+
+  // And the ordinary endings are not failures. A session that ran its course
+  // reported in a warning tone is a product that cries wolf.
+  for (const code of ORDINARY_ENDINGS) {
+    is(adviceFor(code).tone, "info", `reason ${code} is an ordinary ending and is toned as one`);
+    ok(isOrdinary(code), `reason ${code} is not counted as an ordinary ending`);
+  }
+  ok(!isOrdinary(300), "a permission refusal is counted as an ordinary ending");
+
+  // A code from a newer build still produces something: two machines at
+  // different releases have to talk, and silence is a worse answer.
+  for (const unknown of [7, 199, 299, 399, 499, 599, 999]) {
+    ok(adviceFor(unknown).title.length > 10, `an unknown code ${unknown} produced no sentence`);
+  }
+}
+
+// ── What a capability tried, and when a screen shows it ──────────────────
+//
+// Two screens show this and the rule is the same on both: the attempts of a
+// backend that works are noise beside the one in use, and the attempts of one
+// that does not are the whole answer. Written once and checked here, because a
+// rule spelled out in two components is a rule that will be true in one.
+{
+  const missing = {
+    available: false,
+    detail: "nothing — this machine is view only",
+    attempts: ["x11 xtest: no display", "wayland-portal: no portal"],
+  };
+  is(triedFor(missing).length, 2, "a missing capability kept nothing of what it tried");
+  is(
+    triedFor({ available: true, detail: "x11-xtest", attempts: ["wlr: no compositor", "x11: in use"] }).length,
+    0,
+    "a working capability shows the alternatives it never needed",
+  );
+  // An engine older than the field says nothing about attempts, and a screen
+  // that read `undefined.length` would be a blank page rather than a missing
+  // list.
+  is(
+    triedFor({ available: false, detail: "no input backend" }).length,
+    0,
+    "a capability from an engine with no attempts field did not read as an empty list",
+  );
+}
+
+// ── How long the window waits before trying the stream again ─────────────
+//
+// A window whose one live stream has failed is a window that looks like a
+// quiet machine, so it keeps trying. The shape of the schedule is the whole of
+// what matters: short enough that a restarting control plane looks like
+// nothing happened, growing, and capped somewhere a person would still call
+// "keeps trying".
+{
+  is(waits(1)[0], FIRST_WAIT_MS, "the first wait is not the shortest one");
+  ok(FIRST_WAIT_MS <= 2000, `a first wait of ${FIRST_WAIT_MS}ms is a visible stall for a restart`);
+
+  const schedule = waits(12);
+  for (let i = 1; i < schedule.length; i += 1) {
+    ok(
+      schedule[i] >= schedule[i - 1],
+      `the wait went backwards at step ${i}: ${schedule[i - 1]} then ${schedule[i]}`,
+    );
+    ok(schedule[i] <= LONGEST_WAIT_MS, `step ${i} waits ${schedule[i]}ms, past the ceiling`);
+  }
+  // It really does grow, rather than being flat and passing the two above.
+  ok(
+    schedule[schedule.length - 1] > schedule[0],
+    `the schedule never grows: ${JSON.stringify(schedule)}`,
+  );
+  // And it really does reach the ceiling, rather than creeping towards one
+  // nothing ever hits.
+  is(
+    schedule[schedule.length - 1],
+    LONGEST_WAIT_MS,
+    `twelve tries do not reach the ceiling: ${JSON.stringify(schedule)}`,
+  );
+  ok(
+    LONGEST_WAIT_MS <= 60_000,
+    `a ceiling of ${LONGEST_WAIT_MS}ms is a window that has given up without saying so`,
+  );
+
+  // A wait that arrived as nonsense — a cleared timer, a restored value from
+  // somewhere — starts over rather than becoming NaN and never firing.
+  is(nextWait(Number.NaN), FIRST_WAIT_MS, "a wait of NaN did not start the schedule over");
+  is(nextWait(0), FIRST_WAIT_MS, "a wait of nought did not start the schedule over");
+  is(nextWait(-5), FIRST_WAIT_MS, "a negative wait did not start the schedule over");
+  is(nextWait(LONGEST_WAIT_MS), LONGEST_WAIT_MS, "the ceiling is not a fixed point");
+}
+
+// ── An offer is only showable when it can be checked ─────────────────────
+//
+// A code proves somebody typed what you read out; only the fingerprint proves
+// the machine at the other end is the one you meant. A screen showing a code
+// with an empty space where the words belong asks somebody to compare a blank,
+// and a blank reads as "nothing to check" — which is the one conclusion that
+// must never be available on that screen.
+{
+  ok(
+    offerIsCheckable({ code: "7DAH-7HKC", words: ["prairie", "toaster"] }),
+    "an offer with a code and words was called uncheckable",
+  );
+  ok(!offerIsCheckable({ code: "7DAH-7HKC", words: [] }), "a code with no words is showable");
+  ok(!offerIsCheckable({ code: "7DAH-7HKC" }), "a code with no words field at all is showable");
+  ok(!offerIsCheckable({ words: ["prairie"] }), "words with no code are a showable offer");
+  ok(!offerIsCheckable({}), "an empty offer is showable");
+  // A words field that arrived as something other than a list does not become
+  // one: `undefined.length` on a screen is a blank page, and a string's length
+  // is the number of letters in it.
+  ok(
+    !offerIsCheckable({ code: "7DAH-7HKC", words: "prairie toaster" }),
+    "a words field that is not a list was accepted as one",
+  );
+}
+
 // A floor: a run that asserted nothing passes everything.
 if (checked < 80) {
   console.error(`  ✗ logic: only ${checked} assertion(s) ran, which is not this file`);
@@ -490,6 +667,7 @@ console.log(
   `  ✓ logic: ${checked} assertions — how long ago at every boundary, what a pairing admits, the theme ` +
     `the first paint chooses, the class join every component is built on, a CSS duration read in the right ` +
     `unit, where a picture sits in all three fittings and that its corners map back to its own ` +
-    `coordinates in each, what a person has to go and do on each of five platforms, and ${whole.length} ` +
-    `records read identically whole and one byte at a time`,
+    `coordinates in each, what a person has to go and do on each of five platforms, what to do about ` +
+    `every reason the protocol declares, and ${whole.length} records read identically whole and one ` +
+    `byte at a time`,
 );

@@ -56,6 +56,7 @@ function Items({ actions }: { actions: readonly MenuAction[] }) {
             <DM.Item
               disabled={a.disabled ?? false}
               onSelect={a.onSelect}
+              data-focus-exempt="a menu moves a highlight rather than focus; data-[highlighted] is the indicator"
               className={cn(
                 "flex h-8 cursor-pointer select-none items-center gap-2.5 rounded-sm px-2 text-sm outline-none",
                 "data-[highlighted]:bg-surface-1",
@@ -96,7 +97,7 @@ export function RowMenu({ actions, label, className }: RowMenuProps) {
         data-tap-min=""
         onClick={(e) => e.stopPropagation()}
         className={cn(
-          "shrink-0 cursor-pointer rounded-sm p-1.5 text-text-3 outline-none",
+          "shrink-0 cursor-pointer rounded-sm p-1.5 text-text-3",
           "transition-colors duration-[var(--dur-fast)] hover:text-text data-[state=open]:text-text",
           className,
         )}

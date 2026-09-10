@@ -20,7 +20,7 @@ import { Callout } from "@/components/callout";
 import { PermissionChecklist } from "@/screens/PermissionChecklist";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/card";
 import { CommandPalette, useCommandKey } from "@/components/command-palette";
-import { Dialog, DialogContent, DialogFooter, DialogTrigger } from "@/components/dialog";
+import { Dialog, DialogClose, DialogContent, DialogFooter, DialogTrigger } from "@/components/dialog";
 import { DurationInput, NumberInput, ScheduleInput, type Schedule } from "@/components/form-controls";
 import { Field, Input, Textarea } from "@/components/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/select";
@@ -31,6 +31,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/tabs";
 import { Segmented } from "@/components/theme-toggle";
 import { TimeAgo } from "@/components/time-ago";
 import { adviceFor, useToast } from "@/components/toast";
+import { ADVICE } from "@/api/reasons";
 import { Tooltip } from "@/components/tooltip";
 import { Demo, Section, Sub } from "./ui";
 
@@ -38,7 +39,23 @@ const variants: ButtonVariant[] = ["primary", "secondary", "ghost", "danger"];
 const sizes: ButtonSize[] = ["sm", "md", "lg"];
 const tones: Tone[] = ["neutral", "ok", "warn", "danger", "info", "signal"];
 const tiers: Tier[] = ["lan", "private", "direct", "relayed"];
-const reasonCodes = [100, 201, 304, 404, 406, 503] as const;
+/*
+  One button per range, and every code in the list below.
+
+  The buttons are a demonstration — thirty-six of them firing toasts is not a
+  demonstration of anything — and they are chosen to cover the five ranges plus
+  an ordinary ending, which is the one that used to have no sentence at all.
+
+  The *list* is every code the page has an answer for, read from the table
+  rather than written down here. That is what puts all thirty-six sentences in
+  front of the words, ink and overflow gates: a sentence nobody renders is a
+  sentence nobody checks, and these are the words somebody reads at the moment
+  something has gone wrong.
+*/
+const reasonCodes = [2, 100, 201, 304, 404, 503] as const;
+const everyReason = Object.keys(ADVICE)
+  .map(Number)
+  .sort((a, b) => a - b);
 
 const sessions = [
   { who: "workstation", when: Date.now() - 4 * 60_000, what: "Screen, mouse and keyboard", moved: "2 files, 14 MB" },
@@ -488,7 +505,9 @@ export function ComponentsSection() {
             <DialogTrigger asChild><Button variant="danger"><Trash2 aria-hidden size={14} /> Forget device</Button></DialogTrigger>
             <DialogContent title="Forget workstation?" description="It will have to be paired again before it can connect. Nothing on the other machine changes.">
               <DialogFooter>
-                <Button>Keep</Button>
+                <DialogClose asChild>
+                  <Button>Keep</Button>
+                </DialogClose>
                 <Button variant="danger">Forget</Button>
               </DialogFooter>
             </DialogContent>
@@ -521,7 +540,7 @@ export function ComponentsSection() {
             ))}
           </div>
           <ul className="grid gap-1 text-sm sm:grid-cols-2">
-            {reasonCodes.map((c) => {
+            {everyReason.map((c) => {
               const a = adviceFor({ code: c });
               return (
                 <li key={c} className="flex gap-3">

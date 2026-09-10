@@ -1,4 +1,18 @@
-import type { DevicesAnswer, Happening, Health, HostState, Identity, Invitation, Reachable, Status } from "./types";
+import type {
+  Device,
+  DevicesAnswer,
+  Happening,
+  Health,
+  HostState,
+  Identity,
+  Invitation,
+  LockAfter,
+  Reachable,
+  SettingsAnswer,
+  Status,
+} from "./types";
+import { FIRST_WAIT_MS, nextWait } from "./retry";
+import { LOCK_DEFAULT } from "./types";
 import type { Permission } from "./permissions";
 
 /**
@@ -108,6 +122,79 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ when }),
     }),
+  /**
+   * What a session with this device leaves the screen as.
+   *
+   * One of the three choices, or `"default"` to take the per-device answer
+   * off so the host's own setting decides again. Taking it off has to be as
+   * easy as giving it, or somebody who changes their mind edits a file.
+   */
+  lockAfter: (fingerprint: string, after: LockAfter | typeof LOCK_DEFAULT) =>
+    call<DevicesAnswer>(`/devices/${fingerprint}/lock-after`, {
+      method: "POST",
+      body: JSON.stringify({ after }),
+    }),
+  /**
+   * Send a magic packet to a device asleep on this network.
+   *
+   * **Answers when the packet has gone out, not when anything woke.** Nothing
+   * replies to a magic packet — there is no way to tell a machine that woke
+   * from one that never heard — so whatever says so to a person has to say
+   * that much. It takes no destination: the broadcast address is the only
+   * place the control plane will send one.
+   */
+  wake: (fingerprint: string) => call<DevicesAnswer>(`/devices/${fingerprint}/wake`, { method: "POST" }),
+
+  /*
+    Three actions on a paired host, each behind a permission that host granted
+    this one.
+
+    **Whether they are allowed is decided at the other end**, and this side
+    keeps no copy of somebody else's trust store — so these are offered and
+    the host's own answer is what comes back. Its sentence names the permission
+    that is missing, which is the thing to do something about.
+
+    Nothing answers a restart: the machine is gone before it could, so a
+    request that ends without a reply is the ordinary case rather than a
+    failure.
+  */
+  lockHost: (fingerprint: string) => call<Device>(`/devices/${fingerprint}/lock`, { method: "POST" }),
+  logOffHost: (fingerprint: string) => call<Device>(`/devices/${fingerprint}/logoff`, { method: "POST" }),
+  restartHost: (fingerprint: string) => call<Device>(`/devices/${fingerprint}/reboot`, { method: "POST" }),
+
+  /**
+   * Put a device in a named group, or take it out of one.
+   *
+   * **A group is an address, not a grant.** `esper grant --group ops control`
+   * resolves the members and writes the permission onto each, so membership
+   * by itself gives a device nothing — what it changes is who a later command
+   * is about.
+   */
+  group: (fingerprint: string, name: string, remove = false) =>
+    call<Device>(`/devices/${fingerprint}/groups`, {
+      method: "POST",
+      body: JSON.stringify({ name, remove }),
+    }),
+
+  /**
+   * Every setting, what it is now, and where that came from.
+   *
+   * The whole registry rather than the values: what control a setting wants
+   * depends on its kind, and the bounds and the choices travel with it so the
+   * page never declares them a second time.
+   */
+  settings: () => call<SettingsAnswer>("/config"),
+  /**
+   * Change one setting, or take it back out of the file.
+   *
+   * `value` is what the file would write, which is the `raw` the answer gives
+   * — so what came back can be sent back. Unsetting is its own field because
+   * an empty string is a real value for the settings whose kind is text.
+   */
+  setSetting: (key: string, value: string) =>
+    call<SettingsAnswer>("/config", { method: "POST", body: JSON.stringify({ key, value }) }),
+  unsetSetting: (key: string) =>
+    call<SettingsAnswer>("/config", { method: "POST", body: JSON.stringify({ key, unset: true }) }),
 
   // Pairing, both directions. An offer waits, so it has a lifetime: started,
   // polled, and either paired, lapsed or cancelled.
@@ -131,35 +218,98 @@ export const apiBase = BASE;
 /**
  * The one event stream, shared by everything that wants it.
  *
- * **One, deliberately.** Every component that cared used to open its own,
- * and a stream never closes: with a handful of them the browser's per-origin
- * connection limit is reached and every *other* request queues behind them
- * for ever. Found by putting seven screens on one page and watching their
- * device lists load nothing — which is exactly the shape of bug a gallery of
- * live screens is for. The stream is a broadcast anyway, so one reader and a
- * list of listeners is also the smaller thing.
+ * **One, deliberately.** A stream never closes, so a component that opens its
+ * own holds a connection for the life of the page: with a handful of them the
+ * browser's per-origin limit is reached and every *other* request queues
+ * behind them for ever — seven screens on one page and not one device list
+ * loads. The stream is a broadcast anyway, so one reader and a list of
+ * listeners is also the smaller thing.
  */
 const listeners = new Set<(h: Happening) => void>();
 let openStream: (() => void) | null = null;
 
+/**
+ * Whether the live stream is carrying anything, and why not when it is not.
+ *
+ * **Because a window with no stream looks exactly like a quiet machine.**
+ * Every screen here also asks outright — the device list, the record, the
+ * status — so a failed stream costs nothing but *liveness*, and nothing on
+ * screen would say the liveness had gone. A person watching an Activity
+ * screen that had silently stopped updating would read it as nothing having
+ * happened.
+ */
+const watchers = new Set<(trouble: Error | null) => void>();
+let streamTrouble: Error | null = null;
+
+/** How long to wait before trying the stream again. See `./retry`. */
+let nextRetryMs = FIRST_WAIT_MS;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function announce(trouble: Error | null): void {
+  streamTrouble = trouble;
+  for (const watch of watchers) watch(trouble);
+}
+
+/**
+ * Watch whether the live stream is up. Answers immediately with what it is
+ * now, so a screen that mounts while the stream is already down says so.
+ */
+export function onStreamTrouble(watch: (trouble: Error | null) => void): () => void {
+  watchers.add(watch);
+  watch(streamTrouble);
+  return () => {
+    watchers.delete(watch);
+  };
+}
+
+function stopRetrying(): void {
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+  nextRetryMs = FIRST_WAIT_MS;
+}
+
+function beginStream(): void {
+  openStream = streamSessions(
+    (h) => listeners.forEach((l) => l(h)),
+    // Open again: whatever it was is over, and the wait starts from the
+    // shortest one next time.
+    () => {
+      nextRetryMs = FIRST_WAIT_MS;
+      if (streamTrouble) announce(null);
+    },
+    (cause) => {
+      openStream = null;
+      announce(cause);
+      // **Tried again, and with a wait that grows.** A control plane that is
+      // restarting comes back in a second; one refusing because too many
+      // streams are open comes back when something closes one — and asking
+      // it four times a second in the meantime would be this window making
+      // that worse.
+      if (listeners.size === 0) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        if (listeners.size > 0 && !openStream) beginStream();
+      }, nextRetryMs);
+      nextRetryMs = nextWait(nextRetryMs);
+    },
+  );
+}
+
 export function onHappening(listener: (h: Happening) => void): () => void {
   listeners.add(listener);
-  if (!openStream) {
-    openStream = streamSessions(
-      (h) => listeners.forEach((l) => l(h)),
-      // A stream that ends is not reported to every listener: they each have
-      // their own request that will fail with its own sentence. This only
-      // has to let the next subscriber try again.
-      () => {
-        openStream = null;
-      },
-    );
-  }
+  if (!openStream && retryTimer === null) beginStream();
   return () => {
     listeners.delete(listener);
-    if (listeners.size === 0 && openStream) {
-      openStream();
-      openStream = null;
+    if (listeners.size === 0) {
+      stopRetrying();
+      if (openStream) {
+        openStream();
+        openStream = null;
+      }
+      // Nobody is listening, so there is no trouble to report.
+      if (streamTrouble) announce(null);
     }
   };
 }
@@ -175,15 +325,27 @@ export function onHappening(listener: (h: Happening) => void): () => void {
  * **A notification, not a replay** — the API sends nothing for what happened
  * before the stream opened, because `/sessions` is the record.
  */
-function streamSessions(deliver: (h: Happening) => void, onTrouble?: (e: Error) => void): () => void {
+function streamSessions(
+  deliver: (h: Happening) => void,
+  onOpen?: () => void,
+  onTrouble?: (e: Error) => void,
+): () => void {
   const stop = new AbortController();
 
   void (async () => {
     try {
       const response = await fetch(`${BASE}/events`, { signal: stop.signal });
       if (!response.ok || !response.body) {
-        throw new ApiError(response.status, `The event stream answered ${response.status}.`);
+        // The reason, not only the number: the control plane refuses a stream
+        // past its ceiling with a sentence saying what to do about it, and
+        // "503" alone sends nobody anywhere.
+        const said = response.ok ? "" : await response.text().catch(() => "");
+        throw new ApiError(
+          response.status,
+          said.trim() || `The event stream answered ${response.status}.`,
+        );
       }
+      onOpen?.();
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";

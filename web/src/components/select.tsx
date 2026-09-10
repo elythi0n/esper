@@ -55,6 +55,7 @@ export function SelectContent({ className, children, ...props }: RS.SelectConten
 export function SelectItem({ className, children, ...props }: RS.SelectItemProps & { children: ReactNode }) {
   return (
     <RS.Item
+      data-focus-exempt="a listbox moves a highlight rather than focus; data-[highlighted] is the indicator"
       className={cn(
         // 32px rows. The check slot is 20px wide and always present, so a
         // selected label sits exactly where an unselected one did.

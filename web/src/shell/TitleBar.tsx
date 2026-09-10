@@ -67,7 +67,7 @@ function MenuOf({ menu }: { menu: Menu }) {
         */
         data-tap-exempt="a title bar is 32px because the OS draws one at 32px"
         className={cn(
-          "h-full rounded-sm px-2 text-xs text-text-2 no-drag outline-none",
+          "h-full rounded-sm px-2 text-xs text-text-2 no-drag",
           "transition-colors duration-[var(--dur-fast)]",
           "hover:bg-surface-2 hover:text-text data-[state=open]:bg-surface-2 data-[state=open]:text-text",
         )}
@@ -91,6 +91,7 @@ function MenuOf({ menu }: { menu: Menu }) {
                 key={item.label}
                 disabled={item.disabled ?? false}
                 onSelect={() => item.onSelect?.()}
+                data-focus-exempt="a menu moves a highlight rather than focus; data-[highlighted] is the indicator"
                 className={cn(
                   "flex h-8 cursor-pointer select-none items-center gap-4 rounded-sm px-2 text-sm outline-none",
                   "text-text data-[highlighted]:bg-surface-1",

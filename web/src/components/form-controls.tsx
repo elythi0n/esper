@@ -55,6 +55,15 @@ export interface DurationInputProps {
   disabled?: boolean | undefined;
   className?: string | undefined;
   "aria-describedby"?: string | undefined;
+  /**
+   * A name for the number, where nothing else gives it one.
+   *
+   * `id` is the usual way: a `Field` puts a label beside it and the two are
+   * tied together. A caller that draws its own label — a settings row, where
+   * the name of the setting is already on screen — has no such tie, and the
+   * number then reaches a screen reader as "spinbutton" and nothing else.
+   */
+  "aria-label"?: string | undefined;
 }
 
 export function DurationInput({ value, onChange, id, disabled, className, ...aria }: DurationInputProps) {

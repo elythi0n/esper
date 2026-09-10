@@ -2,7 +2,7 @@ import { Plus, X } from "lucide-react";
 import { motion } from "motion/react";
 import { useState } from "react";
 import { Button } from "@/components/button";
-import { Dialog, DialogContent, DialogFooter, DialogTrigger } from "@/components/dialog";
+import { Dialog, DialogClose, DialogContent, DialogFooter, DialogTrigger } from "@/components/dialog";
 import { AnimatePresence, Arrive, layoutTiming } from "@/components/motion";
 import { MotionToggle, Segmented } from "@/components/theme-toggle";
 import { useToast } from "@/components/toast";
@@ -215,7 +215,9 @@ export function MotionSection() {
                 <DialogTrigger asChild><Button>Open a dialog</Button></DialogTrigger>
                 <DialogContent title="Forget this device?" description="It will have to be paired again before it can connect. Nothing on the other machine changes.">
                   <DialogFooter>
-                    <Button>Keep</Button>
+                    <DialogClose asChild>
+                      <Button>Keep</Button>
+                    </DialogClose>
                     <Button variant="danger">Forget</Button>
                   </DialogFooter>
                 </DialogContent>

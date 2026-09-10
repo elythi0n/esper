@@ -56,6 +56,8 @@ function* files(dir) {
   }
 }
 
+let focusSuppressions = 0;
+
 const breakpoints = [...readFileSync(join(src, "tokens/semantic.css"), "utf8").matchAll(/--breakpoint-\w+:\s*(\d+)px/g)]
   .map((m) => m[1]);
 if (breakpoints.length < 4) {
@@ -249,6 +251,39 @@ for (const file of files(src)) {
     }
   }
 
+  /*
+    6. Every `outline-none` is paired with a reason.
+
+       `outline-none` is a Tailwind utility and the focus ring is a rule in
+       `@layer base`, so the utility wins and the ring is gone. Seventeen
+       places had it, copied out of a component library's examples, and 58 of
+       355 controls painted no focus ring at all — which no screenshot shows,
+       because a control with no ring looks exactly like a control nobody is
+       focusing.
+
+       A few of them are right: a dialog panel is not a control, and a menu
+       moves a highlight rather than moving focus. Those say so in the markup
+       with `data-focus-exempt`, which `check-a11y` reads back out of the live
+       page — so the reason is one thing, written once, checked twice.
+
+       Counted per file rather than matched per element, because the class
+       string and the attribute are different lines of the same JSX and
+       pairing them by parsing would be parsing JSX. An unpaired suppression
+       is the accident; putting both on the wrong two elements is a lie, and
+       `check-a11y` measures the consequence of that one.
+  */
+  if (!isCss) {
+    const suppressed = (text.match(/\boutline-none\b/g) ?? []).length;
+    const excused = (text.match(/\bdata-focus-exempt\b/g) ?? []).length;
+    focusSuppressions += suppressed;
+    if (suppressed > excused) {
+      findings.push(
+        `${rel}: ${suppressed} outline-none and ${excused} data-focus-exempt — ` +
+          "every suppression of the focus ring says in the markup why focus is shown another way",
+      );
+    }
+  }
+
   // 5. Keyframes that animate layout.
   //
   //    Whole-file rather than per-line: a keyframe block spans lines and
@@ -288,5 +323,6 @@ if (groupsMoving < 5) {
 }
 console.log(
   `  ✓ discipline: ${scanned} files, no raw colour, no ad-hoc z-index, no layout keyframes, breakpoints from tokens, ` +
-    `and every duration a token — including ${groupsMoving} of ${groupsRead} className expressions that move`,
+    `and every duration a token — including ${groupsMoving} of ${groupsRead} className expressions that move, ` +
+    `and each of ${focusSuppressions} outline-none paired with the reason focus is shown another way`,
 );

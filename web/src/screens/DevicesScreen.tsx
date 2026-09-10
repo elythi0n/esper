@@ -6,9 +6,11 @@ import { PERMISSIONS, type Permission } from "@/api/permissions";
 import { heldFrom, PermissionGrid } from "@/components/permission-grid";
 import { asWhen, asWindow, readSchedule, type Window } from "@/api/schedule";
 import { ScheduleInput } from "@/components/form-controls";
-import { pairingState, type Device } from "@/api/types";
+import { Input } from "@/components/input";
+import { LOCK_AFTER, LOCK_AFTER_LABEL, LOCK_DEFAULT, pairingState, type Device, type LockAfter } from "@/api/types";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/select";
 import { Button } from "@/components/button";
-import { Dialog, DialogContent, DialogFooter, DialogTrigger } from "@/components/dialog";
+import { Dialog, DialogClose, DialogContent, DialogFooter, DialogTrigger } from "@/components/dialog";
 import { CopyField } from "@/components/copy-field";
 import { DeviceRow } from "@/components/device-row";
 import { Identicon } from "@/components/identicon";
@@ -93,11 +95,116 @@ function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onC
     }
   };
 
+  /*
+    What a session with this device leaves the screen as.
+
+    Said back as a sentence rather than as the word that was sent: "never" on
+    its own reads as a refusal, and what somebody has just chosen is that the
+    screen is left alone.
+  */
+  const setLockAfter = async (chosen: string) => {
+    const after = chosen === LOCK_DEFAULT ? LOCK_DEFAULT : (chosen as LockAfter);
+    setBusy(true);
+    try {
+      await api.lockAfter(device.fingerprint.hex, after);
+      toast.show({
+        title:
+          after === LOCK_DEFAULT
+            ? `A session with ${device.name} leaves the screen as this machine is set to`
+            : after === "never"
+              ? `A session with ${device.name} leaves the screen as it is`
+              : after === "always"
+                ? `A session with ${device.name} always locks the screen`
+                : `A session with ${device.name} locks the screen if nobody was here`,
+        tone: "ok",
+      });
+      onChanged();
+    } catch (cause) {
+      toast.show({ title: cause instanceof Error ? cause.message : String(cause), tone: "warn" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const keep = async () => {
     setBusy(true);
     try {
       await api.keep(device.fingerprint.hex);
       toast.show({ title: `${device.name} stays paired`, tone: "ok" });
+      onChanged();
+    } catch (cause) {
+      toast.show({ title: cause instanceof Error ? cause.message : String(cause), tone: "warn" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /*
+    Wake it, if this machine has learned its hardware address.
+
+    **What is said back is that the packet went out.** Nothing answers a magic
+    packet — there is no reply to wait for and no way to tell a machine that
+    woke from one that never heard — so a message saying "it is waking up"
+    would be a message claiming something nobody knows. It says what happened
+    and what to do next.
+  */
+  const wake = async () => {
+    setBusy(true);
+    try {
+      await api.wake(device.fingerprint.hex);
+      toast.show({
+        title: `A wake-up packet went out to ${device.name}`,
+        description: "Nothing answers one, so give it a moment and see whether it turns up on the network.",
+        tone: "ok",
+      });
+      onChanged();
+    } catch (cause) {
+      toast.show({ title: cause instanceof Error ? cause.message : String(cause), tone: "warn" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /*
+    One helper for the three, because they differ only in the verb and the
+    sentence. Each says what happened rather than what was asked for: a lock
+    that the far host refused is not a lock, and the host's own words are what
+    name the permission that is missing.
+  */
+  const reachOut = async (
+    act: (fingerprint: string) => Promise<unknown>,
+    done: string,
+  ) => {
+    setBusy(true);
+    try {
+      await act(device.fingerprint.hex);
+      toast.show({ title: done, tone: "ok" });
+      onChanged();
+    } catch (cause) {
+      toast.show({ title: cause instanceof Error ? cause.message : String(cause), tone: "warn" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const lockThere = () => void reachOut(api.lockHost, `${device.name}'s screen is locked`);
+  const logOffThere = () => void reachOut(api.logOffHost, `${device.name} was logged off`);
+  const restartThere = () =>
+    void reachOut(
+      api.restartHost,
+      // Not "it restarted": nothing answers a restart, and a window that
+      // claimed it did would be claiming something nobody knows.
+      `${device.name} was asked to restart. Nothing answers one, so watch for it coming back.`,
+    );
+
+  const joinGroup = async (name: string, remove: boolean) => {
+    setBusy(true);
+    try {
+      await api.group(device.fingerprint.hex, name, remove);
+      toast.show({
+        title: remove ? `${device.name} is out of ${name}` : `${device.name} is in ${name}`,
+        tone: "ok",
+      });
       onChanged();
     } catch (cause) {
       toast.show({ title: cause instanceof Error ? cause.message : String(cause), tone: "warn" });
@@ -203,6 +310,35 @@ function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onC
               <ScheduleInput value={asWindow(device.unattended_when)} onChange={setWhen} disabled={busy} />
             </div>
           )}
+
+          {/*
+            And what a session with it leaves this machine's screen as.
+
+            The host has one setting for everything, in `esper config`. This is
+            the per-device answer for the machine that setting is wrong about —
+            a laptop connecting to its owner's own desktop should not lock it
+            under them. The engine has had the verb since the setting existed
+            and nothing reached it, so the only way to say so was a terminal.
+
+            "Follow this machine" is a real choice and not the absence of one:
+            taking a per-device answer off has to be as easy as giving it.
+          */}
+          <div data-lock-after="" className="flex flex-col gap-2 pt-1">
+            <Key>After a session with it</Key>
+            <Select value={device.lock_after ?? LOCK_DEFAULT} onValueChange={setLockAfter} disabled={busy}>
+              <SelectTrigger aria-label="After a session with it">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={LOCK_DEFAULT}>Follow this machine</SelectItem>
+                {LOCK_AFTER.map((a) => (
+                  <SelectItem key={a} value={a}>
+                    {LOCK_AFTER_LABEL[a]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
       </Fact>
 
@@ -228,6 +364,113 @@ function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onC
         </Fact>
       </div>
 
+      {/*
+        Wake it, for a device this machine has seen on the network before.
+
+        Offered only when there is a hardware address to send to, because that
+        is the whole of what makes it possible — a magic packet is six 0xFF
+        bytes and the target's address sixteen times, and there is nothing to
+        send without one. A button that was always there and failed for most
+        devices would be a button that teaches people it does not work.
+
+        The engine has had `wake` since Phase 12 and only a terminal could
+        send one, so a machine asleep on the desk was one the window could
+        list and not reach.
+      */}
+      {device.last_mac && (
+        <div data-wake="" className="flex items-center justify-between gap-4 pt-2">
+          <span className="min-w-0 text-xs text-text-3">
+            Asleep on this network? Nothing answers a wake-up packet, so there is nothing to wait for.
+          </span>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={wake} className="shrink-0">
+            Wake it
+          </Button>
+        </div>
+      )}
+
+      {/*
+        Which groups this device is in.
+
+        A group is an address rather than a grant: `esper grant --group ops
+        control` resolves the members and writes the permission onto each, so
+        being in one gives a device nothing by itself. What it buys is a way
+        to say "these machines" once instead of eight times.
+
+        Shown even when empty, because a panel that hid the row would make
+        "this device is in no groups" and "this build has no groups" look the
+        same.
+      */}
+      <div data-groups="" className="flex flex-col gap-2 pt-4">
+        <Key>Groups</Key>
+        <div className="flex flex-wrap items-center gap-2">
+          {(device.groups ?? []).map((name) => (
+            <span
+              key={name}
+              className="flex items-center gap-1 rounded-sm border border-border bg-surface-1 py-0.5 pl-2 pr-1 text-xs text-text"
+            >
+              {name}
+              <button
+                type="button"
+                aria-label={`Take ${device.name} out of ${name}`}
+                disabled={busy}
+                data-tap-min=""
+                onClick={() => void joinGroup(name, true)}
+                className="rounded-sm p-0.5 text-text-3 transition-[color] duration-[var(--dur-fast)] hover:text-danger disabled:text-text-disabled"
+              >
+                <X aria-hidden size={12} />
+              </button>
+            </span>
+          ))}
+          {(device.groups ?? []).length === 0 && <span className="text-xs text-text-3">None</span>}
+          <NewGroup disabled={busy} onAdd={(name) => void joinGroup(name, false)} />
+        </div>
+      </div>
+
+      {/*
+        Three things this machine can do *to* that one.
+
+        **Whether any of them is allowed is decided at the other end.** They
+        are permissions that host granted this one, and this side keeps no
+        copy of somebody else's trust store — so they are offered and the
+        host's own answer is what is shown. Its sentence names the permission
+        that is missing, which is the thing to do something about.
+
+        Offered at all because the window could list a machine and not lock
+        it: `esper lock` has existed since the permission did, and a terminal
+        was the only thing that could send one.
+
+        The two that outlive the session ask first. Locking a screen does not:
+        the worst it costs is typing a password, and a confirmation for that
+        is a dialog people learn to click through.
+      */}
+      {device.admits_a_session && (
+        <div data-reaching="" className="flex flex-col gap-2 pt-4">
+          <Key>On that machine</Key>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="ghost" size="sm" disabled={busy} onClick={lockThere}>
+              Lock its screen
+            </Button>
+            <AskFirst
+              label="Log it off"
+              title={`Log ${device.name} off?`}
+              description="Anything open there is closed, and anybody using it is signed out. It is not undone from here."
+              confirm="Log it off"
+              disabled={busy}
+              onConfirm={logOffThere}
+            />
+            <AskFirst
+              label="Restart it"
+              title={`Restart ${device.name}?`}
+              description="The machine goes away and comes back. Nothing answers a restart, so there is no reply to wait for — and whether it returns depends on that machine, not this one."
+              confirm="Restart it"
+              danger
+              disabled={busy}
+              onConfirm={restartThere}
+            />
+          </div>
+        </div>
+      )}
+
       <div className="mt-auto pt-4">
         <Dialog>
           <DialogTrigger asChild>
@@ -240,7 +483,9 @@ function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onC
             description="It has to be paired again before it can connect. Nothing on that machine changes."
           >
             <DialogFooter>
-              <Button>Keep</Button>
+              <DialogClose asChild>
+                <Button>Keep</Button>
+              </DialogClose>
               <Button variant="danger" disabled={busy} onClick={forget}>
                 Forget
               </Button>
@@ -268,6 +513,108 @@ function Detail({ device, onClose, onChanged, onConnect }: { device: Device; onC
  * That is a narrow promise and it is the true one. A button labelled "Undo"
  * that silently did less than the word implies would be worse than no button.
  */
+/**
+ * A small field for a group's name, folded away until it is wanted.
+ *
+ * Not a permanent text box: a device is in no groups on most machines, and a
+ * row with an empty field in it reads as something half-finished. The button
+ * is what says a group can be added; the field appears when somebody means it.
+ */
+function NewGroup({ disabled, onAdd }: { disabled: boolean; onAdd: (name: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  if (!open) {
+    return (
+      <Button variant="ghost" size="sm" disabled={disabled} onClick={() => setOpen(true)}>
+        Add to a group
+      </Button>
+    );
+  }
+
+  const send = () => {
+    const name = draft.trim();
+    setOpen(false);
+    setDraft("");
+    if (name) onAdd(name);
+  };
+
+  return (
+    <Input
+      autoFocus
+      value={draft}
+      disabled={disabled}
+      placeholder="Group name"
+      aria-label="Group name"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={send}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") send();
+        if (e.key === "Escape") {
+          setOpen(false);
+          setDraft("");
+        }
+      }}
+      className="w-40"
+    />
+  );
+}
+
+/**
+ * A button that asks before it does something that outlives the session.
+ *
+ * The same shape as "Forget this device" above, which is the only other thing
+ * on this screen that cannot be undone from here — one dialog component, one
+ * place the wording lives, and a reader who has seen one has seen both.
+ */
+function AskFirst({
+  label,
+  title,
+  description,
+  confirm,
+  danger,
+  disabled,
+  onConfirm,
+}: {
+  label: string;
+  title: string;
+  description: string;
+  confirm: string;
+  danger?: boolean;
+  disabled?: boolean;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <Button variant="ghost" size="sm" disabled={disabled} className={danger ? "hover:text-danger" : undefined}>
+          {label}
+        </Button>
+      </DialogTrigger>
+      <DialogContent title={title} description={description}>
+        <DialogFooter>
+          {/*
+            **Both wrapped in `DialogClose`.** A button inside a dialog is an
+            ordinary button: it runs its handler and the dialog stays exactly
+            where it was. So the one that means "no" did nothing at all — it
+            looked like a cancel, and only the X in the corner and Escape
+            actually worked — and the one that means "yes" left the dialog
+            sitting over the thing it had just done.
+          */}
+          <DialogClose asChild>
+            <Button>Leave it</Button>
+          </DialogClose>
+          <DialogClose asChild>
+            <Button variant={danger ? "danger" : "primary"} disabled={disabled} onClick={onConfirm}>
+              {confirm}
+            </Button>
+          </DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function actionsFor({
   device,
   onConnect,
@@ -301,10 +648,13 @@ export function DevicesScreen({
   onConnect,
   onPair,
   onSetUp,
+  initial,
 }: {
   onConnect: (d: Device) => void;
   onPair: () => void;
   onSetUp: () => void;
+  /** A device whose panel is open from the start, by its fingerprint's hex. */
+  initial?: string | undefined;
 }) {
   const { data, error, loading, reload } = useDevices();
   // What this machine can do, for the checklist below — asked here rather
@@ -384,7 +734,17 @@ export function DevicesScreen({
     },
     [reload, toast],
   );
-  const [chosen, setChosen] = useState<string | null>(null);
+  /*
+    Which device's panel is open.
+
+    `initial` opens one without a click. It is what the design gallery uses to
+    render the panel at all — every control in it (the permission grid, the
+    schedule, what a session leaves the screen as, wake, lock, log off,
+    restart, groups) is behind a selection, so a gallery that rendered only
+    the list was checking the densest control surface in the product not at
+    all.
+  */
+  const [chosen, setChosen] = useState<string | null>(initial ?? null);
 
   const devices = useMemo(
     () => [...(data ?? [])].sort((a, b) => (b.last_seen ?? 0) - (a.last_seen ?? 0)),

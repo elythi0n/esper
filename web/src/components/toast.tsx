@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import type { CalloutTone } from "./callout";
+import { adviceFor as adviceForCode, isOrdinary } from "@/api/reasons";
 
 /**
  * Toasts, and the protocol's reasons rendered as sentences a person can act on.
@@ -21,25 +22,18 @@ export interface Reason {
   detail?: string;
 }
 
-/** What a person should do about a reason, by range and by the codes that need their own sentence. */
+/**
+ * What a person should do about a reason.
+ *
+ * The table lives in `api/reasons.ts` and not here, for two reasons. It is
+ * data — one line per code, no React in it — so a gate running under node can
+ * import it and hold it to the protocol's own list, which is what stops
+ * thirty-six codes sharing four sentences again. And a sentence that says what
+ * to do is not a property of a toast: a callout, a screen and a log line want
+ * the same words for the same code.
+ */
 export function adviceFor(reason: Reason): { title: string; tone: CalloutTone } {
-  const known: Record<number, string> = {
-    100: "Update Esper on one of the two machines — they speak different protocol versions.",
-    304: "Nobody at the host allowed the session. Ask them, or have them grant unattended access.",
-    404: "The host could not show that it is being watched, so it stopped. Check its display.",
-    406: "That machine is already in a session. Try again when it is free.",
-  };
-  const sentence = known[reason.code];
-  if (sentence) return { title: sentence, tone: reason.code >= 400 ? "warn" : "info" };
-  const range = Math.floor(reason.code / 100);
-  switch (range) {
-    case 1: return { title: "The two machines could not agree on how to talk. Update both.", tone: "danger" };
-    case 2: return { title: "This device is not paired with that machine. Pair it first.", tone: "warn" };
-    case 3: return { title: "This device is not allowed to do that. Ask for the permission at the host.", tone: "warn" };
-    case 4: return { title: "That machine cannot do this right now. Its own output says why.", tone: "info" };
-    case 5: return { title: "The connection was lost. Esper will reconnect if the machine comes back.", tone: "warn" };
-    default: return { title: "Something the host reported has no sentence yet. The code is below.", tone: "info" };
-  }
+  return adviceForCode(reason.code);
 }
 
 export interface ToastMessage {
@@ -93,7 +87,17 @@ export function Toaster({ children }: { children: ReactNode }) {
   const reason = useCallback(
     (r: Reason) => {
       const { title, tone } = adviceFor(r);
-      show({ title, tone, description: `${r.detail ?? ""}${r.detail ? " " : ""}(${r.code})`.trim() });
+      /*
+        The code, except where there is nothing to look up.
+
+        A session that simply finished is not a fault and has no ticket
+        number: putting "(2)" under "The session ran for as long as it was
+        asked to" makes an ordinary ending look like an error report. The
+        codes that *are* faults keep theirs, because that is what somebody
+        quotes when they ask about one.
+      */
+      const trail = isOrdinary(r.code) ? (r.detail ?? "") : `${r.detail ?? ""} (${r.code})`;
+      show({ title, tone, description: trail.trim() || undefined });
     },
     [show],
   );
@@ -138,7 +142,7 @@ export function Toaster({ children }: { children: ReactNode }) {
           </RTo.Close>
         </RTo.Root>
       ))}
-      <RTo.Viewport className="fixed bottom-4 right-4 z-[var(--z-toast)] flex flex-col gap-2 outline-none" />
+      <RTo.Viewport data-focus-exempt="a toast viewport is a region, not a control" className="fixed bottom-4 right-4 z-[var(--z-toast)] flex flex-col gap-2 outline-none" />
     </RTo.Provider>
   );
 }

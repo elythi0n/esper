@@ -293,8 +293,89 @@ const report = (r: unknown) =>
     // A file may be dropped on the picture: the window reads this property to
     // tell a drop meant for the product from one meant for the webview.
     seen.dropTarget = getComputedStyle(canvas).getPropertyValue("--wails-drop-target").trim();
-    const onItsWay = box.querySelector("[data-transfers]");
+    const onItsWay = box.querySelector("[data-transfers]") as HTMLElement | null;
     seen.transfers = onItsWay ? (onItsWay.textContent ?? "").replace(/\s+/g, " ").trim() : "";
+
+    /*
+      **How far along, not just what.**
+
+      A drop used to be reported as a name and a word — "Sending big.iso" —
+      for as long as the file took, which for a large one is the whole time
+      somebody is looking at it. The window now reads the engine's own figures
+      and the queue behind the readout turns them into a bar, a size and an
+      estimate. The fixture behind this moves, so a page that displayed a
+      total it never updated could not reach a second percentage.
+    */
+    const queueText = () => {
+      const panel = [...document.querySelectorAll('[role="menu"]')]
+        .map((el) => (el.textContent ?? "").replace(/\s+/g, " ").trim())
+        .find((t) => t.includes("still moving") || t.includes("did not finish") || t.includes("arrived"));
+      return panel ?? "";
+    };
+    // A pointer, not a click: the panel hangs from the menu primitive, which
+    // opens on pointerdown — and a probe that only clicked would report the
+    // panel missing on a page where it works for everybody with a mouse.
+    const poke = (el: HTMLElement) => {
+      el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
+      el.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 0, pointerType: "mouse" }));
+      el.click();
+    };
+    if (onItsWay) {
+      poke(onItsWay);
+      for (let waited = 0; waited < 3000 && queueText() === ""; waited += 100) await sleep(100);
+    }
+    /*
+      The sizes, read out of the queue rather than the whole blob compared.
+
+      Comparing the panel's text with itself is not enough: a rate ticking
+      between 390 and 391 KB/s changes the text while the file it is about
+      sits at `0 B of 0 B` — which is what a page that dropped the engine's
+      figures looks like, and it passed. So what is read is the pair of sizes
+      the queue is showing for the file that is moving.
+    */
+    const SIZE = /([\d.]+)\s*(B|KB|MB|GB|TB) of ([\d.]+)\s*(B|KB|MB|GB|TB)/;
+    const SCALE: Record<string, number> = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 };
+    const sizes = (text: string) => {
+      const m = SIZE.exec(text);
+      if (!m) return null;
+      return {
+        sent: Number(m[1]) * (SCALE[m[2] ?? "B"] ?? 1),
+        total: Number(m[3]) * (SCALE[m[4] ?? "B"] ?? 1),
+      };
+    };
+    // The estimate in seconds, so "0s left" cannot pass for an estimate.
+    const secondsLeft = (text: string) => {
+      const m = /(\d+)\s*(s|min) left/.exec(text);
+      if (!m) return null;
+      return Number(m[1]) * (m[2] === "min" ? 60 : 1);
+    };
+
+    const first = queueText();
+    // Two readings apart, because the claim is that the figures move. One
+    // reading cannot tell a live percentage from a fixed one.
+    await sleep(1400);
+    const second = queueText();
+    const wasAt = sizes(first);
+    const isAt = sizes(second);
+    seen.queue = {
+      opened: first !== "",
+      first,
+      second,
+      sizes: [wasAt, isAt],
+      // A size at all: a queue showing "0 B of 0 B" is a queue that was handed
+      // a name and a state and made the rest up.
+      sized: (isAt?.total ?? 0) > 0,
+      moved: wasAt !== null && isAt !== null && isAt.sent > wasAt.sent,
+      // The estimate, which exists only if the page worked out a rate from two
+      // readings of its own — and is an actual duration, not "0s".
+      estimated: (secondsLeft(second) ?? 0) > 0,
+      // A failure is named in the queue as well as summarised.
+      names: /big\.iso/.test(second),
+    };
+    if (onItsWay) {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await sleep(150);
+    }
 
     // The readouts panel, which on a loopback is *not there*: a session with
     // no peer has no round trip, no cost and no path, and a panel of zeroes is

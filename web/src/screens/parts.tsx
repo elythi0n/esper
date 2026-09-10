@@ -22,13 +22,14 @@ export function Figure({
   value,
   unit,
   className,
+  ...rest
 }: {
   value: ReactNode;
   unit?: string | undefined;
   className?: string | undefined;
-}) {
+} & Omit<HTMLAttributes<HTMLSpanElement>, "className">) {
   return (
-    <span className={cn("font-mono tabular-nums text-text [transition:none]", className)}>
+    <span className={cn("font-mono tabular-nums text-text [transition:none]", className)} {...rest}>
       {value}
       {unit && <span className="ml-0.5 text-text-3">{unit}</span>}
     </span>

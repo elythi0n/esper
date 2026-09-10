@@ -1,6 +1,7 @@
 import { Check, MailOpen, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
+import { offerIsCheckable } from "@/api/types";
 import { Button } from "@/components/button";
 import { Field, Input } from "@/components/input";
 import { PairingCode } from "@/components/pairing";
@@ -117,6 +118,23 @@ function Showing({ onDone }: { onDone: () => void }) {
     );
   }
 
+  /*
+    **A code with no fingerprint is not shown at all.**
+
+    The words are the half a code cannot do: a code proves somebody typed what
+    you read out, and only the fingerprint proves the machine at the other end
+    is the one you meant. Showing the code under an empty space where the
+    words belong asks somebody to compare a blank — and a blank reads as
+    "nothing to check", which is the one conclusion that must never be
+    available here.
+
+    The control plane refuses an offer that arrives without them, so this is
+    the second of two locks on the same door. The way out is one button.
+  */
+  if (!offerIsCheckable(offer)) {
+    return <UncheckableOffer onAgain={start} />;
+  }
+
   return (
     <div className="flex flex-col items-start gap-6 py-6">
       {/* Exactly as the engine formats it: this is the string somebody types. */}
@@ -129,6 +147,42 @@ function Showing({ onDone }: { onDone: () => void }) {
 
       <Button variant="ghost" size="sm" onClick={cancel}>
         <X aria-hidden size={14} /> Stop showing
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * A code arrived without the fingerprint that goes with it, so it is not
+ * shown.
+ *
+ * # Why this is its own component
+ *
+ * Because it is a state nothing renders. The gallery draws the real pairing
+ * screen against a machine whose engine answers properly, so the words,
+ * contrast and accessibility gates sweep the code and never this — and this is
+ * the one state on that screen where the wrong design costs somebody a
+ * machine.
+ */
+export function UncheckableOffer({ onAgain }: { onAgain: () => void }) {
+  return (
+    /*
+      A left rule and a paragraph rather than the top-bar `Alarm`: that one
+      holds a sentence that must survive a narrow window and therefore never
+      wraps, which turns two sentences into one unbreakable line six hundred
+      pixels past the edge of a phone. Found by `check-overflow`.
+    */
+    <div className="flex w-full min-w-0 flex-col items-start gap-3 border-l-2 border-danger py-2 pl-4">
+      <p className="max-w-[var(--measure)] text-sm text-text">
+        This machine offered a code without the fingerprint that goes with it, so there is nothing
+        to read aloud and nothing to check.
+      </p>
+      <p className="max-w-[var(--measure)] text-sm leading-relaxed text-text-2">
+        The code is not shown: a code proves that whoever typed it was read it, and only the
+        fingerprint proves the machine at the other end is the one you meant.
+      </p>
+      <Button size="sm" onClick={onAgain}>
+        Show another
       </Button>
     </div>
   );

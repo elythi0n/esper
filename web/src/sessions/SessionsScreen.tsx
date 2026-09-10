@@ -14,6 +14,8 @@ import { kindOf } from "@/components/device-row";
 import { Tooltip } from "@/components/tooltip";
 import { cn } from "@/lib/cn";
 import { Key, shortAgo } from "@/screens/parts";
+import { TimeAgo } from "@/components/time-ago";
+import { shortAgoAt } from "@/lib/ago";
 import { SessionView } from "./SessionView";
 import { SessionTab } from "./SessionTab";
 import { popOutWindow, shellCapabilities } from "./shell";
@@ -109,11 +111,15 @@ function AddSession({ align = "end", group }: { align?: "end" | "start"; group?:
               <RD.Item
                 key={d.fingerprint.hex}
                 onSelect={() => add(d, group)}
+                data-focus-exempt="a menu moves a highlight rather than focus; data-[highlighted] is the indicator"
                 className="flex h-8 cursor-pointer select-none items-center gap-2 rounded-sm px-2 text-sm text-text outline-none data-[highlighted]:bg-surface-1"
               >
                 <Icon aria-hidden size={14} strokeWidth={1.5} className="shrink-0 text-text-3" />
                 <span className="min-w-0 flex-1 truncate">{d.name}</span>
-                <span className="shrink-0 font-mono text-xs tabular-nums text-text-3">{shortAgo(d.last_seen)}</span>
+                {/* Ticking, for the same reason the Devices list does. */}
+                <span className="shrink-0 font-mono text-xs tabular-nums text-text-3">
+                  {d.last_seen === null ? shortAgo(null) : <TimeAgo date={d.last_seen * 1000} format={shortAgoAt} />}
+                </span>
               </RD.Item>
             );
           })}

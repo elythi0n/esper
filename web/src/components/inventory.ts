@@ -10,7 +10,7 @@
  *
  * Tier 1 names a real export and `scripts/check-inventory.mjs` fails the
  * build if it does not resolve, so this list cannot quietly describe a
- * component that was renamed or never written.
+ * component that no longer exists under that name, or never did.
  */
 
 export interface Tier1Entry {
@@ -19,6 +19,22 @@ export interface Tier1Entry {
   /** Module path under `src/`. Checked to exist. */
   from: string;
   what: string;
+  /**
+   * Why this is built and on no screen yet.
+   *
+   * # Why a field and not a note somewhere
+   *
+   * Because "built, and nothing renders it" is the state a design system rots
+   * in: the component is written, reviewed and forgotten, and by the time a
+   * screen wants one somebody writes a second inline, beside the one that was
+   * already there.
+   *
+   * So the gate walks from the screens through the component graph and holds
+   * every Tier 1 entry to one of two things: something renders it, or this
+   * says why not. A reason somebody has to write down is a reason somebody
+   * has to have.
+   */
+  waits?: string;
 }
 
 export const TIER_1: readonly Tier1Entry[] = [
@@ -28,14 +44,14 @@ export const TIER_1: readonly Tier1Entry[] = [
   { name: "SessionChrome", from: "session/chrome.tsx", what: "The session's top bar, which retracts and returns" },
   { name: "VideoSurface", from: "session/chrome.tsx", what: "The remote screen. Never transitions" },
   { name: "RemoteScreen", from: "session/RemoteScreen.tsx", what: "The picture itself: the engine's own encoded frames, decoded in the window and drawn on a canvas — or the command that starts one" },
-  { name: "Presence", from: "session/chrome.tsx", what: "This screen is being watched. Held to a contract, not styled" },
+  { name: "Presence", from: "session/chrome.tsx", what: "This screen is being watched. Held to a contract, not styled", waits: "The host's own indicator, which the engine draws as windows on the host's screen so it survives this window being closed or killed. A copy here would only ever appear on the controller, where it would say the wrong thing about the wrong machine — which it did, once." },
   { name: "ReconnectNotice", from: "session/chrome.tsx", what: "States its state. No pulse, no spinner" },
 
   // ── The product's own ──────────────────────────────────────────────────
   { name: "DeviceRow", from: "components/device-row.tsx", what: "A device as one line: which machine, when it was last used, and one click" },
   { name: "TierBadge", from: "components/badge.tsx", what: "How a session got there. Icon and word, never colour alone" },
   { name: "PairingCode", from: "components/pairing.tsx", what: "The code, at 44px, read across a room" },
-  { name: "PairingPrompt", from: "components/pairing.tsx", what: "Somebody wants in, and exactly what they would be able to do" },
+  { name: "PairingPrompt", from: "components/pairing.tsx", what: "Somebody wants in, and exactly what they would be able to do", waits: "Nothing reaches the window when somebody asks to pair: the host puts that question at its terminal or on its own screen, and there is no control-plane event for it. It is built for the day the host's side of pairing is a window rather than a prompt." },
   { name: "PermissionGrid", from: "components/permission-grid.tsx", what: "The store’s fourteen permissions, editable except the five the host keeps" },
   { name: "SessionHUD", from: "components/hud.tsx", what: "RTT, bitrate, fps, encoder, tier. Never animates" },
   { name: "StatTile", from: "components/hud.tsx", what: "One figure with its unit, and a word when it is toned" },
@@ -71,7 +87,7 @@ export const TIER_1: readonly Tier1Entry[] = [
   { name: "RowMenu", from: "components/menu.tsx", what: "A row's actions from a button a keyboard can find" },
   { name: "WithContextMenu", from: "components/menu.tsx", what: "The same actions from a right-click — one list, two triggers" },
   { name: "Popover", from: "components/popover.tsx", what: "A small panel from a control, for a choice that should not take the screen" },
-  { name: "SortableTable", from: "components/sortable-table.tsx", what: "Columns that sort, on top of Table, stable where they compare equal" },
+  { name: "SortableTable", from: "components/sortable-table.tsx", what: "Columns that sort, on top of Table, stable where they compare equal", waits: "Waits on Table, and for the same reason: sorting a windowed log is a query for the control plane rather than a column header." },
   { name: "LogView", from: "components/log-view.tsx", what: "A long record that scrolls at sixty frames, by not drawing what nobody can see" },
   { name: "Stepper", from: "components/stepper.tsx", what: "A short sequence with a visible end. Every step reachable from every step" },
   { name: "Kbd", from: "components/kbd.tsx", what: "A key as it is printed, and the one place a chord is split — a part longer than six characters is a word" },
@@ -83,9 +99,9 @@ export const TIER_1: readonly Tier1Entry[] = [
   { name: "ScheduleInput", from: "components/form-controls.tsx", what: "Which days, between which times" },
   { name: "Select", from: "components/select.tsx", what: "32px rows, the check in a fixed slot" },
   { name: "Switch", from: "components/switch.tsx", what: "On or off, at a 44px target however small it is drawn" },
-  { name: "Checkbox", from: "components/switch.tsx", what: "On, off, or some" },
-  { name: "Tabs", from: "components/tabs.tsx", what: "Sections of one screen" },
-  { name: "Table", from: "components/table.tsx", what: "28px rows, tabular figures, cells that never animate" },
+  { name: "Checkbox", from: "components/switch.tsx", what: "On, off, or some", waits: "Tri-state, for a row that stands for several. The only list of choices on a screen is PermissionGrid, which is one device at a time and uses Switch — nothing here selects across devices yet." },
+  { name: "Tabs", from: "components/tabs.tsx", what: "Sections of one screen", waits: "No screen here has sections yet. The device panel is the candidate and is one column of facts today; splitting it into tabs would hide half of a short panel behind a click." },
+  { name: "Table", from: "components/table.tsx", what: "28px rows, tabular figures, cells that never animate", waits: "The one screen with rows is the Activity log, and its body is windowed — a virtualised <tbody> is the variable-height problem LogView refuses to be. It is here for a screen with a short, fixed list of rows, which the product does not yet have." },
   { name: "DialogContent", from: "components/dialog.tsx", what: "A dialog or a drawer, opening from where it was invoked" },
   { name: "Toaster", from: "components/toast.tsx", what: "Toasts in a reserved band, wired to the protocol's reason codes" },
   { name: "Tooltip", from: "components/tooltip.tsx", what: "The text label an icon owes" },
@@ -96,9 +112,9 @@ export const TIER_1: readonly Tier1Entry[] = [
   { name: "Segmented", from: "components/theme-toggle.tsx", what: "The one family every exclusive choice uses" },
   { name: "ThemeToggle", from: "components/theme-toggle.tsx", what: "Dark, light, high contrast" },
   { name: "MotionToggle", from: "components/theme-toggle.tsx", what: "The reduced-motion override, so the fallback is confirmed and not assumed" },
-  { name: "Textarea", from: "components/input.tsx", what: "The one free-text field the product has" },
-  { name: "Arrive", from: "components/motion.tsx", what: "A new item rises and fades in rather than appearing" },
-  { name: "Overlay", from: "components/motion.tsx", what: "Opens from 0.97 scale, from where it was invoked" },
+  { name: "Textarea", from: "components/input.tsx", what: "The one free-text field the product has", waits: "The product has no free-text field. A device name is one line and is edited as one; nothing else asks anybody to write a paragraph." },
+  { name: "Arrive", from: "components/motion.tsx", what: "A new item rises and fades in rather than appearing", waits: "New rows land in the Activity log, which is the one place this would be for — and that list is on the never-animate list, because a line that moves while somebody is reading is a line they lose." },
+  { name: "Overlay", from: "components/motion.tsx", what: "Opens from 0.97 scale, from where it was invoked", waits: "DialogContent carries its own opening animation, so a dialog does not reach for this. It is the shared shape for the next thing that opens over a screen, and there is not one yet." },
 ];
 
 export interface Tier2Entry {
@@ -129,6 +145,23 @@ export const TIER_2: readonly Tier2Entry[] = [
 export interface NotBuildingEntry {
   name: string;
   why: string;
+  /**
+   * The component that already does this job, where the reason rests on one.
+   *
+   * **Because a reason can quietly become false.** "No MonitorPicker, because
+   * `MonitorSwitcher` already is one" is a decision that holds only while
+   * `MonitorSwitcher` exists — delete or rename it and the entry still reads
+   * as a considered choice while having become an omission. That is exactly
+   * the state somebody signing this list off cannot see, and the list is
+   * twenty entries long.
+   *
+   * Declared rather than parsed out of the prose: the sentences name screens,
+   * libraries and the product itself, and a reader that guessed which capital
+   * letter was a component would be wrong more often than right.
+   *
+   * `check-inventory` holds each of these to Tier 1.
+   */
+  becauseOf?: string;
 }
 
 /**
@@ -140,7 +173,7 @@ export const NOT_BUILDING: readonly NotBuildingEntry[] = [
   { name: "Skeleton shimmer", why: "An animation on the reading critical path. The still block already says loading." },
   { name: "Accordion", why: "A list that hides its content behind a click is a list nobody reads. A drawer or a screen instead." },
   { name: "Breadcrumbs", why: "The app is two levels deep. A trail through two steps is furniture." },
-  { name: "Charting library", why: "The sparkline is the only chart, it is thirty lines, and a library would arrive with a palette of its own." },
+  { name: "Charting library", why: "The sparkline is the only chart, it is thirty lines, and a library would arrive with a palette of its own.", becauseOf: "Sparkline" },
   { name: "Carousel", why: "Nothing here is a sequence somebody should be walked through." },
   { name: "Stacked modals", why: "A dialog over a dialog is a question nobody can answer. One at a time, or a screen." },
   { name: "Rich text editor", why: "Nothing in a remote desktop is prose. The one free-text field is a note, and a textarea is a textarea." },
@@ -149,10 +182,10 @@ export const NOT_BUILDING: readonly NotBuildingEntry[] = [
   { name: "Onboarding tour", why: "If the Devices screen needs coach marks, the Devices screen is wrong." },
   { name: "Avatars of people", why: "Esper has machines, not users. A face on a fingerprint is a claim the product cannot check." },
   { name: "Renaming a device", why: "The first thing anybody reaches for in a row menu, and the device store has no such operation — a name is what the far machine calls itself, sent at the handshake. A menu item for it would be a control that fails, and a name kept locally would be a second answer to \"which machine is this\" that only this machine can see." },
-  { name: "A separate ContextMenu primitive", why: "@radix-ui/react-context-menu is a whole floating primitive for a convenience, when the dropdown already here does the work: a menu positions against its trigger, so the trigger goes where the pointer was. Thirty lines against a dependency — and the menu is provably the same menu because it is the same component." },
-  { name: "A separate Popover primitive", why: "The same argument. A second floating primitive means a second set of collision, focus and portal behaviours to keep in step with the first; what a popover needs beyond a menu is arbitrary content and no item semantics, which is one line — `onSelect` prevented, so a panel does not close when a control inside it is used." },
-  { name: "A separate MonitorPicker", why: "Tier 2 asked for one and `MonitorSwitcher` already is it — each screen drawn at its own aspect ratio, named by its size, because \"Monitor 2\" tells nobody which one that is. Two components for one job is how a system grows a second answer to a question it had already answered." },
-  { name: "A windowing library", why: "LogView is twenty lines of arithmetic over one measured height. What makes a windowing library worth its weight — variable row heights, sticky groups, horizontal windows — is exactly what this product does not have, and a fixed row height is a commitment the table already made." },
+  { name: "A separate ContextMenu primitive", why: "@radix-ui/react-context-menu is a whole floating primitive for a convenience, when the dropdown already here does the work: a menu positions against its trigger, so the trigger goes where the pointer was. Thirty lines against a dependency — and the menu is provably the same menu because it is the same component.", becauseOf: "RowMenu" },
+  { name: "A separate Popover primitive", why: "The same argument. A second floating primitive means a second set of collision, focus and portal behaviours to keep in step with the first; what a popover needs beyond a menu is arbitrary content and no item semantics, which is one line — `onSelect` prevented, so a panel does not close when a control inside it is used.", becauseOf: "Popover" },
+  { name: "A separate MonitorPicker", why: "Tier 2 asked for one and `MonitorSwitcher` already is it — each screen drawn at its own aspect ratio, named by its size, because \"Monitor 2\" tells nobody which one that is. Two components for one job is how a system grows a second answer to a question it had already answered.", becauseOf: "MonitorSwitcher" },
+  { name: "A windowing library", why: "LogView is twenty lines of arithmetic over one measured height. What makes a windowing library worth its weight — variable row heights, sticky groups, horizontal windows — is exactly what this product does not have, and a fixed row height is a commitment the table already made.", becauseOf: "LogView" },
   { name: "Themed scrollbars", why: "Thin and quiet is the whole design. A drawn scrollbar is a widget that has to be maintained on three platforms." },
   { name: "Emoji or icon picker", why: "Nothing is user-decorated. A device has a name." },
   { name: "Auto theme by time of day", why: "The OS already answers this, and a window that changes theme mid-session is a flash somebody has to interpret." },

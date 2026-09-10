@@ -80,6 +80,7 @@ export function CommandPalette({ open, onOpenChange, commands, placeholder = "Ty
         {/* It builds its own Content, so it takes the focus return explicitly
             — the same implementation, not a second one. */}
         <RD.Content
+          data-focus-exempt="a dialog panel is not a control; it takes focus on open so the next Tab starts inside it"
           onOpenAutoFocus={returning.onOpenAutoFocus}
           onCloseAutoFocus={returning.onCloseAutoFocus}
           aria-describedby={undefined}
@@ -105,6 +106,7 @@ export function CommandPalette({ open, onOpenChange, commands, placeholder = "Ty
                 It is redundant besides: Radix's focus scope focuses the
                 first focusable thing in the content, and that is this.
               */
+              data-focus-exempt="the palette opens onto this field and nothing else in it takes focus; the caret says where typing goes"
               role="combobox"
               aria-expanded
               aria-controls="command-list"

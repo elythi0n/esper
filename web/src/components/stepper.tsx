@@ -78,7 +78,7 @@ export function Stepper({ steps, at, onGo, done, className }: StepperProps) {
                 onClick={() => behind && onGo(s.id)}
                 aria-current={here ? "step" : undefined}
                 className={cn(
-                  "flex h-7 items-center gap-2 rounded-sm px-2 text-sm outline-none",
+                  "flex h-7 items-center gap-2 rounded-sm px-2 text-sm",
                   "transition-colors duration-[var(--dur-fast)]",
                   here && "bg-surface-2 text-text",
                   behind && "cursor-pointer text-text-2 hover:text-text",
@@ -119,7 +119,7 @@ export function Stepper({ steps, at, onGo, done, className }: StepperProps) {
           <button
             type="button"
             onClick={() => onGo(steps[index - 1]?.id ?? at)}
-            className="cursor-pointer rounded-sm px-2 py-1 text-sm text-text-3 outline-none transition-colors duration-[var(--dur-fast)] hover:text-text"
+            className="cursor-pointer rounded-sm px-2 py-1 text-sm text-text-3 transition-colors duration-[var(--dur-fast)] hover:text-text"
           >
             Back
           </button>
@@ -129,7 +129,7 @@ export function Stepper({ steps, at, onGo, done, className }: StepperProps) {
             type="button"
             onClick={() => onGo(steps[index + 1]?.id ?? at)}
             className={cn(
-              "cursor-pointer rounded-sm border border-transparent bg-accent px-3 py-1.5 text-sm text-accent-fg outline-none",
+              "cursor-pointer rounded-sm border border-transparent bg-accent px-3 py-1.5 text-sm text-accent-fg",
               "transition-[filter] duration-[var(--dur-fast)] hover:brightness-110",
             )}
           >

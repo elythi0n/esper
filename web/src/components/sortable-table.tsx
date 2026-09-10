@@ -142,7 +142,7 @@ export function SortHeader<Row>({
       type="button"
       onClick={() => onToggle(column)}
       className={cn(
-        "flex h-[var(--row-h)] w-full cursor-pointer items-center gap-1 px-2 text-left outline-none",
+        "flex h-[var(--row-h)] w-full cursor-pointer items-center gap-1 px-2 text-left",
         "transition-colors duration-[var(--dur-fast)] hover:text-text",
         active ? "text-text" : "text-text-3",
       )}

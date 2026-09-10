@@ -5,6 +5,8 @@ import { Lamp } from "@/components/lamp";
 import { RowMenu, WithContextMenu, type MenuAction } from "@/components/menu";
 import { cn } from "@/lib/cn";
 import { Figure, Key, Row, shortAgo } from "@/screens/parts";
+import { TimeAgo } from "./time-ago";
+import { shortAgoAt } from "@/lib/ago";
 
 /**
  * A device, as one line.
@@ -109,7 +111,24 @@ export function DeviceRow({
         )}
         {state === "once" && <Key className="shrink-0">once</Key>}
         {spent && <Key className="shrink-0">spent</Key>}
-        <Figure className="w-10 shrink-0 text-right text-sm text-text-2" value={shortAgo(device.last_seen)} />
+        {/*
+          Live, not a snapshot. A list somebody leaves open — which is what the
+          Devices screen is for — used to say "14s" for as long as it was
+          open, so a device seen a quarter of an hour ago read as seen a moment
+          ago. The element ticks itself, and carries the instant as well as the
+          words for anything that reads the page rather than looks at it.
+        */}
+        <Figure
+          data-last-seen=""
+          className="w-10 shrink-0 text-right text-sm text-text-2"
+          value={
+            device.last_seen === null ? (
+              shortAgo(null)
+            ) : (
+              <TimeAgo date={device.last_seen * 1000} format={shortAgoAt} />
+            )
+          }
+        />
       </button>
       <button
         type="button"

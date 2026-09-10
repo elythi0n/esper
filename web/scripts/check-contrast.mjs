@@ -127,7 +127,8 @@ const tones = ["ok", "warn", "danger", "info"];
 function rows() {
   const r = [];
   const req = (fg, bg, min, text, why) => r.push({ fg, bg, min, text, required: true, why });
-  const watch = (fg, bg, min, text, why) => r.push({ fg, bg, min, text, required: false, why });
+  const watch = (fg, bg, min, text, why, inSession = false) =>
+    r.push({ fg, bg, min, text, required: false, why, inSession });
 
   for (const s of surfaces) {
     req("--color-text", s, AA, true, "body text");
@@ -151,8 +152,17 @@ function rows() {
 
   // Over video. The chrome is opaque, but the temptation to float a label on
   // the picture is real and this is where it would be cheated.
-  watch("--color-text", "--color-video", AA, true, "text drawn directly over video (watched)");
-  watch("--color-border-strong", "--color-video", GRAPHIC, false, "a control edge over video (watched)");
+  //
+  // **Resolved in the session's own theme, not the document's.** A session
+  // root re-declares the dark values on itself — `semantic.css` names
+  // `[data-session]` in the same selector as `:root` — so everything drawn
+  // over video is dark whatever theme the app is in, and `check-live`
+  // measures that every run. Pairing the *document's* light-theme text with
+  // the video surface asks about something that cannot be rendered, and it
+  // reported 1.08:1 for it: a warning nobody could act on, about a pairing
+  // that does not exist, on the one row a signer was being asked to bless.
+  watch("--color-text", "--color-video", AA, true, "text drawn directly over video (watched)", true);
+  watch("--color-border-strong", "--color-video", GRAPHIC, false, "a control edge over video (watched)", true);
   return r;
 }
 
@@ -165,8 +175,11 @@ const lines = [];
 for (const [name, theme] of themes) {
   lines.push(`\n  ${name}`);
   for (const row of rows()) {
-    let fg = color(`var(${row.fg})`, theme);
-    let bg = color(`var(${row.bg})`, theme);
+    // A row inside a session resolves against the session's theme, which is
+    // the dark one in every document theme. See `rows()`.
+    const where = row.inSession ? new Map() : theme;
+    let fg = color(`var(${row.fg})`, where);
+    let bg = color(`var(${row.bg})`, where);
     if (!fg || !bg) { unresolved++; lines.push(`  ? ${row.fg} on ${row.bg} — could not resolve`); continue; }
     if (row.soft) {
       const soft = color(`var(${row.soft})`, theme);
@@ -174,10 +187,14 @@ for (const [name, theme] of themes) {
       bg = over(soft, bg);
     }
     if (fg.a < 1) fg = over(fg, bg);
-    const min = row.text && name === "hc" ? AAA : row.min;
+    // High contrast raises the bar for text — but not inside a session, which
+    // is not in the document's theme at all.
+    const min = row.text && name === "hc" && !row.inSession ? AAA : row.min;
     const got = contrast(fg, bg);
     evaluated++;
-    const label = `${row.fg.replace("--color-", "")} on ${row.bg.replace("--color-", "")}${row.soft ? " (soft)" : ""}`;
+    const label =
+      `${row.fg.replace("--color-", "")} on ${row.bg.replace("--color-", "")}` +
+      `${row.soft ? " (soft)" : ""}${row.inSession ? " [in a session]" : ""}`;
     if (got >= min) {
       lines.push(`  ✓ ${got.toFixed(2).padStart(5)} ≥ ${min}  ${label}`);
     } else if (row.required) {

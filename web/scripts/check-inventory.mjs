@@ -27,7 +27,14 @@ function entries(constName) {
   if (!m) fail(`inventory.ts has no ${constName}`);
   return [...m[1].matchAll(/\{[^}]*\}/g)].map((o) => {
     const field = (k) => o[0].match(new RegExp(`${k}:\\s*"((?:[^"\\\\]|\\\\.)*)"`))?.[1];
-    return { name: field("name"), from: field("from"), what: field("what"), why: field("why") };
+    return {
+      name: field("name"),
+      from: field("from"),
+      what: field("what"),
+      why: field("why"),
+      waits: field("waits"),
+      becauseOf: field("becauseOf"),
+    };
   });
 }
 
@@ -57,6 +64,41 @@ for (const [name, list] of [["Tier 2", tier2], ["Not building", notBuilding]]) {
 const total = tier1.length + tier2.length + notBuilding.length;
 if (total < 40) fail(`the whole inventory parsed as ${total} entries, which is not this one`);
 if (notBuilding.length < 5) fail(`the not-building list parsed as ${notBuilding.length} entries — it is as important as the other two`);
+
+/*
+  **A reason that rests on another component is held to it existing.**
+
+  Several entries on the not-building list are not "we do not want one" but
+  "we already have one": no MonitorPicker because `MonitorSwitcher` is one, no
+  windowing library because `LogView` is twenty lines, no charting library
+  because `Sparkline` is the only chart. Each of those is a decision that
+  holds *only while the named component does* — delete or rename it and the
+  entry still reads as a considered choice while having quietly become an
+  omission.
+
+  That is the state somebody signing a twenty-entry list off cannot see, and
+  it is the difference between "declared out of scope" and "about to be
+  needed".
+*/
+const tier1Names = new Set(tier1.map((e) => e.name));
+let resting = 0;
+for (const entry of notBuilding) {
+  if (!entry.becauseOf) continue;
+  resting++;
+  if (!tier1Names.has(entry.becauseOf)) {
+    fail(
+      `"${entry.name}" is not built because ${entry.becauseOf} already does that job, ` +
+        `and ${entry.becauseOf} is not in Tier 1 — the reason has outlived the component ` +
+        `it rests on, and the entry now reads as a decision while being an omission`,
+    );
+  }
+}
+if (resting < 3) {
+  fail(
+    `only ${resting} not-building entries name the component they rest on — the field is not ` +
+      `being read, and an entry whose reason has gone false would pass`,
+  );
+}
 
 // ── Every Tier 1 entry resolves ──────────────────────────────────────────
 /** The symbols a module exports, by the four forms this codebase uses. */
@@ -139,14 +181,130 @@ for (const file of swept) {
   }
 }
 
+/*
+  ── Every Tier 1 component reaches a screen, or says why it does not ───────
+
+  # The state a design system rots in
+
+  "Built, and nothing renders it." The component is written, reviewed and
+  forgotten, and by the time a screen wants one somebody writes a second
+  inline. That happened twice here: a transfer readout joined into a string
+  beside a queue component that draws bars, and an age computed once beside an
+  element whose whole job is to keep one current.
+
+  Nothing could see it. Every gate here asked whether a component *resolves*,
+  which a component nobody renders does perfectly.
+
+  # Why the walk is transitive
+
+  Because most components are reached through another one. `TransferProgress`
+  is drawn by `TransferQueue`, which a screen opens; a check that only looked
+  at screen files would report it missing and be wrong. So this starts from
+  what the screens use and follows the graph out through the modules those
+  components live in, until it stops growing.
+
+  What is left is held to one of two things: something renders it, or the
+  entry says why not.
+*/
+/*
+  The product's own screens: not `components/`, and **not the gallery**.
+
+  `design/` renders every component there is — that is what it is for — so
+  counting it would make this check pass by construction and say nothing. The
+  question is whether the product uses a component, not whether the catalogue
+  shows it.
+*/
+const screenFiles = [...files(src)].filter((f) => {
+  const rel = relative(src, f);
+  return /\.tsx?$/.test(rel) && !/^(components|design)[/\\]/.test(rel);
+});
+const sourceOf = new Map();
+const readOnce = (file) => {
+  if (!sourceOf.has(file)) sourceOf.set(file, readFileSync(file, "utf8"));
+  return sourceOf.get(file);
+};
+/*
+  Rendered or imported, never merely mentioned.
+
+  A plain word search says yes to a comment. `LogView` explains itself by
+  arguing against a virtualised `<tbody>` and names `Table` while doing it, so
+  a search for the word found `Table` "reaching a screen" through a paragraph
+  about why it does not. What counts is the two ways a component is actually
+  put to work: written as an element, or named in an import.
+
+  Word-bounded either way, so `Table` does not match `SortableTable` and
+  `Card` does not match `CardHeader`.
+*/
+const mentions = (name, text) =>
+  new RegExp(`<${name}\\b`).test(text) ||
+  [...text.matchAll(/import[^;]*?from\s*["'][^"']+["']/gs)].some((m) =>
+    new RegExp(`\\b${name}\\b`).test(m[0]),
+  );
+
+const reached = new Set();
+let searching = screenFiles;
+// A bound, and a failure if it is ever reached: a walk that quietly stopped
+// early would report components as stranded that are not, which is the one way
+// this check could start lying.
+const mostRounds = 24;
+let rounds = 0;
+for (; rounds < mostRounds && searching.length > 0; rounds += 1) {
+  const found = [];
+  const text = searching.map(readOnce).join("\n");
+  for (const entry of tier1) {
+    if (reached.has(entry.name)) continue;
+    if (mentions(entry.name, text)) {
+      reached.add(entry.name);
+      found.push(join(src, entry.from));
+    }
+  }
+  // The modules those components live in, which is where the next layer is.
+  searching = [...new Set(found)].filter((f) => {
+    try {
+      return statSync(f).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
+if (rounds >= mostRounds) {
+  fail(
+    `the walk through the component graph was still finding things after ${mostRounds} rounds — ` +
+      `it is either cycling or the graph is deeper than this expects, and either way what it ` +
+      `reports below cannot be trusted`,
+  );
+}
+
+const stranded = tier1.filter((e) => !reached.has(e.name) && !e.waits);
+for (const e of stranded) {
+  failures.push(
+    `${e.name} (${e.from}) is built and no screen reaches it, directly or through another component — ` +
+      `render it, or give its entry a \`waits\` saying why not`,
+  );
+}
+// And the opposite: a reason that has stopped being true is a reason nobody
+// re-reads. A component that now reaches a screen must not still claim to be
+// waiting for one.
+for (const e of tier1) {
+  if (e.waits && reached.has(e.name)) {
+    failures.push(
+      `${e.name} says it is waiting for a screen and a screen renders it — take the \`waits\` off, ` +
+        `or the next person reads a decision that was reversed`,
+    );
+  }
+}
+
 // ── Report ────────────────────────────────────────────────────────────────
 if (failures.length) {
   for (const f of failures) console.error(`  ✗ inventory: ${f}`);
   process.exit(1);
 }
 console.log(
-  `  ✓ inventory: ${tier1.length} Tier 1 components, all resolving; ${tier2.length} Tier 2 named with the screen that asks for them; ` +
-    `${notBuilding.length} deliberately not built`,
+  `  ✓ inventory: ${tier1.length} Tier 1 components, all resolving; ${reached.size} reaching a screen and ` +
+    `${tier1.length - reached.size} saying why they do not; ${tier2.length} Tier 2 named with the screen that ` +
+    `asks for them; ${notBuilding.length} deliberately not built, ${resting} of those ` +
+      `resting on a component that exists`,
 );
 if (unlisted.length) {
   console.log(`    ${unlisted.length} component(s) in a module no tier mentions — add them, or agree not to:`);

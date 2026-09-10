@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "@/api/client";
 import { useAsk, useStatus } from "@/api/hooks";
-import type { Capability, HostState } from "@/api/types";
+import { triedFor, type Capability, type HostState } from "@/api/types";
+import { EngineSettings } from "@/screens/EngineSettings";
 import { PermissionChecklist } from "@/screens/PermissionChecklist";
 import { Skeleton } from "@/components/states";
 import { CopyField } from "@/components/copy-field";
@@ -48,11 +49,23 @@ function Line({ label, children }: { label: string; children: React.ReactNode })
  * with every other value and leaves the dot in the margin beside it.
  */
 function CapabilityRow({ label, cap }: { label: string; cap: Capability }) {
+  const tried = triedFor(cap);
   return (
     <Line label={label}>
-      <Lamp state={lampFor(cap.available)} className="-ml-3 min-w-0 items-baseline">
-        <span className="min-w-0 font-mono text-xs text-text">{cap.detail || (cap.available ? "yes" : "no")}</span>
-      </Lamp>
+      <div className="min-w-0">
+        <Lamp state={lampFor(cap.available)} className="-ml-3 min-w-0 items-baseline">
+          <span className="min-w-0 font-mono text-xs text-text">{cap.detail || (cap.available ? "yes" : "no")}</span>
+        </Lamp>
+        {tried.length > 0 && (
+          <ul data-tried={label} className="mt-1 space-y-0.5">
+            {tried.map((attempt) => (
+              <li key={attempt} className="break-words font-mono text-xs leading-relaxed text-text-3">
+                {attempt}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </Line>
   );
 }
@@ -320,6 +333,20 @@ export function SettingsScreen() {
             <SettingRow label="Motion" control={<MotionToggle />} />
             <AtLogin />
           </div>
+        </div>
+
+        {/*
+          And what this machine is *set to*, which is a third kind of thing.
+
+          The two columns above are what it is (a key, a name) and what it can
+          do (a measurement). These are choices — every one of them was a file
+          somebody edited by hand, because nothing here could change one.
+
+          Below rather than beside, because there are thirty-two of them and a
+          column of thirty-two next to a column of eight is not two columns.
+        */}
+        <div className="mt-10 min-w-0 @[45rem]:max-w-3xl">
+          <EngineSettings />
         </div>
       </PageBody>
     </>

@@ -1,11 +1,13 @@
 import { Maximize2, Minimize2, Monitor, MousePointer2, MousePointerBan, Ratio, Settings2, TrendingDown } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { TierBadge } from "@/components/badge";
 import { SessionHUD } from "@/components/hud";
 import { MenuUnder, type MenuAction } from "@/components/menu";
 import { MonitorSwitcher } from "@/components/monitor-switcher";
 import { Popover } from "@/components/popover";
+import { TransferQueue } from "@/components/transfer-queue";
+import type { Transfer as QueuedTransfer, TransferState } from "@/components/transfer-progress";
 import { Tooltip } from "@/components/tooltip";
 import { Figure } from "@/screens/parts";
 import { SessionChrome, SessionRoot } from "@/session/chrome";
@@ -45,7 +47,64 @@ interface Transfer {
   id: number;
   name: string;
   state: "sending" | "sent" | "failed";
+  bytes?: number;
+  total?: number;
   trouble?: string;
+}
+
+/** What the window's words for a state are called in the queue. */
+const TRANSFER_STATE: Record<Transfer["state"], TransferState> = {
+  sending: "running",
+  sent: "done",
+  failed: "failed",
+};
+
+/** Whether two answers from the window say the same thing. */
+function sameTransfers(a: readonly Transfer[], b: readonly Transfer[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((was, i) => {
+    const now = b[i];
+    return (
+      now !== undefined &&
+      was.id === now.id &&
+      was.state === now.state &&
+      was.bytes === now.bytes &&
+      was.total === now.total &&
+      was.trouble === now.trouble
+    );
+  });
+}
+
+/** The same, for the rates worked out from them. */
+function sameRates(a: Record<number, number>, b: Record<number, number>): boolean {
+  const keys = Object.keys(b);
+  if (Object.keys(a).length !== keys.length) return false;
+  return keys.every((k) => a[Number(k)] === b[Number(k)]);
+}
+
+/**
+ * The one line the HUD shows for whatever is moving.
+ *
+ * A failure first, then what is still going, then what is finished — in that
+ * order because that is the order somebody needs to hear them, and a line that
+ * said "Sent a.txt" while b.txt had just failed would be a line that buries
+ * the only part needing a person.
+ */
+function transferLine(all: readonly Transfer[]): string {
+  const failed = all.filter((t) => t.state === "failed");
+  if (failed.length > 0) {
+    return failed.length === 1 ? `${failed[0]?.name} did not send` : `${failed.length} files did not send`;
+  }
+  const going = all.filter((t) => t.state === "sending");
+  if (going.length > 0) {
+    const bytes = going.reduce((n, t) => n + (t.bytes ?? 0), 0);
+    const total = going.reduce((n, t) => n + (t.total ?? 0), 0);
+    // Only once there is a total: before the first report every file is "0%",
+    // which reads as stuck at the moment it is starting.
+    const part = total > 0 ? ` ${Math.floor((bytes / total) * 100)}%` : "";
+    return going.length === 1 ? `Sending ${going[0]?.name}${part}` : `Sending ${going.length} files${part}`;
+  }
+  return all.length === 1 ? `Sent ${all[0]?.name}` : `Sent ${all.length} files`;
 }
 
 /**
@@ -185,13 +244,54 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
     screen*, and slowly.
   */
   const [sending, setSending] = useState<Transfer[]>([]);
+
+  /*
+    How fast each one is going, worked out here rather than asked for.
+
+    The window reports how far along a file is, not a rate, and a rate is what
+    an estimate needs. Two readings and the time between them is all it takes,
+    and measuring it where the readings arrive means the figure is about the
+    link rather than about how often the window felt like saying something.
+  */
+  const seen = useRef(new Map<number, { bytes: number; at: number; rate: number | undefined }>());
+  const [rates, setRates] = useState<Record<number, number>>({});
   useEffect(() => {
     let live = true;
     const look = () => {
       fetch("/shell/transfers")
         .then((r) => (r.ok ? r.json() : null))
         .then((body: { transfers?: Transfer[] } | null) => {
-          if (live && body?.transfers) setSending(body.transfers);
+          if (!live || !body?.transfers) return;
+          // **Only when something changed.** This runs once a second for as
+          // long as a session is on screen, and a session is a video surface:
+          // handing React a new array every second re-renders the chrome over
+          // somebody's desktop a second at a time for nothing. Almost always
+          // there is nothing to send and nothing to say.
+          const arrived = body.transfers;
+          setSending((was) => (sameTransfers(was, arrived) ? was : arrived));
+          const now = Date.now();
+          const next: Record<number, number> = {};
+          for (const t of body.transfers) {
+            const bytes = t.bytes ?? 0;
+            const before = seen.current.get(t.id);
+            // Only while it is moving forward: a reading that went backwards
+            // or stood still is a report about the same moment twice, and
+            // dividing by the wall clock would read that as "it stopped". The
+            // last rate is kept over such a reading rather than dropped, so a
+            // poll that landed between two of the engine's reports does not
+            // make the estimate flicker away and come back.
+            const moved = before && now > before.at && bytes > before.bytes;
+            const rate = moved ? ((bytes - before.bytes) * 1000) / (now - before.at) : before?.rate;
+            if (rate !== undefined) next[t.id] = rate;
+            seen.current.set(t.id, { bytes, at: moved ? now : (before?.at ?? now), rate });
+          }
+          // Anything the window has stopped reporting is gone, and a map that
+          // only ever grows is a leak in a window that stays open for days.
+          const still = new Set(body.transfers.map((t) => t.id));
+          for (const id of seen.current.keys()) {
+            if (!still.has(id)) seen.current.delete(id);
+          }
+          setRates((was) => (sameRates(was, next) ? was : next));
         })
         .catch(() => {
           // A tab, or a window without the route. Nothing to add.
@@ -204,6 +304,24 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
       clearInterval(timer);
     };
   }, []);
+
+  /** The window's transfers in the shape the queue reads. */
+  const queued = useMemo(
+    () =>
+      sending.map(
+        (t): QueuedTransfer => ({
+          id: String(t.id),
+          name: t.name,
+          bytes: t.bytes ?? 0,
+          total: t.total ?? 0,
+          rate: rates[t.id],
+          direction: "send",
+          state: TRANSFER_STATE[t.state],
+          error: t.trouble,
+        }),
+      ),
+    [sending, rates],
+  );
 
   /*
     **What was asked for, said here before the far machine says anything.**
@@ -431,19 +549,33 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
           </span>
         )}
         {/*
-          What is on its way, and what happened to it. Said in the HUD rather
-          than over the picture: a transfer is not about the screen, and a
-          panel over somebody's desktop for a file that is already moving
-          would be chrome in the way of the thing it is reporting.
+          What is on its way, and what happened to it.
+
+          A sentence in the HUD, and the detail behind it. A transfer is not
+          about the screen, so a panel of progress bars sitting over somebody's
+          desktop would be chrome in the way of the thing it is reporting —
+          but a single joined line cannot say how far along anything is, which
+          is the only question a moving file raises. So the line is the glance
+          and the queue is a click away, in the same place a screen is chosen.
         */}
         {sending.length > 0 && (
-          <span role="status" data-transfers="" className="min-w-0 shrink-0 truncate text-xs text-text-3">
-            {sending
-              .map((t) =>
-                t.state === "sending" ? `Sending ${t.name}` : t.state === "sent" ? `Sent ${t.name}` : `${t.name}: ${t.trouble}`,
-              )
-              .join(" · ")}
-          </span>
+          <Popover
+            label="Transfers"
+            side="top"
+            trigger={
+              <button
+                type="button"
+                data-transfers=""
+                className="min-w-0 shrink-0 truncate rounded-sm text-xs text-text-3 hover:text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+              >
+                {transferLine(sending)}
+              </button>
+            }
+          >
+            <div className="w-80 max-w-[min(20rem,80vw)]">
+              <TransferQueue transfers={queued} />
+            </div>
+          </Popover>
         )}
         {narrowed && (
           <Tooltip label="The link could not carry what the host was sending, so this session asked for less">

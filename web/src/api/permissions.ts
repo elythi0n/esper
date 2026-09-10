@@ -36,6 +36,12 @@ export type Permission = (typeof PERMISSIONS)[number];
  * show them as held at the host rather than as something to toggle.
  */
 export const SENSITIVE: ReadonlySet<Permission> = new Set<Permission>([
+  // A shell as the user who owns this machine's Esper state — so it can read
+  // the identity key and this window's own token, rewrite the device list
+  // without asking, and edit the record. Granting it grants every one below
+  // whether or not anybody grants them, which is why it is the one that most
+  // needs a person at the machine.
+  "terminal",
   "unattended",
   "files_in",
   "record",
@@ -98,6 +104,11 @@ export const AUTHORISED_BY: Readonly<Record<string, Permission | null>> = {
   session_asked: null,
   lock_after_changed: null,
   permissions_changed: null,
+  // Somebody at the keyboard changed a setting: no device did it and no
+  // permission allowed it.
+  setting_changed: null,
+  // The record trimming itself, which no device asked for either.
+  trail_trimmed: null,
   // Like pairing and unpairing: a thing that happened *to* the arrangement of
   // permissions, not something a permission allowed.
   pairing_kept: null,
@@ -117,5 +128,65 @@ export const AUTHORISED_BY: Readonly<Record<string, Permission | null>> = {
   refused: null,
 };
 
-/** Every event word, in the trail's own order. */
-export const EVENTS = Object.keys(AUTHORISED_BY) as readonly string[];
+/**
+ * What each trail event is called, for somebody reading the record.
+ *
+ * # Why the tag is not enough
+ *
+ * `session_narrowed` is the word the log is written with and the word somebody
+ * greps for, and it is not English. The Activity screen showed it as the whole
+ * of the "What" column, with the engine's own sentence in a Detail column that
+ * is hidden below 45rem — so on a narrow window the record read as a list of
+ * identifiers.
+ *
+ * Both, then: the name here and the tag beside it, so the screen is readable
+ * and the word to grep for is still on it.
+ *
+ * The keys are `AUTHORISED_BY`'s, and `check-vocabularies` holds both to the
+ * Rust — so an event added to the engine and not named here is a failure
+ * rather than a column that quietly says `some_new_thing`.
+ *
+ * In the engine's own order, like the map above it. Not a reading order: the
+ * gate compares the two lists *in order*, because a listing and a fixture are
+ * compared that way, and one rule for both maps is one thing to remember.
+ */
+export const EVENT_LABEL: Readonly<Record<string, string>> = {
+  recording: "Recording",
+  paired: "Paired",
+  unpaired: "Unpaired",
+  revoked: "Revoked",
+  session_narrowed: "Session narrowed",
+  session_asked: "Asked for more",
+  lock_after_changed: "Locking changed",
+  permissions_changed: "Permissions changed",
+  setting_changed: "Setting changed",
+  trail_trimmed: "Record trimmed",
+  pairing_kept: "Pairing kept",
+  schedule_changed: "Schedule changed",
+  session_opened: "Session opened",
+  locked: "Screen locked",
+  // Log off or restart: the detail says which, and the label says what kind
+  // of thing it was.
+  powered: "Log off or restart",
+  session_closed: "Session ended",
+  terminal_opened: "Shell opened",
+  terminal_closed: "Shell ended",
+  terminal_parked: "Shell parked",
+  terminal_resumed: "Shell resumed",
+  forward_opened: "Forward opened",
+  forward_closed: "Forward closed",
+  forward_refused: "Forward refused",
+  file_transferred: "File",
+  refused: "Refused",
+};
+
+/**
+ * The name for an event, falling back to the tag.
+ *
+ * A build talking to a newer engine can be shown an event it has no name for,
+ * and the tag is a worse answer than a name but a much better one than a blank
+ * cell.
+ */
+export function eventLabel(event: string): string {
+  return EVENT_LABEL[event] ?? event;
+}

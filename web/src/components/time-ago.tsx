@@ -29,7 +29,24 @@ function nextTick(then: number, now: number): number {
   return 3_600_000;
 }
 
-export function TimeAgo({ date, className }: { date: Date | number; className?: string }) {
+/**
+ * `format` is how a column gets a live figure without getting a sentence.
+ *
+ * The tick schedule and the `<time>` element are the reusable parts — a list
+ * that says "42s" needs both just as much as a log line saying "3 minutes
+ * ago" does, and the only difference is the words. So the words are a
+ * parameter and everything else is shared, rather than two elements that
+ * drift apart about when a minute becomes an hour.
+ */
+export function TimeAgo({
+  date,
+  format = timeAgo,
+  className,
+}: {
+  date: Date | number;
+  format?: (then: number, now: number) => string;
+  className?: string;
+}) {
   const then = typeof date === "number" ? date : date.getTime();
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -38,7 +55,7 @@ export function TimeAgo({ date, className }: { date: Date | number; className?: 
   }, [then, now]);
   return (
     <time dateTime={new Date(then).toISOString()} title={new Date(then).toLocaleString()} className={className}>
-      {timeAgo(then, now)}
+      {format(then, now)}
     </time>
   );
 }
