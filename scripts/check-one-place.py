@@ -79,6 +79,21 @@ CLAIMS: list[tuple[str, str, str | list[str], str]] = [
         "removed rather than matched.",
     ),
     (
+        "a decoder is spawned without insisting on a sandbox",
+        r"spawn_for_diagnosis|spawn_self_for_diagnosis",
+        [
+            "core/crates/esper-decode/src/worker.rs",
+            "core/crates/esper-engine/src/main.rs",
+        ],
+        "It exists because `ESPER_SANDBOX_AUDIT=1` turns the syscall filter into "
+        "log-and-allow so a missing syscall can be found — and with a session "
+        "refusing any decoder that is not enforcing, that hatch was unreachable "
+        "and taught nobody anything. So there is one caller: `esper sandbox`, on a "
+        "bitstream this machine made a moment earlier. **A peer's bitstream goes "
+        "through `spawn_self`, which refuses**, and a second caller of this is how "
+        "that becomes a preference instead of a property.",
+    ),
+    (
         "the authority that accepts any key is used",
         r"\bpairing_authority\(\)|\bAnyKeyForPairingOnly\b",
         [

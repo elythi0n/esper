@@ -627,6 +627,21 @@ check-messages: build-rust build-go
 ## whose usage text existed as a closure the parser used for errors and nothing
 ## could reach. Reads the dispatcher, the general help's own list, and the
 ## function each command parses its arguments with.
+## Verify nothing reads another binary's printed report without saying why
+.PHONY: check-scraping
+check-scraping:
+	@./scripts/check-scraping.sh
+
+## Verify docs/local-api.md and the server agree about which routes exist
+.PHONY: check-local-api
+check-local-api:
+	@./scripts/check-local-api.sh
+
+## Verify docs/scripting.md and the binaries agree about what answers --json
+.PHONY: check-scripting
+check-scripting: build
+	@./scripts/check-scripting.sh
+
 .PHONY: check-help
 check-help:
 	$(GUARD_ROOT)
@@ -827,7 +842,7 @@ deny:
 
 ## Everything CI runs, in one command
 .PHONY: ci
-ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-one-place check-messages check-images check-unsafe fmt-check lint test check-coverage check-web build check-portal check-packages check-published check-cross check-changelog check-reproducible smoke
+ci: check-isolation check-reached check-shaper check-trail check-host-decides check-settings check-config check-vocabularies check-scancodes check-help check-scripting check-local-api check-scraping check-one-place check-messages check-images check-unsafe fmt-check lint test check-coverage check-web build check-portal check-packages check-published check-cross check-changelog check-reproducible smoke
 
 ## Everything CI runs, plus the slow checks: race, miri, fuzz, deny
 .PHONY: ci-full

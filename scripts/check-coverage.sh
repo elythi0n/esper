@@ -30,16 +30,17 @@ cd "$here"
 
 # package                    floor
 floors="
-cmd/esper                   14
+cmd/esper                   23
 cmd/esper-app               41
 internal/devices            90
 internal/engine             82
 internal/home               83
 internal/proto              90
-internal/server             59
+internal/server             70
+internal/settings           75
 internal/service            53
 "
-total_floor=51
+total_floor=58
 
 profile=$(mktemp)
 trap 'rm -f "$profile"' EXIT

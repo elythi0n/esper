@@ -6,6 +6,52 @@
 # version, the seam between them is broken in a way no unit test would catch —
 # each half would pass its own suite.
 set -euo pipefail
+
+# A free local port, picked from outside the kernel's ephemeral range.
+#
+# **Not `bind(0)` and then `close()`.** That asks the kernel for an ephemeral
+# port and hands it straight back, and the kernel is free to give the same one
+# to anything else in the gap — which on a machine running three Xvfb
+# sessions, four engines and a broker it does. The failure then reads as a
+# defect in the code under test: `Address already in use` against a forwarder
+# that is fine.
+#
+# Picked below the ephemeral range instead, so the only thing that can take it
+# is something that asked for that exact port — and checked as well, so two
+# copies of this suite do not collide.
+#
+# $1: `tcp` or `udp`. Prints the port.
+free_port() {
+  python3 - "${1:-tcp}" <<'PYPORT'
+import random
+import socket
+import sys
+
+kind = socket.SOCK_DGRAM if sys.argv[1] == "udp" else socket.SOCK_STREAM
+low, high = 20000, 30000
+try:
+    with open("/proc/sys/net/ipv4/ip_local_port_range", encoding="ascii") as f:
+        first = int(f.read().split()[0])
+    if first <= high:
+        high = max(low + 1, first - 1)
+except (OSError, ValueError):
+    pass
+
+for _ in range(200):
+    port = random.randint(low, high)
+    s = socket.socket(socket.AF_INET, kind)
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        continue
+    finally:
+        s.close()
+    print(port)
+    break
+else:
+    raise SystemExit("no free local port below the ephemeral range")
+PYPORT
+}
 cd "$(dirname "$0")/.."
 
 BIN=build
@@ -123,6 +169,228 @@ if [ "$noise" = "0" ]; then
 else
   printf '  ✗ the engine'"'"'s output is mixed into the report\n'
   fail=1
+fi
+
+# **What a copy of the state directory is, said where somebody meets it.**
+#
+# `~/.esper` holds this machine's identity key, the local API's token, the
+# device list and the record — so a copy of it is this machine to every device
+# that has paired with it. Permissions stop another account and stop nothing
+# once the disk leaves the building, and full-disk encryption is the answer
+# that is not Esper's to provide and is Esper's to say out loud.
+if printf '%s' "$out" | grep -q '^  at rest'; then
+  printf '  ✓ doctor says what protects this machine'"'"'s state when nothing is running\n'
+else
+  printf '  ✗ doctor does not say what protects the state directory at rest\n'
+  printf '%s\n' "$out" | sed 's/^/      /' | head -12 || true
+  fail=1
+fi
+# **And an answer it cannot establish says so, rather than saying no.** A
+# wrong "not encrypted" is noise; a wrong "encrypted" is the one that stops
+# somebody acting. The suite's homes are under $TMPDIR, which is usually a
+# tmpfs with no backing device — so whichever answer comes back, it must not
+# be a bare claim of safety.
+at_rest=$(printf '%s\n' "$out" | sed -n 's/^  at rest  *//p')
+case "$at_rest" in
+  *"cannot classify"*|*"NOT on an encrypted"*|*"on an encrypted volume"*)
+    printf '  ✓ and the answer is one of the three it can honestly give\n' ;;
+  *)
+    printf '  ✗ the at-rest line says something else: %s\n' "$at_rest"
+    fail=1 ;;
+esac
+
+# **What was tried, and how wide the answer is.** A machine with no display has
+# nothing to capture and nothing to inject with, and the useful half of that
+# answer is which backends were tried and what each one said. Held to both:
+# the attempts are there, and no line runs past a terminal's width. A
+# semicolon-joined list of them is four hundred columns, which a terminal
+# folds wherever it likes and a person reads as damage.
+if printf '%s' "$out" | grep -q 'input   *✗' &&
+  printf '%s' "$out" | grep -qE '^ +(x11|wlr|wayland|dxgi|synthetic)[ -]'; then
+  printf '  ✓ doctor says what it tried before it found nothing\n'
+else
+  printf '  ✗ doctor reported a missing backend without saying what it tried\n'
+  printf '%s\n' "$out" | sed 's/^/      /'
+  fail=1
+fi
+# Counted in characters, not bytes: the report is full of ✓ and — and a byte
+# count would call a seventy-column line too wide. A line whose longest single
+# word already overruns is left alone — half a path helps nobody, so those are
+# printed whole on purpose.
+too_wide() {
+  LC_ALL=C.utf8 awk '
+    length($0) <= 80 { next }
+    {
+      indent = match($0, /[^ ]/) - 1
+      longest = 0
+      n = split($0, word, " ")
+      for (i = 1; i <= n; i++) if (length(word[i]) > longest) longest = length(word[i])
+      if (longest + indent > 80) next
+      print length($0) "  " $0
+    }'
+}
+wide=$(printf '%s\n' "$out" | too_wide | wc -l)
+if [ "$wide" = "0" ]; then
+  printf '  ✓ and no line of the report is wider than a terminal\n'
+else
+  printf '  ✗ %s line(s) of the report run past 80 columns\n' "$wide"
+  printf '%s\n' "$out" | too_wide | sed 's/^/      /'
+  fail=1
+fi
+
+# **The same diagnostic, in a shape a script can read.** A monitoring check and
+# a support script were the two readers of doctor's prose, and prose written
+# for a person is free to change. `--json` is the contract instead — and it has
+# to be the *same* answers, gathered once, not a second diagnostic that can
+# come to disagree with the first.
+if command -v python3 >/dev/null 2>&1; then
+  as_json=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY "$BIN/esper" doctor --json 2>/dev/null || true)
+  verdict=$(printf '%s' "$as_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+rungs = [r["name"] for r in d["ways_in"]]
+tried = d["machine"]["input"]["attempts"]
+remembered = [r for r in d["ways_in"] if r["name"] == "remembered"][0]
+print("ok" if (
+    d["engine"]["reached"]
+    and rungs == ["given", "lan", "remembered", "overlay", "broker"]
+    and remembered["available"] is None
+    and d["ready"] is False
+    and len(tried) > 1
+    and d["warnings"]
+) else "no")
+' 2>/dev/null || echo "no")
+  if [ "$verdict" = "ok" ]; then
+    printf '  ✓ doctor --json is one object with the same answers in it\n'
+  else
+    printf '  ✗ doctor --json did not answer with the report as an object\n'
+    printf '%s\n' "$as_json" | head -20 | sed 's/^/      /' || true
+    fail=1
+  fi
+  # The exit status is the printed report's, so a script that only wants the
+  # number never has to parse anything at all.
+  #
+  # **The status is captured, not allowed to reach the shell.** This suite runs
+  # under `set -e` and the command being checked *exits one* on a machine with
+  # no display — so running it bare ends the run sixty checks early.
+  json_code=0
+  env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY "$BIN/esper" doctor --json >/dev/null 2>&1 || json_code=$?
+  said_code=0
+  env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY "$BIN/esper" doctor >/dev/null 2>&1 || said_code=$?
+  if [ "$json_code" = "$said_code" ]; then
+    printf '  ✓ and exits the way the printed report does\n'
+  else
+    printf '  ✗ doctor --json exited %s where the printed report exited %s\n' "$json_code" "$said_code"
+    fail=1
+  fi
+fi
+
+# **The jail a peer's video is decoded in, and the hatch that could not be
+# reached.**
+#
+# The decoder is a large C parser eating bytes a peer chose, and a session
+# refuses one that is not enforcing — with no flag and no fallback. That is
+# right, and it made `ESPER_SANDBOX_AUDIT=1` useless for the one thing it is
+# documented to do: turn the filter into log-and-allow so a syscall missing
+# from it can be *found*. Turning it on stopped the session and taught nobody
+# anything.
+#
+# So the hatch has one caller, which is this command, on a bitstream this
+# machine made a moment earlier. A peer's bitstream still goes through the
+# constructor that refuses.
+echo "  — the jail a peer's video is decoded in"
+sb=$(timeout 30 "$BIN/esper" sandbox 2>&1 || true)
+if printf '%s' "$sb" | grep -q 'sandboxed —' &&
+  printf '%s' "$sb" | grep -q 'what a compromised decoder could reach'; then
+  printf '  ✓ the decoder runs in a sandbox, and says what it stops\n'
+else
+  printf '  ✗ the sandbox report did not say what it stops\n'
+  printf '%s\n' "$sb" | sed 's/^/      /' | head -8 || true
+  fail=1
+fi
+# **The consequence, not the layer.** "No landlock" is a fact about a kernel;
+# "it can read this machine's identity key" is a fact about the machine, and
+# only the second is something somebody can weigh.
+sb_audit=$( { ESPER_SANDBOX_AUDIT=1 timeout 30 "$BIN/esper" sandbox 2>&1 || true; } | head -20)
+if printf '%s' "$sb_audit" | grep -q 'NOT SANDBOXED' &&
+  printf '%s' "$sb_audit" | grep -q 'every system call' &&
+  printf '%s' "$sb_audit" | grep -q 'separate process'; then
+  printf '  ✓ and with the filter weakened it names what is reachable, and what still is not\n'
+else
+  printf '  ✗ a weakened sandbox did not say what it left reachable\n'
+  printf '%s\n' "$sb_audit" | sed 's/^/      /' | head -8 || true
+  fail=1
+fi
+# The exit status is the answer too, so a check that only wants one need not
+# read anything.
+sb_code=0
+timeout 30 "$BIN/esper" sandbox >/dev/null 2>&1 || sb_code=$?
+sb_audit_code=0
+ESPER_SANDBOX_AUDIT=1 timeout 30 "$BIN/esper" sandbox >/dev/null 2>&1 || sb_audit_code=$?
+if [ "$sb_code" = "0" ] && [ "$sb_audit_code" != "0" ]; then
+  printf '  ✓ and exits nought when it is in force and non-zero when it is not\n'
+else
+  printf '  ✗ sandbox exited %s enforcing and %s weakened\n' "$sb_code" "$sb_audit_code"
+  fail=1
+fi
+
+# **`esper input`, which answers "why does nothing I type arrive".**
+#
+# A machine that can be seen and not driven is view only, and the ladder of
+# injection backends runs when a *session* starts — so a host's own output
+# never shows it and this is the only way to ask. Checked with no display,
+# where the honest answer is that nothing was found and here is what was tried.
+echo "  — which backend this machine would inject with"
+inp=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY "$BIN/esper" input 2>/dev/null || true)
+if printf '%s' "$inp" | grep -q 'view only' &&
+  printf '%s' "$inp" | grep -q 'tried' &&
+  printf '%s' "$inp" | grep -qE '^ +x11 xtest:'; then
+  printf '  ✓ a machine with no display says it is view only, and what it tried\n'
+else
+  printf '  ✗ the input backend report did not say what was tried\n'
+  printf '%s\n' "$inp" | sed 's/^/      /'
+  fail=1
+fi
+# **A question, and one that changes nothing.** It opens each backend in turn
+# to find out which works, and a diagnostic that left an identity, a device
+# store or a line in the record behind would be one nobody dares run on a
+# machine they care about. Measured on the directory rather than on the words
+# it printed: the output is a sentence, and a sentence is not evidence.
+inp_home="${TMPDIR:-/tmp}/esper-smoke-input-$$"
+rm -rf "$inp_home"
+mkdir -p "$inp_home"
+env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$inp_home" \
+  "$BIN/esper" input >/dev/null 2>&1 || true
+left=$(find "$inp_home" -mindepth 1 | wc -l)
+if [ "$left" = "0" ]; then
+  printf '  ✓ and asking leaves nothing behind on the machine\n'
+else
+  printf '  ✗ asking which backend would be used wrote %s thing(s) into the home\n' "$left"
+  find "$inp_home" -mindepth 1 | sed 's/^/      /'
+  fail=1
+fi
+rm -rf "$inp_home"
+if command -v python3 >/dev/null 2>&1; then
+  inp_json=$(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY "$BIN/esper" input --json 2>/dev/null || true)
+  # The same two keys `doctor --json` uses for the same capability, so a
+  # reader that knows one knows the other.
+  same=$(printf '%s' "$inp_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print("ok" if (
+    d["available"] is False
+    and isinstance(d["attempts"], list)
+    and len(d["attempts"]) > 1
+    and isinstance(d["detail"], str)
+) else "no")
+' 2>/dev/null || echo "no")
+  if [ "$same" = "ok" ]; then
+    printf '  ✓ and --json answers with the shape doctor uses for the same thing\n'
+  else
+    printf '  ✗ input --json did not answer with available, detail and attempts\n'
+    printf '%s\n' "$inp_json" | sed 's/^/      /'
+    fail=1
+  fi
 fi
 
 # **The ladder, said as a ladder.** Reporting "no overlay" and "no broker"
@@ -537,7 +805,8 @@ cleanup_terminal() {
              "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}" \
              "${mk_host:-}" "${mk_client:-}" "${na_host:-}" "${la_host:-}" \
              "${bd_host:-}" "${wd_host:-}" "${wd_client:-}" "${wd_win:-}" \
-             "${wd_xev:-}" "${wd_x:-}" "${wd_x2:-}"; do
+             "${wd_xev:-}" "${wd_x:-}" "${wd_x2:-}" "${ask_x:-}" "${own_x:-}" \
+             "${bd_x:-}" "${wr_pid:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -576,7 +845,10 @@ else
     sed 's/^/      /' "$term_a/pair.log" "$term_b/pair.log"
     fail=1
   else
-    ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" terminal >/dev/null
+    # `--yes` for the same reason `unattended` has it a few lines down: a
+    # shell is a permission that needs a person at the machine, and there is
+    # nobody here to ask.
+    ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" terminal --yes >/dev/null
 
     # **And `unattended`, because this host has nobody to ask.** A device that
     # does not hold it needs somebody at the host to accept the session, and a
@@ -615,6 +887,53 @@ else
     else
       printf '  ✓ and nothing was written\n'
     fi
+    # **`terminal` is the permission that grants every other one, and nothing
+    # asked about it.** A shell runs as the user who owns `~/.esper`: it can
+    # read the identity key and the local API's token, rewrite the device list
+    # without going near `grant`, and edit the record of what happened. So it
+    # cannot be closed downstream — the confirmation is answered at a terminal
+    # and a served shell *is* one — and the gate belongs where the escalation
+    # starts: handing out the shell.
+    if ! ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" terminal > "$term_a/shell.log" 2>&1; then
+      if grep -q 'needs confirming at the host' "$term_a/shell.log"; then
+        printf '  ✓ granting a shell is confirmed, like the rest of the dangerous list\n'
+      else
+        printf '  ✗ granting a shell was refused for some other reason\n'
+        sed 's/^/      /' "$term_a/shell.log" || true
+        fail=1
+      fi
+    else
+      printf '  ✗ a shell on this machine was granted with nobody to confirm it\n'
+      fail=1
+    fi
+    # And the question says what it hands over, because naming the permission
+    # and leaving somebody to work out what a shell is, is not asking them.
+    if command -v script >/dev/null 2>&1; then
+      asked=$( { printf 'n\n' | script -q -c \
+        "env ESPER_HOME=$term_a $BIN/esper-engine grant $fp terminal" /dev/null 2>&1 || true; } | head -20)
+      said_all=1
+      for must in "identity key" "device list" "record"; do
+        printf '%s' "$asked" | grep -q "$must" || said_all=0
+      done
+      if [ "$said_all" = "1" ]; then
+        printf '  ✓ and the question says what a shell really hands over\n'
+      else
+        printf '  ✗ the question named the permission and not what it grants\n'
+        printf '%s\n' "$asked" | sed 's/^/      /' | head -8 || true
+        fail=1
+      fi
+      # Folded, because a question somebody cannot read is not a question: the
+      # sentence is a paragraph and a terminal folds a long line through the
+      # box rule this draws.
+      wide=$(printf '%s\n' "$asked" | LC_ALL=C.utf8 awk 'length($0) > 80' | wc -l)
+      if [ "$wide" = "0" ]; then
+        printf '  ✓ and every line of it fits a terminal\n'
+      else
+        printf '  ✗ %s line(s) of the question run past 80 columns\n' "$wide"
+        fail=1
+      fi
+    fi
+
     # An ordinary permission still needs no ceremony.
     if ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" clipboard-out >/dev/null 2>&1; then
       printf '  ✓ an ordinary permission is granted without a question\n'
@@ -961,7 +1280,7 @@ else
         # `reach` now like everything else, and this is the proof: the same
         # host, with nothing but its name, and the rung it was found on said out
         # loud.
-        ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" terminal >/dev/null 2>&1 || true
+        ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" terminal --yes >/dev/null 2>&1 || true
         named_shell=$(printf 'echo smoke-named-$((6*7))\nexit 0\n' | \
           env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" TERM=dumb \
           timeout 60 "$BIN/esper-engine" terminal "$peer_name" --no-mdns 2>&1 || true)
@@ -1038,6 +1357,30 @@ else
             printf '%s\n' "$out" | sed 's/^/      /'
             sed 's/^/      /' "$term_a/announce.log"
             fail=1
+          fi
+          # **The same list, in the three shapes it is offered in.** A person
+          # reads the printed one; a shell cuts the tab-separated one; a
+          # program reads the object. Three renderings of one browse, so a
+          # device present in one and missing from another is a defect
+          # whichever way somebody is reading it.
+          tabs=$(ESPER_HOME="$term_b" timeout 30 "$BIN/esper-engine" discover --porcelain 2>/dev/null || true)
+          obj=$(ESPER_HOME="$term_b" timeout 30 "$BIN/esper-engine" discover --json 2>/dev/null || true)
+          if command -v python3 >/dev/null 2>&1; then
+            agree=$(printf '%s' "$obj" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+seen = {e["fingerprint"] for e in d["paired"] + d["candidates"] if e["fingerprint"]}
+print(" ".join(sorted(seen)))
+' 2>/dev/null || echo "")
+            from_tabs=$(printf '%s\n' "$tabs" | awk -F'\t' 'NF >= 2 && $2 != "" { print $2 }' | sort | tr '\n' ' ' | sed 's/ $//')
+            if [ -n "$agree" ] && [ "$agree" = "$from_tabs" ]; then
+              printf '  ✓ and --json and --porcelain name the same devices\n'
+            else
+              printf '  ✗ the object names [%s] and the tab-separated list names [%s]\n' "$agree" "$from_tabs"
+              printf '%s\n' "$obj" | sed 's/^/      /'
+              printf '%s\n' "$tabs" | sed 's/^/      /'
+              fail=1
+            fi
           fi
         fi
         kill "$announcing" 2>/dev/null || true
@@ -1158,10 +1501,8 @@ PYSVC
 
         # Two free local ports, taken and released: the forwarder binds them a
         # moment later.
-        lport=$(python3 -c 'import socket
-s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
-        lport2=$(python3 -c 'import socket
-s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+        lport=$(free_port tcp)
+        lport2=$(free_port tcp)
 
         if [ -z "$svc_port" ]; then
           printf '  ✗ the test service never said what port it took\n'
@@ -1590,6 +1931,44 @@ except OSError:
       # properties are checked here through the real binary, because they are
       # the whole of what stands between the answers and anything that can
       # reach the socket.
+      # **A port of nought is answered with the port it got.** `--listen
+      # 127.0.0.1:0` means "pick one", and a report printed before the bind
+      # says `:0` — the one thing the person who asked for nought cannot work
+      # out for themselves, and what the API's own Host check compares
+      # against, so a caller told `:0` cannot address it at all.
+      echo "  — the local API says which port it actually took"
+      zero_home="$term_a/zero-port"
+      mkdir -p "$zero_home"
+      ESPER_HOME="$zero_home" timeout 20 "$BIN/esper" api --listen "127.0.0.1:0"         > "$zero_home/api.log" 2>&1 &
+      zero_pid=$!
+      zero_addr=""
+      for _ in $(seq 1 100); do
+        zero_addr=$( { awk '/^  listening/{print $2}' "$zero_home/api.log" 2>/dev/null || true; } | head -1)
+        [ -n "$zero_addr" ] && break
+        sleep 0.1
+      done
+      zero_port=${zero_addr##*:}
+      if [ -n "$zero_port" ] && [ "$zero_port" != "0" ] && [ "$zero_port" -gt 0 ] 2>/dev/null; then
+        printf '  ✓ a port of nought is reported as the port it got
+'
+        # And that port really is the one answering, which is the whole claim.
+        zero_token=$( { cat "$zero_home/api.token" 2>/dev/null || true; } | tr -d '\n')
+        zero_code=$(curl -s -o /dev/null -w '%{http_code}'           -H "Authorization: Bearer $zero_token" "http://$zero_addr/health" || true)
+        if [ "$zero_code" = "200" ]; then
+          printf '  ✓ and the address it reported is the one answering
+'
+        else
+          printf '  ✗ the reported address %s answered %s\n' "$zero_addr" "$zero_code"
+          fail=1
+        fi
+      else
+        printf '  ✗ the API reported %s for a port it was asked to choose\n' "${zero_addr:-nothing}"
+        sed 's/^/      /' "$zero_home/api.log" 2>/dev/null | head -6 || true
+        fail=1
+      fi
+      kill "$zero_pid" 2>/dev/null || true
+      wait "$zero_pid" 2>/dev/null || true
+
       echo "  — the local API answers only with the token, and only on loopback"
       api_port=$((28000 + (RANDOM % 2000)))
       ESPER_HOME="$term_a" timeout 30 "$BIN/esper" api --listen "127.0.0.1:$api_port" \
@@ -1614,6 +1993,43 @@ except OSError:
           printf '  ✗ a request with no token answered %s\n' "$code"
           fail=1
         fi
+        # **The identity over the API is the engine's, in the engine's own
+        # words.** The control plane asks the engine and hands the answer on,
+        # and the window draws an identicon from what comes back — so a `key`
+        # that quietly became the whole key rather than the fingerprint is a
+        # window drawing the wrong picture and showing the wrong thing to read
+        # aloud. Both are here, each the length it should be: this is the seam
+        # where two correct halves disagree.
+        if command -v python3 >/dev/null 2>&1; then
+          who=$(curl -s -H "Authorization: Bearer $api_token" \
+            "http://127.0.0.1:$api_port/identity" || true)
+          if printf '%s' "$who" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert len(d["key"]) == 16, ("key", d["key"])
+assert len(d["public_key"]) == 64, ("public_key", d.get("public_key"))
+assert len(d["words"]) == 8, d["words"]
+assert d["key"] != d["public_key"]
+' 2>/dev/null; then
+            printf '  ✓ the API answers with the fingerprint a screen shows and the key a peer pins\n'
+          else
+            printf '  ✗ /identity did not answer with both: %s\n' \
+              "$(printf '%s' "$who" | head -c 110)"
+            fail=1
+          fi
+          # And it is the same fingerprint the command prints, because two
+          # answers to "what is this machine" is one too many.
+          said_fp=$(ESPER_HOME="$term_a" "$BIN/esper" identity 2>/dev/null |
+            awk '/^  fingerprint /{print $2}')
+          api_fp=$(printf '%s' "$who" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])' 2>/dev/null || true)
+          if [ -n "$said_fp" ] && [ "$said_fp" = "$api_fp" ]; then
+            printf '  ✓ and it is the same fingerprint the command prints\n'
+          else
+            printf '  ✗ the command says %s and the API says %s\n' "${said_fp:-nothing}" "${api_fp:-nothing}"
+            fail=1
+          fi
+        fi
+
         # With it: answered, and with the names a dashboard expects rather than
         # Go's field names.
         body=$(curl -s -H "Authorization: Bearer $api_token" \
@@ -1644,6 +2060,55 @@ except OSError:
           printf '  ✗ the device list is not answered: %s\n' "$(printf '%s' "$listed" | head -c 120)"
           fail=1
         fi
+        # **Pairing through the API, which is how the window does it.**
+        #
+        # The control plane starts `esper-engine pair --listen --json` and
+        # reads the offer off its stream. That seam had no end-to-end check at
+        # all, and it was a regular expression over prose written for a person
+        # — so the day a line was reworded, the window would have shown a
+        # spinner for ever with nothing in any log to say why. What comes back
+        # has to be a code somebody can type, a port something can reach, and
+        # the eight words somebody reads aloud; a screen with any of the three
+        # missing looks like it is working until the moment it matters.
+        if command -v python3 >/dev/null 2>&1; then
+          offered=$(curl -s -X POST -H "Authorization: Bearer $api_token" \
+            "http://127.0.0.1:$api_port/pair/offer" || true)
+          if printf '%s' "$offered" | python3 -c '
+import json, re, sys
+d = json.load(sys.stdin)
+assert re.fullmatch(r"[A-Z0-9]{4}-[A-Z0-9]{4}", d["code"]), d["code"]
+assert 1 <= d["port"] <= 65535, d["port"]
+assert len(d["words"]) == 8, d["words"]
+assert all(w.isalpha() for w in d["words"]), d["words"]
+assert d["state"] == "offering", d["state"]
+assert d["expires_at"] > 0, d["expires_at"]
+' 2>/dev/null; then
+            printf '  ✓ the API offers a pairing code, a port and the eight words for it\n'
+          else
+            printf '  ✗ POST /pair/offer did not answer with an offer: %s\n' \
+              "$(printf '%s' "$offered" | head -c 120)"
+            fail=1
+          fi
+          # And polling it says the same thing, because that is what the
+          # screen does while somebody reads the code out.
+          polled=$(curl -s -H "Authorization: Bearer $api_token" \
+            "http://127.0.0.1:$api_port/pair/offer" || true)
+          same=$(printf '%s\n%s' "$offered" "$polled" | python3 -c '
+import json, sys
+first, second = sys.stdin.read().splitlines()[:2]
+a, b = json.loads(first), json.loads(second)
+print("ok" if a["code"] == b["code"] and a["words"] == b["words"] else "no")
+' 2>/dev/null || echo "no")
+          if [ "$same" = "ok" ]; then
+            printf '  ✓ and polling it answers with the same code and words\n'
+          else
+            printf '  ✗ the offer changed between being made and being polled\n'
+            fail=1
+          fi
+          curl -s -X DELETE -H "Authorization: Bearer $api_token" \
+            "http://127.0.0.1:$api_port/pair/offer" >/dev/null 2>&1 || true
+        fi
+
         # And the mode of the token file, which is the whole of who can ask.
         mode=$(stat -c '%a' "$term_a/api.token" 2>/dev/null || echo "?")
         if [ "$mode" = "600" ]; then
@@ -1655,6 +2120,126 @@ except OSError:
       fi
       kill "$api_pid" 2>/dev/null || true
       api_pid=""
+
+      # **And the routes that change something, all the way to the file.**
+      #
+      # Everything above reads. These write — a request, the Go boundary that
+      # decides what may be asked for, the engine, and the file it rewrites —
+      # and each half of that is tested on its own: the boundary against a
+      # stand-in engine, the engine against a temporary home. Both green is
+      # exactly the state an integration gap is least visible in, so this runs
+      # the real binaries against a real store and then *reads the store*.
+      #
+      # On a home of its own, because it changes what is in it and the checks
+      # after this one read `$term_a`.
+      echo "  — the local API's writes reach the store and the file"
+      wr=$(mktemp -d)
+      cp -a "$term_a/." "$wr/" 2>/dev/null || true
+      : > "$wr/sessions.log"
+      rm -f "$wr/api.token" "$wr/config.toml"
+      wr_port=$((30000 + (RANDOM % 2000)))
+      ESPER_HOME="$wr" timeout 60 "$BIN/esper" api --listen "127.0.0.1:$wr_port" \
+        > "$wr/api.log" 2>&1 &
+      wr_pid=$!
+      wr_up=""
+      for _ in $(seq 1 100); do
+        grep -q "listening" "$wr/api.log" 2>/dev/null && wr_up=yes && break
+        sleep 0.1
+      done
+      wr_token=$( { cat "$wr/api.token" 2>/dev/null || true; } | tr -d '\n')
+      # The whole fingerprint, which is what these routes take: `$fp` is the
+      # prefix the device list prints.
+      wr_fp=$( { ESPER_HOME="$wr" "$BIN/esper" devices 2>/dev/null | grep -oE '\b[0-9a-f]{16}\b' || true; } | head -1)
+      if [ -z "$wr_up" ] || [ -z "$wr_token" ] || [ -z "$wr_fp" ]; then
+        printf '  ✗ the API for the write checks did not start (token %s, device %s)\n' \
+          "${wr_token:+yes}" "${wr_fp:-none}"
+        sed 's/^/      /' "$wr/api.log" 2>/dev/null | head -6
+        fail=1
+      else
+        ask() {
+          curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $wr_token" -H "Content-Type: application/json" \
+            -d "$2" "http://127.0.0.1:$wr_port$1" || true
+        }
+
+        # A per-device answer about locking, and the store holding it.
+        code=$(ask "/devices/$wr_fp/lock-after" '{"after":"always"}')
+        if [ "$code" = "200" ] && grep -q '"lock_after": *"always"' "$wr/devices.json"; then
+          printf '  ✓ a per-device locking answer reaches the store\n'
+        else
+          printf '  ✗ lock-after answered %s and the store says %s\n' "$code" \
+            "$( { grep -o '"lock_after"[^,]*' "$wr/devices.json" || echo nothing; } | head -1)"
+          fail=1
+        fi
+
+        # Hours, which go through the engine's own parser.
+        code=$(ask "/devices/$wr_fp/schedule" '{"when":"weekdays 08:00-18:00"}')
+        if [ "$code" = "200" ] && grep -q '08:00-18:00' "$wr/devices.json"; then
+          printf '  ✓ and the hours an unattended device may walk in\n'
+        else
+          printf '  ✗ schedule answered %s and left no hours in the store\n' "$code"
+          fail=1
+        fi
+
+        # A group, and taking it away again — the last member leaving takes the
+        # group with it, which is what makes a group its members.
+        joined=$(ask "/devices/$wr_fp/groups" '{"name":"ops"}')
+        in_store=$(grep -c '"ops"' "$wr/devices.json" || true)
+        left=$(ask "/devices/$wr_fp/groups" '{"name":"ops","remove":true}')
+        gone=$(grep -c '"ops"' "$wr/devices.json" || true)
+        if [ "$joined" = "200" ] && [ "$in_store" -ge 1 ] && [ "$left" = "200" ] && [ "$gone" = "0" ]; then
+          printf '  ✓ and a group, and the device leaving it again\n'
+        else
+          printf '  ✗ grouping answered %s/%s and the store went %s → %s\n' \
+            "$joined" "$left" "$in_store" "$gone"
+          fail=1
+        fi
+
+        # **And what the boundary refuses.** A name in the position the engine
+        # reads a flag from, and a fingerprint that is not one.
+        refused=""
+        for bad in '/devices/'"$wr_fp"'/groups {"name":"--remove"}'                    '/devices/'"$wr_fp"'/groups {"name":"ops; rm -rf /"}'                    '/devices/'"$wr_fp"'/lock-after {"after":"--yes"}'                    '/devices/827aabec/wake {}'; do
+          path=${bad%% *}
+          body=${bad#* }
+          got=$(ask "$path" "$body")
+          case "$got" in 200) refused="$refused [$path $body]";; esac
+        done
+        if [ -z "$refused" ]; then
+          printf '  ✓ and a flag in a name'"'"'s place is refused before the engine runs\n'
+        else
+          printf '  ✗ these were accepted:%s\n' "$refused"
+          fail=1
+        fi
+
+        # A setting, all the way to a file that did not exist.
+        code=$(ask "/config" '{"key":"host.fps","value":"45"}')
+        if [ "$code" = "200" ] && grep -q 'host.fps = 45' "$wr/config.toml"; then
+          printf '  ✓ and a setting reaches a config file the request created\n'
+        else
+          printf '  ✗ setting host.fps answered %s and wrote %s\n' "$code" \
+            "$( { cat "$wr/config.toml" 2>/dev/null || echo "no file"; } | head -1)"
+          fail=1
+        fi
+
+        # **And the six that need somebody at the machine do not.** This is the
+        # boundary the threat model describes, so it is checked where it
+        # actually stands rather than only in the package that declares it.
+        machine_only=""
+        for one in '{"key":"host.serve_without_indicator","value":"true"}'                    '{"key":"audit.retain","value":"1"}'                    '{"key":"files.root","value":"/"}'                    '{"key":"broker.key","value":"00"}'                    '{"key":"host.serve_without_indicator","unset":true}'; do
+          got=$(ask "/config" "$one")
+          [ "$got" = "403" ] || machine_only="$machine_only [$one → $got]"
+        done
+        if [ -z "$machine_only" ] && ! grep -q 'serve_without_indicator\|audit.retain\|files.root\|broker.key' "$wr/config.toml"; then
+          printf '  ✓ and the settings that need somebody at the machine are refused with a 403\n'
+        else
+          printf '  ✗ these were not refused:%s\n' "${machine_only:- (but something reached the file)}"
+          { cat "$wr/config.toml" 2>/dev/null || true; } | sed 's/^/      /' | head -4
+          fail=1
+        fi
+      fi
+      kill "$wr_pid" 2>/dev/null || true
+      wr_pid=""
+      rm -rf "$wr"
 
       # **The device list with no engine at all.**
       #
@@ -1735,6 +2320,22 @@ except OSError:
         else
           printf '  ✗ a device was listed without a fingerprint to compare: %s\n' \
             "$(printf '%s' "$ne_body" | grep -oE '"fingerprint":\{[^}]*\}' | head -c 160)"
+          fail=1
+        fi
+
+        # **And `/status` says why, not only that it cannot.**
+        #
+        # The window shows "engine not running" and, behind it, whatever came
+        # back — so this answer is the whole of what somebody is told when the
+        # thing that does the work is missing. An answer that named no reason
+        # left them with a warning and nowhere to go.
+        ne_status=$(curl -s -H "Authorization: Bearer $ne_token" \
+          "http://127.0.0.1:$ne_port/status" || true)
+        if printf '%s' "$ne_status" | grep -qiE 'engine|not found|no such file'; then
+          printf '  ✓ and asking what this machine can do says why it cannot say\n'
+        else
+          printf '  ✗ a machine with no engine answers with no reason: %s\n' \
+            "$(printf '%s' "$ne_status" | head -c 160)"
           fail=1
         fi
         # And the engine-backed answers say they are unavailable rather than
@@ -1824,6 +2425,182 @@ except OSError:
       else
         printf '  ✗ the device list does not say how many may walk in unasked\n'
         printf '%s\n' "$unasked" | sed 's/^/      /'
+        fail=1
+      fi
+
+      # **And the same list for a program.** `devices` took no arguments and
+      # ignored every one, so `--json` was accepted, answered with the table
+      # laid out for a person, and exited zero — a script asking for JSON got
+      # a listing and nothing said anything was wrong.
+      listed=$(env -u DISPLAY ESPER_HOME="$term_a" "$BIN/esper" devices --json 2>/dev/null || true)
+      if printf '%s' "$listed" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+one = d["devices"][0]
+# The fields the store holds, and the fingerprint every other part of the
+# product names a device by.
+for k in ("public_key", "name", "permissions", "paired_at", "pairing", "fingerprint"):
+    assert k in one, k
+assert len(one["fingerprint"]["hex"]) == 16, one["fingerprint"]
+assert len(one["fingerprint"]["words"]) == 8, one["fingerprint"]
+assert d["count"] == len(d["devices"])
+' 2>/dev/null; then
+        printf '  ✓ and answers the same list as JSON, with the fingerprint on each\n'
+      else
+        printf '  ✗ `devices --json` did not answer with the store: %s\n' \
+          "$(printf '%s' "$listed" | head -c 100)"
+        fail=1
+      fi
+
+      # **A word that is not a link is refused as one.** `join` accepts the
+      # body of a link on its own, because people paste what is between the
+      # quotes — which means any text at all reaches the decoder, and the
+      # first byte of whatever it spells was reported as a layout version.
+      # Somebody who mistyped was told their Esper was out of date.
+      #
+      # **Captured with `|| true`, and the pipeline too.** This suite runs
+      # under `set -euo pipefail` and the command being checked *refuses* —
+      # so both the engine's exit of one and `head` closing the pipe end the
+      # whole run, on a check that is passing.
+      for typed in notalink elythion hello-there; do
+        said=$( { env -u DISPLAY ESPER_HOME="$term_a" "$BIN/esper" join "$typed" 2>&1 </dev/null || true; } | head -1)
+        case "$said" in
+          *"not an Esper invitation link"*) ;;
+          *)
+            printf '  ✗ `join %s` was refused with: %s\n' "$typed" "$said"
+            fail=1
+            ;;
+        esac
+      done
+      # And a text addressed as a link keeps its own reason, because then it
+      # really is a damaged link and the reason is the useful part.
+      damaged=$( { env -u DISPLAY ESPER_HOME="$term_a" "$BIN/esper" join "esper://join/short" 2>&1 </dev/null || true; } | head -1)
+      case "$damaged" in
+        *"not an Esper invitation link"*)
+          printf '  ✗ a damaged link lost its own reason: %s\n' "$damaged"
+          fail=1
+          ;;
+        *) printf '  ✓ a word that is not a link is refused as one, and a damaged link keeps its reason\n' ;;
+      esac
+
+      # **A pairing says how it happened.** "A device paired" reads exactly
+      # the same whether somebody was at the keyboard reading a code aloud or
+      # a link was pasted out of an email — and those are the two answers an
+      # investigation is looking for. The record names which, and says when a
+      # pairing is spent after one session.
+      if grep -q '"event":"paired"' "$term_a/sessions.log" 2>/dev/null; then
+        if grep '"event":"paired"' "$term_a/sessions.log" | grep -q '"how":"a code read at this machine"'; then
+          printf '  ✓ the record says a pairing came from a code read at the machine\n'
+        else
+          printf '  ✗ a pairing was recorded without saying how it happened\n'
+          grep '"event":"paired"' "$term_a/sessions.log" | head -2 | sed 's/^/      /' || true
+          fail=1
+        fi
+        # And a code at the machine is not a one-session pairing, which is what
+        # a link makes.
+        if grep '"event":"paired"' "$term_a/sessions.log" | grep -q '"once":true'; then
+          printf '  ✗ a pairing made with a code was recorded as lasting one session\n'
+          fail=1
+        else
+          printf '  ✓ and that such a pairing lasts, rather than being spent\n'
+        fi
+      fi
+
+      # **A name is not enough to change what a device may do, and the
+      # refusal says why.** A name is what that device called itself: two can
+      # share one, and a device that wanted to be mistaken for another could
+      # call itself whatever that one is called. So a permission is changed by
+      # fingerprint — and since `esper lock rack` takes the name, somebody who
+      # then types `esper grant rack view` meets a rule they were never told
+      # about, which reads as a bug unless the refusal explains itself.
+      named_home="$term_a/by-name"
+      mkdir -p "$named_home"
+      cp testdata/fixtures/device_store_screens.json "$named_home/devices.json"
+      by_name=$(env -u DISPLAY ESPER_HOME="$named_home" "$BIN/esper" grant rack view 2>&1 || true)
+      if printf '%s' "$by_name" | grep -q 'Did you mean' &&
+         printf '%s' "$by_name" | grep -q '69853f3451e0dd7a'; then
+        printf '  ✓ a permission refused for a name hands over the fingerprint for it
+'
+      else
+        printf '  ✗ `grant <name>` was refused with nothing to do next
+'
+        printf '%s
+' "$by_name" | sed 's/^/      /' | head -6 || true
+        fail=1
+      fi
+      # And it says why, because a rule somebody meets without being told is a
+      # rule that reads as a bug.
+      if printf '%s' "$by_name" | grep -qi 'name a device gave itself'; then
+        printf '  ✓ and says why a name is not enough here
+'
+      else
+        printf '  ✗ the refusal hands over a fingerprint and never says why
+'
+        fail=1
+      fi
+      # An ordinary typo gets the ordinary sentence: the paragraph is about a
+      # name, and printing it at everybody would make it noise.
+      by_typo=$(env -u DISPLAY ESPER_HOME="$named_home" "$BIN/esper" grant 9zz view 2>&1 || true)
+      if printf '%s' "$by_typo" | grep -q 'Did you mean'; then
+        printf '  ✗ a mistyped fingerprint was answered with the paragraph about names
+'
+        fail=1
+      else
+        printf '  ✓ and a mistyped fingerprint is not
+'
+      fi
+      rm -rf "$named_home"
+
+      # An argument neither of them understands is a refusal, not silence.
+      ignored=""
+      for one in "devices --nope" "devices elythion" "identity --porcelain"; do
+        # shellcheck disable=SC2086
+        if env -u DISPLAY ESPER_HOME="$term_a" "$BIN/esper" $one >/dev/null 2>&1; then
+          ignored="$ignored [$one]"
+        fi
+      done
+      if [ -z "$ignored" ]; then
+        printf '  ✓ and an argument neither of them takes is refused rather than ignored\n'
+      else
+        printf '  ✗ these were accepted and ignored:%s\n' "$ignored"
+        fail=1
+      fi
+
+      # **And the one it does take answers with the fingerprint, both ways.**
+      # A refusal that refused everything would satisfy the check above and
+      # leave the flag broken.
+      ident=$(env -u DISPLAY ESPER_HOME="$term_a" "$BIN/esper" identity --json 2>/dev/null || true)
+      if command -v python3 >/dev/null 2>&1 && printf '%s' "$ident" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+# The whole key, because that is what a peer pins — and the fingerprint in
+# both its forms, because sixty-four bits is how a device is named on a
+# command line and eight words is how it is read aloud.
+assert len(d["public_key"]) == 64, d["public_key"]
+assert len(d["fingerprint"]["hex"]) == 16, d["fingerprint"]
+assert len(d["fingerprint"]["words"]) == 8, d["fingerprint"]
+assert d["file"].endswith("identity.key"), d["file"]
+' 2>/dev/null; then
+        printf '  ✓ and `identity --json` answers with the whole key and the fingerprint for it\n'
+      else
+        printf '  ✗ `identity --json` did not answer with this device: %s\n' \
+          "$(printf '%s' "$ident" | head -c 100)"
+        fail=1
+      fi
+
+      # **One word, one meaning, across two binaries.** `esper-broker identity`
+      # prints the whole key under `key`; a device printing sixty-four bits of
+      # a hash under the same word is how somebody comes to compare a
+      # fingerprint and believe they have checked a machine.
+      said_ident=$(env -u DISPLAY ESPER_HOME="$term_a" "$BIN/esper" identity 2>/dev/null || true)
+      ident_key=$(printf '%s\n' "$said_ident" | awk '/^  key /{print $2}')
+      ident_fp=$(printf '%s\n' "$said_ident" | awk '/^  fingerprint /{print $2}')
+      if [ "${#ident_key}" = "64" ] && [ "${#ident_fp}" = "16" ]; then
+        printf '  ✓ and the printed form calls the whole key a key, and the short one a fingerprint\n'
+      else
+        printf '  ✗ identity printed a %s-character key and a %s-character fingerprint\n' \
+          "${#ident_key}" "${#ident_fp}"
+        printf '%s\n' "$said_ident" | sed 's/^/      /'
         fail=1
       fi
 
@@ -2024,9 +2801,7 @@ except OSError:
           [ -n "$small_addr" ] && break
           sleep 0.1
         done
-        lossy=$(python3 -c 'import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1]); s.close()')
+        lossy=$(free_port udp)
         python3 scripts/flaky-link.py --listen "127.0.0.1:$lossy" --to "$small_addr" \
           --loss 5 --seed 7 > "$term_b/flaky.log" 2>&1 &
         relay_pid=$!
@@ -2111,9 +2886,7 @@ print(s.getsockname()[1]); s.close()')
 
         pictures_through() {
           # $1: extra relay arguments. Prints how many pictures were shown.
-          port=$(python3 -c 'import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1]); s.close()')
+          port=$(free_port udp)
           # shellcheck disable=SC2086
           python3 scripts/flaky-link.py --listen "127.0.0.1:$port" --to "$outage_addr" \
             --seed 11 $1 > "$term_b/outage-relay.log" 2>&1 &
@@ -2797,6 +3570,38 @@ WINDOW
         fi
       fi
 
+      # **And the case a parent process is in.** The bar being terminal-only is
+      # right, but it left anything running `cp` as a child — the window's
+      # drop, a script with a progress display of its own — with nothing at all
+      # between "started" and "finished". `--progress` is that: plain lines,
+      # through a pipe, in the shape the window parses.
+      #
+      # Run through the front door rather than the engine, because that is the
+      # command the window actually starts, and a front door that ate the flag
+      # would leave the window silent with every half of this green.
+      front_bin="$(cd "$BIN" && pwd)/esper"
+      [ -x "$front_bin" ] || front_bin="$cp_bin"
+      lines=$(cd "$cp_work" && ESPER_HOME="$term_b" timeout 90 \
+        "$front_bin" cp --progress report.bin "$cp_addr:reports/progress.bin" 2>&1 || true)
+      whole=$(wc -c < "$cp_work/report.bin" | tr -d ' ')
+      reported=$(printf '%s\n' "$lines" | grep -cE '[0-9]+ of [0-9]+ bytes' || true)
+      last=$(printf '%s\n' "$lines" | grep -oE '[0-9]+ of [0-9]+ bytes' | tail -1)
+      # At least two, so the interval is exercised and not only the last report
+      # every transfer makes whatever its size.
+      if [ "$reported" -ge 2 ] && [ "$last" = "$whole of $whole bytes" ]; then
+        printf '  ✓ --progress reports through a pipe, ending on the whole file\n'
+      else
+        printf '  ✗ --progress reported %s times through a pipe, last %s (wanted %s of %s bytes)\n' \
+          "$reported" "${last:-nothing}" "$whole" "$whole"
+        printf '%s\n' "$lines" | tail -4 | sed 's/^/      /'
+        fail=1
+      fi
+      # Lines, not a bar: the whole point is output a program can read.
+      if printf '%s' "$lines" | grep -q $'\r'; then
+        printf '  ✗ --progress drew carriage returns into a pipe\n'
+        fail=1
+      fi
+
       # And back the other way, into a directory that names it after the source.
       mkdir -p "$cp_work/down"
       pulled=$(cd "$cp_work/down" && ESPER_HOME="$term_b" timeout 90 \
@@ -2854,8 +3659,16 @@ WINDOW
 
       # The refusals are in the record, not only the successes: a device
       # repeatedly asking for paths it may not have is the signal that matters.
-      refusals=$( { grep -c '"event":"file_transferred".*"direction":"refused"' \
-        "$term_a/sessions.log" 2>/dev/null || true; } | head -1)
+      #
+      # **The key is `way`, not `direction`.** The entry around the event has a
+      # `direction` of its own for which way the *session* went, and the two
+      # are flattened into one object — so the event's is spelled differently,
+      # and an inbound entry writes no `direction` key at all. Grepping for
+      # the wrong one counts zero every time, which is a gate reporting on a
+      # field nothing writes. Matched in two steps so the order serde happens
+      # to emit keys in cannot decide the answer.
+      refusals=$( { grep '"event":"file_transferred"' "$term_a/sessions.log" 2>/dev/null || true; } |
+        grep -c '"way":"refused"' || true)
       if [ "${refusals:-0}" -ge 5 ]; then
         printf '  ✓ and every refusal is in the record, not only what worked\n'
       else
@@ -3406,9 +4219,7 @@ WINDOW
           [ -n "$short_addr" ] && break
           sleep 0.1
         done
-        pinched=$(python3 -c 'import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1]); s.close()')
+        pinched=$(free_port udp)
         # Plenty of rate, and less buffer than one frame needs. The link is
         # not slow; it simply cannot take a frame all at once.
         python3 scripts/flaky-link.py --listen "127.0.0.1:$pinched" --to "$short_addr" \
@@ -3525,9 +4336,7 @@ print(s.getsockname()[1]); s.close()')
           [ -n "$slow_addr" ] && break
           sleep 0.1
         done
-        bloated=$(python3 -c 'import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1]); s.close()')
+        bloated=$(free_port udp)
         # Two hundred kilobits and a second of buffer. The host is left at its
         # defaults on purpose: what is being tested is whether a session that
         # opens at 1280x720 and thirty frames a second can find its way down
@@ -3683,17 +4492,24 @@ print(s.getsockname()[1]); s.close()')
       # `loginctl` is on PATH that is somebody's real session. Grepping only
       # for the alarm would pass while exactly that shipped, which is how the
       # first version of this check was written.
-      # `clipx.log` is excluded deliberately: it is the one host in this suite
-      # started on a display — a scratch Xvfb, for the X11 clipboard checks —
-      # so it is the one host where locking is a question at all, and what it
-      # reports depends on whether a locker happens to be installed on the
-      # machine running the suite. Every other host here has no display, and
-      # those are the ones this check is about.
+      # **The hosts that had a display are excluded, and they are named here.**
+      # `clipx.log` is the X11 clipboard check's host and `window.log` is the
+      # window-drives-a-session one; both are started on a scratch `Xvfb`, so
+      # both are hosts where locking is a real question and what they report
+      # depends on whether a locker is installed on the machine running the
+      # suite. Every other host here has no display, and those are the ones
+      # this check is about.
+      #
+      # The list is a pattern rather than one name because it grew: the second
+      # host on a display was added a phase after this check was written, and
+      # this reported it as a host with none — an alarm about a machine that
+      # has exactly the screen it is being told it lacks.
+      on_a_display='clipx|window'
       if grep -rqE 'COULD NOT LOCK THE SCREEN AFTER|locked the screen with' \
-        $(ls "$term_a"/*.log 2>/dev/null | grep -v clipx) 2>/dev/null; then
+        $(ls "$term_a"/*.log 2>/dev/null | grep -vE "$on_a_display") 2>/dev/null; then
         printf '  ✗ a host with no display had something to say about locking it\n'
         grep -rlE 'COULD NOT LOCK THE SCREEN AFTER|locked the screen with' \
-          $(ls "$term_a"/*.log | grep -v clipx) | head -3 | sed 's/^/      in /'
+          $(ls "$term_a"/*.log | grep -vE "$on_a_display") | head -3 | sed 's/^/      in /'
         fail=1
       else
         printf '  ✓ a host with no screen said nothing about locking one\n'
@@ -3872,6 +4688,14 @@ print(s.getsockname()[1]); s.close()')
       # twelve seconds in, having gone on showing the screen for the eight
       # seconds in between.
       echo "  — narrowing a live session instead of ending it"
+      # **Granted first, because something earlier takes it away.** The
+      # window-drives-a-session check revokes `control` when it finishes, and
+      # for a phase nothing put it back — so this connected with `--control`
+      # to a host that had never granted it, the host answered "asking
+      # somebody at the host", and the revocation below took away a permission
+      # the session did not hold. The check then reported that withdrawing
+      # control does not narrow a session, which is a claim it had not tested.
+      ESPER_HOME="$term_a" "$BIN/esper-engine" grant "$fp" control >/dev/null
       began=$(date +%s)
       env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY ESPER_HOME="$term_b" \
         timeout 60 "$BIN/esper-engine" connect "$host_addr" --seconds 12 --control \
@@ -4552,9 +5376,7 @@ for record in store["devices"].values():
 json.dump(store, open(path, "w"), indent=2)
 PYWAKE
       # A listener on loopback, so the packet has somewhere to land.
-      port=$(python3 -c 'import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1]); s.close()')
+      port=$(free_port udp)
       cat > "$wk/listen.py" <<'PYLISTEN'
 import socket, sys
 
@@ -4846,11 +5668,30 @@ PYLISTEN
       # Two displays with two colours, and the picture has to be the first
       # one's. Nothing here needs a real seat: what is being checked is that
       # the host reads the display it was given and no other.
-      if [ -n "${DISPLAY:-}" ] && command -v display >/dev/null 2>&1 &&
+      #
+      # **Both displays are this check's own.** Handing the host whatever
+      # `$DISPLAY` the person running the suite has means painting their
+      # desktop red, painting it white afterwards rather than putting their
+      # wallpaper back, and comparing a picture of it against a colour their
+      # own windows are sitting on top of. Two scratch
+      # servers answer the same question and touch nobody's screen.
+      own=""
+      other=""
+      if command -v Xvfb >/dev/null 2>&1; then
+        for d in $(seq 81 99); do
+          [ -e "/tmp/.X${d}-lock" ] && continue
+          if [ -z "$own" ]; then own=$d; continue; fi
+          other=$d; break
+        done
+      fi
+      if [ -n "$own" ] && [ -n "$other" ] && command -v display >/dev/null 2>&1 &&
         command -v convert >/dev/null 2>&1; then
         echo "  — a host serves the display it was started on"
-        other=90
-        while [ -e "/tmp/.X${other}-lock" ] && [ "$other" -lt 99 ]; do other=$((other + 1)); done
+        # Different shapes, so a picture of the wrong one is the wrong size
+        # whatever colour it happens to be.
+        size=1024x768
+        Xvfb ":$own" -screen 0 "${size}x24" >/dev/null 2>&1 &
+        own_x=$!
         Xvfb ":$other" -screen 0 640x480x24 >/dev/null 2>&1 &
         switch_x=$!
         sleep 1
@@ -4864,13 +5705,12 @@ PYLISTEN
         # -solid` sets the background pixel and leaves the screen alone, which
         # is how the first version of this check came to compare black against
         # black.
-        size=$(xdpyinfo | awk '/dimensions:/{print $2}' | head -1)
-        convert -size "${size:-1280x800}" xc:'#ff0000' "$seat/red.png" 2>/dev/null || true
+        convert -size "$size" xc:'#ff0000' "$seat/red.png" 2>/dev/null || true
         convert -size 640x480 xc:'#00ff00' "$seat/green.png" 2>/dev/null || true
-        display -window root "$seat/red.png" >/dev/null 2>&1 || true
+        DISPLAY=":$own" display -window root "$seat/red.png" >/dev/null 2>&1 || true
         DISPLAY=":$other" display -window root "$seat/green.png" >/dev/null 2>&1 || true
 
-        ESPER_HOME="$seat" timeout 90 "$BIN/esper-engine" host \
+        DISPLAY=":$own" ESPER_HOME="$seat" timeout 90 "$BIN/esper-engine" host \
           --listen 127.0.0.1:0 --no-mdns > "$seat/host.log" 2>&1 &
         seat_host=$!
         seat_addr=""
@@ -4892,9 +5732,7 @@ PYLISTEN
               -format '%c' histogram:info:- 2>/dev/null || true)
             reds=$(printf '%s' "$colours" | { grep -ci '#FF0000' || true; })
             greens=$(printf '%s' "$colours" | { grep -ci '#00FF00' || true; })
-            # And the size, which is the other half of the same fact: the two
-            # displays are different shapes, so a picture of the wrong one is
-            # the wrong size whatever colour it happens to be.
+            # And the size, which is the other half of the same fact.
             shape=$(python3 ./scripts/check-png.py "$seat/shot.png" 2>/dev/null | awk '{print $1}')
             if [ "${reds:-0}" -ge 1 ] && [ "${greens:-0}" = 0 ] && [ "$shape" = "${size}" ]; then
               printf '  ✓ the picture is the display it was started on: %s and red\n' "$shape"
@@ -4925,10 +5763,11 @@ PYLISTEN
         seat_host=""
         kill "$switch_x" 2>/dev/null || true
         switch_x=""
-        # Put this display back the way the rest of the suite expects it.
-        convert -size "${size:-1280x800}" xc:white "$seat/white.png" 2>/dev/null || true
-        display -window root "$seat/white.png" >/dev/null 2>&1 || true
+        kill "${own_x:-}" 2>/dev/null || true
+        own_x=""
         rm -rf "$seat"
+      else
+        printf '  — skipped the display check: needs Xvfb, two free displays and ImageMagick\n'
       fi
 
       # **The bound reaches a session already running, not only an arriving
@@ -5199,6 +6038,188 @@ PYLISTEN
         rm -rf "$seen"
       fi
 
+      # **Settings are something a machine can change, not only read.**
+      #
+      # Thirty-two settings were listed by `config` and changed by editing a
+      # file that nothing creates — so the first change meant knowing the path,
+      # the syntax and the key. What is checked here is the whole of what
+      # `config set` promises: the value is validated against the setting's own
+      # kind, the file it writes is one the loader reads back, the rest of
+      # somebody's file survives, and taking a setting out puts the default
+      # back.
+      echo "  — changing a setting, and leaving the rest of the file alone"
+      cfg=$(mktemp -d)
+      printf '# Why this machine is set up the way it is.\ndevice.name = "elythion"\n' > "$cfg/config.toml"
+
+      ESPER_HOME="$cfg" "$BIN/esper-engine" config set host.fps 45 >/dev/null 2>&1
+      if grep -q 'host.fps = 45' "$cfg/config.toml" &&
+         grep -q '# Why this machine is set up' "$cfg/config.toml" &&
+         grep -q 'device.name = "elythion"' "$cfg/config.toml"; then
+        printf '  ✓ a setting is written and the rest of the file is as it was\n'
+      else
+        printf '  ✗ writing one setting disturbed the file\n'
+        sed 's/^/      /' "$cfg/config.toml"
+        fail=1
+      fi
+
+      # **And the loader reads back what the writer wrote**, which is the half
+      # a test of the writer alone cannot show: a file that parses in the
+      # writer's own terms and not in the loader's is a machine that will not
+      # start.
+      if ESPER_HOME="$cfg" "$BIN/esper-engine" config | grep -qE 'host\.fps +45 +config file'; then
+        printf '  ✓ and the engine reads it back, from the file\n'
+      else
+        printf '  ✗ the engine does not read back what it wrote\n'
+        ESPER_HOME="$cfg" "$BIN/esper-engine" config 2>&1 | sed 's/^/      /' | head -6
+        fail=1
+      fi
+
+      # Every refusal, and none of them reaching the file. The kind is what
+      # decides, so this is the check that it is consulted at all.
+      cfg_before=$(cat "$cfg/config.toml")
+      cfg_refused=""
+      for bad in "host.fps 0" "host.fps 241" "host.fps thirty" "host.backend wayland" \
+                 "host.listen not-an-address" "broker.key nope" "host.fbs 45" "colour blue"; do
+        # shellcheck disable=SC2086
+        if ESPER_HOME="$cfg" "$BIN/esper-engine" config set $bad >/dev/null 2>&1; then
+          cfg_refused="$cfg_refused [$bad]"
+        fi
+      done
+      if [ -z "$cfg_refused" ] && [ "$cfg_before" = "$(cat "$cfg/config.toml")" ]; then
+        printf '  ✓ and a value the setting cannot hold never reaches it\n'
+      else
+        printf '  ✗ these were accepted:%s\n' "${cfg_refused:- (the file changed anyway)}"
+        fail=1
+      fi
+
+      # **An option `config` does not have is refused.** Without that, a word
+      # starting with a dash reads as a subcommand that is not there, is
+      # skipped, and the table is printed — so `config --porcelain` answers
+      # with the listing laid out for a person and exits zero.
+      #
+      # And a *value* beginning with a dash is still a value: `set` and `unset`
+      # take those, and only the words before them are examined.
+      cfg_odd=""
+      for bad in "--porcelain" "--yes" "-j"; do
+        if ESPER_HOME="$cfg" "$BIN/esper-engine" config $bad >/dev/null 2>&1; then
+          cfg_odd="$cfg_odd [$bad]"
+        fi
+      done
+      if [ -z "$cfg_odd" ] &&
+         ESPER_HOME="$cfg" "$BIN/esper-engine" config set device.name "-dashed" >/dev/null 2>&1 &&
+         grep -q 'device.name = "-dashed"' "$cfg/config.toml"; then
+        printf '  ✓ and an option it does not have is refused, while a value may still start with a dash\n'
+      else
+        printf '  ✗ these were accepted:%s (or a dashed value was refused)\n' "${cfg_odd:- none}"
+        fail=1
+      fi
+      ESPER_HOME="$cfg" "$BIN/esper-engine" config unset device.name >/dev/null 2>&1 || true
+
+      # A typo is answered with what was meant, because the alternative is
+      # somebody reading a list of thirty-two to find one letter.
+      #
+      # **Captured, not piped.** This suite runs under `pipefail`, and the
+      # command being checked *refuses* — so `engine … | grep -q` is a pipeline
+      # whose status is the engine's 1 however well the grep matched. Written
+      # that way it reads the right sentence, reports it missing, and the
+      # diagnostic pipeline in its own else branch then ends the run under
+      # `set -e`.
+      cfg_typo=$(ESPER_HOME="$cfg" "$BIN/esper-engine" config set host.fbs 45 2>&1 || true)
+      if printf '%s' "$cfg_typo" | grep -q 'host\.fps'; then
+        printf '  ✓ and a mistyped setting is answered with the one that was meant\n'
+      else
+        printf '  ✗ a mistyped setting was refused with no suggestion\n'
+        printf '%s\n' "$cfg_typo" | sed 's/^/      /' | head -3
+        fail=1
+      fi
+
+      # Only this account can read it: the file can carry a broker key.
+      cfg_mode=$(stat -c '%a' "$cfg/config.toml" 2>/dev/null || echo "?")
+      if [ "$cfg_mode" = "600" ]; then
+        printf '  ✓ and the file it writes is readable only by this account\n'
+      else
+        printf '  ✗ the config file is mode %s\n' "$cfg_mode"
+        fail=1
+      fi
+
+      ESPER_HOME="$cfg" "$BIN/esper-engine" config unset host.fps >/dev/null 2>&1
+      if ! grep -q 'host.fps' "$cfg/config.toml" &&
+         ESPER_HOME="$cfg" "$BIN/esper-engine" config | grep -qE 'host\.fps +30 +default'; then
+        printf '  ✓ and taking one out puts the default back\n'
+      else
+        printf '  ✗ unsetting left the file or the value as it was\n'
+        sed 's/^/      /' "$cfg/config.toml"
+        fail=1
+      fi
+
+      # **The file is not the last word, and a change that does nothing says
+      # so.** A value written while the environment sets the same one is a
+      # file that says one thing and a machine that does another.
+      if ESPER_HOME="$cfg" ESPER_HOST_FPS=25 "$BIN/esper-engine" config set host.fps 45 2>&1 |
+         grep -q 'ESPER_HOST_FPS is set in this environment'; then
+        printf '  ✓ and a change the environment overrides is said to be one\n'
+      else
+        printf '  ✗ a change that takes no effect was reported as though it had\n'
+        fail=1
+      fi
+      # **A name longer than the wire carries is said.** A name travels in
+      # sixty-four bytes and is cut there by the protocol, so a longer one is
+      # one thing on this machine and another on every other — and without a
+      # word here, nothing anywhere says why.
+      long_name=$(printf 'kitchen-%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)
+      said_name=$(ESPER_HOME="$cfg" "$BIN/esper-engine" config set device.name "$long_name" 2>&1 || true)
+      if printf '%s' "$said_name" | grep -q 'other machines will see'; then
+        printf '  ✓ and a name longer than the wire carries is said so at the moment it is set\n'
+      else
+        printf '  ✗ a 96-character device name was accepted with nothing said about it\n'
+        printf '%s\n' "$said_name" | sed 's/^/      /' | head -5 || true
+        fail=1
+      fi
+      # And a name that fits is not warned about, so this is a limit and not a
+      # sentence printed at everybody.
+      if ESPER_HOME="$cfg" "$BIN/esper-engine" config set device.name "kitchen" 2>&1 |
+         grep -q 'other machines will see'; then
+        printf '  ✗ a seven-character name was warned about as though it were long\n'
+        fail=1
+      else
+        printf '  ✓ and a name that fits is not\n'
+      fi
+      ESPER_HOME="$cfg" "$BIN/esper-engine" config unset device.name >/dev/null 2>&1 || true
+
+      # **A change to a setting leaves a trace, and a credential's value does
+      # not.** The settings decide who can reach this machine and how much of
+      # the record is kept, so "somebody changed one" is a line an
+      # investigation asks for — and the trail is the file a person is told to
+      # read and attach to a bug report, so the key itself must not be in it.
+      cfg_secret=$(printf 'c%.0s' $(seq 1 64))
+      ESPER_HOME="$cfg" "$BIN/esper-engine" config set broker.key "$cfg_secret" >/dev/null 2>&1 || true
+      ESPER_HOME="$cfg" "$BIN/esper-engine" config set discovery.mdns false >/dev/null 2>&1 || true
+      if grep -q '"event":"setting_changed"' "$cfg/sessions.log" 2>/dev/null &&
+         grep -q '"key":"discovery.mdns"' "$cfg/sessions.log" 2>/dev/null; then
+        printf '  ✓ and a change to a setting is in the record of what happened\n'
+      else
+        printf '  ✗ a setting changed and the record says nothing about it\n'
+        [ -f "$cfg/sessions.log" ] && sed 's/^/      /' "$cfg/sessions.log" | tail -5 || true
+        fail=1
+      fi
+      if grep -q "$cfg_secret" "$cfg/sessions.log" 2>/dev/null; then
+        printf '  ✗ the broker key itself was written into the audit trail\n'
+        fail=1
+      else
+        printf '  ✓ and the key that changed is recorded without its value\n'
+      fi
+      # Nobody connected: it was somebody at the keyboard, and the line says so
+      # rather than carrying a device's key.
+      if grep '"event":"setting_changed"' "$cfg/sessions.log" 2>/dev/null | grep -qv '"peer_key":""'; then
+        printf '  ✗ a setting change was recorded against a peer\n'
+        grep '"event":"setting_changed"' "$cfg/sessions.log" | sed 's/^/      /' | head -3 || true
+        fail=1
+      else
+        printf '  ✓ and it names no peer, because nobody connected to do it\n'
+      fi
+
+      rm -rf "$cfg"
+
       # **A viewer that pins how long it waits for the rest of a frame.**
       #
       # `session.buffer` was promised in `capture-and-codec.md` and did not
@@ -5252,51 +6273,76 @@ PYLISTEN
       # exactly — is measured against a real server in
       # `esper-presence-x11/tests/backdrop_on_a_display.rs`, which plays the
       # desktop's part.
-      echo "  — the desktop background, plain for a session"
-      bd=$(mktemp -d)
-      cp -a "$term_a/." "$bd/" 2>/dev/null || true
-      printf 'host.plain_background = true\n' >> "$bd/config.toml"
-      ESPER_HOME="$bd" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
-      ESPER_HOME="$bd" timeout 60 "$BIN/esper-engine" host \
-        --listen 127.0.0.1:0 --no-mdns > "$bd/host.log" 2>&1 &
-      bd_host=$!
-      bd_addr=""
-      for _ in $(seq 1 150); do
-        if grep -q '^  consent ' "$bd/host.log" 2>/dev/null; then
-          bd_addr=$( { awk '/^  listening/{print $2}' "$bd/host.log" 2>/dev/null || true; } | head -1)
-          [ -n "$bd_addr" ] && break
-        fi
-        sleep 0.1
-      done
-      if [ -z "$bd_addr" ]; then
-        printf '  ✗ the host for the background check never started\n'
-        sed 's/^/      /' "$bd/host.log"
-        fail=1
-      else
-        env -u XAUTHORITY ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
-          connect "$bd_addr" --seconds 2 > "$bd/client.log" 2>&1 || true
-        # **A background nothing can put back may not be taken away.** The
-        # refusal names why, because "left alone" with no reason is the same
-        # line as a feature that silently did nothing.
-        if grep -q 'backdrop.*left alone: this desktop has not published' "$bd/host.log"; then
-          printf '  ✓ a desktop that published no background is left alone, and told why\n'
-        else
-          printf '  ✗ the background was not left alone, or no reason was given\n'
-          { grep -m3 'backdrop' "$bd/host.log" || true; } | sed 's/^/      /'
-          fail=1
-        fi
-        # And the session was not harmed by any of it.
-        if grep -q 'ending the session: session complete' "$bd/client.log"; then
-          printf '  ✓ and the session ran its course\n'
-        else
-          printf '  ✗ the session did not survive the background check\n'
-          tail -6 "$bd/client.log" | sed 's/^/      /'
-          fail=1
-        fi
+      #
+      # **On a display of its own.** The premise above — that no desktop here
+      # publishes a background pixmap — is true of a scratch `Xvfb` and false
+      # of the machine somebody is running this on, where a desktop publishes
+      # one and this check made *their* wallpaper plain for the length of a
+      # session before putting it back. On such a machine the host took the
+      # other branch, said "making it plain changed nothing that could be
+      # seen" — which was true, the windows covered everything sampled — and
+      # the check called a correct answer a failure.
+      bd_d=""
+      if command -v Xvfb >/dev/null 2>&1; then
+        for d in $(seq 71 99); do
+          [ -e "/tmp/.X${d}-lock" ] && continue
+          bd_d=$d; break
+        done
       fi
-      kill "$bd_host" 2>/dev/null || true
-      wait "$bd_host" 2>/dev/null || true
-      bd_host=""
+      if [ -z "$bd_d" ]; then
+        printf '  — skipped the background check: needs Xvfb and a free display\n'
+      else
+        echo "  — the desktop background, plain for a session"
+        bd=$(mktemp -d)
+        cp -a "$term_a/." "$bd/" 2>/dev/null || true
+        printf 'host.plain_background = true\n' >> "$bd/config.toml"
+        ESPER_HOME="$bd" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
+        Xvfb ":$bd_d" -screen 0 800x600x24 >/dev/null 2>&1 &
+        bd_x=$!
+        sleep 1
+        DISPLAY=":$bd_d" ESPER_HOME="$bd" timeout 60 "$BIN/esper-engine" host \
+          --listen 127.0.0.1:0 --no-mdns > "$bd/host.log" 2>&1 &
+        bd_host=$!
+        bd_addr=""
+        for _ in $(seq 1 150); do
+          if grep -q '^  consent ' "$bd/host.log" 2>/dev/null; then
+            bd_addr=$( { awk '/^  listening/{print $2}' "$bd/host.log" 2>/dev/null || true; } | head -1)
+            [ -n "$bd_addr" ] && break
+          fi
+          sleep 0.1
+        done
+        if [ -z "$bd_addr" ]; then
+          printf '  ✗ the host for the background check never started\n'
+          sed 's/^/      /' "$bd/host.log"
+          fail=1
+        else
+          env -u XAUTHORITY ESPER_HOME="$term_b" timeout 60 "$BIN/esper-engine" \
+            connect "$bd_addr" --seconds 2 > "$bd/client.log" 2>&1 || true
+          # **A background nothing can put back may not be taken away.** The
+          # refusal names why, because "left alone" with no reason is the same
+          # line as a feature that silently did nothing.
+          if grep -q 'backdrop.*left alone: this desktop has not published' "$bd/host.log"; then
+            printf '  ✓ a desktop that published no background is left alone, and told why\n'
+          else
+            printf '  ✗ the background was not left alone, or no reason was given\n'
+            { grep -m3 'backdrop' "$bd/host.log" || true; } | sed 's/^/      /'
+            fail=1
+          fi
+          # And the session was not harmed by any of it.
+          if grep -q 'ending the session: session complete' "$bd/client.log"; then
+            printf '  ✓ and the session ran its course\n'
+          else
+            printf '  ✗ the session did not survive the background check\n'
+            tail -6 "$bd/client.log" | sed 's/^/      /'
+            fail=1
+          fi
+        fi
+        kill "$bd_host" 2>/dev/null || true
+        wait "$bd_host" 2>/dev/null || true
+        bd_host=""
+        kill "${bd_x:-}" 2>/dev/null || true
+        bd_x=""
+      fi
       # **And nothing at all is said when nobody asked for it**, which is the
       # default: a host that mentioned somebody's wallpaper every session
       # would be a host teaching them to ignore its output.
@@ -5321,8 +6367,26 @@ PYLISTEN
       # button. Under `script` the host has a pty, so the question is asked as
       # text and answered by writing to a pipe, which is also how a person
       # would answer it.
-      if [ -n "${DISPLAY:-}" ] && command -v script >/dev/null 2>&1; then
+      #
+      # **On a display of its own, not on whoever is running this.** The host
+      # will not send a picture until it has confirmed, by reading the screen
+      # back, that the indicator is really on it. On a developer's desktop the
+      # indicator is drawn around their real screen and their real windows sit
+      # over it, so the host refuses — correctly — and a dozen checks below go
+      # red for a reason that has nothing to do with the code. Every other
+      # display check in this suite already brings its own `Xvfb`.
+      ask_d=""
+      if command -v Xvfb >/dev/null 2>&1; then
+        for d in $(seq 71 99); do
+          [ -e "/tmp/.X${d}-lock" ] && continue
+          ask_d=$d; break
+        done
+      fi
+      if [ -n "$ask_d" ] && command -v script >/dev/null 2>&1; then
         echo "  — a session that asks to be allowed more while it runs"
+        Xvfb ":$ask_d" -screen 0 1280x800x24 >/dev/null 2>&1 &
+        ask_x=$!
+        sleep 1
         mk=$(mktemp -d)
         cp -a "$term_a/." "$mk/" 2>/dev/null || true
         : > "$mk/sessions.log"
@@ -5338,8 +6402,8 @@ PYLISTEN
         # `<>` is what avoids a suite that hangs before its first check.
         mkfifo "$mk/answers"
         exec 3<> "$mk/answers"
-        ESPER_HOME="$mk" timeout 120 script -q \
-          -c "$BIN/esper-engine host --listen 127.0.0.1:0 --no-mdns" /dev/null \
+        DISPLAY=":$ask_d" ESPER_HOME="$mk" timeout 120 script -q \
+          -c "env DISPLAY=:$ask_d $BIN/esper-engine host --listen 127.0.0.1:0 --no-mdns" /dev/null \
           < "$mk/answers" > "$mk/host.log" 2>&1 &
         mk_host=$!
         mk_addr=""
@@ -5470,6 +6534,8 @@ PYLISTEN
         kill "$mk_host" 2>/dev/null || true
         wait "$mk_host" 2>/dev/null || true
         mk_host=""
+        kill "${ask_x:-}" 2>/dev/null || true
+        ask_x=""
         rm -rf "$mk"
 
         # **And a host that does not put such questions at all.** A standing
@@ -5518,8 +6584,8 @@ PYLISTEN
         wait "$na_host" 2>/dev/null || true
         na_host=""
         rm -rf "$na"
-      elif [ -n "${DISPLAY:-}" ]; then
-        printf '  — skipped the asking checks: needs `script` for a host with a terminal\n'
+      else
+        printf '  — skipped the asking checks: needs `script` and an Xvfb of their own\n'
       fi
 
       # **One device set apart from the host's rule about locking.**

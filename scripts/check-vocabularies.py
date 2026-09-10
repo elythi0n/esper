@@ -136,6 +136,22 @@ def web_events() -> list[str]:
     return re.findall(r"^\s{2}([a-z_]+):", body, re.M)
 
 
+def web_event_labels() -> list[str]:
+    """The event words `EVENT_LABEL` names.
+
+    The trail is written with tags — `session_narrowed` — and the screen that
+    shows it has to say something a person reads. An event added in Rust and
+    not named here is a column that quietly shows the identifier, which is what
+    the whole of that column used to be.
+    """
+    text = WEB_PERMISSION.read_text()
+    start = text.find("export const EVENT_LABEL")
+    if start < 0:
+        raise SystemExit(f"{WEB_PERMISSION.name} no longer declares EVENT_LABEL; this check is stale")
+    body = text[start : text.find("};", start)]
+    return re.findall(r"^\s{2}([a-z_]+):", body, re.M)
+
+
 def web_authorising_permissions() -> list[str]:
     """Which permissions `AUTHORISED_BY` names, so none is invented."""
     text = WEB_PERMISSION.read_text()
@@ -151,6 +167,34 @@ def web_sensitive() -> list[str]:
     if start < 0:
         raise SystemExit(f"{WEB_PERMISSION.name} no longer declares SENSITIVE; this check is stale")
     return re.findall(r'"([a-z_]+)"', text[start : text.find("]);", start)])
+
+
+def rust_sensitive() -> list[str]:
+    """The permissions Rust's `is_sensitive` returns true for.
+
+    **The authority, and the one that was not being compared.** This check held
+    Go's list to the window's and left Rust out — so the three could drift, and
+    they did: `terminal` is a shell as the user who owns `~/.esper`, which can
+    rewrite the device list without asking, and it was the one permission on
+    none of the lists. Rust is what `esper grant` actually consults, so it is
+    what the other two are held to.
+
+    The arm names variants — `Self::Unattended` — and everything else here
+    speaks the word that goes in a file, so they are translated the same way
+    the Go reader does it.
+    """
+    text = RUST_PERMISSION.read_text()
+    start = text.find("pub const fn is_sensitive(self) -> bool {")
+    if start < 0:
+        raise SystemExit("the Rust permissions no longer declare is_sensitive; this check is stale")
+    end = text.find("\n    }", start)
+    variants = re.findall(r"Self::([A-Z][A-Za-z]*)", text[start:end])
+    return sorted({_word_of(v) for v in variants})
+
+
+def _word_of(variant: str) -> str:
+    """`FilesIn` -> `files_in`, which is the word the wire and the file use."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", variant).lower()
 
 
 def go_sensitive() -> list[str]:
@@ -230,7 +274,30 @@ def main() -> int:
     # And which of them the host keeps to itself, because the window draws a
     # switch that cannot move for exactly these and a disagreement is either
     # a control that always fails or one that offers what the API refuses.
-    problems += compare("host-only permissions", go_sensitive(), web_sensitive(), "Go", "the window")
+    # **Three lists, and only two were ever compared.** Rust's is the one
+    # `esper grant` consults, Go's is the one the local API refuses on, and the
+    # window's is the one that greys a switch. All three now, against Rust.
+    sensitive_rust = rust_sensitive()
+    if len(sensitive_rust) < 3:
+        problems.append(
+            f"only {len(sensitive_rust)} sensitive permission(s) were read out of Rust, "
+            "which is not this product — the match block is not being read"
+        )
+    problems += compare(
+        "permissions needing somebody at the machine",
+        sensitive_rust,
+        sorted(go_sensitive()),
+        "Rust",
+        "Go",
+    )
+    problems += compare(
+        "permissions needing somebody at the machine",
+        sensitive_rust,
+        sorted(web_sensitive()),
+        "Rust",
+        "the window",
+    )
+    counted.append(f"{len(sensitive_rust)} of them needing somebody at the machine")
 
     # Every event the trail records, against the window's map from event to
     # the permission that authorised it. An event added in Rust and not there
@@ -238,7 +305,8 @@ def main() -> int:
     # filter that can never match.
     events_rust = rust_arms(RUST_AUDIT, "pub const fn tag(&self) -> &'static str {")
     problems += compare("trail events", events_rust, web_events(), "Rust", "the window")
-    counted.append(f"{len(events_rust)} trail events")
+    problems += compare("trail event names", events_rust, web_event_labels(), "Rust", "the window")
+    counted.append(f"{len(events_rust)} trail events, each with a name a person reads")
 
     # And the permissions that map names must be permissions, not new words.
     invented = sorted(set(web_authorising_permissions()) - set(permissions_rust))
