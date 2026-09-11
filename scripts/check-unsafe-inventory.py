@@ -56,12 +56,32 @@ NEEDS_FFI: dict[str, str] = {
         "the staging-texture readback have no pure-Rust equivalent, and the "
         "damage metadata is the reason this API was chosen over the newer one"
     ),
+    "esper-encode-retune": (
+        "Changing a setting on a *running* openh264 encoder has one route: "
+        "`Encoder::raw_api`, which is unsafe because the binding's own "
+        "`reinit` is private. Rebuilding instead costs a keyframe, which is "
+        "the largest frame on the link least able to carry one"
+    ),
     "esper-input-win": (
         "SendInput, GetSystemMetrics and SetProcessDpiAwarenessContext are "
         "user32 calls. There is no pure-Rust path to synthesising input on "
         "Windows the way x11rb is one on X11"
     ),
 }
+
+def rust_files():
+    """Every Rust file in every crate — `tests/` and `benches/` included.
+
+    **Not only `src/`, and that was a hole.** A test is code that runs, links
+    against the same crate and is read by the same reviewer; an `unsafe` block
+    hidden in `tests/` was invisible to this script while being just as much a
+    thing somebody has to justify. Found by writing one: a tripwire test that
+    pokes a dependency through its raw API sat outside every count here and the
+    gate went on saying every block was accounted for.
+    """
+    for where in ("src", "tests", "benches"):
+        yield from CRATES.glob(f"*/{where}/**/*.rs")
+
 
 # An `unsafe` block, and an inventory bullet.
 UNSAFE_BLOCK = re.compile(r"\bunsafe\s*\{")
@@ -157,7 +177,7 @@ def main() -> int:
             )
 
     # Where `unsafe` actually is.
-    for source in sorted(CRATES.glob("*/src/**/*.rs")):
+    for source in sorted(rust_files()):
         crate = source.relative_to(CRATES).parts[0]
         text = source.read_text()
         blocks = len(UNSAFE_BLOCK.findall(text))
@@ -208,7 +228,7 @@ def main() -> int:
 
     inventoried = sum(
         len(UNSAFE_BLOCK.findall(s.read_text()))
-        for s in CRATES.glob("*/src/**/*.rs")
+        for s in rust_files()
         if s.relative_to(CRATES).parts[0] in listed
     )
     print(

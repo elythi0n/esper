@@ -38,8 +38,11 @@ use openh264::encoder::{
 };
 use openh264::formats::YUVSource;
 
+use esper_encode_retune::{InPlace, retune};
+
 use crate::encoder::{
-    EncodeError, EncodeStats, Encoded, EncoderConfig, Tuning, VideoEncoder, has_assembly, timed,
+    Change, EncodeError, EncodeStats, Encoded, EncoderConfig, Tuning, VideoEncoder, has_assembly,
+    timed,
 };
 
 /// The backend name, for the HUD and the log.
@@ -246,14 +249,51 @@ impl VideoEncoder for OpenH264 {
     }
 
     fn reconfigure(&mut self, config: &EncoderConfig) -> Result<(), EncodeError> {
-        // A fresh encoder rather than `SetOption`. openh264 accepts some
-        // changes in place and silently ignores others, and the difference is
-        // version-dependent — so the encoder is rebuilt, which is
-        // unambiguous and happens at most a few times a session.
+        // **A rate change is told to the running encoder; anything else
+        // rebuilds it.**
+        //
+        // "openh264 accepts some changes in place and silently ignores
+        // others" was the reason this always rebuilt, and it is true — but
+        // which ones is not version-dependent guesswork. It is the copy list
+        // in `WelsEncoderParamAdjust`, and [`EncoderConfig::change_to`] is
+        // that list. The quantiser is *not* in it, so the fidelity rung still
+        // rebuilds and `esper_encode_retune` carries the measurement.
+        //
+        // The keyframe period goes with the frame rate and that is the whole
+        // trick. openh264's intra period is a count of frames, so it means a
+        // different length of time at every rate — which is why skipping the
+        // rebuild for a framerate change was measured *worse* the first time
+        // it was tried: an encoder left holding a period computed for the old
+        // rate emitted keyframes more often, and the saving bought more of
+        // exactly what it was avoiding.
+        if self.config.change_to(config) == Change::InPlace {
+            let want = InPlace {
+                fps: config.fps,
+                bitrate: config.bitrate,
+                keyframe_period_frames: keyframe_period_frames(config),
+            };
+            match retune(&mut self.inner, &want) {
+                Ok(()) => {
+                    self.config = *config;
+                    // Deliberately *not* owing a keyframe: every reference
+                    // picture still belongs to this encoder and still
+                    // describes a picture of this size.
+                    return Ok(());
+                }
+                Err(why) => {
+                    // Falling back rather than failing. A rebuild is correct
+                    // from any state, and a session that stutters once is
+                    // better than a session that ends.
+                    tracing::debug!(%why, "retuning in place failed; rebuilding the encoder");
+                }
+            }
+        }
+
         self.inner = build(config)?;
         self.config = *config;
-        // Every reference the decoder holds describes a different picture
-        // size now, so the next frame cannot be a delta against any of them.
+        // A fresh encoder holds no reference pictures, and if the size
+        // changed every reference the decoder holds describes a different
+        // one. Either way the next frame cannot be a delta.
         self.owed_keyframe = true;
         Ok(())
     }
@@ -304,6 +344,7 @@ impl VideoEncoder for OpenH264 {
 mod tests {
     use super::*;
     use esper_color::space::ColorSpace;
+    use std::time::Duration;
 
     /// A picture with something in it, so the encoder has work to do.
     fn picture(w: u32, h: u32, seed: u8) -> I420 {
@@ -448,6 +489,176 @@ mod tests {
             after.keyframe,
             "every reference describes a 320x240 picture now"
         );
+    }
+
+    /// A rate change keeps every reference picture, so it costs no keyframe.
+    ///
+    /// This is the whole point of the in-place path: three of the ladder's
+    /// eight steps change only the frame rate, and they are the three at the
+    /// top, spent first and walked again on the way back up.
+    #[test]
+    fn a_framerate_change_costs_no_keyframe() {
+        let mut enc = OpenH264::new(&small()).expect("encoder");
+        let _ = enc.encode(&picture(320, 240, 0), false).expect("encode");
+        let _ = enc.encode(&picture(320, 240, 1), false).expect("encode");
+
+        enc.reconfigure(&EncoderConfig { fps: 15, ..small() })
+            .expect("reconfigure");
+        assert_eq!(enc.config().fps, 15);
+
+        let after = enc.encode(&picture(320, 240, 2), false).expect("encode");
+        assert!(
+            !after.keyframe,
+            "nothing a reference picture describes has changed, so a keyframe \
+             is a frame's worth of bytes spent on nothing"
+        );
+    }
+
+    /// **The trap that defeated the first attempt at this.**
+    ///
+    /// openh264's intra period is a count of *frames*, so it means a different
+    /// length of time at every frame rate. An encoder told 15 fps while still
+    /// holding the period computed for 30 emits keyframes twice as often as
+    /// asked — which is how skipping the rebuild came to be measured *worse*
+    /// than paying for it: 5% loss went from 78 pictures to 67, with 30% more
+    /// bytes per frame.
+    ///
+    /// So the cadence is counted, not the setting. A one-second interval at 10
+    /// fps is a keyframe every ten pictures; at 30 it would be every thirty,
+    /// and over sixty pictures the difference is unmissable.
+    #[test]
+    fn the_keyframe_cadence_follows_the_new_framerate() {
+        let fast = EncoderConfig {
+            fps: 30,
+            keyframe_interval: Duration::from_secs(1),
+            ..small()
+        };
+        let mut enc = OpenH264::new(&fast).expect("encoder");
+        for i in 0..8u8 {
+            let _ = enc.encode(&picture(320, 240, i), false).expect("encode");
+        }
+
+        enc.reconfigure(&EncoderConfig { fps: 10, ..fast })
+            .expect("reconfigure");
+
+        let mut keyframes = 0;
+        for i in 0..60u8 {
+            let out = enc
+                .encode(&picture(320, 240, i.wrapping_add(9)), false)
+                .expect("encode");
+            if out.keyframe {
+                keyframes += 1;
+            }
+        }
+        // Six expected at ten frames apiece; two would be the old period
+        // still in force. The window is wide because openh264 aligns the
+        // period to its own GOP, and the two answers are three times apart.
+        assert!(
+            keyframes >= 4,
+            "only {keyframes} keyframe(s) in 60 pictures at 10 fps with a \
+             one-second interval — the encoder is still counting to the old \
+             frame rate's period"
+        );
+    }
+
+    /// A fidelity change rebuilds, because openh264 will not move the
+    /// quantiser on a running encoder — see `esper_encode_retune`.
+    #[test]
+    fn a_fidelity_change_still_owes_a_keyframe() {
+        let sharp = EncoderConfig {
+            qp: Some((12, 40)),
+            ..small()
+        };
+        let mut enc = OpenH264::new(&sharp).expect("encoder");
+        let _ = enc.encode(&picture(320, 240, 0), false).expect("encode");
+        let _ = enc.encode(&picture(320, 240, 1), false).expect("encode");
+
+        enc.reconfigure(&EncoderConfig {
+            qp: Some((30, 48)),
+            ..sharp
+        })
+        .expect("reconfigure");
+
+        let after = enc.encode(&picture(320, 240, 2), false).expect("encode");
+        assert!(
+            after.keyframe,
+            "a quantiser change is a rebuild, and a rebuilt encoder holds no \
+             reference pictures"
+        );
+    }
+
+    /// The classification is what decides, so it is checked directly rather
+    /// than only through what the encoder emitted.
+    #[test]
+    fn only_rate_settings_are_changed_in_place() {
+        let base = small();
+        assert_eq!(base.change_to(&base), Change::Nothing);
+        assert_eq!(
+            base.change_to(&EncoderConfig { fps: 15, ..base }),
+            Change::InPlace
+        );
+        assert_eq!(
+            base.change_to(&EncoderConfig {
+                bitrate: base.bitrate / 2,
+                ..base
+            }),
+            Change::InPlace
+        );
+        assert_eq!(
+            base.change_to(&EncoderConfig {
+                keyframe_interval: Duration::from_secs(1),
+                ..base
+            }),
+            Change::InPlace
+        );
+        for (what, next) in [
+            (
+                "size",
+                EncoderConfig {
+                    width: 640,
+                    height: 480,
+                    ..base
+                },
+            ),
+            (
+                "quantiser",
+                EncoderConfig {
+                    qp: Some((20, 40)),
+                    ..base
+                },
+            ),
+            ("threads", EncoderConfig { threads: 4, ..base }),
+            (
+                "slicing",
+                EncoderConfig {
+                    max_slice_bytes: Some(32_768),
+                    ..base
+                },
+            ),
+            (
+                "tuning",
+                EncoderConfig {
+                    tuning: Tuning::ScreenContent,
+                    ..base
+                },
+            ),
+            (
+                "colour space",
+                EncoderConfig {
+                    space: ColorSpace {
+                        range: esper_color::space::Range::Full,
+                        ..base.space
+                    },
+                    ..base
+                },
+            ),
+        ] {
+            assert_eq!(
+                base.change_to(&next),
+                Change::Rebuild,
+                "a change of {what} cannot be applied to a running encoder"
+            );
+        }
     }
 
     #[test]

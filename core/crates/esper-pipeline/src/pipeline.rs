@@ -870,28 +870,35 @@ impl Pipeline {
 
         self.gate.set_max_fps(level.fps);
 
-        // **A rung change rebuilds the encoder, and a rebuild costs a
-        // keyframe.** `reconfigure` builds a fresh one — deliberately,
-        // because openh264 accepts some changes in place and silently ignores
-        // others — and a fresh encoder holds no reference pictures, so its
-        // first frame must be an IDR. On the links where rungs are spent that
-        // is the scarcest thing there is: a keyframe is the largest frame, so
-        // it is the one a slow link is least able to carry. A session walking
-        // four framerate rungs and four resolution rungs pays eight of them.
+        // **A rung change costs a keyframe only when it has to, now.**
         //
-        // Skipping the rebuild for a framerate-only change was tried, on the
-        // reasoning that the gate above is what actually admits fewer frames
-        // and the encoder's `fps` is only a rate-control hint. **Measured
-        // worse**, in both directions: 5% loss went from 78 pictures to 67
-        // with 30% more bytes per frame. The hint is not idle — the periodic
-        // keyframe interval is derived from it *in frames*, so an encoder left
-        // believing in a lower framerate emits keyframes more often, and the
-        // saving buys more of exactly what it was trying to avoid.
+        // A rebuilt encoder holds no reference pictures, so its first frame
+        // must be an IDR — and on the links where rungs are actually spent a
+        // keyframe is the largest frame, so it is the one a slow link is least
+        // able to carry. Three of the ladder's eight steps change only the
+        // frame rate, and they are the top three: a session that falls from 60
+        // to 15 and recovers walks six of them.
         //
-        // Which leaves the cost real and unpaid. Doing better than this needs
-        // the quantiser changed in place, and `reinit` is private in the
-        // binding while the raw `SetOption` is `unsafe`, which this workspace
-        // forbids.
+        // Skipping the rebuild for a framerate change was tried once and
+        // measured *worse* — 5% loss went from 78 pictures to 67 with 30% more
+        // bytes — because openh264's keyframe period is a count of **frames**,
+        // so an encoder left holding the period computed for the old rate
+        // emits keyframes more often. That is not a reason it cannot be done;
+        // it is the field that was missing. `EncoderConfig::change_to` decides
+        // what may be told to a running encoder and `esper_encode_retune`
+        // tells it, keyframe period included.
+        //
+        // Measured on the real ladder, 640x480, falling 60->15 and recovering,
+        // 140 pictures with the periodic keyframe pushed out of reach:
+        //
+        //   always rebuild   7 keyframes   706,297 bytes
+        //   in place         1 keyframe    195,777 bytes
+        //
+        // A fidelity or resolution change still rebuilds and still owes an
+        // IDR. Resolution because every reference the decoder holds describes
+        // a different picture; fidelity because openh264 will not move the
+        // quantiser on a running encoder, which is measured rather than
+        // assumed — see `esper-encode-retune`.
         let config = EncoderConfig::for_budget(
             self.staging.width(),
             self.staging.height(),

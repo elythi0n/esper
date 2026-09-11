@@ -32,6 +32,7 @@ esper-capture-win = { path = "crates/esper-capture-win" }
 esper-capture-x11 = { path = "crates/esper-capture-x11" }
 esper-color = { path = "crates/esper-color" }
 esper-encode = { path = "crates/esper-encode" }
+esper-encode-retune = { path = "crates/esper-encode-retune" }
 esper-decode = { path = "crates/esper-decode" }
 esper-scale = { path = "crates/esper-scale" }
 esper-present = { path = "crates/esper-present" }
@@ -59,6 +60,7 @@ esper-ask-x11 = { path = "crates/esper-ask-x11" }
 esper-presence-x11 = { path = "crates/esper-presence-x11" }
 # Test-only: see the crate's own documentation.
 esper-display-lock = { path = "crates/esper-display-lock" }
+esper-display-mode = { path = "crates/esper-display-mode" }
 # Pure Rust: it speaks the X11 protocol over a socket rather than binding
 # libX11, so nothing here links a display library and this crate keeps
 # `forbid(unsafe_code)`. That also keeps the smoke test's "the engine links no

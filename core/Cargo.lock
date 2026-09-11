@@ -540,14 +540,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "esper-display-mode"
+version = "0.0.0"
+dependencies = [
+ "esper-capture",
+ "esper-display-lock",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
 name = "esper-encode"
 version = "0.0.0"
 dependencies = [
  "esper-capture",
  "esper-color",
+ "esper-encode-retune",
  "openh264",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "esper-encode-retune"
+version = "0.0.0"
+dependencies = [
+ "openh264",
+ "openh264-sys2",
+ "thiserror",
 ]
 
 [[package]]
@@ -574,6 +597,7 @@ dependencies = [
  "esper-dialog",
  "esper-discovery",
  "esper-display-lock",
+ "esper-display-mode",
  "esper-encode",
  "esper-files",
  "esper-input",

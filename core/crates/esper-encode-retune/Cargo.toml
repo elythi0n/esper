@@ -1,0 +1,42 @@
+[package]
+name = "esper-encode-retune"
+description = "Changing a running openh264 encoder's rate settings in place, without rebuilding it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# **Deliberately not `lints.workspace = true`.**
+#
+# The workspace sets `unsafe_code = "forbid"`, which cannot be relaxed at a call
+# site — that is why it was chosen over `deny`. Changing a setting on a *running*
+# openh264 encoder has exactly one route: `Encoder::raw_api`, which is `unsafe`
+# because the binding's own `reinit` is private. So this crate cannot both
+# inherit that and exist.
+#
+# It is a crate rather than a module of `esper-encode` for the reason
+# `security-engineering.md` gives for the inventory in the first place: the
+# unsafe is meant to be small enough to review as a unit. `esper-encode` is
+# 2,400 lines of colour, budget and rate-ladder logic that has no business
+# losing `forbid` so that one of them can call `SetOption`.
+#
+# `scripts/check-unsafe-inventory.py` is what makes the carve-out safe rather
+# than a hole: it compares these tables to the workspace's in both directions,
+# refuses any other crate that stops inheriting, refuses `unsafe` anywhere but
+# in a listed crate, and requires one inventory entry per block.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[dependencies]
+thiserror.workspace = true
+openh264 = { version = "0.9", default-features = false, features = ["source"] }
+openh264-sys2 = { version = "0.9", default-features = false, features = ["source"] }

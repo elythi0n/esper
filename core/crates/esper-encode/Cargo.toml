@@ -19,6 +19,7 @@ openh264 = { version = "0.9", default-features = false, features = ["source"] }
 
 [dependencies]
 esper-capture.workspace = true
+esper-encode-retune.workspace = true
 esper-color.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

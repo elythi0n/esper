@@ -239,6 +239,45 @@ impl EncoderConfig {
         self
     }
 
+    /// What moving from this configuration to `next` costs.
+    ///
+    /// The distinction exists because a rebuilt encoder holds no reference
+    /// pictures, so its first frame must be an IDR — and on the links where
+    /// the ladder is actually spent, a keyframe is the largest frame and the
+    /// one least able to get through. Three of the ladder's eight steps change
+    /// only the frame rate, in both directions, so a session that falls from
+    /// 60 to 15 and recovers was paying six keyframes for three decisions.
+    ///
+    /// **The list of what may differ is short on purpose, and it is openh264's
+    /// list rather than a judgement.** `WelsEncoderParamAdjust` copies a
+    /// hand-picked set of fields when no re-initialisation is needed; anything
+    /// outside it is accepted, reports success and is silently dropped. The
+    /// quantiser is the one that matters here and it is *not* in that set —
+    /// see `esper_encode_retune`, which carries the measurement — so a
+    /// fidelity change still rebuilds.
+    #[must_use]
+    pub fn change_to(&self, next: &Self) -> Change {
+        if self == next {
+            return Change::Nothing;
+        }
+        // Everything the decoder's references or the encoder's memory layout
+        // depend on. A difference in any of them is a rebuild.
+        let structural = self.width != next.width
+            || self.height != next.height
+            || self.space != next.space
+            || self.threads != next.threads
+            || self.max_slice_bytes != next.max_slice_bytes
+            || self.tuning != next.tuning
+            // Not structural in openh264's sense — it simply cannot be
+            // changed on a running encoder, which comes to the same thing.
+            || self.qp != next.qp;
+        if structural {
+            Change::Rebuild
+        } else {
+            Change::InPlace
+        }
+    }
+
     /// Whether this can be acted on.
     #[must_use]
     pub const fn is_well_formed(&self) -> bool {
@@ -256,6 +295,17 @@ impl EncoderConfig {
                 None => true,
             }
     }
+}
+
+/// What a configuration change costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// The configurations are the same; there is nothing to do.
+    Nothing,
+    /// The running encoder can be told, and keeps its reference pictures.
+    InPlace,
+    /// The encoder has to be built again, and owes a keyframe.
+    Rebuild,
 }
 
 /// Slice size used when threading is on.
@@ -418,7 +468,14 @@ pub trait VideoEncoder: std::fmt::Debug + Send {
     ///
     /// A separate step from encoding because a resolution change invalidates
     /// every reference the decoder holds, and the caller has to know that
-    /// happened. Implementations force a keyframe on the next picture.
+    /// happened.
+    ///
+    /// **Whether a keyframe follows depends on what changed.** An
+    /// implementation that can tell a running encoder about the change keeps
+    /// its reference pictures and owes nothing; one that has to rebuild owes
+    /// an IDR. [`EncoderConfig::change_to`] is where that is decided, and the
+    /// caller does not need to know which happened — the next [`Encoded`]
+    /// reports whether it is a keyframe either way.
     fn reconfigure(&mut self, config: &EncoderConfig) -> Result<(), EncodeError>;
 
     /// Encode one picture.
