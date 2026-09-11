@@ -18,6 +18,43 @@ use esper_proto::{Capability, Command, Hello, Report, Role, Status, read_frame, 
 /// together, so a mismatch means a partial install, and every later failure
 /// would be a confusing symptom of this one.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // **Before anything else: put back a resolution a previous run changed.**
+    //
+    // A session that changes the remote's resolution owes it back, and it
+    // gives it back when the session ends. A host that is *killed* ends no
+    // session — and leaves the person sitting at that machine with a screen
+    // they did not choose and nothing to tell them why. The record on disk is
+    // the promise; this is where it is kept.
+    //
+    // Here rather than in `main` because this is the command that hosts. A
+    // `pair` or a `devices` has no business touching somebody's display.
+    match crate::paths::home()
+        .map_err(esper_display_mode::ModeError::Record)
+        .and_then(|home| esper_display_mode::restore_anything_left_behind(&home))
+    {
+        Ok(esper_display_mode::Restored::Nothing) => {}
+        Ok(esper_display_mode::Restored::PutBack) => {
+            eprintln!(
+                "{}: a previous session left this screen's resolution changed; it is back",
+                crate::net::me()
+            );
+        }
+        // Said, not swallowed. This is a screen somebody is looking at.
+        Ok(esper_display_mode::Restored::CouldNotReach(why)) => {
+            eprintln!(
+                "{}: a previous session changed this screen's resolution and it cannot be \
+                 put back: {why}",
+                crate::net::me()
+            );
+        }
+        Err(why) => {
+            eprintln!(
+                "{}: could not check for a changed resolution: {why}",
+                crate::net::me()
+            );
+        }
+    }
+
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());

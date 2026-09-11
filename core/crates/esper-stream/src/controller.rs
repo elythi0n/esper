@@ -1621,6 +1621,18 @@ impl ControllerStream {
         self.outbound.push(MediaMessage::Select(select));
     }
 
+    /// Ask the host to set one of its screens to a different resolution.
+    ///
+    /// Supersedes an unsent request for the same monitor, for the reason the
+    /// monitor selection does: a person dragging down a list of resolutions
+    /// produces one request per entry passed, and every one but the last is
+    /// a screen nobody wanted to look at.
+    pub fn resize(&mut self, request: esper_proto::ResizeRequest) {
+        self.outbound
+            .retain(|m| !matches!(m, MediaMessage::Resize(r) if r.monitor == request.monitor));
+        self.outbound.push(MediaMessage::Resize(request));
+    }
+
     /// A host sent a new config, so the stream's shape changed.
     pub fn reconfigure(&mut self, config: &StreamConfig) -> Result<(), StreamError> {
         if !config.is_well_formed() {
@@ -2013,6 +2025,7 @@ impl ControllerStream {
             // these is something this end *sends*; the direction check above
             // has already refused one arriving.
             MediaMessage::Select(_)
+            | MediaMessage::Resize(_)
             | MediaMessage::Hint(_)
             | MediaMessage::Keyframe(_)
             | MediaMessage::Report(_)
@@ -2437,6 +2450,7 @@ mod tests {
                 height: 360,
                 scale_percent: 100,
                 primary: true,
+                modes: Vec::new(),
             }],
             selected: 0,
             serving: vec![0],

@@ -1,0 +1,22 @@
+[package]
+name = "esper-display-mode"
+description = "Changing a screen's resolution for a session, and putting it back — including after a crash."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+esper-capture.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+x11rb.workspace = true
+
+[dev-dependencies]
+esper-display-lock.workspace = true

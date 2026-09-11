@@ -95,6 +95,17 @@ impl HostLink {
         self.stream.config()
     }
 
+    /// Say which resolutions each monitor may be changed to.
+    ///
+    /// The session tells the stream, because the session is what owns a
+    /// display handle and what owes the resolution back afterwards.
+    pub fn offer_modes(
+        &mut self,
+        modes: std::collections::HashMap<u32, Vec<esper_proto::DisplayMode>>,
+    ) {
+        self.stream.offer_modes(modes);
+    }
+
     /// What has been sent.
     #[must_use]
     pub fn sent(&self) -> crate::SinkStats {
@@ -219,6 +230,17 @@ pub struct HostPump {
 }
 
 impl HostPump {
+    /// Say which resolutions each monitor may be changed to.
+    ///
+    /// The session tells the stream, because the session is what owns a
+    /// display handle and what owes the resolution back afterwards.
+    pub fn offer_modes(
+        &mut self,
+        modes: std::collections::HashMap<u32, Vec<esper_proto::DisplayMode>>,
+    ) {
+        self.stream.offer_modes(modes);
+    }
+
     /// What the controller has asked the picture to be capped at, if
     /// anything. See [`esper_stream::HostStream::asked_ceiling`].
     #[must_use]

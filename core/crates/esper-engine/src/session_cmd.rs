@@ -3403,6 +3403,65 @@ const HELD_SILENCE: Duration = Duration::from_secs(3);
 /// fraction of the wrong screen — or a peer clicking somewhere it cannot see.
 /// The picture and the input surface are the same set, and that is a rule
 /// worth being able to state.
+/// The resolutions each monitor can be changed to, by monitor id.
+///
+/// Matched by position rather than by name: the name a monitor list gives and
+/// the name a RandR output has are not the same string on every server, and
+/// the position is what both are derived from. A monitor nothing covers simply
+/// gets no entry, which the controller reads as "this screen cannot be
+/// resized" — the honest answer.
+fn modes_on_offer(
+    displays: &esper_display_mode::Displays,
+    config: &esper_proto::StreamConfig,
+) -> std::collections::HashMap<u32, Vec<esper_proto::DisplayMode>> {
+    let mut out = std::collections::HashMap::new();
+    for monitor in &config.monitors {
+        let Ok(screen) = displays.covering(monitor.x, monitor.y) else {
+            continue;
+        };
+        let modes: Vec<esper_proto::DisplayMode> = screen
+            .modes
+            .iter()
+            .map(|m| esper_proto::DisplayMode {
+                width: m.width,
+                height: m.height,
+                refresh_mhz: m.refresh_mhz,
+            })
+            .filter(esper_proto::DisplayMode::is_well_formed)
+            .collect();
+        if !modes.is_empty() {
+            out.insert(monitor.id, modes);
+        }
+    }
+    out
+}
+
+/// Act on a controller's resize request.
+fn resize_screen(
+    displays: &mut esper_display_mode::Displays,
+    config: &esper_proto::StreamConfig,
+    request: &esper_proto::ResizeRequest,
+) -> Result<(), String> {
+    let monitor = config
+        .monitors
+        .iter()
+        .find(|m| m.id == request.monitor)
+        .ok_or_else(|| format!("this session has no screen {}", request.monitor))?;
+    let screen = displays
+        .covering(monitor.x, monitor.y)
+        .map_err(|e| e.to_string())?;
+    displays
+        .set(
+            &screen,
+            esper_display_mode::Mode {
+                width: request.mode.width,
+                height: request.mode.height,
+                refresh_mhz: request.mode.refresh_mhz,
+            },
+        )
+        .map_err(|e| e.to_string())
+}
+
 fn monitors_from(config: &esper_proto::StreamConfig) -> Vec<esper_input::Monitor> {
     config
         .monitors
@@ -3552,6 +3611,20 @@ async fn serve(
         //
         // Read from the pump rather than passed in, so there is one source
         // for it.
+        // **The display handle lives here, on the thread that owes the
+        // restoration.** A resolution this session changes has to go back when
+        // it ends, and the surest way to keep that true is for the thing that
+        // can change it and the thing that ends to be the same scope.
+        //
+        // A host with no display, or a compositor that will not do it, simply
+        // offers nothing — and a controller that was offered nothing shows no
+        // picker rather than one that always fails.
+        let mut displays = crate::paths::home()
+            .ok()
+            .and_then(|home| esper_display_mode::Displays::open(&home).ok());
+        if let Some(d) = displays.as_ref() {
+            pump.offer_modes(modes_on_offer(d, &pump.config()));
+        }
         let mut announced: Option<esper_proto::StreamConfig> = Some(pump.config());
         // **What the viewer said it was doing, said once when it says it.**
         //
@@ -3609,6 +3682,36 @@ async fn serve(
                     Ok(Handled::Refused { config, why }) => {
                         eprintln!("      · {why}");
                         Some(config)
+                    }
+                    // **Acted on here because here is what tears down.** The
+                    // stream checked that the resolution was one this host
+                    // offered; the screen itself belongs to the session.
+                    Ok(Handled::Resize(request)) => {
+                        let current = pump.config();
+                        match displays
+                            .as_mut()
+                            .ok_or_else(|| "this host has no display to resize".to_owned())
+                            .and_then(|d| resize_screen(d, &current, &request))
+                        {
+                            Ok(()) => {
+                                println!(
+                                    "      screen {} set to {}x{}, and it goes back when this \
+                                     session ends",
+                                    request.monitor, request.mode.width, request.mode.height
+                                );
+                                // The desktop is a different shape now, so the
+                                // list of what each screen can be is too.
+                                if let Some(d) = displays.as_ref() {
+                                    let offer = modes_on_offer(d, &pump.config());
+                                    pump.offer_modes(offer);
+                                }
+                                Some(pump.config())
+                            }
+                            Err(why) => {
+                                eprintln!("      · could not change the resolution: {why}");
+                                Some(pump.config())
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("      · refused a message from the controller: {e}");
@@ -3753,6 +3856,25 @@ async fn serve(
             if !pump.is_open() {
                 break;
             }
+        }
+        // **The resolution goes back, whatever ended the session.**
+        //
+        // Here rather than in a `Drop` because here is where every way out of
+        // that loop arrives: the controller leaving, the pipeline stopping,
+        // the transport closing, this machine's owner taking it away. A
+        // `Drop` would cover those too, and would also make it easy to move
+        // the handle somewhere that outlives the session without noticing.
+        //
+        // A host killed outright reaches none of this, which is what the
+        // record on disk is for: the next start puts it back. See
+        // `esper_display_mode::restore_anything_left_behind`.
+        if let Some(d) = displays.as_mut()
+            && let Err(why) = d.restore()
+        {
+            eprintln!(
+                "      · could not put the screen's resolution back: {why}. \
+                     The next start of this engine will."
+            );
         }
         // The pump comes back so its pipeline can outlive the transport.
         (frames, pump.sent(), pump)
@@ -6783,6 +6905,7 @@ mod tests {
             height: 1080,
             scale_percent: 100,
             primary: id == 0,
+            modes: Vec::new(),
         };
         let config = esper_proto::StreamConfig {
             monitors: vec![screen(0, 0), screen(1, 1920), screen(2, 3840)],

@@ -151,6 +151,19 @@ pub enum StreamError {
         wanted: Vec<u32>,
         why: String,
     },
+    /// A controller asked for a resolution and the host will not set it.
+    ///
+    /// Named with the resolution asked for, because a controller offering a
+    /// picker has to be able to say which entry failed — and because the
+    /// common cause is a stale config, where the honest report is that the
+    /// host no longer offers what the controller is still showing.
+    #[error("this session cannot set screen {monitor} to {width}x{height}: {why}")]
+    CannotResize {
+        monitor: u32,
+        width: u32,
+        height: u32,
+        why: String,
+    },
 }
 
 /// A sink that keeps everything, for tests and for measuring.

@@ -1315,6 +1315,46 @@ pub struct MonitorDescription {
     pub scale_percent: u16,
     /// Whether the host calls this its primary display.
     pub primary: bool,
+    /// Resolutions this monitor can be changed to, largest first.
+    ///
+    /// **Empty means the host will not change it**, which is the honest answer
+    /// on a Wayland compositor that does not offer the protocol, on a host
+    /// whose display server has one fixed mode, and on a terminal-only host
+    /// with no display at all. A controller shows no picker rather than a
+    /// picker that always fails.
+    ///
+    /// Defaulted and skipped when empty so that a host built before this
+    /// existed, and every recorded fixture, stay byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<DisplayMode>,
+}
+
+/// A resolution a monitor can be set to.
+///
+/// Sent so a controller can offer the list without a round trip, and so it can
+/// say *which* it is asking for rather than "smaller".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayMode {
+    pub width: u32,
+    pub height: u32,
+    /// Refresh rate in millihertz, so it stays an integer on the wire and a
+    /// fixture stays reproducible. 60,000 is 60 Hz; **zero means the host did
+    /// not say**, which every virtual display does and which a controller
+    /// shows as a resolution with no rate rather than as 0 Hz.
+    pub refresh_mhz: u32,
+}
+
+impl DisplayMode {
+    /// Whether this is a resolution worth putting in front of somebody.
+    #[must_use]
+    pub const fn is_well_formed(&self) -> bool {
+        self.width >= 640
+            && self.height >= 480
+            && self.width <= MAX_PICTURE_EDGE
+            && self.height <= MAX_PICTURE_EDGE
+            // 1000 Hz. Above that is not a display, it is a parsing error.
+            && self.refresh_mhz <= 1_000_000
+    }
 }
 
 impl MonitorDescription {
@@ -1331,6 +1371,37 @@ impl MonitorDescription {
             && self.width <= MAX_PICTURE_EDGE
             && self.height <= MAX_PICTURE_EDGE
             && Self::SCALE.contains(&self.scale_percent)
+            // A list longer than this is not a monitor's mode list; it is
+            // something that got in on the wire.
+            && self.modes.len() <= 64
+            && self.modes.iter().all(DisplayMode::is_well_formed)
+    }
+}
+
+/// Set one monitor to one of the resolutions it offered.
+///
+/// Naming the monitor rather than assuming the selected one, because a host
+/// serving two screens has two, and "the resolution" would then be ambiguous
+/// in exactly the arrangement where changing it matters most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResizeRequest {
+    /// An id from [`StreamConfig::monitors`].
+    pub monitor: u32,
+    /// One of that monitor's [`MonitorDescription::modes`].
+    ///
+    /// A host that is offered anything else refuses rather than choosing
+    /// something close: a resolution nobody picked is worse than none.
+    pub mode: DisplayMode,
+}
+
+impl ResizeRequest {
+    /// Whether this asks for something a host could act on.
+    ///
+    /// Shape only. Whether *this* monitor offers *that* mode is the host's to
+    /// judge, because it is the end that owns the screen.
+    #[must_use]
+    pub const fn is_well_formed(&self) -> bool {
+        self.mode.is_well_formed()
     }
 }
 
@@ -2090,6 +2161,17 @@ impl FileEnd {
         matches!(self, Self::Stored)
     }
 
+    /// Whether what arrived was kept, so a later attempt can carry on.
+    ///
+    /// **The one ending worth reconnecting for.** Every other failure has
+    /// already removed the partial, because a file that hashed wrong would
+    /// hash wrong again from the same bytes — so this is what separates a
+    /// transfer that was interrupted from one that was refused.
+    #[must_use]
+    pub const fn is_incomplete(self) -> bool {
+        matches!(self, Self::Incomplete)
+    }
+
     /// A sentence for a user.
     #[must_use]
     pub const fn message(self) -> &'static str {
@@ -2316,6 +2398,13 @@ pub enum MediaMessage {
     Config(StreamConfig),
     /// Send a different monitor. Controller to host.
     Select(MonitorSelect),
+    /// Change the screen's resolution. Controller to host.
+    ///
+    /// **The host is left holding an obligation by this**, which no other
+    /// message on this stream does: it has changed a screen somebody is
+    /// sitting in front of, and it owes them the resolution back when the
+    /// session ends — including if it dies first. See `esper-display-mode`.
+    Resize(ResizeRequest),
     /// What the controller would prefer. Controller to host.
     Hint(QualityHint),
     /// Send a picture I can start from. Controller to host.
@@ -2460,6 +2549,7 @@ impl MediaMessage {
             // not: it asks for a session with no picture, which is a close
             // rather than a selection.
             Self::Select(s) => s.is_well_formed(),
+            Self::Resize(r) => r.is_well_formed(),
             // A receiver sizes every buffer in its playback path from this, so
             // a config it cannot build a decoder for has to be refused rather
             // than approximated.
@@ -2506,6 +2596,7 @@ impl MediaMessage {
         match self {
             Self::Config(_) => "a stream config",
             Self::Select(_) => "a monitor selection",
+            Self::Resize(_) => "a request to change the screen's resolution",
             Self::Hint(_) => "a quality hint",
             Self::Keyframe(_) => "a keyframe request",
             Self::Cursor(c) => c.name(),
@@ -2553,6 +2644,12 @@ impl MediaMessage {
             // refused every honest recording notice, which is how it was
             // found.
             Self::Select(_)
+            // **Controller to host, and it is the message on this stream
+            // that leaves the host owing something.** A host changes its own
+            // screen only because a controller asked; a host that could
+            // resize the *controller's* screen would be reaching through the
+            // session in the direction nothing else does.
+            | Self::Resize(_)
             | Self::Hint(_)
             | Self::Keyframe(_)
             | Self::Report(_)
@@ -3073,6 +3170,7 @@ mod media_tests {
             height: 1080,
             scale_percent: 100,
             primary: id == 0,
+            modes: Vec::new(),
         }
     }
 

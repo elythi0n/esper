@@ -130,6 +130,15 @@ pub struct HostStream {
     reported: Option<u32>,
     /// When it said so, so a caller can tell a measurement from a memory.
     reported_at: Option<Instant>,
+    /// Resolutions each monitor may be changed to, by monitor id.
+    ///
+    /// **Told by the session rather than discovered here.** This type cannot
+    /// see a display server and should not learn how: the session owns the
+    /// handle that can change a resolution and owes the restoration, so it is
+    /// also the thing that knows what is on offer. Empty means the host will
+    /// not resize, which is the right answer on a compositor that does not
+    /// allow it and on a machine with no display at all.
+    offered_modes: std::collections::HashMap<u32, Vec<esper_proto::DisplayMode>>,
 }
 
 impl std::fmt::Debug for HostStream {
@@ -166,6 +175,18 @@ pub enum Handled {
         config: StreamConfig,
         why: StreamError,
     },
+    /// The controller asked for a different resolution, and it is legitimate.
+    ///
+    /// **Not acted on here, deliberately.** Changing the screen is not a
+    /// property of the video stream — it is the *session* that owns the
+    /// display handle, and it is the session that owes the person at that
+    /// machine their resolution back afterwards. This type has no way to
+    /// reach either, and giving it one so that a match arm could would put
+    /// the obligation somewhere nothing tears down.
+    ///
+    /// The same division as [`MediaMessage::Sound`], said out loud because
+    /// this one has a consequence somebody lives with.
+    Resize(esper_proto::ResizeRequest),
 }
 
 /// The SSRC for a session's sound.
@@ -236,6 +257,7 @@ impl HostStream {
             profile: Profile::default(),
             reported: None,
             reported_at: None,
+            offered_modes: std::collections::HashMap::new(),
         })
     }
 
@@ -295,6 +317,19 @@ impl HostStream {
     /// Built fresh each time rather than cached: the encode size changes when
     /// the CPU budget's ladder moves, and a controller acting on a stale
     /// config would size its window wrongly.
+    /// Say which resolutions each monitor may be changed to.
+    ///
+    /// Sent to the controller in the next config, and the list a
+    /// [`MediaMessage::Resize`] is checked against — so a session that stops
+    /// being able to resize can say so by passing an empty map, and requests
+    /// stop being accepted at the same moment they stop being offered.
+    pub fn offer_modes(
+        &mut self,
+        modes: std::collections::HashMap<u32, Vec<esper_proto::DisplayMode>>,
+    ) {
+        self.offered_modes = modes;
+    }
+
     #[must_use]
     pub fn config(&self) -> StreamConfig {
         let (width, height) = self.pipeline.encode_size();
@@ -314,6 +349,11 @@ impl HostStream {
                 // languages; percent keeps it an integer.
                 scale_percent: (m.scale * 100.0).round().clamp(25.0, 800.0) as u16,
                 primary: m.primary,
+                // Empty unless the session said otherwise, which is the
+                // honest default: this type cannot see a display server, and
+                // a controller offering a picker that always fails is worse
+                // than one offering none.
+                modes: self.offered_modes.get(&m.id.0).cloned().unwrap_or_default(),
             })
             .collect();
         StreamConfig {
@@ -444,6 +484,7 @@ impl HostStream {
                     // often the whole reason it was resumed.
                     reported: None,
                     reported_at: None,
+                    offered_modes: std::collections::HashMap::new(),
                 })
             }
             Err(e) => Err((pipeline, e.into())),
@@ -725,6 +766,35 @@ impl HostStream {
             // nothing, which is the honest division — the alternative is
             // giving the stream a handle on the sound so that one match arm
             // can use it.
+            MediaMessage::Resize(request) => {
+                // Checked against what this host actually offered, not merely
+                // against being a plausible resolution. A controller can only
+                // have learned a mode from the config the host sent, so one
+                // that is not in the list is either a stale config or a peer
+                // making things up — and a host that changed a screen to
+                // something nobody offered would be the worst possible answer
+                // to either.
+                let offered = self
+                    .offered_modes
+                    .get(&request.monitor)
+                    .is_some_and(|modes| {
+                        modes.iter().any(|m| {
+                            m.width == request.mode.width && m.height == request.mode.height
+                        })
+                    });
+                if !offered {
+                    return Ok(Handled::Refused {
+                        config: self.config(),
+                        why: StreamError::CannotResize {
+                            monitor: request.monitor,
+                            width: request.mode.width,
+                            height: request.mode.height,
+                            why: "the host did not offer that resolution for that screen".into(),
+                        },
+                    });
+                }
+                Ok(Handled::Resize(*request))
+            }
             MediaMessage::Sound(_) => Ok(Handled::Nothing),
             // Words for a person, not instructions for a video stream. The
             // session prints them; this type has no terminal.

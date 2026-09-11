@@ -620,3 +620,149 @@ fn the_served_set_can_grow_and_shrink_mid_session() {
         "shrinking did not restore the size one screen had"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Resolutions a controller may ask for.
+//
+// The host does not own the display — the session does, and it is the session
+// that owes the resolution back afterwards. What the host owns is the
+// *contract*: which resolutions it told the controller about, and whether a
+// request names one of them. Both halves are here, because a host that
+// accepted a resolution nobody offered would be a host changing somebody's
+// screen to a size that came off the wire.
+
+/// The list the session would have handed over.
+fn offering(
+    monitor: u32,
+    sizes: &[(u32, u32)],
+) -> std::collections::HashMap<u32, Vec<esper_proto::DisplayMode>> {
+    let modes = sizes
+        .iter()
+        .map(|&(width, height)| esper_proto::DisplayMode {
+            width,
+            height,
+            refresh_mhz: 60_000,
+        })
+        .collect();
+    std::collections::HashMap::from([(monitor, modes)])
+}
+
+fn asking(monitor: u32, width: u32, height: u32) -> MediaMessage {
+    MediaMessage::Resize(esper_proto::ResizeRequest {
+        monitor,
+        mode: esper_proto::DisplayMode {
+            width,
+            height,
+            refresh_mhz: 60_000,
+        },
+    })
+}
+
+/// A host that was told nothing offers nothing, and a controller shows no
+/// picker rather than one that always fails.
+#[test]
+fn a_host_told_of_no_resolutions_offers_none() {
+    let host = host_around(two());
+    assert!(
+        host.config().monitors.iter().all(|m| m.modes.is_empty()),
+        "a host that cannot see a display server announced resolutions anyway"
+    );
+}
+
+/// What the session offered is what the controller is told.
+#[test]
+fn the_resolutions_the_session_offers_reach_the_controller() {
+    let mut host = host_around(two());
+    host.offer_modes(offering(0, &[(1920, 1080), (1280, 1024)]));
+
+    let config = host.config();
+    let first = config
+        .monitors
+        .iter()
+        .find(|m| m.id == 0)
+        .expect("monitor 0");
+    assert_eq!(first.modes.len(), 2);
+    assert_eq!(first.modes.first().map(|m| m.width), Some(1920));
+    // The other screen was not offered anything, and says so by saying nothing.
+    let second = config
+        .monitors
+        .iter()
+        .find(|m| m.id == 1)
+        .expect("monitor 1");
+    assert!(second.modes.is_empty());
+}
+
+/// A request for something offered is handed to the session to act on.
+#[test]
+fn a_resolution_that_was_offered_is_passed_on() {
+    let mut host = host_around(two());
+    host.offer_modes(offering(0, &[(1920, 1080), (1280, 1024)]));
+
+    match host.handle(&asking(0, 1280, 1024)).expect("handled") {
+        esper_stream::Handled::Resize(request) => {
+            assert_eq!(request.monitor, 0);
+            assert_eq!((request.mode.width, request.mode.height), (1280, 1024));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// **A resolution nobody offered is refused, not approximated.**
+///
+/// The only way a controller can have learned a resolution is from the config
+/// this host sent, so one that is not in the list is either a stale config or
+/// a peer making things up. Changing somebody's screen to a size that came off
+/// the wire is the worst available answer to either.
+#[test]
+fn a_resolution_that_was_never_offered_is_refused() {
+    let mut host = host_around(two());
+    host.offer_modes(offering(0, &[(1920, 1080)]));
+
+    match host.handle(&asking(0, 800, 600)).expect("handled") {
+        esper_stream::Handled::Refused { why, .. } => {
+            let said = why.to_string();
+            assert!(said.contains("800x600"), "{said}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// And a screen the host never offered anything for cannot be resized at all,
+/// which is how a host with one resizable monitor out of two says so.
+#[test]
+fn a_screen_with_nothing_on_offer_cannot_be_resized() {
+    let mut host = host_around(two());
+    host.offer_modes(offering(0, &[(1920, 1080)]));
+
+    match host.handle(&asking(1, 1920, 1080)).expect("handled") {
+        esper_stream::Handled::Refused { .. } => {}
+        other => panic!("screen 1 was never offered a resolution: {other:?}"),
+    }
+}
+
+/// A host that stops being able to resize stops accepting requests at the same
+/// moment it stops offering them — one list, read by both.
+#[test]
+fn withdrawing_the_offer_withdraws_the_acceptance() {
+    let mut host = host_around(two());
+    host.offer_modes(offering(0, &[(1920, 1080)]));
+    assert!(matches!(
+        host.handle(&asking(0, 1920, 1080)).expect("handled"),
+        esper_stream::Handled::Resize(_)
+    ));
+
+    host.offer_modes(std::collections::HashMap::new());
+    match host.handle(&asking(0, 1920, 1080)).expect("handled") {
+        esper_stream::Handled::Refused { .. } => {}
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Direction is part of the protocol: a host resizing the *controller's*
+/// screen would reach through the session the way nothing else does.
+#[test]
+fn a_host_may_not_ask_a_controller_to_resize() {
+    let ask = asking(0, 1280, 1024);
+    assert!(ask.may_be_sent_by(Role::Controller));
+    assert!(!ask.may_be_sent_by(Role::Host));
+}
