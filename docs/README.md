@@ -9,6 +9,7 @@ something. These are the longer documents.
 |---|---|
 | [`broker.md`](broker.md) | Running a broker, if you need one — and why most people do not. Says which of its own commands have been run and which have not. |
 | [`compatibility.md`](compatibility.md) | Which releases talk to which. The release number and the protocol version are different things and change for different reasons. |
+| [`scripting.md`](scripting.md) | Every command that answers `--json`, and what each object holds. `check-scripting` holds the list to the binaries in both directions. |
 
 ## For somebody deciding whether to trust it
 
@@ -22,6 +23,7 @@ something. These are the longer documents.
 | | |
 |---|---|
 | [`protocol.md`](protocol.md) | What goes on the wire, written so that somebody who is not this project could implement it. Esper has one implementation, and that is a gap. |
+| [`local-api.md`](local-api.md) | The HTTP API `esper api` serves on loopback: every route, how to get in, and the two things it will not do. `check-local-api` holds it to the server. |
 | [`../packaging/README.md`](../packaging/README.md) | How the packages are built and what is checked about them. |
 | [`releasing.md`](releasing.md) | What a release is, what reproducibility does and does not cover, and which steps have actually been run. |
 

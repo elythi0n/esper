@@ -239,6 +239,34 @@ It is **deliberately not in the distribution packages yet**, because the
 viewer is not built and a package called "remote desktop" that cannot show
 you one would be a promise the software does not keep.
 
+## Scripting it
+
+Every command that **reports** answers `--json` as well as printing —
+`version`, `doctor`, `devices`, `sessions`, `identity`, `input`, `discover`
+and `config` — and the exit status is the same either way, so a check that
+only wants a yes or no never has to parse anything:
+
+```sh
+if esper doctor --json > /dev/null; then echo "this machine can host"; fi
+```
+
+`pair` and `invite` answer `--json` too, as **streams**: one object per line,
+flushed as it happens, because both run for minutes and say two things — here
+is the way in, and here is who used it.
+
+[`docs/scripting.md`](docs/scripting.md) says what each object holds. Nothing
+in this product reads another part's *printed* output; `make check-scraping`
+is what keeps that true.
+
+`esper api` serves the same answers over HTTP on loopback, behind a bearer
+token, for a dashboard or an adapter rather than a shell.
+[`docs/local-api.md`](docs/local-api.md) is every route, how to get in, and the
+two things that API will not do.
+
+Both documents are held to the binaries by checks, in both directions: a
+command that starts answering `--json` and is not written down is a failure,
+and so is a route the prose promises and nothing serves.
+
 ## How it is put together
 
 The **engine is Rust** — a hard-realtime pipeline with a per-frame budget of a

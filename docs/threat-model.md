@@ -99,7 +99,12 @@ Lost, stolen, or the person on the other end is no longer somebody you trust.
 `unattended` — and nothing else.
 
 **Stopped by:** permissions being per device and granted deliberately, not
-implied by pairing; sensitive grants needing confirmation at the host;
+implied by pairing; **a permission being changed by fingerprint and never by
+name** — a name is what that device called itself, two devices can share one,
+and a device that wanted to be mistaken for another could call itself whatever
+that one is called, so `esper grant`, `revoke`, `keep`, `forget`, `schedule`,
+`lock-after` and `group` all take the fingerprint and say so when they are
+given a name; sensitive grants needing confirmation at the host;
 **one-session pairings** that are spent when the session opens, not when it
 ends, so an abrupt disconnection does not hand out a second one; a pairing that
 lapses after a day even unused; schedules that bound when a device may connect
@@ -108,6 +113,20 @@ unattended; and `esper-engine forget`, which removes the record entirely.
 **Not stopped:** what they did while trusted. A device holding `control` that
 was used to install something has done that, and revoking the pairing
 afterwards does not undo it. The audit trail is what tells you.
+
+**A pairing records how it happened.** "A device paired" reads exactly the
+same whether somebody was standing at the keyboard reading a code aloud or a
+link was pasted out of an email by whoever received it — and those are the two
+answers an investigation is looking for. The line names which, and says when
+the pairing is spent after one session, because a device let in by a link is a
+materially different thing to find in a list a year later.
+
+The trail is **kept under a policy and says when it applied one**:
+`audit.retain` and `audit.max_size` remove its oldest lines, and a pass that
+removed anything appends a `trail_trimmed` line saying how many went for age,
+how many for size, and how many are left. Without it a reader cannot tell a
+quiet week from a deleted one, and "the record is incomplete" is a thing an
+investigation has to be able to establish from the record.
 
 ### The far end of a session you agreed to
 
@@ -153,6 +172,43 @@ improvement and it is why the portal is preferred where one exists.
 on every display server, and more completely on X11 and wlroots than on GNOME.
 Nothing Esper does can fix that from inside the account.
 
+### A copy of this machine's state
+
+A stolen laptop, a disk image, a backup, a home directory synced somewhere.
+**This adversary needs no code execution at all** — only the bytes.
+
+**Can reach:** `~/.esper`, and that is more than it looks. It holds this
+machine's **identity key**, which is what every paired device knows this
+machine by; the local API's **token**; the **device list**, which is the whole
+of who may connect and what they may do; and the **record** of what happened.
+A copy of that directory *is* this machine to every device that has paired
+with it — there is nothing else to prove otherwise, because the identity is
+the key and nothing about the hardware is bound into it.
+
+**Stopped by:** file permissions, which stop another account on a running
+machine and stop nothing once the disk leaves the building. So: **full-disk
+encryption is the answer**, it is not Esper's to provide, and it *is* Esper's
+to say out loud. `esper doctor` reports whether the state directory is on an
+encrypted volume — asked of the kernel's device-mapper UUID rather than
+guessed from a device's name, walking down through LVM to the layer that
+actually encrypts. A volume it cannot classify is reported as unclassified
+rather than as safe.
+
+**Not stopped:** anything, if the volume is not encrypted. Encrypting the
+identity key on its own with a passphrase or a platform keychain is a smaller
+version of the same answer and a worse one on the platform this ships on
+first: on Linux the keychain's own store lives in the same home directory, so
+it travels in the same backup — it adds the login password and moves nothing
+out of reach. It would also stop a host starting unattended, which is what
+most Esper hosts are for. That trade is a decision the project owes and has
+not made; until it does, the honest statement is the one above rather than a
+setting that reads like protection.
+
+**If it has already happened:** the key is what a peer trusts, so a copy of it
+can impersonate this machine until every peer forgets it. `esper-engine forget`
+on the *other* machines is what ends that, and re-pairing is what replaces it.
+There is no revocation message and no key rotation in this version.
+
 ### Somebody at the machine
 
 **Can reach:** everything a person sitting at an unlocked computer can reach.
@@ -167,6 +223,69 @@ to serve** where it cannot show one.
 `host.serve_without_indicator`, which exists for headless servers with no
 screen to put one on. On a machine with a screen it is the wrong setting, and
 the host says so when it starts.
+
+It is also one of six settings the **local control plane will not change**. The
+window can edit every other setting this machine has; these six are refused
+with the command to run in a terminal instead, because each either removes the
+ability of whoever is in front of the screen to know what is happening to it
+(`host.serve_without_indicator`, `audit.retain`, `audit.max_size`) or widens
+what a paired device may reach without anybody granting it anything
+(`files.root`, `forward.allow`) — or is a credential, which is typed where the
+person is (`broker.key`).
+
+This is the same rule that stops `unattended` being granted over the control
+plane, and it buys the same thing: not protection from an attacker who already
+runs as this user — they can edit the file — but that **no ordinary path**
+through the product reaches these without somebody at the machine.
+
+### The defaults that are security decisions
+
+A setting whose default decides something about security is listed here with
+what the default is and why. **The list and the product are held to each other
+by a test**, in both directions — a setting added to the code and not to this
+table is a failure, and so is a row here for a setting that does not exist.
+
+| Setting | Default | Why |
+|---|---|---|
+| `broker.address` | none | Esper operates no infrastructure and ships no default broker. Without one, the broker tiers do not exist |
+| `broker.key` | none | A broker is pinned to a key or it is not pinned |
+| `host.serve_without_indicator` | `false` | The indicator is how somebody at the machine knows it is being watched |
+| `host.privacy_screen` | `false` | Off is what a person expects a screen to do |
+| `host.lock_local_input` | `false` | Taking this machine's own keyboard away is a thing to ask for |
+| `host.allow_asking` | `true` | A host that cannot ask serves only devices holding `unattended` |
+| `host.lock_after_session` | `unattended` | Lock when nobody here agreed to it, which is the case where nobody is watching |
+| `policy.deny_when_locked` | `false` | A locked screen is not by itself a refusal; making it one is a choice |
+| `session.idle_timeout` | none | A timeout that killed a working session by default is data loss wearing a security feature's clothes |
+| `files.enabled` | `false` | File transfer is a distinct capability and is asked for |
+| `files.root` | none | Nothing is reachable until somebody says what is |
+| `forward.allow` | none | Which means loopback and nothing else |
+| `audit.retain` / `audit.max_size` | 90 days / 64 MB | Two limits, because they fail differently |
+| `discovery.mdns` | `true` | The one deliberate exception: convenience on a network you are already on, and it announces a fingerprint rather than anything private |
+
+**Two things are not settings, deliberately, and that is stronger than a
+secure default.** The decoder's sandbox has no switch at all — a session
+refuses a decoder that is not enforcing, there is no fallback, and `esper
+sandbox` is the diagnostic that reports it. And what a device may do is a
+*permission* per device, not a global flag: there is no `clipboard.inbound` to
+leave on by accident, because a device either holds `clipboard_in` or it does
+not.
+
+**Every change to a setting is recorded**, whichever path it came by: the
+command in a terminal and the window's own settings screen both go through
+`esper-engine config`, and it writes a `setting_changed` line naming the
+setting, what it was and what it is now. That line has no peer on it — nobody
+connected, somebody at the keyboard did it — and it is written *before* the
+file is, so shortening `audit.retain` leaves its own trace in the part of the
+record that survives the shortening. **The value of a credential is never in
+it**: a change to `broker.key` is recorded as having happened and the key
+itself is not written down, because the trail is the file a person is told to
+read and attach to a bug report.
+
+The settings file is written `0600`, and a file that holds `broker.key` and is
+readable by others is **said** at startup rather than refused. Refusing would be
+a machine that will not start over a mode; the API token does refuse, because a
+token *is* the credential for the local control plane and there is nothing else
+it could be, while this file usually holds no credential at all.
 
 ### Somebody in the supply chain
 

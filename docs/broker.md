@@ -93,6 +93,11 @@ broker identity
   file  /home/somebody/.esper/broker.key
 ```
 
+For a script rather than a person, `esper-broker identity --json` answers with
+`public_key`, `fingerprint` and `file` — the same three field names `esper
+identity --json` uses for the same facts. `public_key` is what goes after
+`--broker-key`.
+
 Under systemd the key belongs to the service's own state directory, so read it
 from the log the service wrote when it started:
 
