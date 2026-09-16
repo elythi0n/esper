@@ -53,7 +53,44 @@ pub struct CopyOptions {
     /// between "started" and "finished". This asks for one line per report
     /// instead, which survives a pipe.
     pub plain_progress: bool,
+    /// How long to keep reconnecting when a link goes, in seconds.
+    ///
+    /// **Not a retry count.** What matters to somebody copying a large file
+    /// over a link that keeps dropping is how long before they are told it is
+    /// hopeless, and a count means something different at every backoff. Zero
+    /// means one attempt and no reconnecting, for a script that would rather
+    /// fail now and decide for itself.
+    pub patience: u64,
 }
+
+/// Why an attempt ended, and whether another one would say anything different.
+///
+/// **A transfer that is interrupted is not a transfer that failed.** The bytes
+/// that arrived are on the far end's disk in a partial, the protocol already
+/// knows how to pick up from there — the offer is answered with the byte to
+/// start at — and a person who has to notice and type the command again is
+/// doing what the program could have done. What they cannot do is tell, from
+/// the outside, whether the answer would be different: a host that refused the
+/// path will refuse it again, and reconnecting forever over that is worse than
+/// stopping.
+///
+/// So the two are separated at the point each becomes known, never inferred
+/// later from the wording of a message.
+#[derive(Debug)]
+enum Stalled {
+    /// The link went. The partial is on disk and a new session resumes it.
+    LinkWent(String),
+    /// Trying again would produce the same answer.
+    Settled(String),
+}
+
+/// How long `cp` keeps reconnecting by default, in seconds.
+///
+/// Three minutes. Long enough to ride out a laptop changing networks, a lid
+/// closing and opening, or a mobile connection going under a bridge; short
+/// enough that a script whose host has genuinely gone finds out inside a
+/// coffee break.
+const DEFAULT_PATIENCE: u64 = 180;
 
 /// Split `device:path` from a plain local path.
 ///
@@ -93,6 +130,7 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
     let mut via_key = None;
     let mut mdns = crate::settings::flag("discovery.mdns", true);
     let mut plain_progress = false;
+    let mut patience = DEFAULT_PATIENCE;
     let mut i = 0;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
@@ -107,6 +145,15 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
             "--progress" => {
                 plain_progress = true;
                 i += 1;
+            }
+            "--patience" => {
+                let text = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--patience needs a number of seconds".to_owned())?;
+                patience = text
+                    .parse::<u64>()
+                    .map_err(|_| format!("--patience takes a number of seconds, not {text:?}"))?;
+                i += 2;
             }
             "--via" => {
                 let text = args
@@ -168,6 +215,7 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
         via,
         mdns,
         plain_progress,
+        patience,
     })
 }
 
@@ -186,6 +234,8 @@ pub fn usage() -> String {
          \x20 --broker-key <key>   the broker's key, when it is not remembered\n\
          \x20 --no-mdns            do not ask the local network where the host is\n\
          \x20 --progress           report progress in lines, for a program to read\n\
+         \x20 --patience <seconds> keep reconnecting for this long when a link drops\n\
+         \x20                      (default {DEFAULT_PATIENCE}; 0 to fail on the first drop)\n\
          \n\
          for example: {me} cp report.pdf elythion:reports/\n\
          \x20            {me} cp elythion:logs/build.log ./"
@@ -256,108 +306,207 @@ pub fn run(o: &CopyOptions) -> Result<(), String> {
         .map_err(|e| format!("could not start: {e}"))?;
 
     runtime.block_on(async move {
-        // A device can be named, or named by where it is. An address says
-        // where without saying which; the key check settles the identity
-        // either way, exactly as it does for `connect`.
-        let at = crate::net::parse_addr(&device).ok();
-        let reached = crate::session_cmd::reach(
-            &identity,
-            &crate::session_cmd::Reaching {
-                label: "📄 esper cp",
-                addr: at,
-                named: if at.is_some() { None } else { Some(&device) },
-                via: o.via,
-                mdns: o.mdns,
-                // Everything goes to standard error, so a script's standard
-                // output is its own.
-                aside: true,
-            },
-        )
-        .await?;
-        let crate::session_cmd::Reached {
-            endpoint,
-            mut session,
-            ..
-        } = reached;
-
-        let (media, mut control) = esper_link::parts(&mut session).map_err(|e| e.to_string())?;
-        let want = if pushing {
-            Permission::FilesIn
-        } else {
-            Permission::FilesOut
-        };
-        let grant = esper_transport::request_session(
-            &mut control,
-            &esper_proto::SessionRequest {
-                kind: esper_proto::SessionKind::Files,
-                want: vec![want],
-                codecs: Vec::new(),
-                reason: "a file".to_owned(),
-            },
-        )
-        .await
-        .map_err(|e| match e {
-            esper_transport::AuthorizeError::Refused(d) => {
-                format!("the host refused: {} ({})", d.detail, d.reason.0)
-            }
-            other => format!("agreeing what the session may do: {other}"),
-        })?;
-        if !grant.allows(want) {
-            return Err(format!(
-                "that host has not granted this device {}",
-                want.name()
-            ));
+        // **The command reconnects; the person does not.**
+        //
+        // A dropped link used to end the whole thing, and the bytes that had
+        // arrived were not lost — the partial is on disk and the protocol
+        // resumes from it — so what was actually being asked of somebody was
+        // to notice and type the same command again. On the links this product
+        // is for, that is the difference between copying a large file and
+        // watching a large file be copied.
+        //
+        // What a person cannot do from the outside is tell whether another
+        // attempt would say anything different, and that is what [`Stalled`]
+        // carries. A refused path is refused every time.
+        // **The questions whose answer is the same every time, asked once.**
+        //
+        // Reconnecting is for a link that went. A machine with nothing paired,
+        // or a name this machine does not know, will say exactly the same
+        // thing in ninety seconds — and the first version of this retried
+        // "no devices are paired" nine times before giving up, which turns a
+        // clear sentence into a hang and buries it under eight copies of
+        // itself.
+        let (store, _) = crate::session_cmd::paired()?;
+        if crate::net::parse_addr(&device).is_err() {
+            crate::ladder::device_named(store.iter(), &device)?;
         }
 
-        let mut stream = session
-            .open_control()
-            .await
-            .map_err(|e| format!("could not open a file stream: {e}"))?;
-        stream
-            .send(&esper_proto::StreamPurpose::Files)
-            .await
-            .map_err(|e| format!("could not say what the stream was for: {e}"))?;
+        let give_up_at = std::time::Instant::now() + std::time::Duration::from_secs(o.patience);
+        let stop = crate::files_task::stop_on_interrupt();
+        let mut attempts: u32 = 0;
+        let mut moved;
 
-        let outcome = if pushing {
-            send_one(&mut stream, o, &remote_path).await
-        } else {
-            fetch_one(&mut stream, o, &remote_path).await
+        let outcome = loop {
+            attempts = attempts.saturating_add(1);
+            match attempt(&identity, o, &device, &remote_path, pushing).await {
+                Ok(size) => break Ok(size),
+                Err(Stalled::Settled(why)) => break Err(why),
+                Err(Stalled::LinkWent(why)) => {
+                    moved = why;
+                    // A person who pressed Ctrl-C is not asking for another
+                    // go at it.
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break Err(format!("{moved}, and this end asked to stop"));
+                    }
+                    // **Waited before the clock is checked, so the last
+                    // attempt is a real one.** Checking first would give up
+                    // while there was still time on the budget.
+                    let wait = backoff(attempts);
+                    if std::time::Instant::now() + wait >= give_up_at {
+                        break Err(if o.patience == 0 {
+                            moved
+                        } else {
+                            format!(
+                                "{moved}. Gave up after {attempts} attempt(s) over {}s — \
+                                 what arrived is kept, so running this again picks up \
+                                 from there",
+                                o.patience
+                            )
+                        });
+                    }
+                    eprintln!(
+                        "  · {moved}; reconnecting in {}s (attempt {})",
+                        wait.as_secs().max(1),
+                        attempts.saturating_add(1)
+                    );
+                    tokio::time::sleep(wait).await;
+                }
+            }
         };
 
-        // **Recorded whether it worked or not**, the same rule the host's own
+        // **Recorded once, whatever it took**, the same rule the host's own
         // side follows: a device repeatedly asking for paths it cannot have is
         // a pattern, and only the refusals show it. The path is the remote one
-        // as this end named it, never a byte of what crossed.
+        // as this end named it, never a byte of what crossed. The attempts are
+        // in the record because a transfer that needed nine of them is a link
+        // somebody should know about.
         crate::trail::went_out(
-            session.peer_key(),
+            &identity.public_key(),
             esper_audit::Event::FileTransferred {
                 way: if pushing { "out" } else { "in" }.to_owned(),
                 path: remote_path.clone(),
                 size: outcome.as_ref().copied().unwrap_or(0),
-                outcome: match &outcome {
-                    Ok(_) => "copied".to_owned(),
-                    Err(why) => format!("refused: {why}"),
+                outcome: match (&outcome, attempts) {
+                    (Ok(_), 1) => "copied".to_owned(),
+                    (Ok(_), n) => format!("copied, after {n} attempts"),
+                    (Err(why), 1) => format!("refused: {why}"),
+                    (Err(why), n) => format!("refused after {n} attempts: {why}"),
                 },
             },
         );
-
-        media.close(esper_proto::Reason::SESSION_COMPLETE);
-        media.linger(std::time::Duration::from_millis(200)).await;
-        drop(endpoint);
         outcome.map(|_| ())
     })
+}
+
+/// How long to wait before reconnecting, given how many attempts have failed.
+///
+/// Doubling from a second, capped at fifteen. The cap is the point: a link
+/// that comes back after two minutes should be used within seconds of coming
+/// back, and an unbounded doubling spends the whole budget asleep.
+fn backoff(attempts: u32) -> std::time::Duration {
+    let seconds = 1u64 << attempts.min(4);
+    std::time::Duration::from_secs(seconds.min(15))
+}
+
+/// One connection, and one transfer over it.
+async fn attempt(
+    identity: &esper_crypto::Identity,
+    o: &CopyOptions,
+    device: &str,
+    remote_path: &str,
+    pushing: bool,
+) -> Result<u64, Stalled> {
+    // A device can be named, or named by where it is. An address says
+    // where without saying which; the key check settles the identity
+    // either way, exactly as it does for `connect`.
+    let at = crate::net::parse_addr(device).ok();
+    let reached = crate::session_cmd::reach(
+        identity,
+        &crate::session_cmd::Reaching {
+            label: "📄 esper cp",
+            addr: at,
+            named: if at.is_some() { None } else { Some(device) },
+            via: o.via,
+            mdns: o.mdns,
+            // Everything goes to standard error, so a script's standard
+            // output is its own.
+            aside: true,
+        },
+    )
+    .await
+    // **Not being able to reach a host is the retryable one.** A laptop that
+    // changed networks, a host rebooting, a broker that was busy — all of
+    // them look like this and all of them come back.
+    .map_err(Stalled::LinkWent)?;
+    let crate::session_cmd::Reached {
+        endpoint,
+        mut session,
+        ..
+    } = reached;
+
+    let (media, mut control) =
+        esper_link::parts(&mut session).map_err(|e| Stalled::LinkWent(e.to_string()))?;
+    let want = if pushing {
+        Permission::FilesIn
+    } else {
+        Permission::FilesOut
+    };
+    let grant = esper_transport::request_session(
+        &mut control,
+        &esper_proto::SessionRequest {
+            kind: esper_proto::SessionKind::Files,
+            want: vec![want],
+            codecs: Vec::new(),
+            reason: "a file".to_owned(),
+        },
+    )
+    .await
+    .map_err(|e| match e {
+        // **A refusal is an answer, and it will be the same answer.**
+        esper_transport::AuthorizeError::Refused(d) => {
+            Stalled::Settled(format!("the host refused: {} ({})", d.detail, d.reason.0))
+        }
+        other => Stalled::LinkWent(format!("agreeing what the session may do: {other}")),
+    })?;
+    if !grant.allows(want) {
+        return Err(Stalled::Settled(format!(
+            "that host has not granted this device {}",
+            want.name()
+        )));
+    }
+
+    let mut stream = session
+        .open_control()
+        .await
+        .map_err(|e| Stalled::LinkWent(format!("could not open a file stream: {e}")))?;
+    stream
+        .send(&esper_proto::StreamPurpose::Files)
+        .await
+        .map_err(|e| Stalled::LinkWent(format!("could not say what the stream was for: {e}")))?;
+
+    let outcome = if pushing {
+        send_one(&mut stream, o, remote_path).await
+    } else {
+        fetch_one(&mut stream, o, remote_path).await
+    };
+
+    media.close(esper_proto::Reason::SESSION_COMPLETE);
+    media.linger(std::time::Duration::from_millis(200)).await;
+    drop(endpoint);
+    outcome
 }
 
 /// Push a local file to the host.
 /// Returns the file's size, so the trail records the real number rather than
 /// a plausible one.
-async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result<u64, String> {
+async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result<u64, Stalled> {
     let Side::Here(at) = &o.from else {
-        return Err("nothing local to send".to_owned());
+        return Err(Stalled::Settled("nothing local to send".to_owned()));
     };
-    let (vault, name) = local(at, None)?;
+    // A local file that is not there, or not readable, is not a link.
+    let (vault, name) = local(at, None).map_err(Stalled::Settled)?;
     let mut sending = Sending::begin(&vault, &name, Limits::default())
-        .map_err(|why| format!("{}: {}", at.display(), why.message()))?;
+        .map_err(|why| Stalled::Settled(format!("{}: {}", at.display(), why.message())))?;
 
     // A destination that names a directory takes the source's own name.
     let destination = if remote.is_empty() || remote.ends_with('/') {
@@ -380,17 +529,27 @@ async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result
     stream
         .send(&FileMessage::Offer(offer))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Stalled::LinkWent(e.to_string()))?;
     let from = match stream.recv::<FileMessage>().await {
         Ok(FileMessage::Accept(accept)) => accept.from,
-        Ok(FileMessage::Refuse(why)) => return Err(advice(why, &destination)),
-        Ok(other) => return Err(format!("the host answered with {}", other.name())),
-        Err(e) => return Err(format!("the host said nothing: {e}")),
+        // A host that refuses a path refuses it every time.
+        Ok(FileMessage::Refuse(why)) => {
+            return Err(Stalled::Settled(advice(why, &destination)));
+        }
+        Ok(other) => {
+            return Err(Stalled::Settled(format!(
+                "the host answered with {}",
+                other.name()
+            )));
+        }
+        Err(e) => return Err(Stalled::LinkWent(format!("the host said nothing: {e}"))),
     };
     if from > 0 {
         eprintln!("  resuming   from {from} bytes in");
     }
-    sending.resume_at(from).map_err(|e| e.to_string())?;
+    sending
+        .resume_at(from)
+        .map_err(|e| Stalled::Settled(e.to_string()))?;
 
     // **A figure that moves, and a way to stop.** With one line at the start
     // and one at the end, the only way to tell a ten-gigabyte copy that is
@@ -407,37 +566,53 @@ async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result
     };
     let pushed = crate::files_task::push_reporting(stream, &mut sending, &mut report).await;
     progress.done();
-    pushed?;
+    pushed.map_err(|e| match e {
+        crate::files_task::Moved::LinkWent(why) => Stalled::LinkWent(why),
+        crate::files_task::Moved::Settled(why) => Stalled::Settled(why),
+    })?;
 
     match stream.recv::<FileMessage>().await {
         Ok(FileMessage::Done(end)) if end.is_stored() => {
             eprintln!("  sent       {destination}");
             Ok(size)
         }
-        Ok(FileMessage::Done(end)) => Err(end.message().to_owned()),
-        Ok(other) => Err(format!("the host answered with {}", other.name())),
-        Err(e) => Err(format!("the host did not say how it went: {e}")),
+        // The host has an opinion about the bytes it received — a hash that
+        // did not match, a disk that filled. Sending them again from the
+        // start is the one thing that would not help.
+        Ok(FileMessage::Done(end)) => Err(Stalled::Settled(end.message().to_owned())),
+        Ok(other) => Err(Stalled::Settled(format!(
+            "the host answered with {}",
+            other.name()
+        ))),
+        Err(e) => Err(Stalled::LinkWent(format!(
+            "the host did not say how it went: {e}"
+        ))),
     }
 }
 
 /// Pull a file from the host to here.
 /// Returns the file's size, for the same reason [`send_one`] does.
-async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result<u64, String> {
+async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result<u64, Stalled> {
     let Side::Here(at) = &o.to else {
-        return Err("nowhere local to put it".to_owned());
+        return Err(Stalled::Settled("nowhere local to put it".to_owned()));
     };
     stream
         .send(&FileMessage::Want(FileWant {
             path: remote.to_owned(),
         }))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Stalled::LinkWent(e.to_string()))?;
 
     let wire = match stream.recv::<FileMessage>().await {
         Ok(FileMessage::Have(offer)) => offer,
-        Ok(FileMessage::Refuse(why)) => return Err(advice(why, remote)),
-        Ok(other) => return Err(format!("the host answered with {}", other.name())),
-        Err(e) => return Err(format!("the host said nothing: {e}")),
+        Ok(FileMessage::Refuse(why)) => return Err(Stalled::Settled(advice(why, remote))),
+        Ok(other) => {
+            return Err(Stalled::Settled(format!(
+                "the host answered with {}",
+                other.name()
+            )));
+        }
+        Err(e) => return Err(Stalled::LinkWent(format!("the host said nothing: {e}"))),
     };
 
     // **The name comes from what was asked for, never from the answer.** A
@@ -445,8 +620,9 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
     // would let the far end choose the name of a file on this machine — `.`
     // something, in whichever directory the person happened to be standing in.
     // What lands here is named after what they typed.
-    let (vault, name) = local(at, tail(remote))?;
-    let mut offer = Offer::check(&wire).map_err(|why| why.message().to_owned())?;
+    let (vault, name) = local(at, tail(remote)).map_err(Stalled::Settled)?;
+    let mut offer =
+        Offer::check(&wire).map_err(|why| Stalled::Settled(why.message().to_owned()))?;
     offer.path = name.clone();
     offer.replace = o.force;
     eprintln!(
@@ -459,7 +635,7 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
         Ok(receiving) => receiving,
         Err(why) => {
             let _ = stream.send(&FileMessage::Refuse(why)).await;
-            return Err(advice(why, name.as_str()));
+            return Err(Stalled::Settled(advice(why, name.as_str())));
         }
     };
     let from = receiving.from();
@@ -469,7 +645,7 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
     stream
         .send(&FileMessage::Accept(FileAccept { from }))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Stalled::LinkWent(e.to_string()))?;
 
     // The same figure the sending end draws, at the same interval, so a fetch
     // of a large file is not a command that prints one line and then looks
@@ -478,18 +654,22 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
     let mut buffer = vec![0u8; esper_files::AT_A_TIME];
     let mut got_so_far = from;
     let mut last_said = from;
+    // **Why the loop ended, kept**, because the bytes on disk look the same
+    // either way: a host that sent everything and a link that went at 90%
+    // both leave a partial, and only one of them is worth reconnecting for.
+    let mut broke = None;
     while receiving.left() > 0 {
         let got = match stream.recv_raw(&mut buffer).await {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                eprintln!("  · it stopped part way ({e})");
+                broke = Some(e.to_string());
                 break;
             }
         };
         receiving
             .take(buffer.get(..got).unwrap_or_default())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Stalled::Settled(e.to_string()))?;
         got_so_far = got_so_far.saturating_add(got as u64);
         if got_so_far.saturating_sub(last_said) >= crate::files_task::REPORT_EVERY {
             last_said = got_so_far;
@@ -507,7 +687,16 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
         );
         return Ok(offer.bytes);
     }
-    Err(end.message().to_owned())
+    // **An incomplete file is the resumable one and the only one.** The
+    // partial is kept on purpose — the bytes that arrived are the expensive
+    // part — so reconnecting picks up from them. A hash that did not match or
+    // a disk that would not take it are answers about this attempt that the
+    // next one would repeat, and the partial has already been removed.
+    Err(match (end.is_incomplete(), broke) {
+        (true, Some(why)) => Stalled::LinkWent(format!("it stopped part way ({why})")),
+        (true, None) => Stalled::LinkWent("the host stopped sending part way".to_owned()),
+        _ => Stalled::Settled(end.message().to_owned()),
+    })
 }
 
 /// How a copy says how far it has got.

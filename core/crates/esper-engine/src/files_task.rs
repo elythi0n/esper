@@ -361,7 +361,37 @@ async fn give(control: &mut Control, files: &Files, want: FileWant) {
 
 /// Read a file out onto the stream.
 pub async fn push(control: &mut Control, sending: &mut Sending) -> Result<(), String> {
-    push_reporting(control, sending, &mut |_, _| Going::On).await
+    push_reporting(control, sending, &mut |_, _| Going::On)
+        .await
+        .map_err(|e| e.into_message())
+}
+
+/// Why a transfer stopped, and whether reconnecting would change the answer.
+///
+/// **The distinction is only knowable here**, at the call that failed: a
+/// stream that stopped taking bytes is a link that went, and a file that
+/// stopped giving them is a disk. Both arrive at the caller as "the transfer
+/// ended" and only one of them is worth trying again — so the two are kept
+/// apart where the difference is visible rather than re-derived from the text
+/// of a message further up.
+#[derive(Debug)]
+pub enum Moved {
+    /// The link stopped carrying bytes. The partial is on disk, and a new
+    /// session resumes from where this one reached.
+    LinkWent(String),
+    /// Nothing about trying again would help: the local file could not be
+    /// read, or somebody at this end asked to stop.
+    Settled(String),
+}
+
+impl Moved {
+    /// What to say to a person.
+    #[must_use]
+    pub fn into_message(self) -> String {
+        match self {
+            Self::LinkWent(why) | Self::Settled(why) => why,
+        }
+    }
 }
 
 /// Whether a transfer should keep going.
@@ -400,7 +430,7 @@ pub async fn push_reporting(
     control: &mut Control,
     sending: &mut Sending,
     progress: &mut (dyn FnMut(u64, u64) -> Going + Send),
-) -> Result<(), String> {
+) -> Result<(), Moved> {
     // Asked for here rather than at the stream's opening, because this is the
     // point where a lot of bytes are about to be queued.
     let _ = control.set_priority(BACKGROUND);
@@ -409,7 +439,10 @@ pub async fn push_reporting(
     let mut sent = sending.sent();
     let mut last_reported = sent;
     loop {
-        let got = sending.read(&mut buffer).map_err(|e| e.to_string())?;
+        // A local file that will not be read is a disk, not a link.
+        let got = sending
+            .read(&mut buffer)
+            .map_err(|e| Moved::Settled(e.to_string()))?;
         if got == 0 {
             // **The last report is always made**, whatever the interval says.
             // A transfer that finished on 99% and never said so is a progress
@@ -418,14 +451,19 @@ pub async fn push_reporting(
             return Ok(());
         }
         let piece = buffer.get(..got).unwrap_or_default();
-        control.send_raw(piece).await.map_err(|e| e.to_string())?;
+        control
+            .send_raw(piece)
+            .await
+            .map_err(|e| Moved::LinkWent(e.to_string()))?;
         sent = sent.saturating_add(got as u64);
         if sent.saturating_sub(last_reported) >= REPORT_EVERY {
             last_reported = sent;
             if progress(sent, total) == Going::Stop {
-                return Err(format!(
+                // Asked for by somebody at this keyboard, so reconnecting
+                // would be the program overruling them.
+                return Err(Moved::Settled(format!(
                     "stopped after {sent} of {total} bytes, at this end's request"
-                ));
+                )));
             }
         }
     }

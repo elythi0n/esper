@@ -58,6 +58,11 @@ impl Home {
         &self.dir
     }
 
+    /// This home's own identity, for pairing it into another one.
+    pub fn identity(&self) -> &Identity {
+        &self.id
+    }
+
     /// Write the other device into this home's list, with these permissions.
     ///
     /// **The pairing itself is not what is under test here** and has tests of
@@ -75,6 +80,16 @@ impl Home {
     }
 }
 
+/// A small varying offset, so two test binaries do not pick the same port.
+fn rand_port_nudge() -> u16 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    (nanos % 4_000) as u16
+}
+
 /// A running `esper-engine host`, and what it has said.
 pub struct Host {
     child: Child,
@@ -85,7 +100,33 @@ pub struct Host {
 impl Host {
     /// Start one, and wait until it says where it is listening.
     pub fn start(home: &Home) -> Self {
-        Self::started(home, false)
+        Self::started(home, false, None)
+    }
+
+    /// Start one on a port somebody else chose.
+    ///
+    /// **For the tests that stop a host and start it again**, which is the
+    /// only way to act out a link going and coming back. An ephemeral port
+    /// would move between the two, and a client reconnecting to where it was
+    /// would be reconnecting to nothing — which proves nothing about the
+    /// client.
+    pub fn start_at(home: &Home, port: u16) -> Self {
+        Self::started(home, false, Some(port))
+    }
+
+    /// A port nothing else has, from below the range the kernel hands out.
+    ///
+    /// Not `bind(0)` and then `close()`: that asks for an ephemeral port and
+    /// gives it straight back, and the kernel is free to hand the same one to
+    /// something else in the gap.
+    pub fn free_port() -> u16 {
+        for _ in 0..40 {
+            let port = 20_000 + (std::process::id() as u16 % 8_000) + rand_port_nudge();
+            if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+        }
+        panic!("no free port below the ephemeral range");
     }
 
     /// The same, keeping the display this process can see.
@@ -93,15 +134,15 @@ impl Host {
     /// For the one thing that cannot be measured without a screen: what a
     /// host does to the desktop it is serving, and whether it puts it back.
     pub fn start_on_this_display(home: &Home) -> Self {
-        Self::started(home, true)
+        Self::started(home, true, None)
     }
 
-    fn started(home: &Home, with_a_display: bool) -> Self {
+    fn started(home: &Home, with_a_display: bool, port: Option<u16>) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_esper-engine"));
         command
             .arg("host")
             .arg("--listen")
-            .arg("127.0.0.1:0")
+            .arg(format!("127.0.0.1:{}", port.unwrap_or(0)))
             .arg("--no-mdns")
             .env("ESPER_HOME", home.path())
             .stdout(Stdio::piped())
