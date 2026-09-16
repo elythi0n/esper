@@ -255,8 +255,20 @@ impl Identity {
 /// The mode is applied by `OpenOptions` rather than by a `chmod` afterwards:
 /// creating a world-readable file and then narrowing it leaves a window in
 /// which the key is exposed, and on a shared machine that window is enough.
+///
+/// **Public because it is the rule, not because a second caller happened to
+/// want it.** The portal grant beside the key is the compositor's word that
+/// this machine may take somebody's keyboard without asking, which is a
+/// credential of the same kind — and it was written with `fs::write` and
+/// narrowed afterwards, which is the exact thing this comment was written to
+/// warn against. One implementation is how that stops being a matter of
+/// whoever writes the next one remembering.
+///
+/// # Errors
+///
+/// Whatever creating or writing the file failed with.
 #[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -271,7 +283,8 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+#[expect(clippy::missing_errors_doc, reason = "documented on the unix twin")]
+pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // Windows ACLs are not mode bits. Until the platform work lands in Phase 6
     // this writes normally; `doctor` reports that the key is not protected.
     fs::write(path, bytes)

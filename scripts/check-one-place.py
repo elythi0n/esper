@@ -50,7 +50,9 @@ ROOT = Path(__file__).resolve().parent.parent
 # broker used it too — legitimately, because introducing strangers is its whole
 # job — so the sentence was narrower than the truth, and an auditor reading it
 # would not have gone looking in a crate it did not name.
-CLAIMS: list[tuple[str, str, str | list[str], str]] = [
+# `None` in the third position means **nowhere**: the claim is a prohibition
+# rather than a location, and the pattern is expected to match nothing.
+CLAIMS: list[tuple[str, str, str | list[str] | None, str]] = [
     (
         "a forwarded connection is dialled",
         r"TcpStream::connect",
@@ -92,6 +94,20 @@ CLAIMS: list[tuple[str, str, str | list[str], str]] = [
         "bitstream this machine made a moment earlier. **A peer's bitstream goes "
         "through `spawn_self`, which refuses**, and a second caller of this is how "
         "that becomes a preference instead of a property.",
+    ),
+    (
+        "a credential is narrowed to 0600 after being written",
+        r"from_mode\(0o600\)",
+        None,
+        "**Nowhere**, which is why the list is empty. Every private file in this "
+        "tree is created with its mode by `OpenOptions`, because writing one and "
+        "narrowing it afterwards leaves a window in which a credential is "
+        "world-readable — the comment on `write_private` has said so since the "
+        "identity key was written. The portal grant beside that key, which is the "
+        "compositor's word that this machine may take somebody's keyboard without "
+        "asking, was the one file that did it the other way. Found 2026-09-16. A "
+        "chmod to 0600 is the shape of that mistake, so it is the shape that fails "
+        "here.",
     ),
     (
         "the authority that accepts any key is used",
@@ -143,17 +159,43 @@ def main() -> int:
     checked = 0
 
     for what, pattern, where_it_belongs, why in CLAIMS:
-        homes = [where_it_belongs] if isinstance(where_it_belongs, str) else where_it_belongs
+        # **Two shapes of claim, and they need opposite floors.**
+        #
+        # "Only here" is the original: the pattern must match, in exactly the
+        # named files, and a pattern that stopped matching anything is a check
+        # that has silently turned itself off.
+        #
+        # "Nowhere" is a prohibition — a shape of mistake rather than a place —
+        # and for one of those, matching nothing is the *pass*. Applying the
+        # first floor to it would fail the day the tree became correct, which
+        # is the one thing a gate must never do.
+        forbidden = where_it_belongs is None
+        homes = [] if forbidden else (
+            [where_it_belongs] if isinstance(where_it_belongs, str) else where_it_belongs
+        )
         missing = [h for h in homes if not (ROOT / h).exists()]
         if missing:
             problems.append(
                 f"the claim about where {what} names {', '.join(missing)}, which no longer exists"
             )
             continue
-        home = homes[0]
 
         where = matches(pattern)
         checked += 1
+
+        if forbidden:
+            if where:
+                lines = ", ".join(f"{p}:{n}" for p, n in where)
+                problems.append(f"{what} at {lines}, and it must happen nowhere.\n    {why}")
+            # **The residual risk, said rather than papered over.** A
+            # prohibition cannot have the floor above: there is nothing to
+            # count. If somebody renames the thing this pattern names, this
+            # claim goes quiet — so a prohibition is written against a shape
+            # the language fixes (`from_mode(0o600)` is not a name anybody can
+            # rename) rather than against an identifier in this tree.
+            continue
+
+        home = homes[0]
 
         # A floor: a pattern that matches nothing proves nothing, and a rename
         # would otherwise turn this check off silently.
@@ -184,7 +226,11 @@ def main() -> int:
         print("  something checks it. Either the second one goes, or the comment does.")
         return 1
 
-    print(f"  ✓ one-place: {checked} claims of the form \"the only place…\" are true of this tree")
+    forbidden = sum(1 for _, _, where, _ in CLAIMS if where is None)
+    print(
+        f"  ✓ one-place: {checked - forbidden} claims of the form \"the only place…\" and "
+        f"{forbidden} of the form \"nowhere\" are true of this tree"
+    )
     return 0
 
 

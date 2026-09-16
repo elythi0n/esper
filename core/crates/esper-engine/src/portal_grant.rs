@@ -64,9 +64,14 @@ pub fn keep(token: &str) -> Result<(), String> {
 pub fn keep_in(home: &Path, token: &str) -> Result<(), String> {
     std::fs::create_dir_all(home).map_err(|e| format!("creating {}: {e}", home.display()))?;
     let path = home.join(FILE);
-    std::fs::write(&path, format!("{token}\n"))
-        .map_err(|e| format!("writing {}: {e}", path.display()))?;
-    restrict(&path)
+    // **Owner-only from the moment it exists.** This wrote the file and
+    // narrowed it afterwards, which is precisely what the comment on
+    // `write_private` was written to warn against — a window in which a
+    // credential is world-readable, and on a shared machine that window is
+    // enough. The same helper the identity key uses, so there is one
+    // implementation of the rule rather than a second one to remember.
+    esper_crypto::identity::write_private(&path, format!("{token}\n").as_bytes())
+        .map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 /// Let go of a grant the compositor no longer honours.
@@ -91,20 +96,6 @@ pub fn forget_in(home: &Path) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("removing {}: {e}", path.display())),
     }
-}
-
-/// 0600, like the identity beside it.
-#[cfg(unix)]
-fn restrict(path: &std::path::Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("restricting {}: {e}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict(_path: &std::path::Path) -> Result<(), String> {
-    // No portal off Unix, so nothing here is ever written.
-    Ok(())
 }
 
 #[cfg(test)]
