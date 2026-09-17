@@ -7,6 +7,32 @@
 # each half would pass its own suite.
 set -euo pipefail
 
+# **This suite may not lock, log out or reboot the machine it runs on.**
+#
+# Every host here is started headless, and that is not the same as being unable
+# to reach a desktop: `esper-presence`'s locker ladder tries
+# `loginctl lock-session` first, and `loginctl` does not look at `DISPLAY` — it
+# asks logind which session the *calling process* belongs to, which is the
+# person's real one. Its power actions reach `terminate-session self` and
+# `systemctl reboot` by the same route.
+#
+# `lock.rs` says so in its own comment: *"a locker that asks the session manager
+# locks the person's screen rather than the one the host was showing. The suite
+# caught it."* It caught it again on 2026-09-16, by locking the screen of the
+# machine running the suite, in the middle of somebody working.
+#
+# So the ladder is cut where it reaches the session manager and nowhere else:
+# the display-scoped lockers still work, on whatever display the host was given,
+# which is what the checks below are about.
+#
+# **No `trap` here on purpose.** This script sets one later for its own
+# cleanup, and a second `trap ... EXIT` replaces the first rather than adding
+# to it — so registering one here would either be silently discarded or would
+# silently discard that one. The guard directory tidies up after itself
+# instead.
+PATH="$("$(dirname "$0")/keep-off-the-real-session.sh"):$PATH"
+export PATH
+
 # A free local port, picked from outside the kernel's ephemeral range.
 #
 # **Not `bind(0)` and then `close()`.** That asks the kernel for an ephemeral

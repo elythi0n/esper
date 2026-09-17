@@ -558,9 +558,20 @@ test: test-go test-rust
 test-go:
 	@go test ./...
 
+## Run the Rust tests against a display of their own
+##
+## **Not the developer's desktop**, which is what `cargo test --workspace` used
+## on any machine that had one. Four suites here take a display: capture reads
+## pixels back, presenting draws and reads them, input takes the focus, and
+## presence draws a frame over everything — and one of them now changes the
+## *resolution*. Run against a real desktop, five capture tests failed with an
+## X11 `Match` error on 2026-09-15 and not one of them was a defect.
+##
+## `with-display.sh` nests Xephyr inside Xvfb: headless, and with a RandR
+## implementation that has nine modes rather than Xvfb's one.
 .PHONY: test-rust
 test-rust:
-	@cd $(CORE) && cargo test --workspace --quiet
+	@scripts/with-display.sh sh -c 'cd $(CORE) && cargo test --workspace --quiet'
 
 ## Run the Go tests with the race detector and coverage
 .PHONY: test-race
