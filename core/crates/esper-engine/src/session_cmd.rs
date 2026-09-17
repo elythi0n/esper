@@ -657,6 +657,34 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
     println!("📺 esper host");
     println!();
     println!("  listening  {bound}");
+
+    // **Ask the router, if this machine's owner said to.**
+    //
+    // Off unless `network.port_mapping` is on, and the default is off because
+    // a mapping is a hole in a firewall on a router somebody may share. What
+    // it buys is being reachable without an introducer; what it costs is being
+    // reachable by everybody.
+    //
+    // A previous run's mapping is given back first, whatever the setting says
+    // now: a host that was killed with the setting on and restarted with it
+    // off would otherwise leave the hole open until the router forgot it, and
+    // "until the router forgets" is the wrong amount of time for a firewall.
+    let mapped = start_port_mapping(bound.port());
+
+    // **And any file box a killed host left behind.** A session empties its own
+    // on the way out; a host that was killed ran no teardown, and what it left
+    // is somebody else's files on this machine. Said rather than done quietly,
+    // because a machine silently deleting files is a machine nobody trusts
+    // with files.
+    match crate::paths::sweep_old_boxes() {
+        Ok(0) => {}
+        Ok(n) => println!("  swept      {n} file box(es) a previous run left behind"),
+        Err(why) => eprintln!("  · old file boxes could not be swept: {why}"),
+    }
+    if let Some(mapping) = mapped {
+        keep_the_mapping_alive(mapping, stopping.clone());
+    }
+
     println!("  paired     {} device(s)", keys.len());
     for device in store.iter() {
         println!("      {}  {}", device.fingerprint().hex(), device.name);
@@ -1131,12 +1159,51 @@ pub fn run_host(o: &HostOptions) -> Result<(), String> {
         if let Some(mdns) = mdns {
             mdns.stop().await;
         }
+        // **The hole in the firewall closes with the host that opened it.**
+        //
+        // Here rather than in a `Drop` because here is where every ordinary way
+        // out arrives — the peer leaving, `--once`, this machine's owner
+        // stopping it. A host that is *killed* reaches none of this, which is
+        // what the record on disk is for: the next start gives it back, and
+        // until then the two-minute lifetime is the longest it can stay open.
+        if let Some(mapping) = mapped
+            && let Some(home) = crate::paths::home().ok()
+        {
+            match esper_portmap::unmap(&home, &mapping) {
+                Ok(()) => println!(
+                    "  unmapped   {} on {}",
+                    mapping.internal_port, mapping.gateway
+                ),
+                Err(why) => eprintln!(
+                    "  · the port mapping could not be given back: {why}. \
+                     It expires in at most {}s, and the next start will try again.",
+                    mapping.lifetime_secs
+                ),
+            }
+        }
         // The close frames of any session that just ended are queued, not
         // sent. Exiting here would leave a controller waiting out its idle
         // timeout for a host that told it exactly why it was going.
         let _ = tokio::time::timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
         outcome
     })
+}
+
+/// Takes a session's file box away when the session's scope ends.
+///
+/// A host that is *killed* runs no `Drop`, which is what the sweep at startup
+/// is for — see `paths::sweep_old_boxes`. Between the two, a box outlives its
+/// session only while the host is dead.
+struct BoxGuard(String);
+
+impl Drop for BoxGuard {
+    fn drop(&mut self) {
+        if let Err(why) = crate::paths::empty_the_box(&self.0) {
+            // Said, because the alternative is somebody else's files sitting
+            // on this machine with nothing to say they are there.
+            eprintln!("      · the session's file box could not be emptied: {why}");
+        }
+    }
 }
 
 /// Tell a device arriving mid-session that the host is busy, and let it go.
@@ -2220,6 +2287,20 @@ async fn serve_session(
         session.peer_hello().name
     );
 
+    // **This session's box, named so two cannot collide and a stale one can be
+    // told from a live one.** The peer alone would not do it: the same device
+    // connecting twice would inherit whatever the last session left, and "empty
+    // when it starts" is half of what a box is for.
+    let box_name = format!("{}-{}", session.peer_fingerprint().hex(), paths::now_secs());
+    // **Emptied on every way out, and `Drop` is the right tool for once.**
+    // Elsewhere in this file an obligation is discharged explicitly, because
+    // the thing that owes it can be moved somewhere that outlives the session.
+    // A box's life is exactly this function's: it is named here, nothing else
+    // can reach it, and there are a dozen `?` and `return` paths out — so a
+    // guard is what makes "cleared on teardown" true of all of them rather
+    // than of the ones somebody remembered.
+    let _box = BoxGuard(box_name.clone());
+
     let device = *session.peer_key();
     let (media, mut control) = match parts(&mut session) {
         Ok(parts) => parts,
@@ -2446,6 +2527,7 @@ async fn serve_session(
                 Some(log.clone()),
                 device,
                 "      ",
+                crate::paths::file_box(&box_name).ok().as_deref(),
             )
         }) {
             Ok(files) => std::sync::Arc::new(files),
@@ -2719,6 +2801,7 @@ async fn serve_session(
                 Some(log.clone()),
                 device,
                 "      ",
+                crate::paths::file_box(&box_name).ok().as_deref(),
             )
         }) {
             Ok(files) => {
@@ -3403,6 +3486,100 @@ const HELD_SILENCE: Duration = Duration::from_secs(3);
 /// fraction of the wrong screen — or a peer clicking somewhere it cannot see.
 /// The picture and the input surface are the same set, and that is a rule
 /// worth being able to state.
+/// Give back a previous run's port mapping, then make one if it was asked for.
+///
+/// Returns the mapping to release on the way out, if there is one. Every
+/// failure here is reported and none is fatal: a host that could not persuade
+/// its router is a host that needs a broker, which is the ordinary case and
+/// was the only case until this existed.
+fn start_port_mapping(port: u16) -> Option<esper_portmap::Mapping> {
+    let home = crate::paths::home().ok()?;
+
+    // First, whatever the last run did not give back. Before the setting is
+    // consulted, because the obligation belongs to the mapping rather than to
+    // the current configuration.
+    match esper_portmap::release_anything_left_behind(&home) {
+        Ok(Some(old)) => println!(
+            "  unmapped   {} on {} — a previous run did not give it back",
+            old.internal_port, old.gateway
+        ),
+        Ok(None) => {}
+        Err(why) => eprintln!("  · a previous port mapping could not be given back: {why}"),
+    }
+
+    if !crate::settings::flag("network.port_mapping", false) {
+        return None;
+    }
+    match esper_portmap::map(&home, port) {
+        Ok(mapping) => {
+            println!(
+                "  mapped     {} → {} by {}, for {}s at a time",
+                mapping.internal_port,
+                mapping.external,
+                mapping.how.describe(),
+                mapping.lifetime_secs
+            );
+            Some(mapping)
+        }
+        Err(why) => {
+            // Said rather than swallowed: somebody who turned this on and got
+            // no mapping needs to know it is the router, not the setting.
+            eprintln!("  · no port mapping: {why}");
+            None
+        }
+    }
+}
+
+/// Ask again before the router forgets.
+///
+/// **A short lifetime is only safe if something renews it.** Two minutes is
+/// chosen so that a host which is unplugged rather than shut down leaves the
+/// hole open for at most that long — which is the right trade *provided* a
+/// host that is still running keeps asking. Without this the mapping lapses
+/// after two minutes and the host stops being reachable with nothing having
+/// failed, which is the hardest kind of fault to report because there is no
+/// error anywhere.
+///
+/// Renewed at half the lifetime, which is what both RFCs advise: a refresh
+/// late by a network hiccup still lands before the mapping is gone.
+fn keep_the_mapping_alive(
+    mapping: esper_portmap::Mapping,
+    mut stopping: tokio::sync::watch::Receiver<bool>,
+) {
+    let Ok(home) = crate::paths::home() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let every = mapping.renew_after().max(Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                // Ends with the host. A renewal task outliving the host would
+                // hold a mapping open for a port nothing is listening on.
+                _ = stopping.changed() => return,
+                () = tokio::time::sleep(every) => {}
+            }
+            let home = home.clone();
+            let port = mapping.internal_port;
+            // The request blocks on a socket with a timeout, so it goes to a
+            // thread rather than stalling the runtime this host serves on.
+            let again = tokio::task::spawn_blocking(move || esper_portmap::map(&home, port)).await;
+            match again {
+                Ok(Ok(_)) => {}
+                // **Said once and then kept trying.** A router that refuses one
+                // renewal may take the next; a host that gave up on the first
+                // refusal would stop being reachable over a hiccup.
+                Ok(Err(why)) => {
+                    eprintln!("  · the port mapping could not be renewed: {why}");
+                }
+                Err(why) => {
+                    eprintln!("  · the port mapping renewal did not run: {why}");
+                    return;
+                }
+            }
+        }
+    });
+}
+
 /// The resolutions each monitor can be changed to, by monitor id.
 ///
 /// Matched by position rather than by name: the name a monitor list gives and

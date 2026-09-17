@@ -38,12 +38,14 @@ esper-scale = { path = "crates/esper-scale" }
 esper-present = { path = "crates/esper-present" }
 esper-present-x11 = { path = "crates/esper-present-x11" }
 esper-pipeline = { path = "crates/esper-pipeline" }
+esper-portmap = { path = "crates/esper-portmap" }
 esper-stream = { path = "crates/esper-stream" }
 esper-link = { path = "crates/esper-link" }
 esper-discovery = { path = "crates/esper-discovery" }
 esper-dbus = { path = "crates/esper-dbus" }
 esper-desktop = { path = "crates/esper-desktop" }
 esper-input-portal = { path = "crates/esper-input-portal" }
+esper-input-uinput = { path = "crates/esper-input-uinput" }
 esper-input-wlr = { path = "crates/esper-input-wlr" }
 esper-interfaces = { path = "crates/esper-interfaces" }
 esper-files = { path = "crates/esper-files" }

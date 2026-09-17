@@ -602,6 +602,7 @@ dependencies = [
  "esper-files",
  "esper-input",
  "esper-input-portal",
+ "esper-input-uinput",
  "esper-input-win",
  "esper-input-wlr",
  "esper-input-x11",
@@ -612,6 +613,7 @@ dependencies = [
  "esper-mkv",
  "esper-pipeline",
  "esper-png",
+ "esper-portmap",
  "esper-presence",
  "esper-presence-wlr",
  "esper-presence-x11",
@@ -660,6 +662,17 @@ dependencies = [
  "esper-dbus",
  "esper-input",
  "esper-proto",
+]
+
+[[package]]
+name = "esper-input-uinput"
+version = "0.0.0"
+dependencies = [
+ "esper-input",
+ "esper-proto",
+ "rustix",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -781,6 +794,16 @@ name = "esper-png"
 version = "0.0.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "esper-portmap"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

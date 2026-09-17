@@ -133,6 +133,81 @@ pub fn files_root() -> Result<PathBuf, String> {
     Ok(base.join("Esper"))
 }
 
+/// Where a session's file box lives.
+///
+/// **Inside the machine's own state directory, not the file directory.** The
+/// file directory is somewhere a person chose and can browse; a box is
+/// scaffolding for one session, and putting it there would leave a stranger's
+/// files sitting in a folder somebody keeps their own work in.
+///
+/// Named for the session so two of them cannot collide, and so a box left
+/// behind by a host that was killed can be told from one in use.
+///
+/// # Errors
+///
+/// If there is no home directory to put it in.
+pub fn file_box(session: &str) -> Result<PathBuf, String> {
+    Ok(boxes_root()?.join(session))
+}
+
+/// Where every session's box lives, which is what gets swept at startup.
+///
+/// # Errors
+///
+/// If there is no home directory to put it in.
+pub fn boxes_root() -> Result<PathBuf, String> {
+    Ok(home()?.join("boxes"))
+}
+
+/// Empty a session's box and take it away.
+///
+/// **Called when the session ends, however it ended.** A box that outlived its
+/// session would be a directory of somebody else's files on this machine that
+/// nothing owns and nobody agreed to keep.
+///
+/// # Errors
+///
+/// If the directory is there and will not go.
+pub fn empty_the_box(session: &str) -> Result<(), String> {
+    let path = file_box(session)?;
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("emptying {}: {e}", path.display())),
+    }
+}
+
+/// Take away every box a previous run left behind.
+///
+/// Called at startup, for the same reason the resolution and the port mapping
+/// are put back there: a host that is killed runs no teardown, and what it
+/// leaves is somebody else's files on this machine.
+///
+/// Returns how many were swept, so a host can say so rather than doing it
+/// silently — a machine quietly deleting files is a machine nobody trusts with
+/// files.
+///
+/// # Errors
+///
+/// Never fatally: a sweep that cannot read its own directory reports nothing
+/// swept rather than refusing to start.
+pub fn sweep_old_boxes() -> Result<usize, String> {
+    let root = boxes_root()?;
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Ok(0);
+    };
+    let mut swept = 0;
+    for entry in entries.flatten() {
+        if std::fs::remove_dir_all(entry.path()).is_ok() {
+            swept += 1;
+        }
+    }
+    // The empty parent goes too, so a machine that never uses a box has no
+    // directory for one.
+    let _ = std::fs::remove_dir(&root);
+    Ok(swept)
+}
+
 /// `~` at the start of a configured path, which a config file is written with
 /// and a shell does not expand for us.
 fn expand(text: &str) -> PathBuf {
