@@ -70,13 +70,25 @@ pub fn unattended_input() -> Result<String, ()> {
         return Ok(name);
     }
     // A grant somebody gave once is as good as a backend that never asks.
-    match crate::portal_grant::held() {
-        Some(_) => Ok(format!(
+    if crate::portal_grant::held().is_some() {
+        return Ok(format!(
             "{} (a grant somebody gave once)",
             esper_input_portal::BACKEND
-        )),
-        None => Err(()),
+        ));
     }
+    // **And so is a `uinput` node this user can open.** It asks nobody at the
+    // moment of use, which is the property in question — and the reason that
+    // is not a way around consent is that somebody at the machine had to grant
+    // it, once, with a group and a udev rule. That is the same shape of
+    // decision as the portal grant above: made by a person who was there, kept
+    // afterwards.
+    if esper_input_uinput::available().is_ok() {
+        return Ok(format!(
+            "{} (the machine's owner allowed it)",
+            esper_input_uinput::BACKEND
+        ));
+    }
+    Err(())
 }
 
 /// Open an input sink for this machine.
@@ -174,6 +186,56 @@ pub fn open() -> Chosen {
                 {
                     attempts.push(format!("could not let go of a refused grant: {why}"));
                 }
+            }
+        }
+
+        /*
+            And the kernel, last of all.
+
+            Every rung above asks something: X11 asks an X server, wlroots asks
+            a compositor, the portal asks a person. This one asks the **kernel**,
+            which does not arbitrate — a `uinput` device is indistinguishable
+            from a keyboard somebody plugged in, and every display server on the
+            machine will take its events without knowing where they came from.
+
+            **So it must never turn a refusal into a yes**, and the placement is
+            what makes that true rather than a promise. A machine reaches here
+            only when every rung above found *no backend*: the portal arm above
+            returns on success, and a portal that put a dialog in front of
+            somebody who declined it returns `Err` — which is the same shape as
+            "there is no portal here", and that is the one case worth being
+            careful about.
+
+            It is careful in the way that matters. A person who declines the
+            dialog declines *that session*; the next one asks again. What this
+            rung does is different in kind: it is available only if the
+            machine's owner has already decided it should be, by giving this
+            user access to `/dev/uinput` — which is root-only by default on
+            every distribution, and takes a group and a udev rule to change.
+            That decision is made once, at the machine, by somebody who is
+            there. A host that has not had it made cannot reach this rung at
+            all, and says so with `Trouble::advice`.
+        */
+        match esper_input_uinput::UinputSink::open() {
+            Ok(injector) => {
+                attempts.push(format!("{}: in use", esper_input_uinput::BACKEND));
+                return Chosen {
+                    sink: Box::new(injector),
+                    attempts,
+                    real: true,
+                };
+            }
+            Err(why) => {
+                // The advice is carried with the reason, because "permission
+                // denied on /dev/uinput" is a machine that could do this and
+                // has not been told to — and the two commands that change that
+                // are useless apart.
+                let advice = why.advice().unwrap_or_default();
+                attempts.push(if advice.is_empty() {
+                    format!("{}: {why}", esper_input_uinput::BACKEND)
+                } else {
+                    format!("{}: {why}\n{advice}", esper_input_uinput::BACKEND)
+                });
             }
         }
     }

@@ -1,0 +1,45 @@
+[package]
+name = "esper-input-uinput"
+description = "Injecting input through the kernel's own virtual device, when no display server will do it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# **Deliberately not `lints.workspace = true`.**
+#
+# The workspace sets `unsafe_code = "forbid"`, which cannot be relaxed at a call
+# site — that is why it was chosen over `deny`. `/dev/uinput` is configured
+# entirely through `ioctl`, and an `ioctl` is a syscall with a caller-supplied
+# opcode and a caller-supplied pointer: there is no safe path to it in any
+# crate, because the safety condition is a fact about the opcode that the type
+# system cannot see.
+#
+# `security-engineering.md` drew this line: `forbid` on "every crate that does
+# not need FFI", and an **unsafe inventory** in the ones that do. The lints are
+# declared here with `unsafe_code = "deny"` in place of `forbid` and everything
+# else copied verbatim, and `scripts/check-unsafe-inventory.py` compares the two
+# tables in both directions so they cannot drift.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[dependencies]
+esper-input.workspace = true
+esper-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# The same syscall crate the pty and the decoder sandbox use: two transitive
+# crates and no libc. `fs` opens the node, `io` writes the events, and `ioctl`
+# is the typed wrapper that keeps each call's unsafe to one expression.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["fs", "stdio", "process"] }

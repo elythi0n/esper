@@ -54,7 +54,7 @@ pub struct Floating {
 
 pub use dispatch::{Dispatcher, Monitor, Stopped};
 pub use held::Held;
-pub use hid::{Evdev, evdev_for_usage, usage_for_evdev};
+pub use hid::{Evdev, evdev_for_usage, every_evdev, usage_for_evdev};
 pub use null::{NullSink, Recorded};
 pub use set1::{Set1, set1_for_usage, usage_for_set1};
 

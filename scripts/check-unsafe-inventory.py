@@ -56,6 +56,12 @@ NEEDS_FFI: dict[str, str] = {
         "the staging-texture readback have no pure-Rust equivalent, and the "
         "damage metadata is the reason this API was chosen over the newer one"
     ),
+    "esper-input-uinput": (
+        "`/dev/uinput` is configured entirely through `ioctl`, and an ioctl is "
+        "a syscall with a caller-supplied opcode and a caller-supplied pointer. "
+        "No crate can make that safe, because the safety condition is a fact "
+        "about the opcode that no type carries"
+    ),
     "esper-encode-retune": (
         "Changing a setting on a *running* openh264 encoder has one route: "
         "`Encoder::raw_api`, which is unsafe because the binding's own "

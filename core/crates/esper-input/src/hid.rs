@@ -199,6 +199,18 @@ const TABLE: &[(u16, u16)] = &[
     (0xE7, 126), // right meta
 ];
 
+/// Every evdev code this table can produce.
+///
+/// **For a backend that has to declare its keys up front.** A `uinput` device
+/// is frozen at creation: a key not declared before `UI_DEV_CREATE` is
+/// silently dropped for the life of the device, which from the far end looks
+/// like one key on the keyboard not working and nothing else. So the sink
+/// claims the whole table rather than guessing which keys a session will use,
+/// and this is the table rather than a second copy of it.
+pub fn every_evdev() -> impl Iterator<Item = Evdev> {
+    TABLE.iter().map(|(_, code)| Evdev(*code))
+}
+
 /// The evdev code for a HID usage, if this platform has that key.
 #[must_use]
 pub fn evdev_for_usage(usage: u16) -> Option<Evdev> {

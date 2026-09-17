@@ -1,0 +1,26 @@
+# Let a member of the `uinput` group open the kernel's virtual input device.
+#
+# Esper needs this only on hosts where no display server will inject for it:
+# GNOME without XWayland, a kiosk, a compositor with no remote-control
+# protocol. Everywhere else the ladder finds X11's XTEST, wlroots' virtual
+# devices, or the desktop portal first, and none of them needs this file.
+#
+# **It is a decision about the machine, made by somebody at it.** A process
+# that can open /dev/uinput can synthesise any keystroke, to any application,
+# with nothing to distinguish it from a keyboard somebody plugged in — which is
+# exactly why it is root-only by default and why Esper will not ask for it at
+# run time. Install this, add the user to the group, and it is granted; do not,
+# and that host is view-only, which is the honest outcome rather than a
+# failure.
+#
+#   sudo groupadd -f uinput
+#   sudo usermod -aG uinput "$USER"
+#   sudo install -m 0644 60-esper-uinput.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Then log out and back in, so the new group is in effect.
+#
+# `static_node` is the half people miss: the device node is created by the
+# kernel at module load rather than by a hotplug event, so without it the rule
+# never runs and the group never means anything.
+KERNEL=="uinput", GROUP="uinput", MODE="0660", OPTIONS+="static_node=uinput"
