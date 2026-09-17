@@ -1,0 +1,17 @@
+[package]
+name = "esper-portmap"
+description = "Asking a router to forward a port, and taking it back — PCP and NAT-PMP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -642,6 +642,21 @@ pub static SETTINGS: &[Setting] = &[
                 `none` means whatever fits on the disk.",
     },
     Setting {
+        key: "network.port_mapping",
+        kind: Kind::Flag,
+        // **Off, and this one is not a close call.** A mapping is a hole in a
+        // firewall, opened by a program, on a router the person may share with
+        // a household or an office — and what it buys is skipping an
+        // introducer, not making anything work that otherwise would not. On
+        // means this machine is reachable from the whole internet rather than
+        // from whoever a broker introduced, which is a decision about somebody
+        // else's network as much as their machine.
+        default: Value::Flag(false),
+        about: "Ask this network's router to forward the host's port, so peers can reach it \
+                directly instead of through a broker. Off by default: it opens a hole in the \
+                firewall for as long as the host runs.",
+    },
+    Setting {
         key: "discovery.mdns",
         kind: Kind::Flag,
         // **The one deliberate exception to strict defaults.** It reveals that

@@ -260,6 +260,7 @@ table is a failure, and so is a row here for a setting that does not exist.
 | `files.root` | none | Nothing is reachable until somebody says what is |
 | `forward.allow` | none | Which means loopback and nothing else |
 | `audit.retain` / `audit.max_size` | 90 days / 64 MB | Two limits, because they fail differently |
+| `network.port_mapping` | `false` | A mapping is a hole in a firewall, opened by a program, on a router the person may share with a household or an office. What it buys is skipping an introducer — not making anything work that otherwise would not — and what it costs is being reachable from the whole internet rather than from whoever a broker introduced. The lifetime asked for is two minutes, renewed after one, so a host that is unplugged rather than shut down leaves the hole open for at most that long |
 | `discovery.mdns` | `true` | The one deliberate exception: convenience on a network you are already on, and it announces a fingerprint rather than anything private |
 
 **Two things are not settings, deliberately, and that is stronger than a
