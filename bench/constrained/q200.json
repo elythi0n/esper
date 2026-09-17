@@ -1,0 +1,19 @@
+{
+  "machine": "12th Gen Intel(R) Core(TM) i7-12700H — 2 core(s), linux, held to 200% of a core",
+  "taken": "2026-09-16",
+  "measured": {
+    "convert.line.ms": 0.060356700000000006,
+    "convert.ratio": 50.677867301117075,
+    "convert.whole.ms": 3.0587488333333335,
+    "encode.motion.core": 0.8107799305650113,
+    "encode.motion.factor": 1.9222739828485649,
+    "encode.motion.ms": 5.85231345,
+    "encode.screen.core": 0.3339112231125311,
+    "encode.screen.ms": 3.04447415,
+    "path.idle.fps": 0.0,
+    "path.idle.kbit": 0.0,
+    "path.motion.kbit": 7332.0828920887325,
+    "path.screen.core": 0.08021027459332737,
+    "path.screen.kbit": 367.1254728038331
+  }
+}

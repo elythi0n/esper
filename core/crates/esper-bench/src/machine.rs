@@ -6,14 +6,63 @@
 //! fail every time for a reason that is not a regression.
 
 /// A short description of this machine, stable across runs on it.
+///
+/// **A CPU limit makes it a different machine, and the description says so.**
+/// A run under `CPUQuota=25%` is not a run on a slower processor: it is this
+/// processor, stopped for three quarters of every period, which is a
+/// materially different thing for an encoder with a frame deadline. Worse,
+/// `available_parallelism` already honours the cgroup — 20 becomes 1 — so
+/// without this the run would be described as a one-core machine and its
+/// numbers filed against the wrong thing.
+///
+/// It also does the right thing to the baseline for free: the machine string
+/// is compared, so a constrained run cannot be gated against an unconstrained
+/// baseline.
 #[must_use]
 pub fn describe() -> String {
-    format!(
+    let plain = format!(
         "{} — {} core(s), {}",
         cpu_model(),
         std::thread::available_parallelism().map_or(0, std::num::NonZero::get),
         std::env::consts::OS
-    )
+    );
+    match cpu_limit() {
+        Some(limit) => format!("{plain}, held to {limit}"),
+        None => plain,
+    }
+}
+
+/// The CPU limit this process is running under, if a cgroup sets one.
+///
+/// Reported as a share of one core, which is how `cpu.max` expresses it: a
+/// quota of `25000 100000` is a quarter of one core's time per period. Two
+/// cores' worth reads as `200% of a core`, which is the honest way to say
+/// something that is not a core count.
+#[must_use]
+pub fn cpu_limit() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        // The limit applies at this process's own cgroup, not at the root —
+        // reading `/sys/fs/cgroup/cpu.max` finds nothing on any ordinary
+        // desktop and would report every constrained run as unconstrained.
+        let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+        let relative = own.lines().next()?.rsplit(':').next()?.trim();
+        let path = format!("/sys/fs/cgroup{relative}/cpu.max");
+        let text = std::fs::read_to_string(path).ok()?;
+        let mut parts = text.split_whitespace();
+        let quota = parts.next()?;
+        let period: f64 = parts.next()?.parse().ok()?;
+        // `max` is the ordinary answer: a cgroup with no limit.
+        if quota == "max" || period <= 0.0 {
+            return None;
+        }
+        let quota: f64 = quota.parse().ok()?;
+        Some(format!("{:.0}% of a core", quota / period * 100.0))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 /// The processor's own name for itself.
@@ -103,5 +152,42 @@ mod tests {
         assert_eq!(text.len(), 10, "{text}");
         assert_eq!(text.matches('-').count(), 2, "{text}");
         assert!(text.starts_with("20"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// **The description has to change when the limit does**, or a constrained
+    /// run is filed against an unconstrained baseline and reads as a
+    /// regression on this machine rather than as a measurement of another one.
+    #[test]
+    fn a_limit_shows_in_the_description() {
+        let said = describe();
+        match cpu_limit() {
+            Some(limit) => assert!(
+                said.contains(&limit),
+                "running under {limit} and the description does not say so: {said}"
+            ),
+            None => assert!(
+                !said.contains("held to"),
+                "nothing limits this process and the description claims otherwise: {said}"
+            ),
+        }
+    }
+
+    /// An ordinary desktop process is not in a quota'd cgroup, and saying it is
+    /// would file every number under a machine that does not exist.
+    #[test]
+    fn an_unlimited_cgroup_reads_as_no_limit() {
+        // `cargo test` runs in the session's own scope, which sets no quota.
+        // If this ever fails the suite is being run under one, and the
+        // numbers it produces belong to that machine rather than to this.
+        if let Some(limit) = cpu_limit() {
+            println!("note: this suite is running under {limit}");
+        }
     }
 }

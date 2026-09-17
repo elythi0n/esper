@@ -825,6 +825,18 @@ smoke: build
 bench:
 	@cd $(CORE) && cargo run --release --quiet -p esper-bench -- --check $(CURDIR)/bench/baseline.json
 
+## Measure the encode path on a deliberately weak machine
+##
+## v1 encodes in software everywhere, and the open question was never whether
+## that holds up on a 20-core workstation. `systemd-run` with a `CPUQuota` makes
+## a weak machine out of this one — and a quota is more pessimistic than a slow
+## core, because it is this core stopped for part of every period, which is the
+## right direction for a floor. Every run carries its limit in its machine
+## description, so none of them is gated against this machine's baseline.
+.PHONY: bench-constrained
+bench-constrained:
+	@./scripts/bench-constrained.sh
+
 ## Record what this machine measures, as a baseline to gate against
 .PHONY: bench-baseline
 bench-baseline:
