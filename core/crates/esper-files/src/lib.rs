@@ -40,7 +40,7 @@ mod vault;
 pub use hash::{Running, Sum};
 pub use name::{BadName, MOST_BYTES, MOST_COMPONENTS, MOST_PER_COMPONENT, SafePath};
 pub use transfer::{AT_A_TIME, Limits, Offer, Receiving, Sending};
-pub use vault::{HowConfined, Vault};
+pub use vault::{HowConfined, Listed, Vault};
 
 /// What can go wrong touching a disk on somebody's behalf.
 #[derive(Debug, thiserror::Error)]

@@ -65,6 +65,19 @@ impl HowConfined {
     }
 }
 
+/// One thing a listing found.
+///
+/// Deliberately not [`esper_proto::FileEntry`]: this crate answers about a
+/// filesystem and the protocol decides what to say about it. A name that is
+/// not valid UTF-8 exists on a real disk and has no representation on the
+/// wire, and the conversion is where that is dealt with rather than here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub name: std::ffi::OsString,
+    pub bytes: u64,
+    pub directory: bool,
+}
+
 /// The directory transfers happen inside.
 #[derive(Debug)]
 pub struct Vault {
@@ -191,6 +204,24 @@ impl Vault {
     /// If it is not there, or is not a plain file.
     pub fn open_append(&self, path: &SafePath) -> Result<std::fs::File, FileError> {
         platform::open_append(self, path)
+    }
+
+    /// What is in a directory inside this vault.
+    ///
+    /// **Opened as a directory through the same handle discipline as a file**,
+    /// so a component that becomes a symbolic link between the check and the
+    /// read cannot make this describe somewhere else. An empty path is the
+    /// root of the vault itself.
+    ///
+    /// Anything that is neither a plain file nor a directory is left out
+    /// rather than described: a peer can do nothing with a socket or a device
+    /// node, and naming one only tells them what is on this machine.
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::Outside`] if the path is not a directory in this vault.
+    pub fn list(&self, path: &SafePath, most: usize) -> Result<(Vec<Listed>, bool), FileError> {
+        platform::list(self, path, most)
     }
 
     /// How large the file is, if it is there and is a plain file.
@@ -462,6 +493,74 @@ mod platform {
         fs::fstat(file).is_ok_and(|s| FileType::from_raw_mode(s.st_mode) == FileType::RegularFile)
     }
 
+    pub(super) fn list(
+        vault: &Vault,
+        path: &SafePath,
+        most: usize,
+    ) -> Result<(Vec<super::Listed>, bool), FileError> {
+        // `DIRECTORY` makes the kernel refuse anything that is not one, so
+        // "is it a directory" is answered by the open rather than by a check
+        // beside it. The empty path opens the root itself.
+        let dir = if path.as_str().is_empty() {
+            fs::openat(
+                &vault.root,
+                ".",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(|_| FileError::Outside)?
+        } else {
+            OwnedFd::from(open_within(
+                vault,
+                path,
+                OFlags::RDONLY | OFlags::DIRECTORY,
+                Mode::empty(),
+            )?)
+        };
+
+        let mut entries = Vec::new();
+        let mut truncated = false;
+        let reader = fs::Dir::read_from(&dir).map_err(|_| FileError::Outside)?;
+        for entry in reader {
+            let Ok(entry) = entry else { continue };
+            let raw = entry.file_name().to_bytes();
+            if raw == b"." || raw == b".." {
+                continue;
+            }
+            if entries.len() >= most {
+                truncated = true;
+                break;
+            }
+            let kind = entry.file_type();
+            // **Only files and directories.** A peer can do nothing with a
+            // socket or a device node, and naming one only says what is on
+            // this machine. A symbolic link is left out too: what it points at
+            // is a question this vault answers by refusing to follow it.
+            let directory = match kind {
+                FileType::Directory => true,
+                FileType::RegularFile => false,
+                _ => continue,
+            };
+            let name = std::os::unix::ffi::OsStringExt::from_vec(raw.to_vec());
+            // The size comes from a stat through the same directory handle, so
+            // it is the thing just listed rather than whatever has that name
+            // by the time this asks.
+            let bytes = if directory {
+                0
+            } else {
+                fs::statat(&dir, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+                    .map(|s| s.st_size.try_into().unwrap_or(0))
+                    .unwrap_or(0)
+            };
+            entries.push(super::Listed {
+                name,
+                bytes,
+                directory,
+            });
+        }
+        Ok((entries, truncated))
+    }
+
     pub(super) fn open_read(vault: &Vault, path: &SafePath) -> Result<std::fs::File, FileError> {
         let file = open_within(vault, path, OFlags::RDONLY, Mode::empty())?;
         if !is_plain(&file) {
@@ -642,6 +741,53 @@ mod platform {
             }
         }
         here
+    }
+
+    pub(super) fn list(
+        vault: &Vault,
+        path: &SafePath,
+        most: usize,
+    ) -> Result<(Vec<super::Listed>, bool), FileError> {
+        let at = if path.as_str().is_empty() {
+            vault.shown().to_path_buf()
+        } else {
+            within(vault, path)?
+        };
+        let seen = std::fs::symlink_metadata(&at).map_err(|_| FileError::Outside)?;
+        if !seen.is_dir() {
+            return Err(FileError::Outside);
+        }
+        let reader = std::fs::read_dir(&at).map_err(|_| FileError::Outside)?;
+        let mut entries = Vec::new();
+        let mut truncated = false;
+        for entry in reader.flatten() {
+            if entries.len() >= most {
+                truncated = true;
+                break;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            // As above: only files and directories, and never through a link.
+            let directory = if kind.is_dir() {
+                true
+            } else if kind.is_file() {
+                false
+            } else {
+                continue;
+            };
+            let bytes = if directory {
+                0
+            } else {
+                entry.metadata().map(|m| m.len()).unwrap_or(0)
+            };
+            entries.push(super::Listed {
+                name: entry.file_name(),
+                bytes,
+                directory,
+            });
+        }
+        Ok((entries, truncated))
     }
 
     pub(super) fn open_read(vault: &Vault, path: &SafePath) -> Result<std::fs::File, FileError> {

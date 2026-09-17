@@ -61,6 +61,12 @@ pub struct CopyOptions {
     /// means one attempt and no reconnecting, for a script that would rather
     /// fail now and decide for itself.
     pub patience: u64,
+    /// Use the session's file box rather than the host's file directory.
+    ///
+    /// **A smaller thing to ask for.** The file directory is a place somebody
+    /// chose to share and that keeps what is put in it; the box is opened for
+    /// one session, is empty when it starts, and is emptied when it ends.
+    pub the_box: bool,
 }
 
 /// Why an attempt ended, and whether another one would say anything different.
@@ -82,6 +88,15 @@ enum Stalled {
     LinkWent(String),
     /// Trying again would produce the same answer.
     Settled(String),
+}
+
+/// Which of the host's two directories this copy is about.
+const fn where_to(o: &CopyOptions) -> esper_proto::FileWhere {
+    if o.the_box {
+        esper_proto::FileWhere::Box
+    } else {
+        esper_proto::FileWhere::Directory
+    }
 }
 
 /// How long `cp` keeps reconnecting by default, in seconds.
@@ -131,6 +146,7 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
     let mut mdns = crate::settings::flag("discovery.mdns", true);
     let mut plain_progress = false;
     let mut patience = DEFAULT_PATIENCE;
+    let mut the_box = false;
     let mut i = 0;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
@@ -144,6 +160,10 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
             }
             "--progress" => {
                 plain_progress = true;
+                i += 1;
+            }
+            "--box" => {
+                the_box = true;
                 i += 1;
             }
             "--patience" => {
@@ -216,6 +236,7 @@ pub fn parse(args: &[String]) -> Result<CopyOptions, String> {
         mdns,
         plain_progress,
         patience,
+        the_box,
     })
 }
 
@@ -234,6 +255,8 @@ pub fn usage() -> String {
          \x20 --broker-key <key>   the broker's key, when it is not remembered\n\
          \x20 --no-mdns            do not ask the local network where the host is\n\
          \x20 --progress           report progress in lines, for a program to read\n\
+         \x20 --box                use the session's file box, which is emptied when the\n\
+         \x20                      session ends, rather than the host's file directory\n\
          \x20 --patience <seconds> keep reconnecting for this long when a link drops\n\
          \x20                      (default {DEFAULT_PATIENCE}; 0 to fail on the first drop)\n\
          \n\
@@ -517,6 +540,7 @@ async fn send_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Result
     let mut offer = sending.offer().to_wire();
     offer.path = destination.clone();
     offer.replace = o.force;
+    offer.to = where_to(o);
     // Read before the offer is handed over, so the trail's number is the one
     // that was actually sent.
     let size = offer.bytes;
@@ -599,6 +623,7 @@ async fn fetch_one(stream: &mut Control, o: &CopyOptions, remote: &str) -> Resul
     stream
         .send(&FileMessage::Want(FileWant {
             path: remote.to_owned(),
+            from: where_to(o),
         }))
         .await
         .map_err(|e| Stalled::LinkWent(e.to_string()))?;
@@ -767,7 +792,7 @@ impl Progress {
 /// **The prompt happens where the person is.** A receiver that found something
 /// already there refuses rather than asking, because an unattended host has
 /// nobody to ask — so the asking is here, at the end that typed the command.
-fn advice(why: FileRefusal, what: &str) -> String {
+pub(crate) fn advice(why: FileRefusal, what: &str) -> String {
     match why {
         FileRefusal::Exists => {
             format!("{what} is already there — pass --force to replace it")

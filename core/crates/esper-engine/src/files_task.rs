@@ -42,6 +42,14 @@ const BACKGROUND: i32 = -1;
 /// What this machine will do with files for one session.
 pub struct Files {
     vault: Arc<Vault>,
+    /// This session's box, if one could be opened.
+    ///
+    /// **A second vault rather than a subdirectory of the first.** A box
+    /// inside the file directory would be a directory of somebody else's
+    /// files sitting in a folder a person keeps their own work in, and
+    /// "cleared on teardown" would mean deleting something inside a directory
+    /// they chose — which is the one place a bug would be unforgivable.
+    the_box: Option<Arc<Vault>>,
     limits: Limits,
     /// What the far end may do to this machine's file directory.
     granted: Vec<Permission>,
@@ -81,13 +89,24 @@ impl Files {
         log: Option<Log>,
         device: [u8; 32],
         indent: &'static str,
+        the_box: Option<&std::path::Path>,
     ) -> Result<Self, String> {
         if !granted.contains(&Permission::FilesOut) && !granted.contains(&Permission::FilesIn) {
             return Err("not granted for this session".to_owned());
         }
         let vault = Vault::open(root).map_err(|e| e.to_string())?;
+        // A box that will not open is not a reason to refuse the session: the
+        // file directory still works, and a peer asking for the box is told.
+        let the_box = the_box.and_then(|path| match Vault::open(path) {
+            Ok(vault) => Some(Arc::new(vault)),
+            Err(why) => {
+                tracing::warn!(error = %why, "a session file box could not be opened");
+                None
+            }
+        });
         Ok(Self {
             vault: Arc::new(vault),
+            the_box,
             limits,
             granted: granted.to_vec(),
             taking: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -96,6 +115,19 @@ impl Files {
             device,
             indent,
         })
+    }
+
+    /// The vault a peer named, or a refusal saying why there is not one.
+    ///
+    /// **A peer that asks for the box on a host that has none is refused
+    /// rather than quietly given the file directory.** Silently substituting
+    /// would put a file somebody meant to be temporary into a folder that
+    /// keeps things.
+    fn vault_for(&self, which: esper_proto::FileWhere) -> Result<&Arc<Vault>, FileRefusal> {
+        match which {
+            esper_proto::FileWhere::Directory => Ok(&self.vault),
+            esper_proto::FileWhere::Box => self.the_box.as_ref().ok_or(FileRefusal::NotEnabled),
+        }
     }
 
     /// Where files go, and how a peer is kept there.
@@ -170,6 +202,7 @@ pub async fn serve(mut control: Control, files: Arc<Files>) {
     match first {
         FileMessage::Offer(offer) => take(&mut control, &files, offer).await,
         FileMessage::Want(want) => give(&mut control, &files, want).await,
+        FileMessage::List(asked) => tell(&mut control, &files, asked).await,
         other => {
             tracing::debug!(
                 what = other.name(),
@@ -204,8 +237,25 @@ async fn take(control: &mut Control, files: &Files, wire: FileOffer) {
         return;
     };
 
+    // **Which of the two directories**, chosen once and used for both halves:
+    // beginning the transfer and finishing it must land in the same place, and
+    // reading the peer's choice twice is how they could differ.
+    let chosen = match files.vault_for(offer.to) {
+        Ok(vault) => Arc::clone(vault),
+        Err(why) => {
+            let _ = control.send(&FileMessage::Refuse(why)).await;
+            files.note(
+                "refused",
+                offer.path.as_str(),
+                offer.bytes,
+                "this host has no file box",
+            );
+            return;
+        }
+    };
+
     // Beginning can read and hash a partial, which is a disk's worth of work.
-    let vault = Arc::clone(&files.vault);
+    let vault = Arc::clone(&chosen);
     let limits = files.limits;
     let for_thread = offer.clone();
     let started =
@@ -262,12 +312,101 @@ async fn take(control: &mut Control, files: &Files, wire: FileOffer) {
     }
 
     // Finishing waits for the disk, and on a large file that is seconds.
-    let vault = Arc::clone(&files.vault);
+    let vault = chosen;
     let end = tokio::task::spawn_blocking(move || receiving.finish(&vault))
         .await
         .unwrap_or(FileEnd::Failed);
     let _ = control.send(&FileMessage::Done(end)).await;
     files.note("in", offer.path.as_str(), offer.bytes, end.message());
+}
+
+/// The far end is asking what is in a directory.
+///
+/// **Governed by `files-out`, the same permission as sending one.** Knowing a
+/// file exists is reading: a host that will not send a file has no business
+/// saying it has one, and a listing is how somebody works out what to ask for.
+async fn tell(control: &mut Control, files: &Files, asked: esper_proto::FileList) {
+    if !files.may(Permission::FilesOut) {
+        let _ = control
+            .send(&FileMessage::Refuse(FileRefusal::NotPermitted))
+            .await;
+        files.note("refused", &shown(&asked.path), 0, "not permitted");
+        return;
+    }
+    // The empty path is the root, which is the one thing `SafePath` refuses —
+    // it parses names, and the root has none.
+    let path = if asked.path.is_empty() {
+        SafePath::root()
+    } else {
+        match SafePath::parse(&asked.path) {
+            Ok(path) => path,
+            Err(why) => {
+                let _ = control
+                    .send(&FileMessage::Refuse(FileRefusal::BadName))
+                    .await;
+                files.note("refused", &shown(&asked.path), 0, &why.message());
+                return;
+            }
+        }
+    };
+    let vault = match files.vault_for(asked.from) {
+        Ok(vault) => Arc::clone(vault),
+        Err(why) => {
+            let _ = control.send(&FileMessage::Refuse(why)).await;
+            files.note("refused", path.as_str(), 0, "this host has no file box");
+            return;
+        }
+    };
+
+    // Reading a large directory is a disk's worth of work.
+    let for_thread = path.clone();
+    let read =
+        tokio::task::spawn_blocking(move || vault.list(&for_thread, esper_proto::MAX_LISTING))
+            .await;
+    let (found, truncated) = match read {
+        Ok(Ok(listed)) => listed,
+        Ok(Err(_)) => {
+            let _ = control
+                .send(&FileMessage::Refuse(FileRefusal::Missing))
+                .await;
+            files.note("refused", path.as_str(), 0, "no such directory");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "a directory could not be listed");
+            let _ = control
+                .send(&FileMessage::Refuse(FileRefusal::Failed))
+                .await;
+            return;
+        }
+    };
+
+    // **A name that is not valid UTF-8 is left out rather than mangled.** It
+    // exists on a real disk and has no representation on the wire; sending a
+    // lossy version would name a file the peer could then fail to ask for, in
+    // a way that looks like the host lying about what it has.
+    let entries: Vec<esper_proto::FileEntry> = found
+        .into_iter()
+        .filter_map(|entry| {
+            let name = entry.name.into_string().ok()?;
+            let candidate = esper_proto::FileEntry {
+                name,
+                bytes: entry.bytes,
+                directory: entry.directory,
+            };
+            candidate.is_well_formed().then_some(candidate)
+        })
+        .collect();
+
+    let count = entries.len();
+    let _ = control
+        .send(&FileMessage::Listing(esper_proto::FileListing {
+            path: path.as_str().to_owned(),
+            entries,
+            truncated,
+        }))
+        .await;
+    files.note("listed", path.as_str(), count as u64, "listed");
 }
 
 /// The far end is asking this machine for a file.
@@ -295,7 +434,14 @@ async fn give(control: &mut Control, files: &Files, want: FileWant) {
     };
 
     // Opening reads the whole file once, to hash it.
-    let vault = Arc::clone(&files.vault);
+    let vault = match files.vault_for(want.from) {
+        Ok(vault) => Arc::clone(vault),
+        Err(why) => {
+            let _ = control.send(&FileMessage::Refuse(why)).await;
+            files.note("refused", path.as_str(), 0, "this host has no file box");
+            return;
+        }
+    };
     let limits = files.limits;
     let for_thread = path.clone();
     let opened =

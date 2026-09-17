@@ -160,6 +160,21 @@ impl SafePath {
     /// With the first rule it broke. One reason rather than all of them: the
     /// sender fixes one thing and asks again, and listing every fault of a
     /// name that was probably generated is telling an attacker what to try.
+    /// The vault's own top, which has no name.
+    ///
+    /// **The one path `parse` will not produce**, deliberately: it parses
+    /// names, and the root is the absence of one. Listing a directory is the
+    /// only operation that has any use for it — a transfer always names a
+    /// file — so it is a constructor of its own rather than a special case
+    /// inside the parser, where it would have to be refused for every other
+    /// caller anyway.
+    #[must_use]
+    pub fn root() -> Self {
+        Self {
+            text: String::new(),
+        }
+    }
+
     pub fn parse(raw: &str) -> Result<Self, BadName> {
         if raw.is_empty() {
             return Err(BadName::Empty);

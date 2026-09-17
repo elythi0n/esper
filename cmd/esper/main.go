@@ -199,6 +199,9 @@ var engineCommands = map[string]bool{
 	"terminal": true,
 	"forward":  true,
 	"cp":       true,
+	// Listing a directory is `files-out`, the same permission as reading a
+	// file from it: knowing a file exists is reading.
+	"ls": true,
 	// Locking a host's screen is its own verb because it is its own
 	// permission: a device may hold `lock` without holding `view`, so this
 	// works on a host it may not watch.
@@ -1148,6 +1151,7 @@ Using a machine
   terminal           open a shell on a paired host
   forward            reach a port on a paired host, ssh -L style
   cp                 copy one file to or from a paired host
+  ls                 list a directory on a paired host
   screenshot         one picture of a paired host's screen, as a PNG
   host               serve this machine's screen to a paired device
   host enable        start the host now and at login

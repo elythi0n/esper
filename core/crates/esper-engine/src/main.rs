@@ -35,6 +35,7 @@ mod invite_cmd;
 mod ladder;
 mod lock_cmd;
 mod loopback;
+mod ls_cmd;
 mod net;
 mod pairing;
 mod paths;
@@ -378,6 +379,16 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("{} screenshot: {e}", net::me());
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("ls") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            match ls_cmd::parse(&rest).and_then(|o| ls_cmd::run(&o)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{} ls: {e}", net::me());
                     ExitCode::FAILURE
                 }
             }
@@ -854,6 +865,7 @@ fn usage_for(command: &str) -> Option<String> {
     match command {
         "connect" => Some(session_cmd::connect_usage()),
         "cp" => Some(cp_cmd::usage()),
+        "ls" => Some(ls_cmd::usage()),
         "host" => Some(session_cmd::host_usage()),
         "lock" => Some(lock_cmd::usage(lock_cmd::What::Lock)),
         "logoff" => Some(lock_cmd::usage(lock_cmd::What::Logoff)),

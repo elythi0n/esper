@@ -60,6 +60,13 @@ pub struct Offer {
     pub bytes: u64,
     pub hash: Sum,
     pub replace: bool,
+    /// Which of the host's two directories this is about.
+    ///
+    /// **Carried rather than decided here**, because this type knows about
+    /// names and sizes and nothing about which vault it will be opened
+    /// against. The caller picks the vault; this says which one the peer
+    /// asked for.
+    pub to: esper_proto::FileWhere,
 }
 
 impl Offer {
@@ -80,6 +87,7 @@ impl Offer {
             bytes: wire.bytes,
             hash: Sum::from_bytes(wire.hash),
             replace: wire.replace,
+            to: wire.to,
         })
     }
 
@@ -91,6 +99,7 @@ impl Offer {
             bytes: self.bytes,
             hash: self.hash.bytes(),
             replace: self.replace,
+            to: self.to,
         }
     }
 }
@@ -368,6 +377,9 @@ impl Sending {
                 bytes,
                 hash,
                 replace: false,
+                // The sender says where it is going; a `Sending` built from a
+                // local file has no opinion until the caller states one.
+                to: esper_proto::FileWhere::default(),
             },
             sent: 0,
         })
@@ -731,6 +743,7 @@ mod tests {
             bytes: 10,
             hash: Sum::from_bytes([0; 32]),
             replace: false,
+            to: esper_proto::FileWhere::Directory,
         };
         let mut receiving = Receiving::begin(&to, &offer, Limits::default()).expect("a place");
         receiving.take(b"0123456789").expect("the ten it said");
@@ -808,6 +821,7 @@ mod tests {
                 bytes: 1,
                 hash: [0; 32],
                 replace: false,
+                to: esper_proto::FileWhere::Directory,
             };
             assert_eq!(
                 Offer::check(&wire).err(),
@@ -820,6 +834,7 @@ mod tests {
             bytes: 7,
             hash: [3; 32],
             replace: true,
+            to: esper_proto::FileWhere::Directory,
         };
         let checked = Offer::check(&fine).expect("a name the rules accept");
         assert_eq!(checked.path.as_str(), "reports/q3.pdf");

@@ -2038,6 +2038,44 @@ pub const MAX_FILE_PATH_LEN: usize = 1024;
 /// can prove the partial data belongs to the same content, and there is no
 /// trailing frame to send after a raw body — which there is no clean way to
 /// do.
+/// Which of a host's two file directories a transfer is about.
+///
+/// **A session's file box is not the file directory**, and the difference is
+/// the whole point of having one. The file directory is a place somebody chose
+/// to share and that keeps what is put in it; the box is opened for one
+/// session, is empty when it starts, and is emptied when it ends — so dropping
+/// something into it is a smaller decision than writing into a directory that
+/// persists.
+///
+/// Defaulted and skipped when it is the directory, so a host built before this
+/// existed, and every recorded fixture, stay byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileWhere {
+    /// The host's file directory, which persists.
+    #[default]
+    Directory,
+    /// This session's box, which does not.
+    Box,
+}
+
+impl FileWhere {
+    /// A phrase for a person, and for the record.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Directory => "the file directory",
+            Self::Box => "this session's box",
+        }
+    }
+
+    /// Whether this names the box.
+    #[must_use]
+    pub const fn is_box(self) -> bool {
+        matches!(self, Self::Box)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileOffer {
     /// Where, relative to the far end's file directory. Never absolute.
@@ -2053,6 +2091,14 @@ pub struct FileOffer {
     /// transfer that silently replaces is a transfer that eats work.
     #[serde(default)]
     pub replace: bool,
+    /// Which directory it is going into.
+    #[serde(default, skip_serializing_if = "is_the_directory")]
+    pub to: FileWhere,
+}
+
+/// Whether a destination is the ordinary one, for `skip_serializing_if`.
+fn is_the_directory(where_to: &FileWhere) -> bool {
+    matches!(where_to, FileWhere::Directory)
 }
 
 impl FileOffer {
@@ -2072,6 +2118,9 @@ impl FileOffer {
 pub struct FileWant {
     /// Where, relative to the far end's file directory.
     pub path: String,
+    /// Which directory to take it from.
+    #[serde(default, skip_serializing_if = "is_the_directory")]
+    pub from: FileWhere,
 }
 
 impl FileWant {
@@ -2079,6 +2128,103 @@ impl FileWant {
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         !self.path.is_empty() && self.path.len() <= MAX_FILE_PATH_LEN
+    }
+}
+
+/// Ask what is in a directory.
+///
+/// **A listing is not a transfer**, and it is governed by the same permission:
+/// `files-out` is the right to read what is there, and knowing a file exists is
+/// reading. A host that will not send a file will not say it has one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileList {
+    /// Which directory, relative to the far end's file directory. Empty means
+    /// the top of it.
+    pub path: String,
+    /// Which of the host's two directories.
+    #[serde(default, skip_serializing_if = "is_the_directory")]
+    pub from: FileWhere,
+}
+
+impl FileList {
+    /// Whether this is within the bounds the framing sets.
+    ///
+    /// The empty path is allowed and means the root — which is the one case
+    /// [`FileWant`] refuses, because wanting nothing is not a request and
+    /// listing everything is.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.path.len() <= MAX_FILE_PATH_LEN
+    }
+}
+
+/// One thing in a directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEntry {
+    /// Its name, with no path in it. **A single component**, so a listing
+    /// cannot be used to describe somewhere else.
+    pub name: String,
+    /// How many bytes, for a plain file. Zero for a directory, which is what
+    /// the filesystem says and not a count of what is inside.
+    pub bytes: u64,
+    /// Whether it is a directory.
+    pub directory: bool,
+}
+
+impl FileEntry {
+    /// Whether this names something a listing may describe.
+    ///
+    /// **Nothing that is neither a file nor a directory appears at all**, so
+    /// this does not need a kind for a socket or a device node — a host does
+    /// not put them in a listing, and a controller that received one would be
+    /// being told about something it can do nothing with.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        !self.name.is_empty()
+            && self.name.len() <= MAX_NAME_LEN
+            && !self.name.contains('/')
+            && !self.name.contains('\\')
+            && self.name != "."
+            && self.name != ".."
+            && !self.name.chars().any(char::is_control)
+    }
+}
+
+/// What is in a directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileListing {
+    /// What the peer asked about, echoed so a controller listing several
+    /// directories at once can tell the answers apart.
+    pub path: String,
+    /// What is in it, in no particular order — sorting is a decision for
+    /// whoever is showing it, and a host that sorted would be imposing its
+    /// own collation on somebody else's language.
+    pub entries: Vec<FileEntry>,
+    /// Whether the host stopped short of the end.
+    ///
+    /// **A bound rather than pagination.** A directory with a million files in
+    /// it is a thing that exists, and a host that tried to describe it whole
+    /// would spend a session's memory on one message. The controller is told
+    /// it is seeing part of it rather than being left to believe a directory
+    /// is smaller than it is.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// The most entries one listing carries.
+///
+/// Two thousand: enough that an ordinary directory is never cut, small enough
+/// that the message stays well under the framing's limit even with the longest
+/// names the protocol allows.
+pub const MAX_LISTING: usize = 2000;
+
+impl FileListing {
+    /// Whether this is within the bounds the framing sets.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.path.len() <= MAX_FILE_PATH_LEN
+            && self.entries.len() <= MAX_LISTING
+            && self.entries.iter().all(FileEntry::is_well_formed)
     }
 }
 
@@ -2232,6 +2378,10 @@ pub enum FileMessage {
     Refuse(FileRefusal),
     /// That was all of it, and this is how it went. Said by the receiver.
     Done(FileEnd),
+    /// What is in this directory?
+    List(FileList),
+    /// This is what is in it.
+    Listing(FileListing),
 }
 
 impl FileMessage {
@@ -2241,6 +2391,8 @@ impl FileMessage {
         match self {
             Self::Offer(o) | Self::Have(o) => o.is_well_formed(),
             Self::Want(w) => w.is_well_formed(),
+            Self::List(l) => l.is_well_formed(),
+            Self::Listing(l) => l.is_well_formed(),
             Self::Accept(_) | Self::Refuse(_) | Self::Done(_) => true,
         }
     }
@@ -2255,6 +2407,8 @@ impl FileMessage {
             Self::Accept(_) => "an acceptance",
             Self::Refuse(_) => "a refusal",
             Self::Done(_) => "the end of a transfer",
+            Self::List(_) => "a request for a directory listing",
+            Self::Listing(_) => "a directory listing",
         }
     }
 }
@@ -3760,6 +3914,7 @@ mod file_tests {
             bytes: 4096,
             hash: [7u8; 32],
             replace: false,
+            to: FileWhere::Directory,
         }
     }
 
@@ -3770,6 +3925,7 @@ mod file_tests {
             FileMessage::Have(offer("logs/build.log")),
             FileMessage::Want(FileWant {
                 path: "logs/build.log".to_owned(),
+                from: FileWhere::Directory,
             }),
             FileMessage::Accept(FileAccept { from: 1_048_576 }),
             FileMessage::Refuse(FileRefusal::NoRoom),
@@ -3816,7 +3972,8 @@ mod file_tests {
         assert!(FileMessage::Offer(offer(&"a".repeat(MAX_FILE_PATH_LEN))).is_well_formed());
         assert!(
             !FileMessage::Want(FileWant {
-                path: String::new()
+                path: String::new(),
+                from: FileWhere::Directory,
             })
             .is_well_formed()
         );
@@ -3889,6 +4046,7 @@ mod file_tests {
             (
                 encoded(&FileMessage::Want(FileWant {
                     path: "x".to_owned(),
+                    from: FileWhere::Directory,
                 })),
                 "want",
             ),
