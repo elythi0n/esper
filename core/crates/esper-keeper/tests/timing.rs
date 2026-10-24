@@ -187,7 +187,10 @@ fn one_unreadable_record_does_not_lose_the_others() {
 /// happened — harmless, because putting something back that was never moved
 /// is a no-op — rather than a change with no record of how to undo it.
 #[test]
-#[cfg_attr(windows, ignore = "the fake keeper is a shell script, which Windows cannot run")]
+#[cfg_attr(
+    windows,
+    ignore = "the fake keeper is a shell script, which Windows cannot run"
+)]
 fn registering_writes_the_journal_before_the_caller_changes_anything() {
     let home = tempdir();
     let fake = fake_keeper();
@@ -225,7 +228,10 @@ fn registering_writes_the_journal_before_the_caller_changes_anything() {
 /// server. Tested by putting a directory where the journal file goes, which is
 /// the simplest thing the filesystem will refuse to overwrite.
 #[test]
-#[cfg_attr(windows, ignore = "the fake keeper is a shell script, which Windows cannot run")]
+#[cfg_attr(
+    windows,
+    ignore = "the fake keeper is a shell script, which Windows cannot run"
+)]
 fn a_change_that_cannot_be_written_down_is_not_allowed_to_happen() {
     let home = tempdir();
     let fake = fake_keeper();
@@ -249,7 +255,10 @@ fn a_change_that_cannot_be_written_down_is_not_allowed_to_happen() {
 /// **Dropping the handle cancels**, because a host that returns from its own
 /// shutdown has already undone its work.
 #[test]
-#[cfg_attr(windows, ignore = "the fake keeper is a shell script, which Windows cannot run")]
+#[cfg_attr(
+    windows,
+    ignore = "the fake keeper is a shell script, which Windows cannot run"
+)]
 fn dropping_the_handle_leaves_nothing_to_recover() {
     let home = tempdir();
     let fake = fake_keeper();
@@ -273,7 +282,10 @@ fn dropping_the_handle_leaves_nothing_to_recover() {
 /// **A keeper that does not say it is watching is a refusal**, because the
 /// whole arrangement is that nothing is changed until somebody is.
 #[test]
-#[cfg_attr(windows, ignore = "the fake keeper is a shell script, which Windows cannot run")]
+#[cfg_attr(
+    windows,
+    ignore = "the fake keeper is a shell script, which Windows cannot run"
+)]
 fn a_keeper_that_says_the_wrong_thing_is_refused() {
     let home = tempdir();
     let wrong = fixture("keeper-that-does-not-answer.sh");
