@@ -180,7 +180,15 @@ jobs:
       - name: Go — vet
         run: go vet ./...
 
+      # **Linux only, for now.** The Go suite has never run anywhere else, and
+      # on macOS and Windows about forty of its tests fail for reasons that are
+      # the port rather than a regression: fake engines written as shell
+      # scripts, Unix permission bits, and a supervision socket that cannot yet
+      # ask which process connected. Those hosts do not exist yet; this job
+      # still builds and vets the Go for them, and the type-check job builds it
+      # for both. The suite joins them when the port does.
       - name: Go — test
+        if: runner.os == 'Linux'
         run: go test ./...
 
       # The cross-language contract. Both implementations decode the same
