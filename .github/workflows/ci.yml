@@ -149,9 +149,12 @@ jobs:
       - name: Install dnspython (mDNS interoperability tests)
         run: python3 -m pip install --break-system-packages dnspython
 
+      # `--no-fail-fast` so one run names every failing test binary, not only
+      # the first: macOS and Windows had never got past the format check, and
+      # finding what fails there one crate per run is a week of runs.
       - name: Rust — test
         working-directory: core
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
       # Every performance target the design states, measured here.
       #
