@@ -1,4 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Real shells, and a shell is a pseudo-terminal, so: Unix. Elsewhere the host
+// refuses a terminal as unsupported, which is the answer it should give.
+#![cfg(unix)]
 
 //! A dropped link must not kill the shell.
 //!

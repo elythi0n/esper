@@ -191,7 +191,14 @@ mod tests {
         std::fs::write(&path, b"").expect("a file");
         // Backdate it past the staleness bound.
         let old = SystemTime::now() - STALE - Duration::from_secs(60);
-        let _ = std::fs::File::open(&path).map(|f| f.set_modified(old));
+        // Opened for writing, and the result read: Windows changes a time
+        // only through a handle that may write, and a backdating that failed
+        // quietly made this test about nothing.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_modified(old))
+            .expect("backdating the lock");
         assert!(
             DisplayLock::is_stale(&path),
             "a lock this old must count as abandoned"

@@ -1,0 +1,5 @@
+# The wire fixtures are compared byte for byte, by two implementations, against
+# what each one writes. A checkout that turned their line endings into CRLF — git
+# on Windows does, by default — makes every one of them a mismatch that is not a
+# defect. Checked out exactly as committed, everywhere.
+testdata/** -text

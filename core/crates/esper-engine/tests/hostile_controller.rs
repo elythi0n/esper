@@ -320,22 +320,24 @@ async fn a_second_input_stream_gets_a_refusal_and_not_a_keyboard() {
 
     let _first = red.opens(StreamPurpose::Input).await;
     let _second = red.opens(StreamPurpose::Input).await;
-    let refused = |host: &Host| {
-        host.everything()
-            .iter()
-            .filter(|l| {
-                l.contains("refused a second input stream")
-                    || l.contains("with nothing on this machine to inject")
-            })
-            .count()
+    // **Two right answers, and which one depends on the machine.** A host with
+    // nothing to inject with refuses both; a host that has a keyboard gives it
+    // to the first and refuses the second. Windows always has one —
+    // `SendInput` needs no display — so it is the second case even headless,
+    // and counting two refusals there read a correct host as a broken one.
+    let held = |host: &Host| {
+        let lines = host.everything();
+        let count = |what: &str| lines.iter().filter(|l| l.contains(what)).count();
+        count("refused a second input stream") >= 1
+            || count("with nothing on this machine to inject") >= 2
     };
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while refused(&host) < 2 && std::time::Instant::now() < deadline {
+    while !held(&host) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(
-        refused(&host) >= 2,
-        "a session opened two input streams and one of them was served: {:?}",
+        held(&host),
+        "a session opened two input streams and both were served: {:?}",
         host.everything()
     );
 }

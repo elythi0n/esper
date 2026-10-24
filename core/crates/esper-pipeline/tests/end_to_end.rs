@@ -303,6 +303,10 @@ fn a_resolution_change_forces_a_whole_conversion() {
 /// A host over its budget must be degraded, and the degradation must reach
 /// the encoder rather than staying in the governor's own bookkeeping.
 #[test]
+#[cfg_attr(
+    not(unix),
+    ignore = "the governor acts on process CPU time, which only Unix reports yet"
+)]
 fn a_tiny_budget_degrades_the_encoder() {
     // A budget so small that any real work exceeds it.
     let mut p = build(1280, 720, 60, 0.05);
@@ -324,6 +328,10 @@ fn a_tiny_budget_degrades_the_encoder() {
 /// the rate model and not the workload, so the pipeline reports itself
 /// degraded and costs the same.
 #[test]
+#[cfg_attr(
+    not(unix),
+    ignore = "the governor acts on process CPU time, which only Unix reports yet"
+)]
 fn degrading_actually_reduces_the_frames_encoded() {
     // A generous budget first: how many frames get encoded when nothing is
     // holding it back.
@@ -376,6 +384,10 @@ fn the_governor_never_raises_the_frame_rate_above_what_was_asked() {
 /// three quarter scale and encode exactly as many pixels as before. Dropping
 /// to a resolution rung has to shrink what is actually encoded.
 #[test]
+#[cfg_attr(
+    not(unix),
+    ignore = "the governor acts on process CPU time, which only Unix reports yet"
+)]
 fn the_resolution_rung_shrinks_what_is_encoded() {
     let mut p = build(640, 480, 60, 0.02);
     assert_eq!(p.encode_size(), (640, 480), "it starts at the display size");
