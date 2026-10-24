@@ -170,7 +170,11 @@ host.budget = 1
     /// A key that is not there is added, and the file still parses.
     #[test]
     fn a_setting_that_was_never_written_is_added() {
-        let (after, changed) = set_in("device.name = \"elythion\"\n", "host.fps", &Value::Whole(45));
+        let (after, changed) = set_in(
+            "device.name = \"elythion\"\n",
+            "host.fps",
+            &Value::Whole(45),
+        );
         assert!(changed.added);
         assert_eq!(after, "device.name = \"elythion\"\nhost.fps = 45\n");
         let read = crate::parse(&after).expect("what was written is what is read");

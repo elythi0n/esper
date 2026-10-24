@@ -359,7 +359,14 @@ mod tests {
         .expect("an address without one");
         assert_eq!(with.to, without.to);
         assert_eq!(without.to.map(|a| a.port()), Some(PORT));
-        assert!(parse(&["elythion".to_owned(), "--to".to_owned(), "nowhere".to_owned()]).is_err());
+        assert!(
+            parse(&[
+                "elythion".to_owned(),
+                "--to".to_owned(),
+                "nowhere".to_owned()
+            ])
+            .is_err()
+        );
         assert!(parse(&[]).is_err());
     }
 }

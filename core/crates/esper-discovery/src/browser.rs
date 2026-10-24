@@ -491,9 +491,12 @@ mod tests {
     #[test]
     fn a_query_is_not_absorbed() {
         let mut b = browser();
-        let mut message =
-            Message::decode(&response(&advertisement("elythion", "c6a8baa216f1078e", 7645)))
-                .expect("decode");
+        let mut message = Message::decode(&response(&advertisement(
+            "elythion",
+            "c6a8baa216f1078e",
+            7645,
+        )))
+        .expect("decode");
         message.response = false;
         b.absorb(&message.encode(), from("192.168.1.5:5353"));
         assert!(b.all().is_empty());
@@ -661,7 +664,10 @@ mod tests {
 
     #[test]
     fn a_device_name_is_the_instance_without_the_fingerprint() {
-        assert_eq!(device_name("elythion (c6a8baa2)._esper._udp.local"), "elythion");
+        assert_eq!(
+            device_name("elythion (c6a8baa2)._esper._udp.local"),
+            "elythion"
+        );
         // A name with brackets of its own keeps everything up to the last one.
         assert_eq!(
             device_name("elythion (spare) (c6a8baa2)._esper._udp.local"),

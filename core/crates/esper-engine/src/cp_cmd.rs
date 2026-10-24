@@ -904,7 +904,11 @@ mod tests {
                 .expect("a copy")
                 .force
         );
-        assert!(parse_args(&["a", "elythion:b", "-f"]).expect("a copy").force);
+        assert!(
+            parse_args(&["a", "elythion:b", "-f"])
+                .expect("a copy")
+                .force
+        );
         // And the refusal says how, rather than only that.
         let said = advice(FileRefusal::Exists, "reports/q3.pdf");
         assert!(said.contains("--force"), "{said}");

@@ -172,7 +172,10 @@ mod tests {
 
     #[test]
     fn an_instance_name_carries_the_fingerprint_prefix() {
-        assert_eq!(instance_name("elythion", "c6a8baa216f1078e"), "elythion (c6a8baa2)");
+        assert_eq!(
+            instance_name("elythion", "c6a8baa216f1078e"),
+            "elythion (c6a8baa2)"
+        );
     }
 
     /// **A label cannot be longer than 63 bytes**, and a person's machine name
