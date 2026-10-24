@@ -328,14 +328,14 @@ func (s *Supervisor) stopEngine(cmd *exec.Cmd, done <-chan error, grace time.Dur
 	}
 	_ = cmd.Process.Signal(syscall.SIGTERM)
 	select {
-	case <-done:
+	case <-done: //nolint:errcheck // it was asked to stop, so how it exited is not news
 		return
 	case <-time.After(grace):
 	}
 	s.log("the engine did not stop within %s, so it is being killed — a session "+
 		"may not have been told why it ended", grace)
 	_ = cmd.Process.Kill()
-	<-done
+	<-done //nolint:errcheck // it was asked to stop, so how it exited is not news
 }
 
 // keepAsking asks the engine whether it is working until it stops answering or

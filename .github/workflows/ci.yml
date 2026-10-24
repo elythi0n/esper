@@ -203,7 +203,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v6
+      # v8 of the action, because v6 and earlier install golangci-lint v1, which
+      # cannot read the v2 schema `.golangci.yml` is written in and is built
+      # with a Go older than the one `go.mod` targets.
+      - uses: golangci/golangci-lint-action@v8
         with:
           version: latest
 
@@ -315,6 +318,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+      # `rust-toolchain.toml` pins a toolchain, so the targets the step above
+      # installed went to `stable` and not to the toolchain this repository
+      # actually builds with. Added here, inside the checkout, where the pin
+      # decides which toolchain receives them.
+      - name: the targets, for the pinned toolchain
+        run: rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin
       - name: a Linux-only use would fail here
         run: ./scripts/check-other-platforms.sh
 
@@ -334,6 +343,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # The privacy-screen check reads the display back with `xrandr`. The
+      # runner ships `Xvfb` but not that, and without it the check skips.
+      - name: xrandr (privacy screen check)
+        run: sudo apt-get update && sudo apt-get install -y x11-xserver-utils
       - run: make build
       # Here rather than in the `rules` job because it drives the built
       # binaries: what a person reads is assembled from a parser and a
@@ -358,9 +371,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+      # `make miri` rather than the cargo command, so the crate exclusions —
+      # the codec crates call C, which MIRI cannot — live in one place. It also
+      # says `+nightly`, which matters: `rust-toolchain.toml` pins a stable
+      # toolchain, miri ships only with nightly, and without it the pin wins.
       - name: miri test
-        working-directory: core
-        run: cargo miri test --workspace --exclude esper-crypto
+        run: make miri
 
   # The window's own gates, which ran nowhere.
   #

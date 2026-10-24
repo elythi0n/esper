@@ -636,11 +636,11 @@ func (s *Supervisor) stopLocked() error {
 		// noticed while nobody is stopping anything.
 		cmd, done := s.cmd, s.reaped
 		select {
-		case <-done:
+		case <-done: //nolint:errcheck // it was asked to stop, so how it exited is not news
 		case <-time.After(s.grace):
 			s.log("the engine did not end when its channel closed, so it is being killed")
 			_ = cmd.Process.Kill()
-			<-done
+			<-done //nolint:errcheck // it was asked to stop, so how it exited is not news
 		}
 	}
 	s.cmd, s.stdin, s.stdout, s.hello, s.reaped = nil, nil, nil, nil, nil

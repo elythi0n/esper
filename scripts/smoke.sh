@@ -1791,7 +1791,11 @@ except OSError:
       # exactly that. What is real and checkable is that the keeper **ran, put
       # the record back, and said so** after a `SIGKILL` — which runs no
       # destructor, no signal handler and no cleanup path in the host.
-      if command -v Xvfb >/dev/null 2>&1; then
+      #
+      # `xrandr` too, because the last check reads the display back with it:
+      # without it the count is empty, the check fails, and the diagnostic
+      # under it exits 127 and takes the rest of the suite with it.
+      if command -v Xvfb >/dev/null 2>&1 && command -v xrandr >/dev/null 2>&1; then
         priv_d=""
         for d in $(seq 71 99); do
           [ -e "/tmp/.X${d}-lock" ] && continue
@@ -1892,7 +1896,7 @@ except OSError:
         priv_client=""
         rm -rf "$priv_home"
       else
-        printf '  — skipped the privacy screen check: needs Xvfb and a free display\n'
+        printf '  — skipped the privacy screen check: needs Xvfb, xrandr and a free display\n'
       fi
 
       # **Retention that actually deletes.** The policy existed for weeks with
