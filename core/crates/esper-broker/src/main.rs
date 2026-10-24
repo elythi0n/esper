@@ -558,12 +558,25 @@ mod tests {
         // Forwarding spends the operator's bandwidth for as long as a session
         // lasts. Nobody should discover they are paying for that because a
         // default said so.
-        let o = parse(&["--listen".to_owned(), "127.0.0.1:1".to_owned()]).unwrap();
+        //
+        // `--identity` named, so this is about relaying and not about where a
+        // key lives: without it the parse looks for `$HOME`, which Windows
+        // does not set, and the test failed there for a reason it is not
+        // about.
+        let o = parse(&[
+            "--listen".to_owned(),
+            "127.0.0.1:1".to_owned(),
+            "--identity".to_owned(),
+            "broker.key".to_owned(),
+        ])
+        .unwrap();
         assert!(o.relay.is_none());
 
         let o = parse(&[
             "--listen".to_owned(),
             "127.0.0.1:1".to_owned(),
+            "--identity".to_owned(),
+            "broker.key".to_owned(),
             "--relay".to_owned(),
         ])
         .unwrap();
@@ -574,6 +587,8 @@ mod tests {
         let e = parse(&[
             "--listen".to_owned(),
             "127.0.0.1:1".to_owned(),
+            "--identity".to_owned(),
+            "broker.key".to_owned(),
             "--relay-bitrate".to_owned(),
             "2M".to_owned(),
         ])

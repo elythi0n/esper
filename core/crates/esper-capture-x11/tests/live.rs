@@ -600,12 +600,22 @@ fn every_monitor_can_be_switched_to_on_a_live_session() {
         println!("skipped: one monitor, so there is nothing to switch to");
         return;
     }
-    let _ = first_frame(&mut cap);
+    // **Selecting the screen already served is not a switch**, and by design
+    // owes no new frame — so on a display where nothing moves, waiting for one
+    // waits for ever. The capturer opens on the first of `all`, so the first
+    // pass would do exactly that, and this passed only when another test
+    // happened to draw something in time. That screen's frame is this one.
+    let mut current = Some(first_frame(&mut cap));
 
     for m in &all {
-        cap.select(m.id).expect("the switch");
+        let frame = match current.take() {
+            Some(f) if cap.selected() == m.id => f,
+            _ => {
+                cap.select(m.id).expect("the switch");
+                first_frame(&mut cap)
+            }
+        };
         assert_eq!(cap.selected(), m.id);
-        let frame = first_frame(&mut cap);
         assert_eq!(
             (frame.width(), frame.height()),
             m.size(),

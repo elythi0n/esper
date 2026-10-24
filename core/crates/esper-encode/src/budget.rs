@@ -736,8 +736,12 @@ mod tests {
             "1.9 cores buys one thread, not two: the second would spend CPU \
              the budget has not got"
         );
-        assert_eq!(Budget::of(2.0).encoder_threads(), 2);
-        assert_eq!(Budget::of(4.0).encoder_threads(), 4);
+        // Up to what the machine has: a budget is a ceiling, and the cap at
+        // the core count is its own test. GitHub's macOS runners have three.
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let at_most = |n: u16| n.min(u16::try_from(cores).unwrap_or(u16::MAX));
+        assert_eq!(Budget::of(2.0).encoder_threads(), at_most(2));
+        assert_eq!(Budget::of(4.0).encoder_threads(), at_most(4));
         // A fraction of a core still buys a thread, because zero threads is
         // not a thing an encoder can be.
         assert_eq!(Budget::of(0.1).encoder_threads(), 1);
