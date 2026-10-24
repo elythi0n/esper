@@ -60,8 +60,11 @@ pub const LOCKERS: &[(&str, &[&str], Locks)] = &[
 /// and neither should need a particular machine.
 #[must_use]
 pub fn find_on(path: &str, program: &str) -> Option<PathBuf> {
-    for dir in path.split(':').filter(|d| !d.is_empty()) {
-        let candidate = PathBuf::from(dir).join(program);
+    // `split_paths` and not `split(':')`: the separator is the platform's, and
+    // on Windows a colon is part of every drive letter, so splitting on one
+    // cut `C:\Windows` in two and found nothing anywhere.
+    for dir in std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()) {
+        let candidate = dir.join(program);
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -286,7 +289,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("esper-lock-skip-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a directory");
         std::fs::write(dir.join("swaylock"), b"#!/bin/sh\n").expect("a file");
-        let path = format!("/definitely/not/here:{}", dir.to_string_lossy());
+        let path = std::env::join_paths([std::path::Path::new("/definitely/not/here"), &dir])
+            .expect("a path")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(available_locker_on(&path).map(|(p, _)| p), Some("swaylock"));
         std::fs::remove_dir_all(&dir).ok();
     }
