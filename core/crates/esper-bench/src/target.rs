@@ -206,12 +206,15 @@ pub const TARGETS: &[Target] = &[
                 frame of screen. **The fixture's own self-check**: if the \
                 full-motion content ever stopped being full motion, every \
                 encode figure here would quietly improve and the harness would \
-                report good news. Portable, because it is a ratio of two \
-                timings on the same machine.",
+                report good news — and the ratio would fall towards one, which \
+                is what the target catches. **Not portable, though it is a \
+                ratio**: the two encodes lean on different parts of a \
+                processor, and with the same code it measured 2.66 on an \
+                i7-12700H, 2.12 on an i7-9700K and 1.89 on an EPYC 9V45.",
         unit: "x",
         better: Better::Higher,
         want: Some(1.5),
-        portable: true,
+        portable: false,
     },
     Target {
         name: "convert.ratio",
@@ -303,8 +306,10 @@ mod tests {
     }
 
     /// **A portable figure means the same thing on another machine.** An
-    /// encode time does not; a ratio of two timings on one machine does, and
-    /// so does a figure the policy decides. Getting this wrong in either
+    /// encode time does not; a ratio of two timings on one machine can, and
+    /// so does a figure the policy decides. *Can*, not does: a ratio of two
+    /// workloads that stress the processor differently moves with the
+    /// processor, which is why `encode.motion.factor` is not on this list. Getting this wrong in either
     /// direction is how a suite either fails on every CI run or catches
     /// nothing on any of them.
     #[test]
@@ -314,10 +319,7 @@ mod tests {
             .filter(|t| t.portable)
             .map(|t| t.name)
             .collect();
-        assert_eq!(
-            portable,
-            vec!["path.idle.fps", "encode.motion.factor", "convert.ratio"]
-        );
+        assert_eq!(portable, vec!["path.idle.fps", "convert.ratio"]);
 
         // Nothing measured in milliseconds or cores can be portable: both are
         // properties of the processor.
