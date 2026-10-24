@@ -716,13 +716,29 @@ tidy:
 ## live, and they have to stay in this set.
 ##
 ## The full run is `miri-full`, on a nightly schedule.
+##
+## **Isolation off**, because the tests that stand in for real use make a
+## temporary directory, write a file into it and read a clock — and with
+## isolation on, the first `open` ends the whole test binary, so everything
+## after it in that crate was never checked. What isolation guards against is a
+## test that behaves differently run to run, and these were already written to
+## run on any machine.
+##
+## And four more crates out, for the reason the codecs are: esper-engine,
+## esper-link, esper-bench and esper-encode-retune call into C throughout —
+## opus, openh264, aws-lc under QUIC — and none of them has unsafe code of its
+## own for MIRI to find anything in. A crate whose C is incidental marks those
+## tests instead, so the rest of it still runs.
+MIRI_FLAGS := -Zmiri-disable-isolation
+MIRI_C_CRATES := --exclude esper-engine --exclude esper-link \
+		--exclude esper-bench --exclude esper-encode-retune
 .PHONY: miri
 miri:
-	@cd $(CORE) && cargo +nightly miri test --workspace \
+	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri test --workspace \
 		--exclude esper-crypto --exclude esper-capture \
 		--exclude esper-color --exclude esper-scale \
 		--exclude esper-encode --exclude esper-decode \
-		--exclude esper-pipeline
+		--exclude esper-pipeline $(MIRI_C_CRATES)
 
 ## Memory-safety check over every crate, including the slow crypto one
 ##
@@ -731,9 +747,9 @@ miri:
 ## rather than a judgement about the code.
 .PHONY: miri-full
 miri-full:
-	@cd $(CORE) && cargo +nightly miri test --workspace \
+	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri test --workspace \
 		--exclude esper-encode --exclude esper-decode \
-		--exclude esper-pipeline
+		--exclude esper-pipeline $(MIRI_C_CRATES)
 
 ## Fuzz every target (needs nightly + cargo-fuzz). FUZZ_SECONDS=600 for a long run
 ##

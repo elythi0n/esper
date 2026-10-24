@@ -476,6 +476,10 @@ mod tests {
     /// is ordinary, and nothing named for a container bridge is somewhere to
     /// announce a laptop.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "asks the kernel about this machine's network, which MIRI cannot"
+    )]
     fn this_machine_has_ordinary_interfaces_and_they_are_not_the_bridges() {
         let ordinary = ordinary_v4();
         for addr in &ordinary {
@@ -489,6 +493,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "asks the kernel about this machine's network, which MIRI cannot"
+    )]
     fn naming_nothing_selects_nothing() {
         // The override is an override: an empty list means "decide for me",
         // never "everything".
@@ -610,6 +618,10 @@ mod tests {
 
     /// Loopback resolves to itself, which is the one route every machine has.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "asks the kernel about this machine's network, which MIRI cannot"
+    )]
     fn the_kernel_answers_for_a_route_that_always_exists() {
         assert_eq!(source_towards(ip("127.0.0.1")), Some(ip("127.0.0.1")));
         assert_eq!(source_towards(ip("::1")), Some(ip("::1")));
@@ -622,6 +634,10 @@ mod tests {
     /// container bridges and no tunnel, a developer's laptop has both, and
     /// neither may produce a `docker0` labelled as a way to reach a peer.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "asks the kernel about this machine's network, which MIRI cannot"
+    )]
     fn this_machine_classifies_itself_consistently() {
         let overlays = Overlays::detect(&[]);
         for o in overlays.iter() {

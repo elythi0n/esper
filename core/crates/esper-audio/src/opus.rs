@@ -324,6 +324,7 @@ mod tests {
     /// loud enough to be the tone rather than the silence a broken path
     /// produces.
     #[test]
+    #[cfg_attr(miri, ignore = "needs libopus, which is C; MIRI cannot call it")]
     fn a_tone_survives_a_round_trip_through_the_codec() {
         let mut source = tone();
         let mut encoder = Encoder::new(SENT).expect("an encoder");
@@ -358,6 +359,7 @@ mod tests {
     /// magnitude larger than the target bitrate would mean the bitrate was
     /// never applied.
     #[test]
+    #[cfg_attr(miri, ignore = "needs libopus, which is C; MIRI cannot call it")]
     fn a_packet_is_about_the_bitrate_that_was_asked_for() {
         let mut source = tone();
         let mut encoder = Encoder::new(SENT).expect("an encoder");
@@ -382,6 +384,7 @@ mod tests {
     /// A frame that is not one frame is refused, rather than encoded as
     /// whatever the codec makes of it.
     #[test]
+    #[cfg_attr(miri, ignore = "needs libopus, which is C; MIRI cannot call it")]
     fn a_frame_of_the_wrong_size_is_refused() {
         let mut encoder = Encoder::new(SENT).expect("an encoder");
         let short = Frame {
@@ -407,6 +410,7 @@ mod tests {
     /// a click in the middle of every such frame, and nothing further down
     /// would notice.
     #[test]
+    #[cfg_attr(miri, ignore = "needs libopus, which is C; MIRI cannot call it")]
     fn a_packet_of_a_different_frame_length_is_refused() {
         let short = Format {
             frame_ms: 10,
@@ -433,6 +437,7 @@ mod tests {
     /// **A packet longer than any Opus packet is refused before the codec sees
     /// it.** It arrives from a peer, and the bound is the specification's own.
     #[test]
+    #[cfg_attr(miri, ignore = "needs libopus, which is C; MIRI cannot call it")]
     fn a_packet_too_long_to_be_opus_is_refused() {
         let mut decoder = Decoder::new(&SENT.as_config(1)).expect("a decoder");
         let huge = vec![0u8; MAX_PACKET + 1];
@@ -445,6 +450,7 @@ mod tests {
     /// Rubbish in is an error, not a panic and not a frame of noise presented
     /// as sound. This is the path a hostile peer takes.
     #[test]
+    #[cfg_attr(miri, ignore = "needs libopus, which is C; MIRI cannot call it")]
     fn a_packet_that_is_not_opus_is_an_error_rather_than_a_panic() {
         let mut decoder = Decoder::new(&SENT.as_config(1)).expect("a decoder");
         for junk in [
@@ -468,6 +474,7 @@ mod tests {
     /// concealed frame is the right size and is counted separately, so a
     /// session can say how much of what was heard was reconstructed.
     #[test]
+    #[cfg_attr(miri, ignore = "needs libopus, which is C; MIRI cannot call it")]
     fn a_lost_packet_is_concealed_and_counted() {
         let mut source = tone();
         let mut encoder = Encoder::new(SENT).expect("an encoder");
@@ -492,6 +499,7 @@ mod tests {
 
     /// Mono and stereo both work, because a backend may only offer one.
     #[test]
+    #[cfg_attr(miri, ignore = "needs libopus, which is C; MIRI cannot call it")]
     fn mono_encodes_and_decodes_as_mono() {
         let mono = Format {
             channels: 1,
@@ -512,6 +520,7 @@ mod tests {
     /// A shape Opus does not have is refused when the codec is built, not when
     /// the first frame arrives.
     #[test]
+    #[cfg_attr(miri, ignore = "needs libopus, which is C; MIRI cannot call it")]
     fn an_unsupported_shape_is_refused_at_construction() {
         let bad = Format {
             sample_rate_hz: 44_100,
