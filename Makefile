@@ -724,21 +724,28 @@ tidy:
 ## test that behaves differently run to run, and these were already written to
 ## run on any machine.
 ##
-## And four more crates out, for the reason the codecs are: esper-engine,
-## esper-link, esper-bench and esper-encode-retune call into C throughout —
-## opus, openh264, aws-lc under QUIC — and none of them has unsafe code of its
-## own for MIRI to find anything in. A crate whose C is incidental marks those
-## tests instead, so the rest of it still runs.
+## And six more crates out, for the reason the codecs are: each does, all the
+## way through, something MIRI cannot execute, and none has unsafe code of its
+## own for MIRI to find anything in. esper-engine, esper-link, esper-bench and
+## esper-encode-retune call into C — opus, openh264, aws-lc under QUIC;
+## esper-audio-pulse is two programs it starts; esper-files confines every
+## path with `openat2`, which MIRI does not implement. A crate where it is
+## incidental marks those tests instead, so the rest of it still runs.
+##
+## `--no-fail-fast`, because MIRI ends a test binary at the first thing it
+## cannot do: without it one such test hides every crate after it, and the
+## list comes back one run at a time.
 MIRI_FLAGS := -Zmiri-disable-isolation
-MIRI_C_CRATES := --exclude esper-engine --exclude esper-link \
-		--exclude esper-bench --exclude esper-encode-retune
+MIRI_OUT := --exclude esper-engine --exclude esper-link \
+		--exclude esper-bench --exclude esper-encode-retune \
+		--exclude esper-audio-pulse --exclude esper-files
 .PHONY: miri
 miri:
-	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri test --workspace \
+	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri test --no-fail-fast --workspace \
 		--exclude esper-crypto --exclude esper-capture \
 		--exclude esper-color --exclude esper-scale \
 		--exclude esper-encode --exclude esper-decode \
-		--exclude esper-pipeline $(MIRI_C_CRATES)
+		--exclude esper-pipeline $(MIRI_OUT)
 
 ## Memory-safety check over every crate, including the slow crypto one
 ##
@@ -747,9 +754,9 @@ miri:
 ## rather than a judgement about the code.
 .PHONY: miri-full
 miri-full:
-	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri test --workspace \
+	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri test --no-fail-fast --workspace \
 		--exclude esper-encode --exclude esper-decode \
-		--exclude esper-pipeline $(MIRI_C_CRATES)
+		--exclude esper-pipeline $(MIRI_OUT)
 
 ## Fuzz every target (needs nightly + cargo-fuzz). FUZZ_SECONDS=600 for a long run
 ##

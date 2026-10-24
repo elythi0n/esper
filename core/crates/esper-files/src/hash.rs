@@ -154,10 +154,6 @@ mod tests {
     /// because the receiver hashes datagram-sized pieces and the sender hashes
     /// a file in chunks.
     #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "hashes 300 KB six times, once a byte at a time; interpreted, that outlasts the job"
-    )]
     fn a_file_hashed_in_pieces_is_the_same_file() {
         let whole: Vec<u8> = (0..300_000u32)
             .map(|i| u8::try_from(i % 251).unwrap_or(0))

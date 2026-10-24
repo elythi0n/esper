@@ -191,6 +191,10 @@ fn one_unreadable_record_does_not_lose_the_others() {
     windows,
     ignore = "the fake keeper is a shell script, which Windows cannot run"
 )]
+#[cfg_attr(
+    miri,
+    ignore = "starts the fake keeper, and MIRI cannot start a process"
+)]
 fn registering_writes_the_journal_before_the_caller_changes_anything() {
     let home = tempdir();
     let fake = fake_keeper();
@@ -232,6 +236,10 @@ fn registering_writes_the_journal_before_the_caller_changes_anything() {
     windows,
     ignore = "the fake keeper is a shell script, which Windows cannot run"
 )]
+#[cfg_attr(
+    miri,
+    ignore = "starts the fake keeper, and MIRI cannot start a process"
+)]
 fn a_change_that_cannot_be_written_down_is_not_allowed_to_happen() {
     let home = tempdir();
     let fake = fake_keeper();
@@ -259,6 +267,10 @@ fn a_change_that_cannot_be_written_down_is_not_allowed_to_happen() {
     windows,
     ignore = "the fake keeper is a shell script, which Windows cannot run"
 )]
+#[cfg_attr(
+    miri,
+    ignore = "starts the fake keeper, and MIRI cannot start a process"
+)]
 fn dropping_the_handle_leaves_nothing_to_recover() {
     let home = tempdir();
     let fake = fake_keeper();
@@ -285,6 +297,10 @@ fn dropping_the_handle_leaves_nothing_to_recover() {
 #[cfg_attr(
     windows,
     ignore = "the fake keeper is a shell script, which Windows cannot run"
+)]
+#[cfg_attr(
+    miri,
+    ignore = "starts the fake keeper, and MIRI cannot start a process"
 )]
 fn a_keeper_that_says_the_wrong_thing_is_refused() {
     let home = tempdir();

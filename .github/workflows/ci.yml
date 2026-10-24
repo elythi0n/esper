@@ -168,9 +168,14 @@ jobs:
       - name: Rust — benchmark against the targets
         run: make bench
 
+      # The list is printed, then tested: Git Bash on Windows has no
+      # `/dev/stderr` to `tee` it to.
       - name: Go — format
         shell: bash
-        run: test -z "$(gofmt -s -l . | tee /dev/stderr)"
+        run: |
+          unformatted=$(gofmt -s -l .)
+          printf '%s\n' "$unformatted"
+          test -z "$unformatted"
 
       - name: Go — vet
         run: go vet ./...

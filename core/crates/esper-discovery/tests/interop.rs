@@ -36,6 +36,10 @@ use esper_discovery::wire::{Data, Message, Record, TYPE_PTR};
 
 /// `Some(python)` when an outside DNS implementation is available.
 fn python() -> Option<&'static str> {
+    if cfg!(miri) {
+        println!("skipped: MIRI cannot start another program, so there is no outside reader");
+        return None;
+    }
     let ok = Command::new("python3")
         .args(["-c", "import dns.message"])
         .output()

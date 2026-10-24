@@ -3,3 +3,7 @@
 # on Windows does, by default — makes every one of them a mismatch that is not a
 # defect. Checked out exactly as committed, everywhere.
 testdata/** -text
+
+# gofmt writes LF and reports any file that differs from what it writes, so a
+# Windows checkout with CRLF is every Go file reported unformatted.
+*.go text eol=lf
