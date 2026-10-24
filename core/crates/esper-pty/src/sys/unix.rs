@@ -102,12 +102,31 @@ pub fn close_master(read: ReadHalf, write: WriteHalf) -> Option<u32> {
     let Ok(pty) = read.unsplit(write) else {
         return None;
     };
-    let group = rustix::termios::tcgetpgrp(&pty)
-        .ok()
-        .and_then(|pid| u32::try_from(pid.as_raw_nonzero().get()).ok());
+    let group = foreground_group(&pty);
     // The hangup itself.
     drop(pty);
     group
+}
+
+/// The terminal's foreground process group, where it can be asked safely.
+///
+/// **Linux only, because of what `tcgetpgrp` answers elsewhere.** With no
+/// foreground group — a shell that has already exited — macOS returns 0 rather
+/// than an error, and rustix builds a `Pid` from it unchecked on every platform
+/// but Linux: a panic in a debug build and a `NonZero` holding zero in a
+/// release one. Asking nowhere else costs only the chase, which is a second
+/// chance at a job that slipped the hangup; the escalation against the shell's
+/// own group still happens.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn foreground_group(pty: &pty_process::Pty) -> Option<u32> {
+    rustix::termios::tcgetpgrp(pty)
+        .ok()
+        .and_then(|pid| u32::try_from(pid.as_raw_nonzero().get()).ok())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn foreground_group(_: &pty_process::Pty) -> Option<u32> {
+    None
 }
 
 /// Whether `pid` is still part of the session `leader` leads.
