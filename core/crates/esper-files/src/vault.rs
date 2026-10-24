@@ -143,8 +143,8 @@ impl Vault {
                 root.display()
             )));
         }
-        let handle = std::fs::File::open(root)
-            .map_err(|e| FileError::NoRoot(format!("{}: {e}", root.display())))?;
+        let handle =
+            open_dir(root).map_err(|e| FileError::NoRoot(format!("{}: {e}", root.display())))?;
         let how = platform::best_confinement(&handle);
         Ok(Self {
             root: handle,
@@ -293,6 +293,26 @@ impl Vault {
     pub fn sync_dir(&self, path: &SafePath) {
         platform::sync_dir(self, path);
     }
+}
+
+/// A handle on a directory.
+///
+/// **Windows will not open a directory as a file unless asked to**: without
+/// `FILE_FLAG_BACKUP_SEMANTICS` the answer is "Access is denied", which is how
+/// every root failed there whatever its permissions.
+#[cfg(windows)]
+fn open_dir(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_dir(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 #[cfg(unix)]
