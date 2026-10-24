@@ -54,10 +54,6 @@ criteria = "safe-to-deploy"
 version = "0.1.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.chacha20]]
-version = "0.10.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.ciborium]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
@@ -74,10 +70,6 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.cpufeatures]]
-version = "0.3.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.crypto-common]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
@@ -92,6 +84,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.digest]]
 version = "0.9.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.downcast-rs]]
+version = "1.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.ed25519]]
@@ -116,10 +112,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.fs_extra]]
 version = "1.3.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.futures-core]]
-version = "0.3.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-task]]
@@ -214,16 +206,16 @@ criteria = "safe-to-deploy"
 version = "0.10.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.pkg-config]]
-version = "0.3.34"
-criteria = "safe-to-deploy"
-
 [[exemptions.proc-macro2]]
 version = "1.0.107"
 criteria = "safe-to-deploy"
 
 [[exemptions.pty-process]]
 version = "0.5.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.quick-xml]]
+version = "0.41.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.quinn]]
@@ -246,14 +238,6 @@ criteria = "safe-to-deploy"
 version = "0.10.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.rand_core]]
-version = "0.10.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.rand_pcg]]
-version = "0.10.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.ring]]
 version = "0.17.14"
 criteria = "safe-to-deploy"
@@ -263,7 +247,7 @@ version = "2.1.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
-version = "0.23.43"
+version = "0.23.37"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-pki-types]]
@@ -304,10 +288,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serde_json]]
 version = "1.0.151"
-criteria = "safe-to-deploy"
-
-[[exemptions.shlex]]
-version = "2.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.signal-hook-registry]]
@@ -370,10 +350,6 @@ criteria = "safe-to-deploy"
 version = "0.1.31"
 criteria = "safe-to-deploy"
 
-[[exemptions.tracing-core]]
-version = "0.1.36"
-criteria = "safe-to-deploy"
-
 [[exemptions.tracing-subscriber]]
 version = "0.3.23"
 criteria = "safe-to-deploy"
@@ -384,10 +360,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]
 version = "1.0.24"
-criteria = "safe-to-deploy"
-
-[[exemptions.untrusted]]
-version = "0.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.valuable]]
@@ -418,8 +390,32 @@ criteria = "safe-to-deploy"
 version = "0.2.127"
 criteria = "safe-to-deploy"
 
-[[exemptions.web-time]]
-version = "1.1.0"
+[[exemptions.wayland-backend]]
+version = "0.3.17"
+criteria = "safe-to-deploy"
+
+[[exemptions.wayland-client]]
+version = "0.31.15"
+criteria = "safe-to-deploy"
+
+[[exemptions.wayland-protocols]]
+version = "0.32.13"
+criteria = "safe-to-deploy"
+
+[[exemptions.wayland-protocols-misc]]
+version = "0.3.12"
+criteria = "safe-to-deploy"
+
+[[exemptions.wayland-protocols-wlr]]
+version = "0.3.12"
+criteria = "safe-to-deploy"
+
+[[exemptions.wayland-scanner]]
+version = "0.31.11"
+criteria = "safe-to-deploy"
+
+[[exemptions.wayland-sys]]
+version = "0.31.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.wide]]
