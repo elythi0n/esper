@@ -831,8 +831,8 @@ cleanup_terminal() {
              "${pw_host:-}" "${li_host:-}" "${li_client:-}" "${li_hold:-}" \
              "${mk_host:-}" "${mk_client:-}" "${na_host:-}" "${la_host:-}" \
              "${bd_host:-}" "${wd_host:-}" "${wd_client:-}" "${wd_win:-}" \
-             "${wd_xev:-}" "${wd_x:-}" "${wd_x2:-}" "${ask_x:-}" "${own_x:-}" \
-             "${bd_x:-}" "${wr_pid:-}"; do
+             "${wd_xev:-}" "${wd_x:-}" "${wd_x2:-}" "${ask_x:-}" "${ask_vx:-}" "${own_x:-}" \
+             "${bd_x:-}" "${wr_pid:-}" "${la_x:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
   rm -rf "$term_a" "$term_b"
@@ -6405,17 +6405,26 @@ PYLISTEN
       # over it, so the host refuses — correctly — and a dozen checks below go
       # red for a reason that has nothing to do with the code. Every other
       # display check in this suite already brings its own `Xvfb`.
+      #
+      # **And the viewer on a second one.** Input comes from a window, so a
+      # viewer with no display cannot drive whatever it is allowed, and one
+      # that inherited this shell's would open its window on the person
+      # running the suite. Not the host's display either: a window over the
+      # indicator is a screen the host will not vouch for.
       ask_d=""
+      ask_v=""
       if command -v Xvfb >/dev/null 2>&1; then
         for d in $(seq 71 99); do
           [ -e "/tmp/.X${d}-lock" ] && continue
-          ask_d=$d; break
+          if [ -z "$ask_d" ]; then ask_d=$d; else ask_v=$d; break; fi
         done
       fi
-      if [ -n "$ask_d" ] && command -v script >/dev/null 2>&1; then
+      if [ -n "$ask_v" ] && command -v script >/dev/null 2>&1; then
         echo "  — a session that asks to be allowed more while it runs"
         Xvfb ":$ask_d" -screen 0 1280x800x24 >/dev/null 2>&1 &
         ask_x=$!
+        Xvfb ":$ask_v" -screen 0 1280x800x24 >/dev/null 2>&1 &
+        ask_vx=$!
         sleep 1
         mk=$(mktemp -d)
         cp -a "$term_a/." "$mk/" 2>/dev/null || true
@@ -6450,7 +6459,8 @@ PYLISTEN
           sed 's/^/      /' "$mk/host.log"
           fail=1
         else
-          env -u XAUTHORITY ESPER_HOME="$term_b" timeout 90 "$BIN/esper-engine" \
+          env -u XAUTHORITY -u WAYLAND_DISPLAY DISPLAY=":$ask_v" ESPER_HOME="$term_b" \
+            timeout 90 "$BIN/esper-engine" \
             connect "$mk_addr" --control --present --seconds 20 > "$mk/client.log" 2>&1 &
           mk_client=$!
           put=""
@@ -6564,8 +6574,8 @@ PYLISTEN
         kill "$mk_host" 2>/dev/null || true
         wait "$mk_host" 2>/dev/null || true
         mk_host=""
-        kill "${ask_x:-}" 2>/dev/null || true
-        ask_x=""
+        kill "${ask_vx:-}" 2>/dev/null || true
+        ask_vx=""
         rm -rf "$mk"
 
         # **And a host that does not put such questions at all.** A standing
@@ -6577,7 +6587,11 @@ PYLISTEN
         printf 'host.allow_asking = false\n' >> "$na/config.toml"
         ESPER_HOME="$na" "$BIN/esper-engine" grant "$fp" unattended --yes >/dev/null 2>&1 || true
         ESPER_HOME="$na" "$BIN/esper-engine" revoke "$fp" control >/dev/null 2>&1 || true
-        ESPER_HOME="$na" timeout 60 "$BIN/esper-engine" host \
+        # On the display of its own. The host opens an injector before it reads
+        # its policy, and with no display the answer is the truthful but
+        # different "nothing to inject with" — which is not what is checked.
+        env -u XAUTHORITY -u WAYLAND_DISPLAY DISPLAY=":$ask_d" ESPER_HOME="$na" \
+          timeout 60 "$BIN/esper-engine" host \
           --listen 127.0.0.1:0 --no-mdns > "$na/host.log" 2>&1 &
         na_host=$!
         na_addr=""
@@ -6614,8 +6628,10 @@ PYLISTEN
         wait "$na_host" 2>/dev/null || true
         na_host=""
         rm -rf "$na"
+        kill "${ask_x:-}" 2>/dev/null || true
+        ask_x=""
       else
-        printf '  — skipped the asking checks: needs `script` and an Xvfb of their own\n'
+        printf '  — skipped the asking checks: needs `script` and two Xvfb of their own\n'
       fi
 
       # **One device set apart from the host's rule about locking.**
@@ -6627,6 +6643,25 @@ PYLISTEN
       # records it, and a real session's end obeys it and says which of the
       # two rules decided.
       echo "  — a device with its own answer about locking the screen"
+      # **A display of its own, and never this shell's.** A host with no screen
+      # has nothing to lock and says nothing about it, so the host rule cannot
+      # be seen deciding; and a host given the person's own display, with
+      # `lock_after_session = "always"`, locks the screen of whoever is
+      # running the suite. With no Xvfb the check that needs one says so.
+      la_d=""
+      if command -v Xvfb >/dev/null 2>&1; then
+        for d in $(seq 71 99); do
+          [ -e "/tmp/.X${d}-lock" ] && continue
+          la_d=$d; break
+        done
+      fi
+      la_env=(env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY)
+      if [ -n "$la_d" ]; then
+        Xvfb ":$la_d" -screen 0 1280x800x24 >/dev/null 2>&1 &
+        la_x=$!
+        sleep 1
+        la_env+=(DISPLAY=":$la_d")
+      fi
       la=$(mktemp -d)
       cp -a "$term_a/." "$la/" 2>/dev/null || true
       : > "$la/sessions.log"
@@ -6660,7 +6695,7 @@ PYLISTEN
         fail=1
       fi
 
-      ESPER_HOME="$la" timeout 60 "$BIN/esper-engine" host \
+      "${la_env[@]}" ESPER_HOME="$la" timeout 60 "$BIN/esper-engine" host \
         --listen 127.0.0.1:0 --no-mdns > "$la/host.log" 2>&1 &
       la_host=$!
       la_addr=""
@@ -6707,7 +6742,7 @@ PYLISTEN
       # **And taking the answer off puts the device back on the host's rule**,
       # which is the half that makes it a setting rather than a trapdoor.
       ESPER_HOME="$la" "$BIN/esper-engine" lock-after "$fp" default >/dev/null 2>&1 || true
-      ESPER_HOME="$la" timeout 60 "$BIN/esper-engine" host \
+      "${la_env[@]}" ESPER_HOME="$la" timeout 60 "$BIN/esper-engine" host \
         --listen 127.0.0.1:0 --no-mdns > "$la/host2.log" 2>&1 &
       la_host=$!
       la_addr=""
@@ -6728,6 +6763,8 @@ PYLISTEN
         done
         if [ -n "$back" ]; then
           printf '  ✓ and with the answer taken off, the host rule decides again\n'
+        elif [ -z "$la_d" ]; then
+          printf '  — skipped the host rule deciding again: needs an Xvfb to lock\n'
         else
           printf '  ✗ the device kept its own answer after it was taken off\n'
           { grep -m4 '  · ' "$la/host2.log" || true; } | sed 's/^/      /'
@@ -6741,6 +6778,8 @@ PYLISTEN
       wait "$la_host" 2>/dev/null || true
       la_host=""
       rm -rf "$la"
+      kill "${la_x:-}" 2>/dev/null || true
+      la_x=""
 
       echo "  — revoking a device that is connected right now"
       { printf 'echo holding\n'; sleep 15; } | \
