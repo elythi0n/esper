@@ -22,6 +22,28 @@ fn request(cols: u16, rows: u16) -> TerminalOpen {
     }
 }
 
+/// Wait for the shell to exit, reading what it says on the way out.
+///
+/// **On macOS a process cannot finish exiting while its terminal holds output
+/// nobody has read**: closing the last handle on the terminal waits for that
+/// output to drain. A test that wrote `exit` and then only waited would wait
+/// for ever there, and Linux never shows it. A session reads all the time, so
+/// this is what one looks like.
+async fn exits(read: &mut ReadHalf, child: &mut tokio::process::Child) -> std::process::ExitStatus {
+    let mut sink = [0u8; 4096];
+    let mut reading = true;
+    loop {
+        tokio::select! {
+            status = child.wait() => return status.expect("wait"),
+            n = read.read(&mut sink), if reading => {
+                // The end of the terminal, or an error, is not the end of the
+                // shell: stop reading and go on waiting for it.
+                reading = matches!(n, Ok(k) if k > 0);
+            }
+        }
+    }
+}
+
 /// Read until `needle` appears, or fail reporting what was actually seen —
 /// far more useful than "timed out" when a shell misbehaves.
 async fn read_until(read: &mut ReadHalf, needle: &str) -> String {
@@ -93,10 +115,9 @@ async fn a_shell_runs_and_answers() {
     assert!(seen.contains("esper-marker-42"));
 
     write.write_all(b"exit\n").await.expect("exit");
-    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+    let status = tokio::time::timeout(Duration::from_secs(15), exits(&mut read, &mut child))
         .await
-        .expect("the shell should exit")
-        .expect("wait");
+        .expect("the shell should exit");
     assert_eq!(
         exit_status(&status).shell_code(),
         0,
@@ -189,13 +210,12 @@ async fn utf8_survives_including_wide_and_combining_characters() {
 )]
 async fn a_nonzero_exit_code_is_reported() {
     let t = Terminal::open(&request(80, 24)).expect("open");
-    let (read, mut write, mut child) = t.into_parts();
+    let (mut read, mut write, mut child) = t.into_parts();
     write.write_all(b"exit 42\n").await.expect("write");
 
-    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+    let status = tokio::time::timeout(Duration::from_secs(15), exits(&mut read, &mut child))
         .await
-        .expect("exit")
-        .expect("wait");
+        .expect("exit");
     let e = exit_status(&status);
     assert_eq!(e.code, Some(42));
     assert_eq!(e.shell_code(), 42);
@@ -669,14 +689,13 @@ async fn a_backgrounded_job_is_deliberately_left_running() {
 )]
 async fn tearing_down_an_already_exited_shell_reports_its_exit() {
     let t = Terminal::open(&request(80, 24)).expect("open");
-    let (read, mut write, mut child) = t.into_parts();
+    let (mut read, mut write, mut child) = t.into_parts();
     write.write_all(b"exit 7\n").await.expect("write");
 
     // Let it exit on its own first.
-    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+    let status = tokio::time::timeout(Duration::from_secs(15), exits(&mut read, &mut child))
         .await
-        .expect("exit")
-        .expect("wait");
+        .expect("exit");
     assert_eq!(exit_status(&status).code, Some(7));
 
     // Now tear down. It must not panic, and must not hang.
