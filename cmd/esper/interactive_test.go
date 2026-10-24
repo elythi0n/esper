@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/elythi0n/esper/internal/devices"
 )
 
@@ -246,8 +244,7 @@ func TestDevNullIsNotSomebodyToAsk(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = null.Close() })
 
-	var termios unix.Termios
-	if err := ioctlTermios(int(null.Fd()), &termios); err == nil {
+	if isATerminal(null.Fd()) {
 		t.Fatalf("%s answered as a terminal", os.DevNull)
 	}
 	// And the mode check that used to decide says the opposite, which is why

@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/elythi0n/esper/internal/devices"
 )
 
@@ -51,20 +49,7 @@ exec rather than a subprocess. Choosing a machine *is* running `esper connect
 // question is whether the descriptor has a terminal behind it, and the only
 // thing that answers that is asking the terminal driver.
 var atATerminal = func() bool {
-	var termios unix.Termios
-	//nolint:errcheck // the error *is* the answer: no termios, no terminal.
-	err := ioctlTermios(int(os.Stdin.Fd()), &termios)
-	return err == nil
-}
-
-// ioctlTermios asks the terminal driver about a descriptor.
-func ioctlTermios(fd int, into *unix.Termios) error {
-	got, err := unix.IoctlGetTermios(fd, termiosRequest)
-	if err != nil {
-		return err
-	}
-	*into = *got
-	return nil
+	return isATerminal(os.Stdin.Fd())
 }
 
 /*
