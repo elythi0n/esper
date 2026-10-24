@@ -111,6 +111,19 @@ const fn open_wlr(_monitor: Option<MonitorId>) -> Result<Option<Box<dyn Capturer
     Ok(None)
 }
 
+/// A backend somebody named that this build does not have.
+///
+/// **An error, like one that failed to open**, and for the same reason: the
+/// alternative is the synthetic pattern, handed to somebody who said which
+/// screen they wanted. On a platform without the backend that fall-through was
+/// silent, because "not compiled in" was only ever noted as an attempt.
+fn not_here(backend: &'static str) -> CaptureError {
+    CaptureError::Backend {
+        backend,
+        detail: "not compiled in for this platform".to_owned(),
+    }
+}
+
 pub fn open(
     choice: Choice,
     monitor: Option<MonitorId>,
@@ -127,7 +140,12 @@ pub fn open(
                     attempts,
                 });
             }
-            Ok(None) => attempts.push("x11: not compiled in for this platform".to_owned()),
+            Ok(None) => {
+                if choice == Choice::X11 {
+                    return Err(not_here("x11"));
+                }
+                attempts.push("x11: not compiled in for this platform".to_owned());
+            }
             Err(e) => {
                 // Asking for x11 explicitly and not getting it is an error.
                 // Falling back would hand back a test pattern to somebody who
@@ -155,7 +173,12 @@ pub fn open(
                     attempts,
                 });
             }
-            Ok(None) => attempts.push("wlr: not compiled in for this platform".to_owned()),
+            Ok(None) => {
+                if choice == Choice::Wlr {
+                    return Err(not_here("wlr"));
+                }
+                attempts.push("wlr: not compiled in for this platform".to_owned());
+            }
             Err(e) => {
                 if choice == Choice::Wlr {
                     return Err(e);
@@ -174,7 +197,12 @@ pub fn open(
                     attempts,
                 });
             }
-            Ok(None) => attempts.push("dxgi: not compiled in for this platform".to_owned()),
+            Ok(None) => {
+                if choice == Choice::Dxgi {
+                    return Err(not_here("dxgi"));
+                }
+                attempts.push("dxgi: not compiled in for this platform".to_owned());
+            }
             Err(e) => {
                 // Asking for it explicitly and not getting it is an error, for
                 // the same reason as x11: falling back hands a test pattern to
