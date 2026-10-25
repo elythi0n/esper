@@ -693,8 +693,9 @@ tidy:
 ## Two crates are excluded, for the same reason stated two ways: MIRI's cost
 ## here is measured and its value here is not.
 ##
-## esper-crypto: interpreting Ed25519 takes ~200s against ~13s for everything
-## else, and dalek's unsafe is heavily audited upstream.
+## esper-crypto: interpreting Ed25519 takes ~200s, which was the whole run
+## when everything else took ~13s, and dalek's unsafe is heavily audited
+## upstream. Everything else now takes about eight minutes on eight threads.
 ##
 ## esper-capture, esper-color and esper-scale: forbid unsafe code and have
 ## no FFI, so there is no undefined behavior for MIRI to find. Their tests are
@@ -732,16 +733,18 @@ tidy:
 ## path with `openat2`, which MIRI does not implement. A crate where it is
 ## incidental marks those tests instead, so the rest of it still runs.
 ##
-## `--no-fail-fast`, because MIRI ends a test binary at the first thing it
-## cannot do: without it one such test hides every crate after it, and the
-## list comes back one run at a time.
+## Through nextest (`cargo install cargo-nextest`), which runs each test in a
+## process of its own: MIRI ends a process at the first thing it cannot do, so
+## one such test no longer hides the rest of its binary, and every test has a
+## clock. `core/.config/nextest.toml` holds the limit and the handful of tests
+## too slow to run on every push; `miri-full` runs those too.
 MIRI_FLAGS := -Zmiri-disable-isolation
 MIRI_OUT := --exclude esper-engine --exclude esper-link \
 		--exclude esper-bench --exclude esper-encode-retune \
 		--exclude esper-audio-pulse --exclude esper-files
 .PHONY: miri
 miri:
-	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri test --no-fail-fast --workspace \
+	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri nextest run --workspace \
 		--exclude esper-crypto --exclude esper-capture \
 		--exclude esper-color --exclude esper-scale \
 		--exclude esper-encode --exclude esper-decode \
@@ -754,7 +757,7 @@ miri:
 ## rather than a judgement about the code.
 .PHONY: miri-full
 miri-full:
-	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri test --no-fail-fast --workspace \
+	@cd $(CORE) && MIRIFLAGS="$(MIRI_FLAGS)" cargo +nightly miri nextest run --profile miri-full --workspace \
 		--exclude esper-encode --exclude esper-decode \
 		--exclude esper-pipeline $(MIRI_OUT)
 

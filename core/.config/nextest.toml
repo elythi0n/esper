@@ -1,0 +1,42 @@
+# Only MIRI runs through nextest; the ordinary suite is still `cargo test`.
+#
+# `cargo miri nextest run` picks the `default-miri` profile by itself. What it
+# buys over `cargo miri test` is a clock on each test. The run that hit the
+# six-hour limit was one interpreter working through a test that builds a
+# full-screen image, then a few megabytes of clipboard: seconds natively, hours
+# under MIRI, and nothing said which test it was until the job was cancelled.
+# Here a test that runs too long is stopped and reported by name, and the rest
+# carry on in parallel.
+[profile.default-miri]
+# Warned about after a minute, stopped after two.
+slow-timeout = { period = "60s", terminate-after = 2 }
+# Every failing test in one run, not only the first.
+fail-fast = false
+# The tests that need more than two minutes under MIRI, each found by the limit
+# above rather than guessed at. Every one of them sweeps megabytes or thousands
+# of cases — a screenful of pixels, a clipboard at its cap, every time zone on
+# the machine, a sequence counter all the way round — which is a moment
+# natively and many minutes interpreted. Left out of the run on each push and
+# run by `miri-full` below, so they are slow rather than unchecked. A test that
+# grows past the limit later fails by name, and belongs here.
+default-filter = """
+not (
+    test(=conformance::tests::a_backend_that_truncates_at_a_nul_is_caught)
+  | test(=conformance::tests::a_backend_with_a_frozen_generation_is_caught)
+  | test(=conformance::tests::the_null_clipboard_conforms)
+  | test(=every_zone_on_this_machine_parses)
+  | test(=tests::no_name_can_decide_how_big_the_window_is)
+  | test(=tests::the_identity_is_always_drawn)
+  | test(=annexb::tests::arbitrary_bytes_never_panic)
+  | test(=depacketize::tests::frames_keep_arriving_across_the_sequence_wrap)
+  | test(=packetize::tests::every_datagram_fits_the_mtu)
+  | test(=a_screenful_of_nothing_compresses_to_almost_nothing)
+  | test(=message::clipboard_tests::the_cap_holds_exactly_at_its_edge)
+)
+"""
+
+# The nightly run: the same, with the slow tests back in and half an hour each.
+[profile.miri-full]
+inherits = "default-miri"
+default-filter = "all()"
+slow-timeout = { period = "60s", terminate-after = 30 }

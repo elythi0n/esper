@@ -372,18 +372,25 @@ jobs:
       - run: ./scripts/smoke.sh
 
   # Memory-safety checks over the fast crates. esper-crypto is excluded here
-  # and covered by the nightly workflow: interpreting Ed25519 costs ~200s
-  # against ~13s for everything else, and dalek's unsafe is audited upstream.
-  # The FFI crates land in Phase 3 and belong in *this* set, because that is
-  # where undefined behavior actually lives.
+  # and covered by the nightly workflow, with the few tests too slow to
+  # interpret on every push: `core/.config/nextest.toml` names them. The FFI
+  # crates land in Phase 3 and belong in *this* set, because that is where
+  # undefined behavior actually lives.
+  #
+  # A limit on the job as well as on each test. This job once ran for the six
+  # hours GitHub allows before it was cancelled, and said nothing about why.
   miri:
     name: miri
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core

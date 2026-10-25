@@ -16,11 +16,17 @@ jobs:
   miri-full:
     name: miri (all crates)
     runs-on: ubuntu-latest
+    # Under GitHub's six hours, so a run that is too slow fails with its own
+    # name instead of being cancelled.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
