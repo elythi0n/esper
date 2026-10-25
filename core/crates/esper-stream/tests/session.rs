@@ -1071,34 +1071,53 @@ fn a_burst_of_loss_produces_one_keyframe_request() {
 /// coin flip rather than a measurement of this rule.
 #[test]
 fn sustained_loss_asks_no_faster_than_the_pace() {
-    // Sixty frames a second, so there are enough frames to lose. The loss is
-    // per datagram, and a 320x240 frame from a one-thread encoder is about one
-    // datagram: at thirty a second, this link lost only five frames a second,
-    // which is the pace itself and so cannot show it holding. The sliced
-    // frames a threaded encoder made were several datagrams each, and that
-    // was the margin this test had, without saying so.
+    // **Recorded first, then played at a fixed rate**, because the host makes
+    // frames by the real clock and the controller here runs on a simulated
+    // one. Stepped together, a slower machine made fewer frames per simulated
+    // second and so lost fewer: two seconds lost sixteen frames on one machine
+    // and nine on a CI runner, against the ten requests the pace allows, so
+    // whether this tested anything depended on the runner. The controller's
+    // requests never reach the host here, so nothing is lost by taking the
+    // frames first.
     let mut h = host(60);
     let mut c = controller(&h);
     c.set_round_trip(Duration::from_millis(200));
-    // Losing most of them, so the link loses more frames per second than the
-    // pace allows requests. A gentler link cannot test a rate limit: it never
-    // reaches the limit.
-    let mut link = LossySink::new(70);
     let _ = c.take_outbound();
 
+    // A hundred and twenty frames, however long the machine takes to make
+    // them. A step that sends nothing made no frame, and is not one. Bounded,
+    // so a host that stopped making frames fails here rather than hanging.
+    let mut recorder = LossySink::new(0);
+    let mut frames: Vec<Vec<Vec<u8>>> = Vec::new();
+    for _ in 0..2_000 {
+        if frames.len() == 120 {
+            break;
+        }
+        let _ = h
+            .step(Duration::from_millis(25), &mut recorder)
+            .expect("a step");
+        let sent = std::mem::take(&mut recorder.sent);
+        if !sent.is_empty() {
+            frames.push(sent);
+        }
+    }
+    assert_eq!(frames.len(), 120, "the host stopped making frames");
+
+    // Two seconds of link at sixty frames a second, losing most of it, so the
+    // link loses more frames than the pace allows requests. A gentler link
+    // cannot test a rate limit: it never reaches the limit. Drained after
+    // every frame like a real caller — the storm this prevents is one request
+    // per lost frame.
+    let mut link = LossySink::new(70);
     let start = std::time::Instant::now();
     let mut asks = 0u32;
     let mut lost = 0u32;
     let mut out = Vec::new();
-    // Eighty turns of twenty-five milliseconds: two seconds of link, drained
-    // every turn like a real caller. Fine-grained on purpose — the storm this
-    // prevents is one request per lost frame, so the test has to lose more
-    // frames than the pace allows requests.
-    for turn in 0..80u32 {
-        let now = start + Duration::from_millis(u64::from(turn) * 25);
-        let _ = h
-            .step(Duration::from_millis(25), &mut link)
-            .expect("a step");
+    for (n, frame) in frames.iter().enumerate() {
+        let now = start + Duration::from_secs(2) * n as u32 / 120;
+        for datagram in frame {
+            link.send(datagram).expect("a lossy send never fails");
+        }
         for datagram in std::mem::take(&mut link.sent) {
             c.receive_at(&datagram, now, &mut out).expect("received");
         }
