@@ -203,12 +203,25 @@ func (s *Supervisor) Start(ctx context.Context, local proto.Hello) error {
 	// warning lands in the middle of a report, attributed to nobody. Relayed,
 	// every line says where it came from, and a command that writes a report
 	// on stdout keeps that report clean.
-	stderr, err := cmd.StderrPipe()
+	//
+	// **A pipe of our own, not `StderrPipe`.** `Wait` closes a `StderrPipe`
+	// the moment the process exits, and the reaper calls `Wait` while the
+	// relay is still reading: an engine that printed its reason and exited
+	// straight away could have the pipe closed under the relay before a line
+	// of it was read, and the reason was lost. Here the relay owns the read
+	// end and closes it when it has read everything.
+	stderr, stderrW, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("engine stderr: %w", err)
 	}
+	cmd.Stderr = stderrW
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	// The child has its own copy now; ours would keep the pipe from ever
+	// reaching its end.
+	_ = stderrW.Close()
+	if err != nil {
+		_ = stderr.Close()
 		return fmt.Errorf("starting %s: %w", s.path, err)
 	}
 	s.cmd, s.stdin, s.stdout, s.running = cmd, stdin, stdout, true
@@ -220,6 +233,7 @@ func (s *Supervisor) Start(ctx context.Context, local proto.Hello) error {
 	relayed := s.relayed
 	go func() {
 		s.relay(stderr)
+		_ = stderr.Close()
 		close(relayed)
 	}()
 	go s.reap(cmd, s.reaped)

@@ -590,8 +590,10 @@ func TestTheEnginesOwnReasonSurvivesAFailedHandshake(t *testing.T) {
 		t.Fatalf("the reason is not what the message leads with: %v", err)
 	}
 	// And the framing error is still wrapped, so anything matching on it still
-	// matches.
-	if !strings.Contains(err.Error(), "reading engine hello") {
+	// matches. Which one depends on the race the stand-in wins: exited before
+	// our hello went out, the write fails; after, the read does.
+	if !strings.Contains(err.Error(), "reading engine hello") &&
+		!strings.Contains(err.Error(), "sending hello") {
 		t.Fatalf("what actually happened to the stream was dropped: %v", err)
 	}
 	// **Bounded.** A hung engine fails this handshake too and has said
