@@ -195,12 +195,21 @@ fn encode_run(motion: Motion) -> Result<(f64, f64), BenchError> {
     Ok((per_frame, cores))
 }
 
-/// Convert a frame, whole or in one strip.
+/// Convert a frame whole and in one strip, and say what each took.
 ///
 /// The same frame every time: what is being measured is the converter, and a
 /// fresh capture each round would put the pattern's own rendering into the
 /// figure.
-fn convert_run(whole: bool) -> Result<f64, BenchError> {
+///
+/// **Interleaved, and the median of each, because the two figures are only
+/// worth their ratio.** Timed as two back-to-back averages, the strip's sixty
+/// runs were seven milliseconds in all, so one preemption on a shared
+/// three-core runner moved the line figure by a third and the ratio with it:
+/// 74, 49, 55 and 37 times on the same macOS runner with the same code, where
+/// the x86 runners stayed between 54 and 59. Alternating the two puts any
+/// disturbance on both sides of the division, and a median is decided by the
+/// typical run rather than the unlucky one.
+fn convert_runs() -> Result<(f64, f64), BenchError> {
     let mut capturer =
         SyntheticCapturer::new(WIDTH, HEIGHT, 1_000_000).map_err(BenchError::Pattern)?;
     let source = next(&mut capturer)?;
@@ -215,26 +224,42 @@ fn convert_run(whole: bool) -> Result<f64, BenchError> {
         height: 20,
     }];
 
-    let mut run = || -> Result<(), BenchError> {
+    let mut run = |whole: bool| -> Result<f64, BenchError> {
+        let started = Instant::now();
         if whole {
             esper_color::convert::whole_frame(&source, space(), &mut out)
                 .map(|_| ())
-                .map_err(|e| BenchError::Failed(e.to_string()))
+                .map_err(|e| BenchError::Failed(e.to_string()))?;
         } else {
             esper_color::convert::regions(&source, space(), &mut out, &strip)
                 .map(|_| ())
-                .map_err(|e| BenchError::Failed(e.to_string()))
+                .map_err(|e| BenchError::Failed(e.to_string()))?;
         }
+        Ok(started.elapsed().as_secs_f64() * 1000.0)
     };
 
     for _ in 0..WARM_UP {
-        run()?;
+        run(true)?;
+        run(false)?;
     }
-    let started = Instant::now();
+    let mut whole = Vec::new();
+    let mut line = Vec::new();
     for _ in 0..FRAMES {
-        run()?;
+        whole.push(run(true)?);
+        line.push(run(false)?);
     }
-    Ok(started.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64)
+    Ok((median(&mut whole), median(&mut line)))
+}
+
+/// The middle value; the mean of the middle two when there is an even number.
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let mid = values.len() / 2;
+    match (values.get(mid.wrapping_sub(1)), values.get(mid)) {
+        (Some(a), Some(b)) if values.len().is_multiple_of(2) => (a + b) / 2.0,
+        (_, Some(b)) => *b,
+        _ => 0.0,
+    }
 }
 
 fn encoder_for(config: &EncoderConfig) -> Result<Box<dyn VideoEncoder>, EncodeError> {
@@ -351,8 +376,7 @@ pub fn run_all() -> Result<Measured, BenchError> {
         out.insert("encode.motion.factor", ms / screen_ms);
     }
 
-    let whole = convert_run(true)?;
-    let line = convert_run(false)?;
+    let (whole, line) = convert_runs()?;
     out.insert("convert.whole.ms", whole);
     out.insert("convert.line.ms", line);
     // The ratio, which is the claim rather than either number — and the one
@@ -810,4 +834,26 @@ pub fn soak(minutes: u64, mut each_minute: impl FnMut(SoakMinute)) -> Result<(),
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One slow run cannot move the figure, which is what the median is for.
+    #[test]
+    fn one_slow_run_does_not_decide_the_median() {
+        let mut runs = [0.12, 0.11, 3.0, 0.12, 0.13, 0.11];
+        assert!((median(&mut runs) - 0.12).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_odd_count_takes_the_middle_one() {
+        assert!((median(&mut [5.0, 1.0, 3.0]) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nothing_measured_is_zero_rather_than_a_panic() {
+        assert!(median(&mut []).abs() < 1e-9);
+    }
 }
