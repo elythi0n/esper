@@ -1,4 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Not under MIRI: twenty of these twenty-two tests start a session, a session
+// starts the OpenH264 encoder, which is C, and MIRI cannot call it. The framing
+// these sessions carry is checked under MIRI by the unit tests in esper-media
+// and this crate.
+#![cfg(not(miri))]
 
 //! A desktop that changes under a session.
 //!

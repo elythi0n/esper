@@ -379,6 +379,7 @@ mod tests {
     /// **Sound goes out as datagrams and comes back as frames**, through the
     /// same header format the picture uses.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn a_frame_becomes_a_datagram_and_a_datagram_becomes_a_frame() {
         let mut host = host();
         let mut controller = controller(&host.config());
@@ -407,6 +408,7 @@ mod tests {
     /// Opus payload type, the session's SSRC, and a timestamp that advances by
     /// one frame's samples.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn the_header_is_one_a_receiver_can_read() {
         let mut host = host();
         let mut want_timestamp = None;
@@ -427,6 +429,7 @@ mod tests {
     /// **A lost packet is concealed and counted**, so the sound blurs over the
     /// gap rather than clicking, and the session can say it happened.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn a_gap_is_concealed_and_counted() {
         let mut host = host();
         let mut controller = controller(&host.config());
@@ -472,6 +475,7 @@ mod tests {
     /// Continuing to synthesise from the decoder's memory would fill a pause
     /// with noise nobody played.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn a_very_long_gap_is_not_filled_with_invented_sound() {
         let mut host = host();
         let mut controller = controller(&host.config());
@@ -499,6 +503,7 @@ mod tests {
     /// is the A/V policy: sound is never delayed to line up with anything, so
     /// a packet that took a longer path has missed its moment.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn a_packet_that_arrives_late_is_dropped_rather_than_queued() {
         let mut host = host();
         let mut controller = controller(&host.config());
@@ -525,6 +530,7 @@ mod tests {
 
     /// A duplicate is dropped for the same reason, and counted the same way.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn a_duplicate_is_dropped() {
         let mut host = host();
         let mut controller = controller(&host.config());
@@ -539,6 +545,7 @@ mod tests {
     /// media channel carries the picture and the sound together, and a video
     /// packet handed to an audio decoder would be noise.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn a_datagram_from_another_stream_is_refused() {
         let mut host = host();
         let mut controller = controller(&host.config());
@@ -565,6 +572,7 @@ mod tests {
     /// Rubbish is refused, counted, and does not end the session — the path a
     /// hostile peer takes.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn rubbish_is_refused_without_ending_the_session() {
         let mut host = host();
         let mut controller = controller(&host.config());
@@ -581,6 +589,7 @@ mod tests {
     /// It would produce frames of a length the playback path did not size for,
     /// which is heard rather than reported.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn a_decoder_of_the_wrong_shape_is_refused() {
         let announced = SENT.as_config(SSRC);
         let other = Format {
@@ -594,6 +603,7 @@ mod tests {
     /// An announcement Opus cannot be built for is refused, rather than
     /// becoming a stream that fails on every packet.
     #[test]
+    #[cfg_attr(miri, ignore = "needs opus, which is C; MIRI cannot call it")]
     fn an_unsupported_announcement_is_refused() {
         let bad = AudioConfig {
             sample_rate_hz: 44_100,

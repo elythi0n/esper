@@ -1,4 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Not under MIRI: every session here starts the OpenH264 encoder, which is C,
+// and MIRI cannot call it. The framing these sessions carry is checked under
+// MIRI by the unit tests in esper-media and this crate.
+#![cfg(not(miri))]
 
 //! A whole media session, over a link that can be made to misbehave.
 //!
