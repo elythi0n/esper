@@ -314,6 +314,7 @@ mod tests {
     /// cleanly is `xdg-screensaver` delegating, and exited badly is a program
     /// that could not reach a display.
     #[test]
+    #[cfg_attr(miri, ignore = "starts processes, which MIRI cannot")]
     fn only_a_locker_that_fell_over_is_a_failure() {
         let still_running = Command::new("sleep")
             .arg("30")

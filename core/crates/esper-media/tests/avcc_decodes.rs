@@ -100,6 +100,7 @@ fn to_annexb(sample: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "needs openh264, which is C; MIRI cannot call it")]
 fn a_repackaged_stream_still_decodes() {
     let mut encoder = OpenH264::new(&EncoderConfig {
         fps: 30,
@@ -158,6 +159,7 @@ fn a_repackaged_stream_still_decodes() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "needs openh264, which is C; MIRI cannot call it")]
 fn the_codec_string_matches_what_the_encoder_made() {
     let mut encoder = OpenH264::new(&EncoderConfig {
         fps: 30,

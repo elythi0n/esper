@@ -65,6 +65,7 @@ fn encoder() -> OpenH264 {
 /// frame at the start of a session: the first frame has no previous marker to
 /// say where it begins, so it waits for the second to bound it.
 #[test]
+#[cfg_attr(miri, ignore = "needs openh264, which is C; MIRI cannot call it")]
 fn real_frames_survive_packetization_and_decode() {
     let mut enc = encoder();
     let mut dec = OpenH264Decoder::new(&DecoderConfig::default()).expect("a decoder");
@@ -148,6 +149,7 @@ fn real_frames_survive_packetization_and_decode() {
 /// controller either discards a picture it could have started from or tries to
 /// start from one it cannot.
 #[test]
+#[cfg_attr(miri, ignore = "needs openh264, which is C; MIRI cannot call it")]
 fn the_derived_keyframe_flag_matches_what_the_encoder_did() {
     let mut enc = encoder();
     let mut pack = Packetizer::new(SSRC, MTU).expect("valid");
@@ -217,6 +219,7 @@ fn the_derived_keyframe_flag_matches_what_the_encoder_did() {
 /// refuses rather than inventing pixels. That refusal is another reason to ask
 /// for a keyframe, which is exactly what a controller does with it.
 #[test]
+#[cfg_attr(miri, ignore = "needs openh264, which is C; MIRI cannot call it")]
 fn a_lossy_link_recovers_through_keyframe_requests() {
     let mut enc = encoder();
     let mut dec = OpenH264Decoder::new(&DecoderConfig::default()).expect("a decoder");
@@ -327,6 +330,7 @@ fn a_lossy_link_recovers_through_keyframe_requests() {
 
 /// Reordering is normal on a datagram link and must not cost frames.
 #[test]
+#[cfg_attr(miri, ignore = "needs openh264, which is C; MIRI cannot call it")]
 fn a_reordering_link_loses_nothing() {
     let mut enc = encoder();
     let mut pack = Packetizer::new(SSRC, MTU).expect("valid");

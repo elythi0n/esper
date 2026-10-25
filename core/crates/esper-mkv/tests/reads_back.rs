@@ -352,6 +352,7 @@ fn a_recording_that_was_never_finished_still_parses() {
 /// disappears on a machine without the tool is a check nobody knows they are
 /// missing.
 #[test]
+#[cfg_attr(miri, ignore = "runs ffprobe and openh264; MIRI can do neither")]
 fn ffprobe_reads_a_real_recording() {
     if std::process::Command::new("ffprobe")
         .arg("-version")

@@ -511,6 +511,7 @@ fn the_committed_fixture_is_a_stream_this_build_can_read() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "needs openh264, which is C; MIRI cannot call it")]
 fn what_this_build_writes_is_the_same_shape() {
     check(&build(), "a freshly written stream");
 }
