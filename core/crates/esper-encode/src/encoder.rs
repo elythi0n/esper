@@ -210,9 +210,12 @@ impl EncoderConfig {
     ///   means spending four cores' worth for a quarter of the wall clock.
     ///
     /// See [`crate::budget::Budget::encoder_threads`] for the measurements.
+    ///
+    /// **One thread, whatever the budget pays for, until openh264 can be torn
+    /// down safely.** See [`SAFE_THREADS`].
     #[must_use]
     pub fn for_budget(width: u32, height: u32, budget: &crate::budget::Budget) -> Self {
-        let threads = budget.encoder_threads();
+        let threads = budget.encoder_threads().min(SAFE_THREADS);
         Self {
             width,
             height,
@@ -318,6 +321,24 @@ pub enum Change {
 /// rather than a law. The relationship between slice size, slice count and
 /// content is not something two data points establish.
 pub const DEFAULT_SLICE_BYTES: u32 = 32 * 1024;
+
+/// The most threads a budget is given, whatever it could pay for.
+///
+/// **One, because openh264's threaded encoder uses memory it has freed.**
+/// Destroying an encoder frees its task manager, lock included, while a thread
+/// of openh264's pool can still be inside `OnTaskMinusOne`, unlocking that
+/// lock: the encode call returns when the last task signals, not when the
+/// thread that signalled has let go. ThreadSanitizer reports it on every run
+/// of `esper-pipeline`'s end-to-end tests, and it is the likeliest cause of the
+/// SIGSEGV those tests showed on CI. Every rebuild — a size change, a quality
+/// rung — destroys an encoder, so a host with a raised budget was exposed in
+/// the middle of a session.
+///
+/// What this costs is latency rather than CPU: one thread cannot finish a
+/// full-motion 1080p frame inside 33 ms, and four could (see
+/// [`crate::budget::Budget::encoder_threads`]). Raise it when an openh264 that
+/// tears down safely is the one this builds.
+pub const SAFE_THREADS: u16 = 1;
 
 /// One encoded picture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -594,11 +615,13 @@ mod tests {
              pure loss of compression efficiency"
         );
 
+        // A budget that could pay for four threads gets no more than openh264
+        // can tear down safely, and slicing only if that is more than one.
         let wide = EncoderConfig::for_budget(1920, 1080, &Budget::of(4.0));
-        assert!(wide.threads > 1);
+        assert!(wide.threads <= SAFE_THREADS);
         assert_eq!(
             wide.max_slice_bytes,
-            Some(DEFAULT_SLICE_BYTES),
+            (wide.threads > 1).then_some(DEFAULT_SLICE_BYTES),
             "more than one thread must mean slicing, or the threads do nothing"
         );
         assert!(wide.is_well_formed());

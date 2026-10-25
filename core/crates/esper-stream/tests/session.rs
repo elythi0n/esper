@@ -1071,7 +1071,13 @@ fn a_burst_of_loss_produces_one_keyframe_request() {
 /// coin flip rather than a measurement of this rule.
 #[test]
 fn sustained_loss_asks_no_faster_than_the_pace() {
-    let mut h = host(30);
+    // Sixty frames a second, so there are enough frames to lose. The loss is
+    // per datagram, and a 320x240 frame from a one-thread encoder is about one
+    // datagram: at thirty a second, this link lost only five frames a second,
+    // which is the pace itself and so cannot show it holding. The sliced
+    // frames a threaded encoder made were several datagrams each, and that
+    // was the margin this test had, without saying so.
+    let mut h = host(60);
     let mut c = controller(&h);
     c.set_round_trip(Duration::from_millis(200));
     // Losing most of them, so the link loses more frames per second than the
@@ -1084,11 +1090,11 @@ fn sustained_loss_asks_no_faster_than_the_pace() {
     let mut asks = 0u32;
     let mut lost = 0u32;
     let mut out = Vec::new();
-    // Forty turns of twenty-five milliseconds: one second of link at thirty
-    // frames a second, drained every turn like a real caller. Fine-grained on
-    // purpose — the storm this prevents is one request per lost frame, so the
-    // test has to lose more frames per second than the pace allows requests.
-    for turn in 0..40u32 {
+    // Eighty turns of twenty-five milliseconds: two seconds of link, drained
+    // every turn like a real caller. Fine-grained on purpose — the storm this
+    // prevents is one request per lost frame, so the test has to lose more
+    // frames than the pace allows requests.
+    for turn in 0..80u32 {
         let now = start + Duration::from_millis(u64::from(turn) * 25);
         let _ = h
             .step(Duration::from_millis(25), &mut link)
@@ -1104,18 +1110,20 @@ fn sustained_loss_asks_no_faster_than_the_pace() {
     }
 
     println!(
-        "{} dropped, {lost} lost, {asks} asks in one second",
+        "{} dropped, {lost} lost, {asks} asks in two seconds",
         link.dropped
     );
+    // Two seconds at one per 200 ms is ten requests, so fewer lost frames than
+    // that could never have reached the pace.
     assert!(
-        lost >= 8,
-        "only {lost} frames were lost in a second; this cannot test pacing"
+        lost > 10,
+        "only {lost} frames were lost in two seconds; this cannot test pacing"
     );
-    // One second at one per 200 ms: five, and a sixth would need the clock to
-    // have moved further than this loop moves it.
+    // Ten, and an eleventh would need the clock to have moved further than
+    // this loop moves it.
     assert!(
-        asks <= 6,
-        "{lost} lost frames produced {asks} requests in one second, at a pace of 200 ms"
+        asks <= 11,
+        "{lost} lost frames produced {asks} requests in two seconds, at a pace of 200 ms"
     );
     // And it does not stop asking: a link that keeps losing must keep
     // recovering, or a session that lost one keyframe stays black for good.
