@@ -8,21 +8,20 @@
   <strong><a href="https://esper.st">esper.st</a></strong> · <a href="docs/">Docs</a> · <a href="SECURITY.md">Security</a>
 </p>
 
-🚧 **Early development.** Linux hosts work end to end. The desktop window can
-pair devices, show activity and manage this machine, but it can't show a
-remote screen yet. For that, use `esper connect`. Windows and macOS hosts
-don't exist yet.
+🚧 **Early development.** Esper works end to end on Linux desktops running X11
+or Sway. There's no release to download yet, and GNOME on Wayland, Windows and
+macOS are still to come. [Features](#features) lists exactly what's ready.
 
 ---
 
 ## What it is
 
-Esper is an open-source alternative to TeamViewer that runs no servers of its
-own.
+Esper lets you see and control another computer, like TeamViewer, but without
+anyone else's servers in between.
 
-Two devices pair once with a short code. After that, they recognise each other
-by public key. There is no account and no password, and no server address is
-built into the binary, so there is nothing to opt out of.
+You pair two devices once, with a short code. After that they recognise each
+other on their own. There's no account and no password, and Esper has no
+server address built in, so there's nothing to opt out of.
 
 How Esper reaches another machine:
 
@@ -32,11 +31,10 @@ How Esper reaches another machine:
 - **Anywhere else**, you can run your own broker. If you don't, Esper won't
   route you through anyone else's.
 
-Every connection is end-to-end encrypted between the two devices' keys, on
-every path, including through your own relay.
+Every connection is encrypted end to end between the two devices, whichever
+way it travels, including through your own relay.
 
-Headless servers are a first-class use, so terminal mode and port forwarding
-are built in:
+It also works well for servers with no screen at all:
 
 - `esper terminal` opens a shell on the host.
 - `esper forward` reaches a service on the host's loopback, like `ssh -L`. A
@@ -47,36 +45,46 @@ are built in:
 
 ## Why
 
-Most remote desktop products decide who may see your screen on their own
-servers. That control is their business model, not a side effect.
+Most remote desktop products decide who may see your screen, on their own
+servers. That control is their business model.
 
-The open-source alternatives mostly ship with a public rendezvous server as the
-default, so a typical install still has a third party in the path.
+Most open-source alternatives send you through a public server by default, so
+a typical install still has a stranger in the middle.
 
-And connecting is awkward. Reading a nine-digit ID and a rotating password
-over the phone is a workaround for two machines that have no lasting trust
-between them, even when they belong to the same person.
+And connecting is awkward. Reading out a nine-digit ID and a password that
+keeps changing is a workaround for two machines that don't trust each other,
+even when they're both yours.
 
-## Status
+## Features
 
-| | |
-|---|---|
-| Builds, tests, lints | ✅ |
-| Wire protocol framing | ✅ Rust and Go, byte-compatible |
-| Identity, pairing, transport | ✅ |
-| Terminal mode | ✅ shells, reattach after a dropped link |
-| Port forwarding | ✅ `ssh -L` and `ssh -W` styles |
-| Screen, video and input | ✅ Linux, X11 |
-| Finding a host: LAN, overlay network, remembered address, your own broker | ✅ |
-| Control plane: CLI, device store, local API | ✅ |
-| Desktop window: devices, pairing, activity, settings | ✅ |
-| Viewer: a remote screen inside the window | ⏳ |
-| Windows and macOS hosts | ⏳ |
+| Category | Feature | Status |
+|---|---|:---:|
+| Connecting | **No account, no password, no Esper servers** | ✅ |
+| Connecting | Pair once with a short code, then just connect | ✅ |
+| Connecting | Works on your network, over Tailscale or WireGuard, or through your own broker | ✅ |
+| Connecting | Invite someone with a single link | ✅ |
+| Remote desktop | Linux desktops on X11 or Sway | ✅ |
+| Remote desktop | Sound, clipboard and drag-and-drop files | ✅ |
+| Remote desktop | Several machines side by side in one window | ✅ |
+| Remote desktop | Record a session, and the other side always sees it | ✅ |
+| Remote desktop | GNOME and KDE on Wayland | 🚧 |
+| Remote desktop | Windows | 🚧 |
+| Remote desktop | macOS | 🗓️ |
+| Servers | A shell that survives a dropped connection | ✅ |
+| Servers | Port forwarding, plus ssh, scp, rsync and git over Esper | ✅ |
+| Control | Choose what each device may do, and when it may connect unasked | ✅ |
+| Control | Wake, lock or restart a machine from afar | ✅ |
+| Privacy | **End-to-end encrypted, with post-quantum key exchange** | ✅ |
+| Privacy | No telemetry or update checks, and the activity log stays on your machine | ✅ |
+| Privacy | Reproducible builds you can check byte for byte | ✅ |
+| Release | First tagged release | 🗓️ |
+
+✅ Ready · 🚧 In progress · 🗓️ Planned
 
 ## Installing
 
-No release has been tagged yet, so there is nothing to download. You can build
-the packages from a checkout:
+There's no release to download yet. You can build the packages yourself from a
+checkout:
 
 ```sh
 make package-deb                 # → dist/*.deb
@@ -92,14 +100,14 @@ If you'd rather not use a package, `make install` puts the binaries under
 
 ### Checking what you downloaded
 
-Esper's builds are reproducible. Given a release's source tarball and the
-toolchain it names, you get the published binary back byte for byte. That lets
-anyone confirm the binary matches the code, without trusting us.
+Esper's builds are reproducible: build a release's source with the toolchain it
+names and you get the exact same binary, byte for byte. Anyone can confirm the
+binary matches the code without having to trust us.
 `make check-reproducible` runs the same check the project uses, and
 [`docs/releasing.md`](docs/releasing.md) explains what it covers.
 
-Esper never checks for updates. Asking a server for updates would tell it that
-this machine exists, what it runs and roughly where it is. Updates come from
+Esper never checks for updates, because asking a server would tell it that
+your machine exists, what it runs and roughly where it is. Updates come from
 your package manager, or from you.
 
 ## Your first connection
@@ -179,13 +187,13 @@ make build-app             # needs pnpm, and webkit2gtk-4.1 on Linux
 make install-app           # → ~/.local/bin, plus a desktop entry
 ```
 
-There's nothing else to set up. The window starts its own control plane if
-one isn't already running. It pairs devices, shows activity on this machine,
-turns hosting on and off, and opens `esper://` invitation links.
+There's nothing else to set up. The window pairs devices, opens remote
+sessions side by side, shows what happened on this machine, turns hosting on
+and off, and opens `esper://` invitation links. It starts everything it needs
+by itself.
 
-It isn't in the distribution packages yet. Until the viewer is built, it can't
-show a remote screen, and a remote desktop package that can't do that would be
-misleading.
+The window isn't in the distribution packages yet, so install it this way for
+now.
 
 ## Scripting
 
@@ -217,7 +225,7 @@ route that nothing serves.
 
 ## Building
 
-You need Go 1.26+, Rust 1.98+ and `make`. `nasm` is recommended.
+You need Go 1.26+, Rust 1.98+, `make` and `cmake`. `nasm` is recommended.
 
 Some distributions ship older versions. Checked on 2026-09-12:
 
