@@ -1,0 +1,7 @@
+# No dependency runs an install script. Newer pnpm (12 here) refuses to install
+# until each one that asks has been answered, and pnpm 10, which CI uses, skips
+# them with a warning. esbuild is the only one that asks: its binary comes as a
+# platform package, and its script only checks that binary, so CI has always
+# built without running it.
+allowBuilds:
+  esbuild: false
