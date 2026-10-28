@@ -102,6 +102,13 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "esper-app: %v\n", err)
 		return 1
 	}
+	// **Made here, unlike everywhere else.** Opening the window is how a
+	// machine gets set up, so on a machine that has never run Esper the home
+	// does not exist yet, and the lock below cannot bind inside it.
+	if err := os.MkdirAll(esperHome, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "esper-app: making %s: %v\n", esperHome, err)
+		return 1
+	}
 
 	if !secondary {
 		// **One main window.** A second launch — from a tray, a desktop file
