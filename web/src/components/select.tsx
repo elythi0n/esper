@@ -40,7 +40,7 @@ export function SelectContent({ className, children, ...props }: RS.SelectConten
         position="popper"
         sideOffset={4}
         className={cn(
-          "z-[var(--z-popover)] min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-md border border-border bg-surface-2 p-1 shadow-[var(--shadow-2)]",
+          "z-[var(--z-popover)] min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-lg border border-border bg-surface-2 p-1 shadow-[var(--shadow-2)]",
           "data-[state=open]:animate-[overlay-in_var(--dur-base)_var(--ease-out)]",
           className,
         )}

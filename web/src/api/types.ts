@@ -53,7 +53,7 @@ export const LOCK_DEFAULT = "default";
 export const LOCK_AFTER_LABEL: Readonly<Record<LockAfter, string>> = {
   unattended: "Lock if nobody was here",
   always: "Always lock",
-  never: "Leave it as it is",
+  never: "Leave it unlocked",
 };
 
 export interface Device {

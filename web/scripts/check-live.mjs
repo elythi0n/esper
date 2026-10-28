@@ -357,7 +357,7 @@ try {
     await new Promise((r) => setTimeout(r, 700));
     const bound = document.querySelector("[data-bounded]");
     const unattended = [...document.querySelectorAll("*")].find(
-      (el) => el.children.length === 0 && /Connect unasked/.test(el.textContent || ""),
+      (el) => el.children.length === 0 && /Connect without asking/.test(el.textContent || ""),
     );
     /*
       What a session with this device leaves the screen as.
@@ -713,8 +713,37 @@ try {
       el !== null && (el.disabled === true || el.getAttribute("aria-disabled") === "true" ||
         el.getAttribute("data-disabled") !== null);
 
+    // The screen is in sections now, so the registry is read across all of
+    // them: every section visited, every key it shows counted once. A setting
+    // that no section shows is a setting missing from the screen.
+    const settle = async () => {
+      await new Promise((r) => setTimeout(r, 400));
+      for (let waited = 0; waited < 6000 && rows().length === 0; waited += 200) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    };
+    const open = async (section) => {
+      window.location.hash = "/settings/" + section;
+      await settle();
+    };
+    const sections = [...document.querySelectorAll(".settings-nav-item")].length;
+    const everyKey = new Set();
+    for (const id of ["general", "machine", "connections", "privacy", "files", "activity"]) {
+      await open(id);
+      for (const el of rows()) everyKey.add(el.getAttribute("data-setting"));
+    }
+
+    await open("connections");
+    const file = (document.querySelector("[data-config-file]") || {}).textContent || null;
     const machineOnly = controlFor("host.serve_without_indicator");
     const ordinary = controlFor("host.fps");
+    const machineOnlyDisabled = off(machineOnly);
+    const machineOnlySaysWhy = (said("host.serve_without_indicator") || "").length > 0 &&
+      [...document.querySelectorAll("[data-not-here]")].some((el) =>
+        /esper config set host.serve_without_indicator/.test(el.textContent || ""));
+    const ordinaryOffered = ordinary !== null && !off(ordinary);
+
+    await open("privacy");
 
     // And a change, all the way to the file. A flag, so it is one click; one
     // nothing else in this suite reads; and put back afterwards so the rig is
@@ -736,13 +765,12 @@ try {
     }
 
     return JSON.stringify({
-      shown: rows().length,
-      file: (document.querySelector("[data-config-file]") || {}).textContent || null,
-      machineOnlyDisabled: off(machineOnly),
-      machineOnlySaysWhy: (said("host.serve_without_indicator") || "").length > 0 &&
-        [...document.querySelectorAll("[data-not-here]")].some((el) =>
-          /esper config set host.serve_without_indicator/.test(el.textContent || "")),
-      ordinaryOffered: ordinary !== null && !off(ordinary),
+      shown: everyKey.size,
+      sections,
+      file,
+      machineOnlyDisabled,
+      machineOnlySaysWhy,
+      ordinaryOffered,
       before,
       after,
     });
@@ -863,7 +891,7 @@ try {
     // **A pairing, and any permission at all.** Pairing is authorised by no
     // permission, so no line can satisfy both — whichever permission the
     // record happens to offer.
-    const kind = await pick("what happened", "paired");
+    const kind = await pick("event", "paired");
     const perm = await pickFirstReal("permission");
     const empty = document.querySelector("[data-empty='filtered']");
     const said = empty ? (empty.textContent || "").replace(/\\s+/g, " ").trim() : null;
@@ -890,7 +918,7 @@ try {
     } else {
       // It says how many there are, so "my filter is wrong" and "this machine
       // is quiet" are different sentences.
-      if (!/\d+ lines? (is|are) recorded/.test(seen.said)) {
+      if (!/has \d+ entr(y|ies)/.test(seen.said)) {
         findings.push(
           `a filter that hides everything says ${JSON.stringify(seen.said)} — without the count, it ` +
             `reads the same as a machine with nothing on it`,
@@ -927,14 +955,15 @@ try {
   await sleep(2000);
   const recorded = await evaluate(`(async () => {
     const clear = [...document.querySelectorAll("button")].find(
-      (b) => /clear the filters/i.test(b.textContent || ""),
+      (b) => /clear filters/i.test(b.textContent || ""),
     );
     if (clear) {
       clear.click();
       await new Promise((r) => setTimeout(r, 800));
     }
+    // The event's tag is an attribute now, not a word on screen.
     const lines = () => [...document.querySelectorAll("[data-line]")].map(
-      (el) => (el.textContent || "").replace(/\\s+/g, " ").trim(),
+      (el) => ((el.getAttribute("data-event") || "") + " " + (el.textContent || "")).replace(/\\s+/g, " ").trim(),
     );
     let found = [];
     for (let waited = 0; waited < 15000; waited += 500) {
@@ -963,7 +992,7 @@ try {
           `the record has ${trail.found.length} setting change(s) and none names the setting that ` +
             `was changed: ${JSON.stringify(trail.found.slice(0, 3))}`,
         );
-      } else if (!/this machine/.test(about)) {
+      } else if (!/this machine/i.test(about)) {
         findings.push(
           `the line reads ${JSON.stringify(about)} — nobody connected to change a setting, so the ` +
             `device column has to say so rather than leave a reader looking for a peer`,

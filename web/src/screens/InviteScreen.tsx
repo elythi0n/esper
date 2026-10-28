@@ -1,4 +1,4 @@
-import { Check, Send, X } from "lucide-react";
+import { Check, TicketPlus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
 import { useStatus } from "@/api/hooks";
@@ -31,7 +31,7 @@ import { Figure, Heading, Key, Trouble } from "./parts";
 function TheLink({ link }: { link: string }) {
   return (
     <CopyField
-      label="Send them this, and nothing else"
+      label="Send them this link"
       value={link}
       wrap
       className="max-w-lg rounded-md border border-border bg-surface-1 p-3"
@@ -106,10 +106,10 @@ function Offering({ broker }: { broker: string }) {
     return (
       <div className="flex flex-col items-start gap-4 py-6">
         <p className="flex items-center gap-2 text-sm text-text">
-          <Check aria-hidden size={16} className="text-ok" /> Somebody took it up. They are paired.
+          <Check aria-hidden size={16} className="text-ok" /> They accepted. You are now paired.
         </p>
         <Button size="sm" onClick={() => setLive(null)}>
-          Offer another
+          Make another
         </Button>
       </div>
     );
@@ -119,10 +119,10 @@ function Offering({ broker }: { broker: string }) {
     return (
       <div className="flex flex-col items-start gap-4 py-6">
         <p className="text-sm text-text-2">
-          {live.state === "expired" ? "That invitation lapsed." : live.detail || "The invitation stopped."}
+          {live.state === "expired" ? "That invitation expired." : live.detail || "The invitation stopped working."}
         </p>
         <Button size="sm" onClick={() => setLive(null)}>
-          Offer another
+          Make another
         </Button>
       </div>
     );
@@ -135,13 +135,13 @@ function Offering({ broker }: { broker: string }) {
 
         <div className="flex max-w-lg flex-col gap-1.5">
           <p className="text-xs leading-relaxed text-text-3">
-            The link is the secret: anybody holding it can pair with this machine until it lapses. It
-            grants one session, it meets at {live.broker || broker}, and it stops working on its own.
+            Anyone with this link can pair with this machine until it expires. It allows one session
+            and connects through {live.broker || broker}.
           </p>
         </div>
 
         <Button variant="ghost" size="sm" onClick={stop}>
-          <X aria-hidden size={14} /> Stop offering
+          <X aria-hidden size={14} /> Cancel invitation
         </Button>
       </div>
     );
@@ -155,7 +155,7 @@ function Offering({ broker }: { broker: string }) {
         void offer();
       }}
     >
-      <Field label="Who it is for" hint="A label, so you can tell two invitations apart. Nothing checks it.">
+      <Field label="Who it is for" hint="A label to tell invitations apart. It is not checked.">
         {(id, by) => (
           <Input
             id={id}
@@ -168,10 +168,10 @@ function Offering({ broker }: { broker: string }) {
         )}
       </Field>
 
-      {trouble && <Trouble detail={trouble}>An invitation could not be offered.</Trouble>}
+      {trouble && <Trouble detail={trouble}>Could not make an invitation.</Trouble>}
 
       <Button variant="primary" type="submit" disabled={busy}>
-        {busy ? "Offering…" : "Make an invitation"}
+        {busy ? "Making…" : "Make an invitation"}
       </Button>
     </form>
   );
@@ -184,33 +184,47 @@ export function InviteScreen() {
     <>
       <Topbar title="Invite" />
       <PageBody>
-        <div className="max-w-xl">
-          <Heading>Reaching somebody elsewhere</Heading>
+        {/*
+          With no broker there is nothing to do here yet, so the screen is the
+          empty state alone: centred in the window, with a title that says
+          what this screen is for, rather than a heading over a note in the
+          corner.
+        */}
+        {data && !data.broker ? (
+          <div data-grow="true" data-empty="true" className="flex">
+            <EmptyState
+              icon={TicketPlus}
+              title="Invite someone on another network"
+              action={
+                <Button size="sm" onClick={() => (window.location.hash = "/settings/connections")}>
+                  Open connection settings
+                </Button>
+              }
+            >
+              Invitations need a broker: a small server you run on a computer both devices can reach, such as
+              a cloud server. Run <span className="font-mono">esper broker serve</span> in a terminal on it, then
+              add the address and key it prints in Settings.
+            </EmptyState>
+          </div>
+        ) : (
+          <div className="max-w-xl">
+            <Heading>Invite someone on another network</Heading>
 
-          {loading && <Skeleton className="mt-4 h-3 w-72" />}
+            {loading && <Skeleton className="mt-4 h-3 w-72" />}
 
-          {error && <Trouble detail={error.message}>The engine did not answer, so this is unknown.</Trouble>}
+            {error && <Trouble detail={error.message}>Could not reach Esper on this machine.</Trouble>}
 
-          {data && !data.broker && (
-            <div data-grow="true" data-empty="true" className="flex">
-              <EmptyState icon={Send}>
-                No broker is configured, so there is nowhere for an invitation to meet. Esper operates no
-                infrastructure of its own — run one with <span className="font-mono">esper broker</span> and
-                put its address and key in your settings.
-              </EmptyState>
-            </div>
-          )}
-
-          {data?.broker && (
-            <>
-              <div className="flex flex-col gap-2 border-b border-border py-4">
-                <Key>Meeting at</Key>
-                <Figure value={data.broker} />
-              </div>
-              <Offering broker={data.broker} />
-            </>
-          )}
-        </div>
+            {data?.broker && (
+              <>
+                <div className="flex flex-col gap-2 border-b border-border py-4">
+                  <Key>Broker</Key>
+                  <Figure value={data.broker} />
+                </div>
+                <Offering broker={data.broker} />
+              </>
+            )}
+          </div>
+        )}
       </PageBody>
     </>
   );

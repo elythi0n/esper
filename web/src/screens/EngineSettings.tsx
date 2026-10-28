@@ -1,3 +1,4 @@
+import { Lock } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
 import type { Setting, SettingsAnswer } from "@/api/types";
@@ -5,11 +6,11 @@ import { Button } from "@/components/button";
 import { DurationInput, NumberInput } from "@/components/form-controls";
 import { Input } from "@/components/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/select";
-import { SettingRow } from "@/components/setting";
+import { SettingCard, SettingRow } from "@/components/setting";
 import { Skeleton } from "@/components/states";
 import { Switch } from "@/components/switch";
 import { useToast } from "@/components/toast";
-import { Heading, Trouble } from "./parts";
+import { Trouble } from "./parts";
 
 /**
  * What this machine is *set to*, as against what it is and what it can do.
@@ -37,23 +38,67 @@ import { Heading, Trouble } from "./parts";
 
 /** What a person calls each part of a key. */
 const GROUP_NAMES: Readonly<Record<string, string>> = {
-  device: "Naming",
-  host: "Serving a session",
+  device: "How other devices see it",
+  host: "Incoming connections",
   policy: "Policy",
-  consent: "Being asked",
-  session: "While a session runs",
-  audit: "The record",
-  forward: "Forwarding a port",
+  consent: "Asking permission",
+  session: "During a session",
+  audit: "Activity log",
+  forward: "Port forwarding",
   files: "Files",
-  discovery: "Being found",
-  connectivity: "Reaching each other",
-  broker: "Through a broker",
+  discovery: "Discovery",
+  connectivity: "Connections",
+  network: "Network",
+  broker: "Broker",
 };
 
-const groupOf = (key: string) => key.split(".")[0] ?? "";
+export const groupOf = (key: string) => key.split(".")[0] ?? "";
 
 /** The part after the first dot, as a sentence starts. */
+const LABELS: Readonly<Record<string, string>> = {
+  "device.name": "Name",
+  "host.listen": "Listen on",
+  "host.backend": "Screen capture",
+  "host.synthetic_monitors": "Test screens",
+  "host.synthetic_motion": "Test screen content",
+  "host.lock_after_session": "Lock after a session",
+  "host.monitor": "Monitor to share",
+  "host.fps": "Frame rate limit",
+  "host.budget": "Encoding CPU limit",
+  "host.max_resolution": "Largest picture size",
+  "host.privacy_screen": "Dark screen during sessions",
+  "host.lock_local_input": "Block local keyboard and mouse",
+  "host.plain_background": "Plain wallpaper during sessions",
+  "host.allow_asking": "Let sessions ask for more",
+  "host.serve_without_indicator": "Allow sessions without the indicator",
+  "host.pace_to_measured": "Match the viewer's speed",
+  "policy.deny_when_locked": "Refuse while locked",
+  "consent.answer_within": "Time to answer",
+  "session.buffer": "Frame wait",
+  "session.idle_timeout": "Idle terminal timeout",
+  "audit.retain": "Keep entries for",
+  "audit.max_size": "Largest log size",
+  "forward.allow": "Allowed destinations",
+  "forward.max_connections": "Connections per session",
+  "files.enabled": "File transfer",
+  "files.root": "Shared folder",
+  "files.max_bytes": "Largest file",
+  "network.port_mapping": "Ask the router for a port",
+  "discovery.mdns": "Be found on this network",
+  "discovery.mdns_interfaces": "Networks to be found on",
+  "connectivity.overlay_interfaces": "Extra private networks",
+  "broker.address": "Broker address",
+  "broker.key": "Broker key",
+};
+
+/**
+ * What a setting is called on screen. A person's words where we have them;
+ * the key, made readable, for one the engine added later. The key itself is
+ * still shown under every row, for whoever uses `esper config`.
+ */
 function labelOf(key: string): string {
+  const named = LABELS[key];
+  if (named) return named;
   const rest = key.slice(key.indexOf(".") + 1).replace(/_/g, " ");
   return rest.charAt(0).toUpperCase() + rest.slice(1);
 }
@@ -73,18 +118,23 @@ function whyNotHere(setting: Setting, file: string | null): string | null {
   // Nowhere to write it down. A machine with no home directory runs entirely
   // on defaults, and a control that was offered would fail on every change.
   if (file === null) {
-    return "There is nowhere to write this down: this machine has no home directory.";
+    return "This can't be saved, because this machine has no home directory.";
   }
   if (setting.at_the_machine) {
-    return setting.why_at_the_machine ?? "It is changed at the machine.";
+    // The reason arrives as a clause written to follow "because", the way
+    // the command line says it, so it is finished into a sentence here.
+    return setting.why_at_the_machine
+      ? `Only changeable in a terminal on this machine, because ${setting.why_at_the_machine}.`
+      : "Only changeable in a terminal on this machine.";
   }
   if (/environment|command line|flag/i.test(setting.source)) {
-    return `This comes from the ${setting.source}, which beats the file — a change here would not reach it.`;
+    return `This is set by the ${setting.source}, which overrides the settings file. Change it there.`;
   }
   return null;
 }
 
-export function EngineSettings() {
+/** Which settings groups a part of the Settings screen shows. Absent, all of them. */
+export function EngineSettings({ show }: { show?: ((group: string) => boolean) | undefined } = {}) {
   const toast = useToast();
   const [answer, setAnswer] = useState<SettingsAnswer | null>(null);
   const [trouble, setTrouble] = useState<string | null>(null);
@@ -127,7 +177,7 @@ export function EngineSettings() {
     setBusy(setting.key);
     try {
       setAnswer(await api.unsetSetting(setting.key));
-      toast.show({ title: `${setting.key} is back to what this build chooses`, tone: "ok" });
+      toast.show({ title: `${setting.key} is back to its default`, tone: "ok" });
     } catch (cause) {
       toast.show({ title: cause instanceof Error ? cause.message : String(cause), tone: "warn" });
     } finally {
@@ -139,16 +189,25 @@ export function EngineSettings() {
   // engine's own order.
   const rows = useMemo(() => {
     let seen = "";
-    return (answer?.settings ?? []).map((setting) => {
-      const group = groupOf(setting.key);
-      const heads = group !== seen;
-      seen = group;
-      return { setting, group, heads };
-    });
-  }, [answer]);
+    return (answer?.settings ?? [])
+      .filter((setting) => !show || show(groupOf(setting.key)))
+      .map((setting, i) => {
+        const group = groupOf(setting.key);
+        const heads = group !== seen;
+        seen = group;
+        return { setting, group, heads, first: i === 0 };
+      });
+  }, [answer, show]);
+
+  // One card per group, in the engine's own order.
+  const cards: { group: string; settings: Setting[] }[] = [];
+  for (const { setting, group, heads } of rows) {
+    if (heads || cards.length === 0) cards.push({ group, settings: [] });
+    cards[cards.length - 1]!.settings.push(setting);
+  }
 
   if (trouble) {
-    return <Trouble detail={trouble}>What this machine is set to could not be read.</Trouble>;
+    return <Trouble detail={trouble}>Could not load this machine's settings.</Trouble>;
   }
   if (!answer) {
     return (
@@ -170,24 +229,28 @@ export function EngineSettings() {
       */}
       <p data-config-file="" className="pb-2 text-xs leading-relaxed text-text-3">
         {answer.file === null
-          ? "This machine has no home directory, so nothing can be written down."
+          ? "This machine has no home directory, so settings can't be saved."
           : answer.present
-            ? `Written in ${answer.file}`
-            : `Nothing is written down yet. The first change here creates ${answer.file}.`}
+            ? `Saved in ${answer.file}`
+            : `Using defaults. Your first change creates ${answer.file}.`}
       </p>
 
-      {rows.map(({ setting, group, heads }) => (
-        <div key={setting.key} className="min-w-0">
-          {heads && <Heading>{GROUP_NAMES[group] ?? group}</Heading>}
-          <Row
-            setting={setting}
-            file={answer.file}
-            busy={busy === setting.key}
-            onChange={(raw) => void change(setting, raw)}
-            onRestore={() => void restore(setting)}
-          />
-        </div>
-      ))}
+      <div className="flex flex-col gap-8 pt-2">
+        {cards.map(({ group, settings }) => (
+          <SettingCard key={group} title={GROUP_NAMES[group] ?? group}>
+            {settings.map((setting) => (
+              <Row
+                key={setting.key}
+                setting={setting}
+                file={answer.file}
+                busy={busy === setting.key}
+                onChange={(raw) => void change(setting, raw)}
+                onRestore={() => void restore(setting)}
+              />
+            ))}
+          </SettingCard>
+        ))}
+      </div>
     </>
   );
 }
@@ -215,10 +278,12 @@ function Row({
       className="min-w-0"
       label={labelOf(setting.key)}
       state={
-        <span data-setting={setting.key} className="flex min-w-0 flex-col gap-0.5">
+        <span data-setting={setting.key} className="flex min-w-0 flex-col gap-2">
           <span>{setting.about}</span>
-          <span className="font-mono">
-            {setting.key} · {setting.source}
+          {/* For whoever uses `esper config`: the key, and where today's value comes from. */}
+          <span className="flex flex-wrap items-center gap-1.5 text-xs text-text-3">
+            <code className="rounded-sm bg-text/[0.05] px-1.5 py-0.5 font-mono">{setting.key}</code>
+            <span>{setting.source}</span>
           </span>
         </span>
       }
@@ -226,7 +291,7 @@ function Row({
         <span className="flex items-center gap-2">
           {!why && chosen && (
             <Button variant="ghost" size="sm" disabled={busy} onClick={onRestore} className="text-text-3">
-              Put it back
+              Reset
             </Button>
           )}
           <Control setting={setting} disabled={busy || why !== null} onChange={onChange} />
@@ -234,11 +299,17 @@ function Row({
       }
       trouble={
         why ? (
-          <p data-not-here="" className="text-xs leading-relaxed text-text-3">
-            {why}
-            {setting.at_the_machine && (
-              <span className="ml-1 font-mono text-text-2">esper config set {setting.key} …</span>
-            )}
+          <p
+            data-not-here=""
+            className="flex gap-2.5 rounded-lg bg-text/[0.04] px-3 py-2.5 text-xs leading-relaxed text-text-2"
+          >
+            <Lock aria-hidden size={14} strokeWidth={1.75} className="mt-0.5 shrink-0 text-text-3" />
+            <span className="min-w-0">
+              {why}
+              {setting.at_the_machine && (
+                <code className="mt-1.5 block font-mono text-text">esper config set {setting.key} …</code>
+              )}
+            </span>
           </p>
         ) : undefined
       }
@@ -404,7 +475,8 @@ function SavedText({
     <Input
       value={draft}
       disabled={disabled}
-      placeholder={setting.shape}
+      // The shape is a hint like "host:port"; a bare "text" says nothing.
+      placeholder={setting.shape === "text" ? undefined : setting.shape}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={send}
       onKeyDown={(e) => {

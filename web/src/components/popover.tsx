@@ -57,7 +57,7 @@ export function Popover({ trigger, children, label, side = "bottom", align = "en
           // let somebody change exactly one thing.
           onSelect={(e) => e.preventDefault()}
           className={cn(
-            "z-[var(--z-popover)] min-w-56 max-w-80 rounded-md border border-border bg-surface-2 p-3",
+            "z-[var(--z-popover)] min-w-56 max-w-80 rounded-lg border border-border bg-surface-2 p-3",
             "shadow-[var(--shadow-2)] data-[state=open]:animate-[overlay-in_var(--dur-base)_var(--ease-out)]",
             className,
           )}

@@ -14,13 +14,14 @@
 @layer theme {
   /*
     ── Light ───────────────────────────────────────────────────────────
-    Ink on bone. The three surfaces still separate by lightness, but upward:
-    a raised thing is paler than the paper it sits on.
+    Ink on a neutral grey ground, with white for what is raised. The three
+    surfaces still separate by lightness, upward: a panel is brighter than
+    the window it sits in.
   */
   [data-theme="light"] {
-    --sem-surface-0: var(--bone);
-    --sem-surface-1: var(--n-10);
-    --sem-surface-2: var(--paper);
+    --sem-surface-0: var(--mist);
+    --sem-surface-1: var(--snow);
+    --sem-surface-2: var(--snow);
 
     --sem-text: var(--ink);
     --sem-text-2: var(--n-3);

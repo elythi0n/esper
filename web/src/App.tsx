@@ -22,6 +22,7 @@ import { DevicesScreen } from "@/screens/DevicesScreen";
 import { InviteScreen } from "@/screens/InviteScreen";
 import { PairScreen } from "@/screens/PairScreen";
 import { SessionsScreen } from "@/sessions/SessionsScreen";
+import { MachineCard } from "@/shell/MachineCard";
 import { SettingsScreen } from "@/screens/SettingsScreen";
 import { WelcomeScreen } from "@/screens/WelcomeScreen";
 import { FirstRun } from "@/screens/FirstRun";
@@ -156,14 +157,14 @@ export function App() {
     return [
       {
         keys: `${modifier} K`,
-        what: "Commands, devices and everything else",
+        what: "Search commands and devices",
         group: "Getting around",
         when: (e) => held(e) && e.key.toLowerCase() === "k",
         run: () => setPalette((o) => !o),
       },
       {
         keys: "?",
-        what: "This sheet",
+        what: "Show keyboard shortcuts",
         group: "Getting around",
         when: (e) => e.key === "?" && !held(e),
         run: () => setKeys((o) => !o),
@@ -354,17 +355,19 @@ export function App() {
                 action={
                   engine.health?.restartable ? (
                     <Button size="sm" onClick={engine.restart} disabled={engine.restarting}>
-                      {engine.restarting ? "Starting…" : "Start it again"}
+                      {engine.restarting ? "Starting…" : "Restart Esper"}
                     </Button>
                   ) : null
                 }
               >
-                The engine on this machine has stopped.
+                Esper's background service on this machine has stopped.
               </Alarm>
             }
             groups={SCREENS}
             active={screen}
             onSelect={(id) => go(`/${id}`)}
+            onSearch={() => setPalette(true)}
+            sidebarFoot={<MachineCard onOpen={() => go("/settings")} />}
             version={__ESPER_VERSION__}
             status={
               <StatusBar>

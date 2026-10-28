@@ -36,7 +36,19 @@
   /* Bone. The text colour in dark, the paper in light. */
   --bone: oklch(0.93 0.012 87);
   --bone-deep: oklch(0.88 0.014 87);
+  /*
+    The warm greys esper.st sets its secondary text in, at the lightnesses the
+    cool ramp already proved: 0.76 and 0.64 clear every surface they sit on.
+  */
+  --dim: oklch(0.76 0.014 87);
+  --faint: oklch(0.64 0.012 87);
   --paper: oklch(0.985 0.005 87);
+  /*
+    The light theme's ground: neutral, a breath of the cool hue and no warmth.
+    Bone and paper read as cream once they were the whole window.
+  */
+  --mist: oklch(0.968 0.003 286);
+  --snow: oklch(0.995 0.001 286);
   --ink: oklch(0.16 0.008 286);
   --pitch: oklch(0 0 0);
 

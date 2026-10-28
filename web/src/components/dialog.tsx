@@ -112,17 +112,17 @@ export function DialogContent({
           if (!event.defaultPrevented) returning.onCloseAutoFocus(event);
         }}
         className={cn(
-          "fixed z-[var(--z-modal)] flex flex-col gap-3 border border-border bg-surface-2 p-5 text-text shadow-[var(--shadow-3)] outline-none",
+          "fixed z-[var(--z-modal)] flex flex-col gap-3 border border-border bg-surface-1 p-6 text-text shadow-[var(--shadow-3)] outline-none",
           drawer
-            ? "inset-y-0 right-0 w-[min(28rem,100%)] rounded-l-lg data-[state=open]:animate-[drawer-in_var(--dur-slow)_var(--ease-out)] data-[state=closed]:animate-[drawer-out_var(--dur-fast)_var(--ease)]"
-            : "left-1/2 top-1/2 w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-lg data-[state=open]:animate-[overlay-in_var(--dur-slow)_var(--ease-out)] data-[state=closed]:animate-[overlay-out_var(--dur-fast)_var(--ease)]",
+            ? "inset-y-0 right-0 w-[min(28rem,100%)] rounded-l-xl data-[state=open]:animate-[drawer-in_var(--dur-slow)_var(--ease-out)] data-[state=closed]:animate-[drawer-out_var(--dur-fast)_var(--ease)]"
+            : "left-1/2 top-1/2 w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-xl data-[state=open]:animate-[overlay-in_var(--dur-slow)_var(--ease-out)] data-[state=closed]:animate-[overlay-out_var(--dur-fast)_var(--ease)]",
           className,
         )}
         {...props}
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <RD.Title className="text-lg font-medium">{title}</RD.Title>
+            <RD.Title className="font-display text-xl font-medium">{title}</RD.Title>
             {description && <RD.Description className="mt-1 text-sm text-text-2">{description}</RD.Description>}
           </div>
           <RD.Close asChild>

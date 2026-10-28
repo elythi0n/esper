@@ -83,7 +83,7 @@ export function PairingCode({ code, expiresAt, className, ...props }: PairingCod
       </output>
       <div className="flex items-center gap-3 text-sm text-text-2">
         {expiresAt !== undefined && (
-          <span className="tabular-nums">{expired ? "Expired — ask for a new code" : `Expires in ${mmss(expiresAt - now)}`}</span>
+          <span className="tabular-nums">{expired ? "Expired. Ask for a new code." : `Expires in ${mmss(expiresAt - now)}`}</span>
         )}
         <Button variant="ghost" size="sm" onClick={copy} disabled={expired}>
           {copied ? <Check aria-hidden size={14} /> : <Copy aria-hidden size={14} />}
@@ -131,7 +131,7 @@ export function PairingPrompt({ requester, requested, expiresAt, onAllow, onDeny
       </ul>
       <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
         <span className="text-xs text-text-3 tabular-nums">
-          {expiresAt !== undefined ? `Closes in ${mmss(expiresAt - now)} if nothing is chosen` : "Nothing happens until you choose"}
+          {expiresAt !== undefined ? `Closes in ${mmss(expiresAt - now)} if you don't choose` : "Nothing happens until you choose"}
         </span>
         <div className="flex gap-2">
           <Button onClick={onDeny}>Deny</Button>

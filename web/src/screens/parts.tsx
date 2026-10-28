@@ -5,16 +5,16 @@ import { cn } from "@/lib/cn";
   The instrument-panel vocabulary the product screens are built from.
 
   Three rules, and they are why these exist rather than each screen deciding:
-  a **key** is mono, uppercase, widely tracked and small; a **figure** is mono
+  a **key** is small, quiet and in sentence case, like every other label in
+  the window (it was mono capitals once, and read as a second product beside
+  Settings); a **figure** is mono
   and tabular and never animates; and a **row** is a hairline, not a box. Boxes
   around everything is how a dense screen becomes a scrapbook.
 */
 
-/** A field name. Small, mono, tracked — read as a label, never as content. */
+/** A field name. Small and quiet: read as a label, never as content. */
 export function Key({ children, className }: { children: ReactNode; className?: string | undefined }) {
-  return (
-    <span className={cn("font-mono text-xs uppercase tracking-[0.14em] text-text-3", className)}>{children}</span>
-  );
+  return <span className={cn("text-xs font-medium text-text-3", className)}>{children}</span>;
 }
 
 /** A number and its unit. Tabular, so a column of them lines up, and still. */
@@ -33,16 +33,6 @@ export function Figure({
       {value}
       {unit && <span className="ml-0.5 text-text-3">{unit}</span>}
     </span>
-  );
-}
-
-/** A key above its value, for a panel of facts. */
-export function Fact({ label, children, className }: { label: string; children: ReactNode; className?: string | undefined }) {
-  return (
-    <div className={cn("flex min-w-0 flex-col gap-1", className)}>
-      <Key>{label}</Key>
-      <div className="min-w-0 break-words text-sm text-text">{children}</div>
-    </div>
   );
 }
 
@@ -84,9 +74,17 @@ export { shortAgo } from "@/lib/ago";
  * a screen that explains itself in a paragraph is a screen that needs fewer
  * things on it.
  */
-export function Heading({ children, count }: { children: ReactNode; count?: ReactNode }) {
+export function Heading({
+  children,
+  count,
+  className,
+}: {
+  children: ReactNode;
+  count?: ReactNode;
+  className?: string | undefined;
+}) {
   return (
-    <div className="flex items-baseline justify-between gap-4 pb-2">
+    <div className={cn("flex items-baseline justify-between gap-4 pb-2", className)}>
       <Key>{children}</Key>
       {count !== undefined && <Figure className="text-xs text-text-3" value={count} />}
     </div>

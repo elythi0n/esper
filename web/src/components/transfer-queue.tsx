@@ -78,7 +78,7 @@ export function TransferQueue({ transfers, onCancel, onClearFinished, className 
         <p className="min-w-0 flex-1 text-sm text-text">
           {running.length > 0 ? (
             <>
-              {running.length} of {transfers.length} still moving
+              {running.length} of {transfers.length} still sending
               {left > 0 && <span className="text-text-2"> · {formatBytes(left)} to go</span>}
               {seconds !== null && (
                 <span className="text-text-2">

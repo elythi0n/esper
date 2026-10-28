@@ -76,7 +76,7 @@ function Showing({ onDone }: { onDone: () => void }) {
   if (trouble) {
     return (
       <Trouble detail={trouble} action={<Button size="sm" onClick={start}>Try again</Button>}>
-        A code could not be offered.
+        Could not show a code.
       </Trouble>
     );
   }
@@ -84,7 +84,7 @@ function Showing({ onDone }: { onDone: () => void }) {
   if (!offer) {
     return (
       <div className="flex flex-col items-start gap-4 py-6">
-        <p className="text-sm text-text-2">Show a code for somebody to type on the other machine.</p>
+        <p className="text-sm text-text-2">Show a code here, then type it on the other machine.</p>
         <Button variant="primary" disabled={busy} onClick={start}>
           Show a code
         </Button>
@@ -109,7 +109,7 @@ function Showing({ onDone }: { onDone: () => void }) {
     return (
       <div className="flex flex-col items-start gap-4 py-6">
         <p className="text-sm text-text-2">
-          {offer.state === "expired" ? "That code lapsed." : offer.detail || "The offer stopped."}
+          {offer.state === "expired" ? "That code expired." : offer.detail || "The code stopped working."}
         </p>
         <Button size="sm" onClick={start}>
           Show another
@@ -141,7 +141,7 @@ function Showing({ onDone }: { onDone: () => void }) {
       <PairingCode code={offer.code} expiresAt={offer.expires_at * 1000} />
 
       <div className="flex flex-col gap-1.5">
-        <Key>Read this aloud — it must match there</Key>
+        <Key>Read these words aloud. They must match on the other machine.</Key>
         <p className="max-w-sm break-words font-mono text-sm leading-relaxed text-text-2">{offer.words.join(" ")}</p>
       </div>
 
@@ -174,12 +174,10 @@ export function UncheckableOffer({ onAgain }: { onAgain: () => void }) {
     */
     <div className="flex w-full min-w-0 flex-col items-start gap-3 border-l-2 border-danger py-2 pl-4">
       <p className="max-w-[var(--measure)] text-sm text-text">
-        This machine offered a code without the fingerprint that goes with it, so there is nothing
-        to read aloud and nothing to check.
+        This machine made a code without the words that go with it, so there is nothing to check.
       </p>
       <p className="max-w-[var(--measure)] text-sm leading-relaxed text-text-2">
-        The code is not shown: a code proves that whoever typed it was read it, and only the
-        fingerprint proves the machine at the other end is the one you meant.
+        The code is hidden, because only the words prove you are pairing with the right machine.
       </p>
       <Button size="sm" onClick={onAgain}>
         Show another
@@ -229,7 +227,7 @@ function Entering({ onDone }: { onDone: () => void }) {
         void join();
       }}
     >
-      <Field label="Where it is" hint="The address and port the other machine is showing.">
+      <Field label="Address" hint="The other machine shows this after you click Show a code there.">
         {(id, by) => (
           <Input
             id={id}
@@ -242,7 +240,7 @@ function Entering({ onDone }: { onDone: () => void }) {
         )}
       </Field>
 
-      <Field label="The code">
+      <Field label="Code">
         {(id) => (
           <Input
             id={id}
@@ -254,7 +252,7 @@ function Entering({ onDone }: { onDone: () => void }) {
         )}
       </Field>
 
-      {trouble && <Trouble detail={trouble}>That pairing did not complete.</Trouble>}
+      {trouble && <Trouble detail={trouble}>Pairing did not finish.</Trouble>}
 
       <Button variant="primary" type="submit" disabled={busy || !address.trim() || !code.trim()}>
         {busy ? "Pairing…" : "Pair"}
@@ -320,13 +318,13 @@ function Invited({ token, onDone }: { token: string; onDone: () => void }) {
       </span>
       <div className="flex flex-col items-center gap-3">
         <p className="max-w-[var(--measure)] text-base text-text-2">
-          Somebody has invited this machine to pair. Accepting meets them through the broker in the
-          invitation — Esper operates none of its own.
+          Someone invited this machine to pair. Accepting connects you through the broker server named
+          in the invitation.
         </p>
         <p className="max-w-md break-all font-mono text-xs leading-relaxed text-text-3">{token}</p>
       </div>
 
-      {trouble && <Trouble detail={trouble}>That invitation could not be used.</Trouble>}
+      {trouble && <Trouble detail={trouble}>Could not use that invitation.</Trouble>}
 
       <div className="flex items-center gap-2">
         <Button variant="primary" disabled={busy} onClick={accept}>
@@ -381,7 +379,7 @@ function Pasting({ onDone }: { onDone: () => void }) {
         void accept();
       }}
     >
-      <Field label="An invitation link" hint="Clicking one opens this window on it. Pasting it here does the same thing.">
+      <Field label="Invitation link" hint="Someone can send you one from their Invite screen. Paste it here, or click it to open it here.">
         {(id, by) => (
           <Input
             id={id}
@@ -394,7 +392,7 @@ function Pasting({ onDone }: { onDone: () => void }) {
         )}
       </Field>
 
-      {trouble && <Trouble detail={trouble}>That invitation could not be used.</Trouble>}
+      {trouble && <Trouble detail={trouble}>Could not use that invitation.</Trouble>}
 
       <Button variant="primary" type="submit" disabled={busy || !link.trim()}>
         {busy ? "Pairing…" : "Accept"}
@@ -410,7 +408,7 @@ export function PairScreen({ onDone, invitation }: { onDone: () => void; invitat
   if (invitation) {
     return (
       <>
-        <Topbar title="An invitation" />
+        <Topbar title="Invitation" />
         <PageBody>
           <div data-grow="true" data-empty="true" className="flex">
             <Invited token={invitation} onDone={onDone} />
@@ -424,20 +422,24 @@ export function PairScreen({ onDone, invitation }: { onDone: () => void; invitat
     <>
       <Topbar title="Pair" />
       <PageBody>
-        <div className="grid gap-12 @[45rem]:grid-cols-2">
-          <div>
+        {/*
+          The two ends of one pairing, as two panels side by side: you do one
+          on each machine, and seeing both says so without a sentence.
+        */}
+        <div className="grid gap-4 @[45rem]:grid-cols-2">
+          <section className="rounded-xl border border-border bg-surface-1 p-6">
             <Heading>Show a code</Heading>
             <Showing onDone={onDone} />
-          </div>
-          <div>
-            <Heading>Enter one</Heading>
+          </section>
+          <section className="rounded-xl border border-border bg-surface-1 p-6">
+            <Heading>Enter a code</Heading>
             <Entering onDone={onDone} />
-          </div>
+          </section>
         </div>
-        <div className="mt-4">
-          <Heading>Or use an invitation</Heading>
+        <section className="mt-4 rounded-xl border border-border p-6">
+          <Heading>Use an invitation link</Heading>
           <Pasting onDone={onDone} />
-        </div>
+        </section>
       </PageBody>
     </>
   );

@@ -67,7 +67,7 @@ const sessions = [
 const SAMPLE_ACTIONS: readonly MenuAction[] = [
   { label: "Connect", icon: ArrowRight, onSelect: () => {} },
   { label: "Permissions…", icon: SlidersHorizontal, onSelect: () => {} },
-  { label: "Make the pairing last", icon: Infinity, onSelect: () => {} },
+  { label: "Make pairing permanent", icon: Infinity, onSelect: () => {} },
   { label: "Forget this device", icon: Trash2, onSelect: () => {}, danger: true, apart: true },
 ];
 
@@ -83,7 +83,7 @@ const SAMPLE_ROWS = [
 const SAMPLE_TRANSFERS: readonly Transfer[] = [
   { id: "a", name: "capture-2026-09-10.mkv", bytes: 41_000_000, total: 92_000_000, rate: 5_400_000, direction: "receive", state: "running" },
   { id: "b", name: "notes.md", bytes: 2_100, total: 2_100, direction: "send", state: "done" },
-  { id: "c", name: "build/esper-engine", bytes: 3_900_000, total: 14_700_000, direction: "send", state: "failed", error: "The far side refused: files_in is not granted." },
+  { id: "c", name: "build/esper-engine", bytes: 3_900_000, total: 14_700_000, direction: "send", state: "failed", error: "The other device refused: files_in is not granted." },
   { id: "d", name: "screenshot.png", bytes: 810_000, total: 810_000, direction: "receive", state: "done" },
 ];
 
@@ -92,15 +92,15 @@ const SAMPLE_LOG = Array.from({ length: 10000 }, (_, i) => i);
 
 /** The real first-run sequence's shape, with its content stood in for. */
 const SAMPLE_STEPS: readonly Step[] = [
-  { id: "who", label: "This machine", about: "Its key is what other devices trust.", content: <Identicon of="019a11258f68cdd0" size={44} /> },
-  { id: "reachable", label: "Reachable", about: "Whether paired devices can connect to this screen.", content: <p className="text-sm text-text-2">A switch, and off is a good answer.</p> },
-  { id: "pair", label: "Pair", about: "The one exchange that has to happen at both ends.", content: <p className="text-sm text-text-2">A code, read from one screen and typed on the other.</p> },
+  { id: "who", label: "This machine", about: "Other devices recognise this machine by its key.", content: <Identicon of="019a11258f68cdd0" size={44} /> },
+  { id: "reachable", label: "Allow connections", about: "Choose whether paired devices can connect to this machine.", content: <p className="text-sm text-text-2">A switch. Leaving it off is fine.</p> },
+  { id: "pair", label: "Pair", about: "Pair with another device. You need both machines for this step.", content: <p className="text-sm text-text-2">A code, read from one screen and typed on the other.</p> },
 ];
 
 /** A few of the window's real bindings, for the gate to render. */
 const SAMPLE_KEYS: readonly Shortcut[] = [
-  { keys: `${modifier} K`, what: "Commands, devices and everything else", group: "Getting around", when: null },
-  { keys: "?", what: "This sheet", group: "Getting around", when: null },
+  { keys: `${modifier} K`, what: "Search commands and devices", group: "Getting around", when: null },
+  { keys: "?", what: "Show keyboard shortcuts", group: "Getting around", when: null },
   { keys: `${modifier} 1`, what: "Devices", group: "Getting around", when: null },
   { keys: "F11", what: "Full screen", group: "This window", when: null },
   { keys: `${modifier} ,`, what: "Settings", group: "This window", when: null },
@@ -122,9 +122,9 @@ export function ComponentsSection() {
     <Section
       id="components"
       title="Components"
-      lede="Every borrowed component — Radix underneath, shadcn's shapes — has its colours and durations re-pointed at the tokens before it is used here. A hardcoded colour fails the lint, not review. Buttons name the action; errors say what to do."
+      lede="Built on Radix, styled only through the tokens. Buttons name the action; errors say what to do."
     >
-      <Sub title="Button" about="primary is the inverse fill. danger is the only tinted button, because destroying something deserves a warning and not a highlight. Feedback is --dur-fast on colour only.">
+      <Sub title="Button" about="Primary is a solid bone fill. Danger is the only coloured button.">
         <Demo className="flex-col items-stretch gap-4">
           {sizes.map((s) => (
             <div key={s} className="flex flex-wrap items-center gap-2">
@@ -141,7 +141,7 @@ export function ComponentsSection() {
         </Demo>
       </Sub>
 
-      <Sub title="Badge and TierBadge" about="Tier is never colour alone: icon and word, always. LAN, private and direct are equally fine and carry the same weight; relayed takes the signal; degraded is text-level warn beside it, so one signal per view still holds.">
+      <Sub title="Badge and TierBadge" about="How a session reaches the other machine, always as an icon and a word. Relayed is the one that stands out.">
         <Demo>
           {tones.map((t) => <Badge key={t} tone={t}>{t}</Badge>)}
         </Demo>
@@ -152,18 +152,18 @@ export function ComponentsSection() {
         </Demo>
       </Sub>
 
-      <Sub title="Callout" about="The tone's text on the tone's own soft fill. In high contrast the fill goes and a border in the tone takes its place.">
+      <Sub title="Callout" about="A tone's text on its own soft fill. High contrast swaps the fill for a border.">
         <div className="grid gap-3 sm:grid-cols-2">
           <Callout tone="info" title="Unattended access is off">This machine asks every time. Turn it on in Settings to skip the prompt for devices you trust.</Callout>
-          <Callout tone="ok" title="Paired">workstation can connect to this machine. Change what it may do in its permissions.</Callout>
-          <Callout tone="warn" title="Relayed through a broker">Your bytes cross a machine that is not an endpoint. They are encrypted end to end, and this is slower.</Callout>
-          <Callout tone="danger" title="This device's key has changed">Somebody may be impersonating it. Do not connect until you have checked with the person who owns it.</Callout>
+          <Callout tone="ok" title="Paired">workstation can connect to this machine. Change what it can do in its permissions.</Callout>
+          <Callout tone="warn" title="Relayed through a broker">Your data passes through another server. It is still encrypted end to end, but the connection is slower.</Callout>
+          <Callout tone="danger" title="This device's key has changed">Someone may be impersonating it. Don't connect until you have checked with its owner.</Callout>
         </div>
       </Sub>
 
       <Sub
         title="Permission checklist"
-        about="What a person has to go and do, on the platform they are on. Every one of these is rendered here because the part that has to be right is the part nobody here can test: a person who owns a Mac can read these words and correct them without touching a screen."
+        about="What a person has to do on their platform, in their platform's words."
       >
         <div className="grid gap-3 sm:grid-cols-2">
           {(
@@ -173,7 +173,7 @@ export function ComponentsSection() {
               ["X11", { os: "linux", display: "x11" }],
               ["A machine with no screen", { os: "linux", display: "headless" }],
               ["Windows", { os: "windows", display: "" }],
-              ["An engine that did not say", { os: "", display: "" }],
+              ["An unknown platform", { os: "", display: "" }],
             ] as const
           ).map(([what, platform]) => (
             <div key={what} className="flex flex-col gap-1.5">
@@ -184,8 +184,7 @@ export function ComponentsSection() {
           <div className="flex flex-col gap-1.5">
             <Key>A machine that can do both</Key>
             <p className="text-sm text-text-2">
-              Nothing is drawn. A checklist of things that are already true is one nobody reads, and it would sit here for ever
-              on a machine where everything works.
+              Nothing is shown. There is nothing to do, so the checklist stays out of the way.
             </p>
           </div>
         </div>
@@ -193,7 +192,7 @@ export function ComponentsSection() {
 
       <Sub
         title="Alarm"
-        about="A condition of the machine, not of a screen — so it bands across the whole window, above the sidebar as well, and it cannot be dismissed. It leaves when the thing it describes does."
+        about="A problem with the machine, shown across the whole window until it is fixed."
       >
         <div className="flex flex-col gap-3">
           <div className="shell-frame overflow-hidden rounded-md border border-border">
@@ -202,11 +201,11 @@ export function ComponentsSection() {
               detail="the engine stopped on its own: signal: killed"
               action={
                 <Button size="sm" onClick={() => {}}>
-                  Start it again
+                  Restart Esper
                 </Button>
               }
             >
-              The engine on this machine has stopped.
+              Esper's background service on this machine has stopped.
             </Alarm>
           </div>
           <div className="shell-frame overflow-hidden rounded-md border border-border">
@@ -219,7 +218,7 @@ export function ComponentsSection() {
 
       <Sub
         title="Kbd"
-        about="Eleven characters of markup, written four times, already drifted: a 3px radius and a 4px radius, px-1 and px-1.5, one grey and one inheriting. A key cap is recognised by its shape, and four shapes is the shape meaning nothing. The chord is split here rather than by the caller, because every caller that split on a space printed `Drag a tab` as three keys — so a part longer than six characters is a word and is set as one."
+        about="One key cap, everywhere a shortcut is shown."
       >
         <Demo className="gap-4">
           <Kbd keys="⌘ K" />
@@ -233,7 +232,7 @@ export function ComponentsSection() {
 
       <Sub
         title="Shortcut sheet"
-        about="The list is the bindings. `useShortcuts` walks the same array this renders, so a key that is on the sheet is a key that works — a hand-written sheet teaches one that does nothing the first time somebody adds a binding."
+        about="Generated from the same list the shortcuts run from, so it is always right."
       >
         <Demo>
           <Button size="sm" onClick={() => setKeys(true)}>
@@ -245,7 +244,7 @@ export function ComponentsSection() {
 
       <Sub
         title="CopyField"
-        about="Every value in this product that somebody has to move — an address, an invitation link, a path, eight words — is one they will otherwise select with a mouse and lose half of. The text stays real text, because the clipboard is a permission a webview can refuse and a component whose only affordance is a button would then have none."
+        about="For anything someone needs to copy: an address, a link, a path, the eight words."
       >
         <div className="grid max-w-2xl gap-4 sm:grid-cols-2">
           <CopyField label="Key file" value="~/.esper/identity.key" />
@@ -261,7 +260,7 @@ export function ComponentsSection() {
 
       <Sub
         title="Identicon"
-        about="A key drawn, so a device that has quietly become a *different* device looks different from across a desk. **Not a check, ever** — the drawing is a few dozen bits of the digest, so two keys can be made to draw the same picture, and every place it appears shows the hex or the words beside it. Exactly seven of fifteen half-cells carry ink, because sampling each cell independently drew a solid block about one key in eighty, and a solid block is the same picture for every key that draws it."
+        about="A picture of a device's key, so a changed device looks different. It is never a security check."
       >
         <Demo className="gap-6">
           {[
@@ -286,7 +285,7 @@ export function ComponentsSection() {
 
       <Sub
         title="Row menu, and the same menu on a right-click"
-        about="The inventory asked for a DropdownMenu and a ContextMenu separately, and building them separately is how the two lists drift — one grows an action and the other does not, and then which actions a row has depends on how you asked. One list, two triggers, and the right-click needs no second dependency: a menu positions against its trigger, so the trigger goes where the pointer was."
+        about="One list of actions, opened by the menu button or a right-click."
       >
         <div className="max-w-xl">
           <WithContextMenu actions={SAMPLE_ACTIONS}>
@@ -300,15 +299,14 @@ export function ComponentsSection() {
             </Row>
           </WithContextMenu>
           <p className="pt-3 text-xs leading-relaxed text-text-3">
-            Right-click anywhere on the row. Renaming is deliberately absent — the device store has no such
-            operation, and a name is what the far machine calls itself.
+            Right-click anywhere on the row. There is no rename, because a device's name is set on that device.
           </p>
         </div>
       </Sub>
 
       <Sub
         title="Popover"
-        about="A small panel from a control, for a choice that should not take the screen — the quality profile mid-session is the case, since a session is somebody else's screen and a dialog over it covers the thing they came to look at. Built on the menu primitive with its item semantics removed, so there is one focus trap and one animation rather than two."
+        about="A small panel for a quick choice that should not cover the screen."
       >
         <Demo className="gap-4">
           <Popover
@@ -326,7 +324,7 @@ export function ComponentsSection() {
                 </Lamp>
               </p>
               <p className="text-xs leading-relaxed text-text-2">
-                How this machine reads its own screen. Without it there is nothing to send.
+                How this machine reads its own screen. Without it, there is nothing to share.
               </p>
               <p className="font-mono text-xs text-text-3">x11</p>
             </div>
@@ -336,7 +334,7 @@ export function ComponentsSection() {
 
       <Sub
         title="SortableTable"
-        about="Columns that sort, on top of Table. The part that is easy to get wrong is not the comparison but the stability: two rows that compare equal must keep the order they arrived in, or a re-render shuffles rows nobody asked to move. The whole header cell is the control, and only the sorted column draws an arrow — an arrow on every column is an arrow that says nothing."
+        about="A table whose columns sort, keeping equal rows in the order they arrived."
       >
         <div className="max-w-2xl">
           <SortableTable
@@ -354,7 +352,7 @@ export function ComponentsSection() {
 
       <Sub
         title="LogView"
-        about="A long record that scrolls at sixty frames, by not drawing what nobody can see. Ten thousand lines of trail is an ordinary amount and thirty thousand DOM nodes is not — and the failure arrives as 'the app is slow' rather than 'this list is too long', which is the wrong thing to go looking at. Two spacers and an overscan, over a fixed row height the table already commits to."
+        about="A long list that stays fast by only drawing the rows on screen."
       >
         <div className="flex h-64 max-w-2xl flex-col rounded-md border border-border">
           <LogView
@@ -370,13 +368,13 @@ export function ComponentsSection() {
           />
         </div>
         <p className="pt-3 text-xs leading-relaxed text-text-3">
-          Ten thousand rows. Scroll it — the DOM holds about thirty.
+          Ten thousand rows. Scroll it: only about thirty are drawn at a time.
         </p>
       </Sub>
 
       <Sub
         title="Stepper"
-        about="A short sequence with a visible end, and the one place this product has one: first run asks three things, once, in an order. Every step is drawn from every step, because a sequence that shows only where you are has an unknown end — and the first thing anybody wants to know about a setup flow is how much of it there is. Backwards is reachable; forwards is the step's own action."
+        about="A short sequence with every step visible, so you know how much is left."
       >
         <div className="max-w-xl rounded-md border border-border p-4">
           <Stepper
@@ -390,7 +388,7 @@ export function ComponentsSection() {
 
       <Sub
         title="TransferQueue"
-        about="Several files at once. One file asks how far along it is; six ask whether it is going to finish and whether anything failed — and a column of six bars answers neither without the reader adding up, so there is a line at the top that says the whole thing. **The order is not the order they were started**: running, then failed, then finished, because a failure that scrolled away under nine successes is a failure nobody sees."
+        about="Several transfers at once, with one line summing them up and failures listed first."
       >
         <div className="max-w-xl">
           <TransferQueue transfers={SAMPLE_TRANSFERS} onCancel={() => {}} onClearFinished={() => {}} />
@@ -420,14 +418,14 @@ export function ComponentsSection() {
           <Card>
             <CardHeader><CardTitle>Segmented</CardTitle></CardHeader>
             <CardBody className="flex flex-col gap-3">
-              <p>The one family every exclusive choice uses; the theme and motion toggles above are this component.</p>
+              <p>Use this for any either-or choice. The theme and motion toggles above use it too.</p>
               <Segmented label="Density" value={density} onChange={setDensity} options={[{ id: "dense", label: "Dense" }, { id: "comfortable", label: "Comfortable" }]} />
             </CardBody>
           </Card>
         </div>
       </Sub>
 
-      <Sub title="Form controls" about="A control's boundary is --border-strong, never the hairline: it is how the control is found. Help is one line under the control — what to type, or what went wrong and what to do.">
+      <Sub title="Form controls" about="Controls have a strong border so they are easy to find. Help sits one line below.">
         <Demo className="flex-col items-stretch gap-5">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <Field label="Device name" hint="What this machine is called on other devices.">
@@ -446,10 +444,10 @@ export function ComponentsSection() {
                   <SelectContent>
                     <SelectGroup>
                       <SelectLabel>Profiles</SelectLabel>
-                      <SelectItem value="sharp">Sharp — text and code</SelectItem>
+                      <SelectItem value="sharp">Sharp, for text and code</SelectItem>
                       <SelectItem value="balanced">Balanced</SelectItem>
-                      <SelectItem value="smooth">Smooth — video and motion</SelectItem>
-                      <SelectItem value="saver" disabled>Data saver — needs a 1.x host</SelectItem>
+                      <SelectItem value="smooth">Smooth, for video and motion</SelectItem>
+                      <SelectItem value="saver" disabled>Data saver (needs Esper 1.x on the other device)</SelectItem>
                     </SelectGroup>
                   </SelectContent>
                 </Select>
@@ -458,7 +456,7 @@ export function ComponentsSection() {
             <Field label="Frame rate cap" hint="A number and its unit, in one control.">
               {(id, by) => <NumberInput id={id} aria-describedby={by} value={n} onChange={setN} min={1} max={144} unit="fps" />}
             </Field>
-            <Field label="Idle timeout" hint="Always stored in seconds; the unit is a way of writing it.">
+            <Field label="Idle timeout" hint="Stored in seconds. The unit only changes how it is shown.">
               {(id, by) => <DurationInput id={id} aria-describedby={by} value={dur} onChange={setDur} />}
             </Field>
           </div>
@@ -466,8 +464,8 @@ export function ComponentsSection() {
             <Field label="Unattended access allowed" hint="Which days, between which times, on this machine's clock.">
               {() => <ScheduleInput value={schedule} onChange={setSchedule} />}
             </Field>
-            <Field label="Note to the other side" hint="Shown once, when they connect.">
-              {(id, by) => <Textarea id={id} aria-describedby={by} placeholder="Back at 14:00 — leave the build running." />}
+            <Field label="Note to the other person" hint="Shown once, when they connect.">
+              {(id, by) => <Textarea id={id} aria-describedby={by} placeholder="Back at 14:00. Leave the build running." />}
             </Field>
           </div>
           <div className="flex flex-wrap items-center gap-6 text-sm">
@@ -481,7 +479,7 @@ export function ComponentsSection() {
         </Demo>
       </Sub>
 
-      <Sub title="Table" about="28px rows, tabular numbers, hairlines between rows only. Cell content never animates.">
+      <Sub title="Table" about="Dense rows, aligned numbers, hairlines between rows.">
         <Table>
           <THead>
             <TR><TH>Device</TH><TH>When</TH><TH>Granted</TH><TH className="text-right">Moved</TH></TR>
@@ -499,11 +497,11 @@ export function ComponentsSection() {
         </Table>
       </Sub>
 
-      <Sub title="Dialog, Tooltip, Command palette" about="Overlays open from where they were invoked. A tooltip is the text label an icon owes. The palette is ⌘K or Ctrl+K anywhere on this page.">
+      <Sub title="Dialog, Tooltip, Command palette" about="Overlays open from where you clicked. Press ⌘K or Ctrl+K for the command palette.">
         <Demo>
           <Dialog>
             <DialogTrigger asChild><Button variant="danger"><Trash2 aria-hidden size={14} /> Forget device</Button></DialogTrigger>
-            <DialogContent title="Forget workstation?" description="It will have to be paired again before it can connect. Nothing on the other machine changes.">
+            <DialogContent title="Forget workstation?" description="You'll need to pair it again to connect. Nothing changes on that machine.">
               <DialogFooter>
                 <DialogClose asChild>
                   <Button>Keep</Button>
@@ -530,7 +528,7 @@ export function ComponentsSection() {
         </Demo>
       </Sub>
 
-      <Sub title="Toast and reason codes" about="Every failure the protocol can report has a human sentence. 1xx protocol, 2xx authentication, 3xx authorization, 4xx capability, 5xx transport — and the codes that need their own words have them.">
+      <Sub title="Toast and reason codes" about="Every error the protocol can report, in a plain sentence.">
         <Demo className="flex-col items-stretch gap-3">
           <div className="flex flex-wrap gap-2">
             {reasonCodes.map((c) => (
@@ -555,17 +553,17 @@ export function ComponentsSection() {
 
       <Sub
         title="Empty and loading states"
-        about="Every list has an empty state that says what to do next, and a skeleton the shape of what is coming so nothing pops. Skeletons do not shimmer. There were two empty states for a while — this one and a Nothing in the screens' own vocabulary — and every real screen used the other; they are one component now, with the treatment the screens proved they wanted: centred, no box, a hairline mark."
+        about="Empty lists say what to do next. Loading shows the shape of what is coming."
       >
         <div className="grid gap-4 divide-y divide-border lg:grid-cols-3 lg:divide-x lg:divide-y-0">
           <EmptyState icon={Monitor} title="No devices yet" action={<Button variant="primary">Pair a device</Button>}>
-            Pair this machine with another and it will appear here, ready to connect in one click.
+            Pair a device, then connect to it in one click.
           </EmptyState>
           <EmptyState icon={Inbox} title="No sessions">
-            When a device connects to this machine, or this machine connects out, it is listed here.
+            Sessions to and from this machine appear here.
           </EmptyState>
           <EmptyState icon={Activity} title="No activity">
-            Everything granted, connected or moved is recorded here, on this machine only.
+            Sessions, permission changes and file transfers appear here. The log stays on this machine.
           </EmptyState>
         </div>
         <Card className="flex flex-col gap-3 p-4">

@@ -1,0 +1,47 @@
+/*
+  The gate's numbering. A counter rather than a prop, so a section moved in
+  DesignPage renumbers itself and the sidebar and the headings cannot disagree.
+*/
+@layer components {
+  .design-sections {
+    counter-reset: design-section;
+  }
+
+  .design-section {
+    counter-increment: design-section;
+  }
+
+  .design-index::before {
+    content: counter(design-section, decimal-leading-zero) " /";
+  }
+
+  .design-nav {
+    counter-reset: design-nav;
+  }
+
+  .design-nav-link {
+    counter-increment: design-nav;
+  }
+
+  .design-nav-link::before {
+    content: counter(design-nav, decimal-leading-zero);
+    margin-right: var(--px-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-3);
+  }
+
+  /* The headings fade from the text colour to the faint one, the way esper.st's do. */
+  .design-title {
+    background: linear-gradient(to bottom, var(--color-text) 40%, var(--color-text-3) 110%);
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+@layer components {
+  [data-theme="hc"] .design-title {
+    background: none;
+    color: var(--color-text);
+  }
+}

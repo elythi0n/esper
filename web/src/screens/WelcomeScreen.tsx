@@ -46,7 +46,7 @@ function Identity() {
   const { data, error, loading } = useAsk(() => api.identity(), []);
 
   if (loading) return <Skeleton className="h-16 w-full max-w-md" />;
-  if (error) return <Trouble detail={error.message}>This machine could not say who it is.</Trouble>;
+  if (error) return <Trouble detail={error.message}>Could not read this machine's identity.</Trouble>;
   if (!data) return null;
 
   return (
@@ -62,8 +62,7 @@ function Identity() {
       <CopyField label="Read these aloud when you pair" value={data.words.join(" ")} wrap />
 
       <p className="text-xs leading-relaxed text-text-3">
-        A pairing code proves the same code was typed at both ends. Only these words prove the machine at
-        the other end is the one you meant — so they are the half worth saying out loud.
+        These words prove you are pairing with the right machine. Check that they match on both screens.
       </p>
     </div>
   );
@@ -86,19 +85,18 @@ function Reachable() {
     };
   }, []);
 
-  if (trouble && !state) return <Trouble detail={trouble}>Whether this machine serves its screen is unknown.</Trouble>;
+  if (trouble && !state) return <Trouble detail={trouble}>Could not check whether this machine shares its screen.</Trouble>;
   if (!state) return <Skeleton className="h-10 w-full max-w-md" />;
 
   if (!state.managed) {
     return (
       <div className="flex max-w-lg flex-col gap-3">
         <p className="text-sm text-text-2">
-          {state.why || "There is no service manager here that Esper turns the host on with."}
+          {state.why || "Esper can't turn screen sharing on by itself on this machine."}
         </p>
         <p className="text-xs leading-relaxed text-text-3">
-          Run <code className="font-mono text-text-2">esper host</code> and let whatever starts programs at
-          login on this machine run it. Nothing here is blocked by this — a machine that only{" "}
-          <em>connects</em> to others never needs it.
+          Run <code className="font-mono text-text-2">esper host</code> and set it to start when you log in.
+          You only need this if other devices will connect <em>to</em> this machine.
         </p>
       </div>
     );
@@ -121,26 +119,25 @@ function Reachable() {
     <div className="flex max-w-lg flex-col gap-4">
       <div className="flex items-start justify-between gap-6 rounded-md border border-border p-4">
         <div className="flex min-w-0 flex-col gap-1">
-          <p className="text-sm text-text">Let paired devices reach this machine</p>
+          <p className="text-sm text-text">Let paired devices connect to this machine</p>
           <p className="text-xs text-text-3">
-            {state.active ? "Running now" : "Not running"} ·{" "}
-            {state.enabled ? "starts at login" : "does not start at login"} · {state.manager}
+            {state.active ? "Other devices can connect right now." : "Other devices can't connect right now."}{" "}
+            {state.enabled ? "It turns on when you log in." : "It stays off after you log in."}
           </p>
         </div>
         <Switch
           checked={state.enabled || state.active}
           disabled={busy}
           onCheckedChange={change}
-          aria-label="Serve this machine's screen to paired devices"
+          aria-label="Share this machine's screen with paired devices"
         />
       </div>
 
       <p className="text-xs leading-relaxed text-text-3">
-        Off is a perfectly good answer. A machine you only ever <em>connect from</em> — a laptop you use to
-        reach a server — never serves anything, and leaving this off is one fewer thing listening.
+        If you only connect <em>from</em> this machine, such as a laptop, you can leave this off.
       </p>
 
-      {trouble && <Trouble detail={trouble}>That could not be changed.</Trouble>}
+      {trouble && <Trouble detail={trouble}>Could not change this setting.</Trouble>}
       {said && (
         <pre className="overflow-x-auto whitespace-pre-wrap break-words border-l-2 border-border py-2 pl-3 font-mono text-xs leading-relaxed text-text-3">
           {said}
@@ -154,8 +151,8 @@ function Pairing({ onPair }: { onPair: () => void }) {
   return (
     <div className="flex max-w-lg flex-col gap-4">
       <p className="text-sm text-text-2">
-        Two machines pair once, with a short code read from one screen and typed on the other, and know each
-        other by key from then on. There is no account and nothing to register.
+        Pair two machines once: type the short code from one screen into the other. After that, you
+        connect in one click. No account needed.
       </p>
       <div className="flex items-center gap-2">
         <Button variant="primary" onClick={onPair}>
@@ -163,8 +160,8 @@ function Pairing({ onPair }: { onPair: () => void }) {
         </Button>
       </div>
       <p className="text-xs leading-relaxed text-text-3">
-        If the other machine is not on this network, an invitation is the other way in — one link, through a
-        broker you run.
+        If the other machine is on a different network, send an invitation link instead. It needs a broker
+        server that you run.
       </p>
     </div>
   );
@@ -177,19 +174,19 @@ export function WelcomeScreen({ onPair, onDone }: { onPair: () => void; onDone: 
     {
       id: "who",
       label: "This machine",
-      about: "Its key is what other devices trust. Nothing here is set — this is what it already is.",
+      about: "Other devices recognise this machine by its key. There is nothing to set here.",
       content: <Identity />,
     },
     {
       id: "reachable",
-      label: "Reachable",
-      about: "Whether paired devices can connect to this machine's screen.",
+      label: "Allow connections",
+      about: "Choose whether paired devices can connect to this machine.",
       content: <Reachable />,
     },
     {
       id: "pair",
       label: "Pair",
-      about: "The one exchange that has to happen at both ends.",
+      about: "Pair with another device. You need both machines for this step.",
       content: <Pairing onPair={onPair} />,
     },
   ];

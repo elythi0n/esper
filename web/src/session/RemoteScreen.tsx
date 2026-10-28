@@ -231,7 +231,7 @@ export function RemoteScreen({
       />
       {drivable && (
         <p id={wayOut} className="sr-only">
-          While this screen has the keyboard, what you type goes to the far machine. Press Escape twice to bring it
+          While this screen has the keyboard, what you type goes to the other device. Press Escape twice to take it
           back.
         </p>
       )}
@@ -262,11 +262,11 @@ export function RemoteScreen({
           <Key>{state.status === "failed" ? "No picture" : "Waiting for a session"}</Key>
           <p className="text-sm text-text-2">
             {state.trouble ??
-              "This window is listening. A session started against it will draw here — the pictures are decoded in the window itself."}
+              "This window is ready. When a session starts, the other screen appears here."}
           </p>
           {socket && (
             <div className="flex w-full flex-col items-center gap-1.5">
-              <Key>Point a session at</Key>
+              <Key>To start one, run</Key>
               <CopyField value={`esper connect ${device ?? "<device>"} --viewer ${socket}`} wrap />
             </div>
           )}

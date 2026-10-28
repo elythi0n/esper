@@ -210,7 +210,7 @@ export function ReconnectNotice({ state, sinceMs }: { state: ReconnectState; sin
     <div role="status" className="rounded-md border border-border bg-surface-1 px-4 py-3 text-center text-sm text-text">
       <div className="font-medium">{state === "reconnecting" ? "Connection interrupted" : "Connection lost"}</div>
       <div className="text-text-2 tabular-nums">
-        {state === "reconnecting" ? `Reconnecting — ${s}s` : "Esper will reconnect if the machine comes back."}
+        {state === "reconnecting" ? `Reconnecting (${s}s)` : "Esper reconnects when the other device comes back."}
       </div>
     </div>
   );

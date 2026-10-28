@@ -1,5 +1,6 @@
 import { useEffect, useState, type HTMLAttributes, type ReactNode, type RefObject } from "react";
 import { cn } from "@/lib/cn";
+import "./design.css";
 
 /*
   The gate's own furniture. Nothing here is a product component; it is how the
@@ -8,9 +9,11 @@ import { cn } from "@/lib/cn";
 
 export function Section({ id, title, lede, children }: { id: string; title: string; lede: ReactNode; children: ReactNode }) {
   return (
-    <section id={id} aria-labelledby={`${id}-title`} className="flex scroll-mt-8 flex-col gap-8 border-t border-border pt-12">
-      <header className="flex flex-col gap-2">
-        <h2 id={`${id}-title`} className="font-display text-3xl font-medium text-text">
+    <section id={id} aria-labelledby={`${id}-title`} className="design-section flex scroll-mt-8 flex-col gap-8 border-t border-border pt-14">
+      <header className="flex flex-col gap-3">
+        {/* The number is a CSS counter, so the order on the page is the only order there is. */}
+        <span aria-hidden className="design-index font-mono text-xs tracking-[0.18em] text-text-3" />
+        <h2 id={`${id}-title`} className="design-title font-display text-3xl font-medium text-text sm:text-[44px] sm:leading-[1.05] sm:tracking-[-0.03em]">
           {title}
         </h2>
         <p className="max-w-[var(--measure)] text-base text-text-2">{lede}</p>
@@ -24,7 +27,7 @@ export function Sub({ title, about, children, className }: { title: string; abou
   return (
     <div className={cn("flex flex-col gap-3", className)}>
       <div className="flex flex-col gap-1">
-        <h3 className="text-lg font-medium text-text">{title}</h3>
+        <h3 className="font-display text-lg font-medium text-text">{title}</h3>
         {about && <p className="max-w-[var(--measure)] text-sm text-text-2">{about}</p>}
       </div>
       {children}
@@ -34,11 +37,11 @@ export function Sub({ title, about, children, className }: { title: string; abou
 
 /** A framed area on the canvas surface, so what is shown sits where it will sit in the product. */
 export function Demo({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface-0 p-5", className)} {...props} />;
+  return <div className={cn("flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface-0 p-6", className)} {...props} />;
 }
 
 export function Eyebrow({ children, className }: { children: ReactNode; className?: string | undefined }) {
-  return <span className={cn("font-mono text-xs uppercase tracking-[0.12em] text-text-3", className)}>{children}</span>;
+  return <span className={cn("font-mono text-xs uppercase tracking-[0.18em] text-text-3", className)}>{children}</span>;
 }
 
 export function TokenName({ children }: { children: ReactNode }) {
@@ -87,7 +90,7 @@ export interface SwatchProps {
 export function Swatch({ token, className, note, value }: SwatchProps) {
   return (
     <div className="flex min-w-36 flex-1 flex-col gap-2">
-      <div className={cn("h-14 rounded-sm border border-border", className)} />
+      <div className={cn("h-16 rounded-lg border border-border", className)} />
       <div className="flex flex-col gap-0.5">
         <TokenName>{token}</TokenName>
         {value && <span className="truncate font-mono text-xs text-text-2" title={value}>{value}</span>}

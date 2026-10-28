@@ -384,7 +384,7 @@ window.__paths = {
       // What is actually on screen, so a path that measured a failure
       // message cannot be reported as a path that measured the product.
       shell: !!document.querySelector(".shell"),
-      firstRun: /Nothing is answering|does not take this window/.test(document.body.innerText || ""),
+      firstRun: /isn't running on this machine|won't accept this window/.test(document.body.innerText || ""),
       rows: document.querySelectorAll(".device-row, [data-device]").length,
     };
   },

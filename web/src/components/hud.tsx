@@ -91,7 +91,7 @@ export function formatBitrate(kbps: number): string {
  * where a hundred milliseconds of round trip is an ordinary continent.
  */
 function hopTone(ms: number): { tone: StatTone; note?: string } {
-  if (ms >= 100) return { tone: "danger", note: "the window is behind" };
+  if (ms >= 100) return { tone: "danger", note: "this window is lagging" };
   if (ms >= 50) return { tone: "warn", note: "slow" };
   return { tone: "neutral" };
 }

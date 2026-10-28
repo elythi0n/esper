@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
-import { Key } from "@/screens/parts";
 
 export interface SettingRowProps {
   label: string;
@@ -40,17 +39,38 @@ export interface SettingRowProps {
  */
 export function SettingRow({ label, state, control, trouble, said, className }: SettingRowProps) {
   return (
-    <div className={cn("flex flex-col gap-2 border-b border-border py-3", className)}>
-      <div className="flex items-center gap-4">
-        <span className="flex min-w-0 flex-1 flex-col gap-1">
-          <Key>{label}</Key>
-          {state && <span className="min-w-0 text-xs leading-relaxed text-text-3">{state}</span>}
+    <div className={cn("flex flex-col gap-3 border-b border-border py-4", className)}>
+      {/* The control drops under the words when there is no room beside them, rather than squeezing them into a column. */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        {/*
+          The label in the interface's own face, sentence case, at body size.
+          Tracked mono capitals were how a readout's field names look, and a
+          column of forty of them read as a spreadsheet header rather than a
+          list of things somebody might want to change.
+        */}
+        <span className="flex min-w-[min(100%,16rem)] flex-1 flex-col gap-1">
+          <span className="text-sm font-medium text-text">{label}</span>
+          {state && <span className="min-w-0 max-w-[60ch] text-sm leading-relaxed text-text-2">{state}</span>}
         </span>
         {control && <span className="shrink-0">{control}</span>}
       </div>
       {trouble}
       {said}
     </div>
+  );
+}
+
+/**
+ * Related settings, together in one rounded card, the way a phone's or a
+ * desktop's own settings group them. The rows keep their hairlines between
+ * each other; the card's edge replaces the last one.
+ */
+export function SettingCard({ title, children, className }: { title?: ReactNode; children: ReactNode; className?: string | undefined }) {
+  return (
+    <section className={cn("flex flex-col gap-2", className)}>
+      {title && <h3 className="px-1 font-display text-base font-medium text-text">{title}</h3>}
+      <div className="rounded-xl border border-border bg-surface-1 px-5 [&>*:last-child]:border-b-0">{children}</div>
+    </section>
   );
 }
 

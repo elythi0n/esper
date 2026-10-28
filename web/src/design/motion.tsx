@@ -12,18 +12,18 @@ import { Demo, Section, Sub, TokenName, TokenTable, useTokens } from "./ui";
 
 const durationRows = [
   { token: "--dur-instant", note: "Nothing" },
-  { token: "--dur-fast", note: "Hover, press, focus — and the ceiling inside a session" },
+  { token: "--dur-fast", note: "Hover, press, focus. Also the longest motion inside a session" },
   { token: "--dur-base", note: "State changes; arrive" },
   { token: "--dur-slow", note: "Entrances; overlay" },
   { token: "--dur-graph", note: "A chart redrawing" },
   { token: "--dur-video", note: "The video surface. Always 0" },
-  { token: "--session-chrome-hide", note: "Idle time before the session chrome retracts. Not a motion; reduced motion leaves it" },
+  { token: "--session-chrome-hide", note: "Idle time before the session controls hide. Not a motion, so reduced motion leaves it alone" },
   { token: "--arrive-rise", note: "How far a new item rises" },
   { token: "--arrive-leave", note: "How far a leaving item lifts" },
   { token: "--overlay-from", note: "The scale an overlay opens from" },
 ];
 const easingRows = [
-  { token: "--ease-out", note: "Enters — fast out of the gate, settles" },
+  { token: "--ease-out", note: "Entrances: a fast start, then a gentle settle" },
   { token: "--ease", note: "Everything else" },
   { token: "--ease-spring", note: "Sparingly" },
 ];
@@ -116,9 +116,9 @@ function LayoutReplay() {
         </AnimatePresence>
       </ul>
       <p className="max-w-[var(--measure)] text-xs text-text-3">
-        Nothing here writes a keyframe. The rows that move are measured before and after and animated on the
-        compositor — which is why the lint refuses a <code className="font-mono">@keyframes</code> that names a
-        layout property.
+        Nothing here uses a keyframe. Rows are measured before and after the change and animated on the
+        compositor. The lint rejects any <code className="font-mono">@keyframes</code> that animates a layout
+        property.
       </p>
     </Demo>
   );
@@ -134,18 +134,18 @@ export function MotionSection() {
     <Section
       id="motion"
       title="Motion"
-      lede="Five named motions, and no others: arrive, overlay, chrome hide and show, drawer, toast. The CSS is the source of truth and src/motion.ts is generated from it, so the library and the stylesheet cannot disagree. Every replay below can be run with motion off."
+      lede="Five motions and no others. Every one can be replayed below, with motion on or off."
     >
       <Demo className="justify-between">
         <div className="flex flex-col gap-1">
           <span className="text-sm font-medium text-text">Reduced motion</span>
-          <span className="text-xs text-text-2">Two ways in — the OS setting and this override — one place out: every duration token goes to 0 and a sweep cuts anything that never read the tokens to 0.01ms.</span>
+          <span className="text-xs text-text-2">Turn it on in your OS settings or here. Either way, every duration token becomes 0, and any other animation is cut to 0.01ms.</span>
         </div>
         <MotionToggle />
       </Demo>
 
       <div className="grid gap-8 lg:grid-cols-[3fr_2fr]">
-        <Sub title="Durations" about="As the document resolves them now. Toggle reduced motion and the values change; that is the fallback being confirmed rather than assumed.">
+        <Sub title="Durations" about="The durations in use right now. Turn on reduced motion and they drop to zero.">
           <table className="w-full border-collapse text-sm">
             <thead className="text-left text-xs text-text-3">
               <tr className="h-[var(--row-h)]">
@@ -170,7 +170,7 @@ export function MotionSection() {
             </tbody>
           </table>
         </Sub>
-        <Sub title="Easing" about="Enters use --ease-out. Everything else uses --ease.">
+        <Sub title="Easing" about="Things arriving use ease-out. Everything else uses ease.">
           <TokenTable rows={easingRows} values={v} />
           <div className="flex flex-col gap-2 pt-2">
             {easingRows.map((r) => (
@@ -185,7 +185,7 @@ export function MotionSection() {
         </Sub>
       </div>
 
-      <Sub title="Replay" about="Each of the five, on demand.">
+      <Sub title="Replay" about="Run each motion on demand.">
         <div className="grid gap-4 lg:grid-cols-2">
           <Demo className="flex-col items-stretch gap-3">
             <div className="flex items-center justify-between">
@@ -213,10 +213,10 @@ export function MotionSection() {
             <div className="flex flex-wrap gap-2">
               <Dialog>
                 <DialogTrigger asChild><Button>Open a dialog</Button></DialogTrigger>
-                <DialogContent title="Forget this device?" description="It will have to be paired again before it can connect. Nothing on the other machine changes.">
+                <DialogContent title="Forget this device?" description="You'll need to pair it again to connect. Nothing changes on that machine.">
                   <DialogFooter>
                     <DialogClose asChild>
-                      <Button>Keep</Button>
+                      <Button>Cancel</Button>
                     </DialogClose>
                     <Button variant="danger">Forget</Button>
                   </DialogFooter>
@@ -238,11 +238,11 @@ export function MotionSection() {
           <span className="text-sm font-medium">chrome hide / show</span>
           <SessionRoot className="h-56 rounded-md border border-border">
             <VideoSurface>
-              <span className="font-mono text-xs text-text-3">1920 × 1080 · the video surface never transitions</span>
+              <span className="font-mono text-xs text-text-3">1920 × 1080 · the video surface never animates</span>
             </VideoSurface>
             <SessionChrome>
               <span className="text-sm font-medium">workstation</span>
-              <span className="text-xs text-text-3">retracts after --session-chrome-hide, over --dur-base — which inside a session is --dur-fast</span>
+              <span className="text-xs text-text-3">hides after --session-chrome-hide, over --dur-base (--dur-fast inside a session)</span>
             </SessionChrome>
             <Presence />
             <ChromeReplay />
@@ -252,10 +252,10 @@ export function MotionSection() {
         <LayoutReplay />
       </Sub>
 
-      <Sub title="The never-animate list" about="Where motion is refused, and why the refusals are the design rather than gaps in it.">
+      <Sub title="The never-animate list" about="Where nothing moves, on purpose.">
         <ul className="grid gap-2 text-sm text-text-2 sm:grid-cols-2">
           <li className="rounded-sm border border-border p-3"><span className="font-medium text-text">Text reflow.</span> Words move when a layout does. They do not tween.</li>
-          <li className="rounded-sm border border-border p-3"><span className="font-medium text-text">Table and list cell content.</span> A figure counting up is, for the whole count, wrong.</li>
+          <li className="rounded-sm border border-border p-3"><span className="font-medium text-text">Table and list cell content.</span> A number counting up is wrong until it stops.</li>
           <li className="rounded-sm border border-border p-3"><span className="font-medium text-text">Anything per keystroke.</span> Typing has its own rhythm.</li>
           <li className="rounded-sm border border-border p-3"><span className="font-medium text-text">The reading critical path.</span> Skeletons do not shimmer; time-ago updates in place.</li>
           <li className="rounded-sm border border-border p-3"><span className="font-medium text-text">HUD numbers.</span> RTT, bitrate and fps are read while doing something else.</li>

@@ -6,14 +6,15 @@ import {
   type IDockviewHeaderActionsProps,
   type IDockviewPanelProps,
 } from "dockview-react";
-import { PictureInPicture2, Plus } from "lucide-react";
+import { MonitorPlay, PictureInPicture2, Plus } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useDevices } from "@/api/hooks";
 import { pairingState, type Device } from "@/api/types";
 import { kindOf } from "@/components/device-row";
 import { Tooltip } from "@/components/tooltip";
 import { cn } from "@/lib/cn";
-import { Key, shortAgo } from "@/screens/parts";
+import { Topbar } from "@/shell/AppShell";
+import { shortAgo } from "@/screens/parts";
 import { TimeAgo } from "@/components/time-ago";
 import { shortAgoAt } from "@/lib/ago";
 import { SessionView } from "./SessionView";
@@ -74,7 +75,16 @@ function useDock(): DockState {
   return ctx;
 }
 
-function AddSession({ align = "end", group }: { align?: "end" | "start"; group?: unknown }) {
+function AddSession({
+  align = "end",
+  group,
+  label,
+}: {
+  align?: "end" | "start";
+  group?: unknown;
+  /** Drawn as a labelled button, for the empty dock, rather than a bare + in a tab strip. */
+  label?: string | undefined;
+}) {
   const { devices, open, add } = useDock();
   const choices = openable(devices, open);
   return (
@@ -85,10 +95,15 @@ function AddSession({ align = "end", group }: { align?: "end" | "start"; group?:
           // 28px in a tab strip: small in both directions, so it takes the
           // hit area the system provides for exactly this.
           data-tap-min=""
-          aria-label="Open another session"
-          className="inline-flex size-7 items-center justify-center rounded-sm text-text-3 transition-colors duration-[var(--dur-fast)] hover:bg-surface-2 hover:text-text"
+          aria-label={label ? undefined : "Open another session"}
+          className={
+            label
+              ? "inline-flex h-8 items-center gap-2 rounded-md bg-accent px-3.5 text-sm font-semibold text-accent-fg transition-opacity duration-[var(--dur-fast)] hover:opacity-90"
+              : "inline-flex size-7 items-center justify-center rounded-sm text-text-3 transition-colors duration-[var(--dur-fast)] hover:bg-text/5 hover:text-text"
+          }
         >
           <Plus aria-hidden size={15} strokeWidth={1.75} />
+          {label}
         </button>
       </RD.Trigger>
       <RD.Portal>
@@ -96,13 +111,13 @@ function AddSession({ align = "end", group }: { align?: "end" | "start"; group?:
           align={align}
           sideOffset={6}
           className={cn(
-            "z-[var(--z-popover)] min-w-56 overflow-hidden rounded-md border border-border bg-surface-2 p-1 shadow-[var(--shadow-2)]",
+            "z-[var(--z-popover)] min-w-56 overflow-hidden rounded-lg border border-border bg-surface-2 p-1 shadow-[var(--shadow-2)]",
             "data-[state=open]:animate-[overlay-in_var(--dur-base)_var(--ease-out)]",
           )}
         >
           {choices.length === 0 && (
             <p className="px-3 py-4 text-center text-sm text-text-2">
-              {devices.length ? "Every device is already open." : "No devices paired yet."}
+              {devices.length ? "All your devices are already open." : "No devices paired yet."}
             </p>
           )}
           {choices.map((d) => {
@@ -260,7 +275,15 @@ export function SessionsScreen({ initial }: { initial?: string | undefined }) {
 
   return (
     <Dock.Provider value={dock}>
-      <div className="relative min-h-0 flex-1" data-session="">
+      {/*
+        **Dark only while something is on screen.** The session layer is dark
+        because a remote desktop is somebody else's picture; an empty dock is
+        just a screen of this app, and painting it black under a light theme
+        read as a broken half of the window. So the dark root, and the title
+        bar's absence, both wait for the first session.
+      */}
+      {open.size === 0 && <Topbar title="Sessions" />}
+      <div className="relative min-h-0 flex-1" data-session={open.size > 0 ? "" : undefined}>
         <DockviewReact
           className="dockview-theme-esper h-full"
           components={components}
@@ -277,12 +300,20 @@ export function SessionsScreen({ initial }: { initial?: string | undefined }) {
 /** "Nothing is open", in dockview's own slot rather than laid over it. */
 function Watermark() {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-6 bg-surface-0">
-      <Key>No sessions</Key>
-      <AddSession align="start" />
-      <p className="max-w-[var(--measure-short)] text-center text-sm text-text-3">
-        Open one, then drag its tab to an edge to put two machines side by side.
-      </p>
+    <div className="flex h-full flex-col items-center justify-center gap-5 bg-surface-0 text-center">
+      <span
+        aria-hidden
+        className="flex size-14 items-center justify-center rounded-xl border border-border bg-text/[0.04] text-text-3"
+      >
+        <MonitorPlay size={22} strokeWidth={1.5} />
+      </span>
+      <div className="flex max-w-[var(--measure-short)] flex-col gap-1.5">
+        <p className="font-display text-lg font-medium text-text">No sessions open</p>
+        <p className="text-sm text-text-2">
+          Open a session to see another machine's screen. Drag a tab to an edge to show two side by side.
+        </p>
+      </div>
+      <AddSession align="start" label="Open a session" />
     </div>
   );
 }

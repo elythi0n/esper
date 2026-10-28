@@ -10,7 +10,7 @@ import { Demo, Section, Sub, TokenName, TokenTable, useTokens } from "./ui";
 
 const shellTokens: ReadonlyArray<{ token: string; note?: string }> = [
   { token: "--sidebar-w", note: "The longest destination at 13px, beside its icon" },
-  { token: "--sidebar-rail-w", note: "Collapsed. A 30px row centred in it is still a 44px target" },
+  { token: "--sidebar-rail-w", note: "Collapsed. Each icon gets a 40px square with room either side" },
   { token: "--topbar-h", note: "The topbar, and the brand block, so their hairlines meet" },
   { token: "--footbar-h", note: "The status strip and the sidebar's foot" },
   { token: "--page-gutter", note: "The one number the topbar, the body and the strip share" },
@@ -79,7 +79,7 @@ function ShellContents({ onSearch }: { onSearch?: (() => void) | undefined }) {
     <>
       <Topbar
         title="Devices"
-        subtitle="Machines this one is paired with. One click connects."
+        subtitle="Devices paired with this machine. Click one to connect."
         onSearch={onSearch}
         actions={
           <Button variant="primary" size="sm">
@@ -119,11 +119,11 @@ export function ShellSection() {
     <Section
       id="shell"
       title="The shell"
-      lede="Every screen outside a session sits in this: a sidebar that collapses to a rail, a topbar that stays put, a page body that is the only thing that scrolls, and a status strip. A session is the exception and has its own root, because inside one the UI is not the content."
+      lede="The frame around every screen: sidebar, top bar, page and status strip."
     >
       <Sub
         title="Wide"
-        about="The sidebar's rail can be collapsed and the choice is remembered. The active destination is marked by a bar on the rail's edge rather than a filled pill — the quieter mark says where you are without competing with the screen."
+        about="The sidebar collapses to icons and remembers. The current screen is lit."
       >
         <div className="h-[30rem] overflow-hidden rounded-md border border-border">
           <AppShell groups={SCREENS} active={wide} onSelect={setWide} version="0.1.0" status={<ShellStatus />}>
@@ -134,7 +134,7 @@ export function ShellSection() {
 
       <Sub
         title="Narrow, and narrowest"
-        about="The shell asks how wide it is, not how wide the display is — a window dragged to half a screen gets the compact arrangement whether or not the monitor is large, and a media query cannot answer that. Which is also why all three fit on this page: one component at three widths, not a description of one."
+        about="One shell at three widths. It responds to the window, not the monitor."
       >
         <div className="flex flex-wrap items-start gap-4">
           {/* Widths in pixels on purpose: these boxes are the measurement. */}
@@ -151,17 +151,16 @@ export function ShellSection() {
         </div>
         <p className="max-w-[var(--measure)] text-xs text-text-3">
           At <TokenName>--breakpoint-lg</TokenName> the search trigger loses its words. Below{" "}
-          <TokenName>--breakpoint-sm</TokenName> the sidebar's box dissolves and its two halves become rows of one
-          column: the brand as a strip across the top, the destinations as a tab bar across the bottom, the screen
-          between them. The native pattern rather than a squeezed desktop. Only the destinations that earn a
-          thumb-sized tab are on the bar; the rest stay in the palette. Each tab clears{" "}
+          <TokenName>--breakpoint-sm</TokenName> the sidebar splits in two: the brand becomes a strip across the top,
+          and the main destinations become a tab bar across the bottom. The rest stay in the command palette. Each
+          tab clears{" "}
           <TokenName>--tap-min</TokenName>, and both bars respect the safe-area insets.
         </p>
       </Sub>
 
       <Sub
         title="The window's own bar"
-        about="The desktop window is frameless, so this replaces the system's title bar — which means the three buttons the OS used to draw are ours to provide. 32px, one hairline, and the empty middle is the drag region, which is where somebody grabs a window anyway. There is no File and no Edit: there are no files here and nothing to edit, and the sidebar already holds the destinations. What a menu earns its place with is the things that are not destinations — the window's own commands, and what you do to a session."
+        about="The window draws its own title bar, with menus that only hold what earns a place."
       >
         <div className="overflow-hidden rounded-md border border-border">
           <TitleBar
@@ -174,12 +173,12 @@ export function ShellSection() {
         </div>
       </Sub>
 
-      <Sub title="Sizing" about="Five numbers, and the gutter is the one the topbar, the body and the status strip all use, so their content sits on one line.">
+      <Sub title="Sizing" about="The five sizes the shell is built from.">
         <TokenTable rows={shellTokens} values={v} />
         <Demo className="gap-6">
           <span className="text-sm text-text-2">
-            The wordmark is uppercase, one weight, wide tracking, no letter device and no effect of any kind. It
-            takes tokens like everything else:
+            The wordmark is uppercase, one weight, with wide tracking and no effects. It uses tokens like
+            everything else:
           </span>
           <Wordmark className="h-3" />
         </Demo>

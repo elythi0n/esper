@@ -50,24 +50,25 @@ export const SENSITIVE: ReadonlySet<Permission> = new Set<Permission>([
 ]);
 
 /**
- * The words on screen. Short on purpose: a permission list is scanned, not
- * read, and "out" and "in" are the store's direction, not a person's.
+ * The words on screen. Each names this machine, because the list is what
+ * another device may do *here*, and "Copy from here" or "Restart" alone read
+ * as things you do to that device.
  */
 export const PERMISSION_LABEL: Record<Permission, string> = {
-  view: "See the screen",
-  control: "Mouse and keyboard",
-  clipboard_out: "Copy from here",
-  clipboard_in: "Paste to here",
-  files_out: "Take files",
-  files_in: "Put files",
-  audio: "Hear audio",
-  terminal: "Terminal",
-  forward: "Forward ports",
-  unattended: "Connect unasked",
-  record: "Record",
-  lock: "Lock screen",
-  logoff: "Sign out",
-  reboot: "Restart",
+  view: "See this screen",
+  control: "Use the mouse and keyboard",
+  clipboard_out: "Copy text from this machine",
+  clipboard_in: "Paste text into this machine",
+  files_out: "Take files from this machine",
+  files_in: "Send files to this machine",
+  audio: "Hear this machine's sound",
+  terminal: "Open a terminal on this machine",
+  forward: "Reach network services on this machine",
+  unattended: "Connect without asking",
+  record: "Record the session",
+  lock: "Lock this screen",
+  logoff: "Log this machine off",
+  reboot: "Restart this machine",
 };
 
 /** The four the product is mostly about, for a summary that is not a list of fourteen. */
@@ -151,33 +152,33 @@ export const AUTHORISED_BY: Readonly<Record<string, Permission | null>> = {
  * compared that way, and one rule for both maps is one thing to remember.
  */
 export const EVENT_LABEL: Readonly<Record<string, string>> = {
-  recording: "Recording",
+  recording: "Session recording",
   paired: "Paired",
   unpaired: "Unpaired",
-  revoked: "Revoked",
-  session_narrowed: "Session narrowed",
-  session_asked: "Asked for more",
-  lock_after_changed: "Locking changed",
+  revoked: "Access removed",
+  session_narrowed: "Quality lowered",
+  session_asked: "Asked for a permission",
+  lock_after_changed: "Auto-lock rule changed",
   permissions_changed: "Permissions changed",
   setting_changed: "Setting changed",
-  trail_trimmed: "Record trimmed",
-  pairing_kept: "Pairing kept",
-  schedule_changed: "Schedule changed",
+  trail_trimmed: "Log trimmed",
+  pairing_kept: "Pairing made permanent",
+  schedule_changed: "Access hours changed",
   session_opened: "Session opened",
   locked: "Screen locked",
   // Log off or restart: the detail says which, and the label says what kind
   // of thing it was.
-  powered: "Log off or restart",
+  powered: "Logged off or restarted",
   session_closed: "Session ended",
-  terminal_opened: "Shell opened",
-  terminal_closed: "Shell ended",
-  terminal_parked: "Shell parked",
-  terminal_resumed: "Shell resumed",
-  forward_opened: "Forward opened",
-  forward_closed: "Forward closed",
-  forward_refused: "Forward refused",
-  file_transferred: "File",
-  refused: "Refused",
+  terminal_opened: "Terminal opened",
+  terminal_closed: "Terminal closed",
+  terminal_parked: "Terminal kept open",
+  terminal_resumed: "Terminal reconnected",
+  forward_opened: "Port forward opened",
+  forward_closed: "Port forward closed",
+  forward_refused: "Port forward refused",
+  file_transferred: "File transferred",
+  refused: "Connection refused",
 };
 
 /**

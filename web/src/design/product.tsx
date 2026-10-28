@@ -50,7 +50,7 @@ const monitors = [
 const transfers: Transfer[] = [
   { id: "t1", name: "release-notes-2026-09.pdf", bytes: 3_400_000, total: 8_200_000, rate: 1_200_000, direction: "send", state: "running" },
   { id: "t2", name: "IMG_4821.HEIC", bytes: 2_100_000, total: 2_100_000, direction: "receive", state: "done" },
-  { id: "t3", name: "backup.tar", bytes: 410_000_000, total: 1_900_000_000, direction: "send", state: "failed", error: "The other side stopped answering. Try again when it is back." },
+  { id: "t3", name: "backup.tar", bytes: 410_000_000, total: 1_900_000_000, direction: "send", state: "failed", error: "The other device stopped responding. Try again when it is back." },
   { id: "t4", name: "notes.md", bytes: 12_000, total: 40_000, direction: "receive", state: "cancelled" },
 ];
 
@@ -67,15 +67,15 @@ export function ProductSection() {
     <Section
       id="product"
       title="Product components"
-      lede="The pieces the screens are made of, in the states they will actually be in. Devices is the product: if connecting to a machine you already trust is not one click from a cold start, nothing else here matters."
+      lede="The pieces the screens are built from, in the states they will really be in."
     >
-      <Sub title="DeviceRow" about="A row and not a card, and that was decided twice: the card carried a readout under every name, and five of them is five paragraphs. The row keeps what answers the question somebody opens this screen with — which machine, and can I go there now — and the rest moved to the panel beside the list.">
+      <Sub title="DeviceRow" about="One line per device: its name, when it was last seen, and Connect.">
         <div className="flex flex-col">
           {devices.map((d) => (
             <DeviceRow
               key={d.fingerprint.hex}
               device={d}
-              onSelect={() => toast.show({ title: `${d.name} — the panel opens beside the list` })}
+              onSelect={() => toast.show({ title: `Opening ${d.name}'s details beside the list` })}
               onConnect={() => toast.show({ title: `Connecting to ${d.name}` })}
             />
           ))}
@@ -83,13 +83,13 @@ export function ProductSection() {
       </Sub>
 
       <div className="grid gap-8 lg:grid-cols-2">
-        <Sub title="PairingCode" about="44px, grouped in threes, a countdown that updates in place. Nothing else on any view is this big.">
+        <Sub title="PairingCode" about="The pairing code, big enough to read across a room, with a live countdown.">
           <Demo className="flex-col items-start gap-6">
             <PairingCode code="482917" expiresAt={nowMs + 4 * 60_000 + 37_000} />
             <PairingCode code="103448" expiresAt={nowMs - 1000} />
           </Demo>
         </Sub>
-        <Sub title="PairingPrompt" about="The host-side accept or deny, with what is being asked for spelled out in sentences. Doing nothing is a deny.">
+        <Sub title="PairingPrompt" about="Asking the host to allow a session, in plain sentences. Doing nothing means no.">
           <Demo className="items-start">
             {prompt ? (
               <PairingPrompt
@@ -106,7 +106,7 @@ export function ProductSection() {
         </Sub>
       </div>
 
-      <Sub title="SessionHUD, StatTile, Sparkline" about="RTT, bitrate, fps, the window's own hop, encoder, tier. The numbers update in place and declare no transition; a toned value carries a word beside it so the tone is never the only signal. The hop is the window's share of the latency — socket, decode, paint — and is never added to the round trip, because a hundred milliseconds of hop is a window that is behind where a hundred of round trip is an ordinary continent.">
+      <Sub title="SessionHUD, StatTile, Sparkline" about="Live session numbers that update in place, each with a word so colour is never the only signal.">
         <div className="flex flex-col gap-3">
           <SessionHUD stats={{ rttMs: 18, bitrateKbps: 4200, fps: 60, hopMs: 2, encoder: "h264 sw", tier: "lan", rttHistory, fpsHistory }} />
           <SessionHUD stats={{ rttMs: 212, bitrateKbps: 900, fps: 24, encoder: "h264 sw", tier: "relayed", degraded: true, rttHistory: rttHistory.map((x) => x * 11), fpsHistory: fpsHistory.map((x) => x * 0.4) }} />
@@ -120,18 +120,18 @@ export function ProductSection() {
       </Sub>
 
       <div className="grid gap-8 lg:grid-cols-2">
-        <Sub title="MonitorSwitcher" about="Each screen at its own aspect ratio, named with its size. Arrow keys move between them. Switching never animates the video.">
+        <Sub title="MonitorSwitcher" about="Pick a monitor. Arrow keys move between them.">
           <Demo className="items-start">
             <MonitorSwitcher monitors={monitors} value={monitor} onChange={setMonitor} allowAll />
             <p className="w-full text-xs text-text-3">Showing {monitor === ALL_SCREENS ? "all screens, tiled" : monitors.find((m) => m.id === monitor)?.label}.</p>
           </Demo>
         </Sub>
-        <Sub title="PermissionGrid" about="What a device may do, with the sentence that says what each means. Seeing the screen cannot be turned off, and the switch says so.">
+        <Sub title="PermissionGrid" about="What a device may do, each with a sentence that explains it.">
           <PermissionGrid value={perms} onChange={setPerms} />
         </Sub>
       </div>
 
-      <Sub title="TransferProgress" about="Per file, cancellable, and the bar is a measurement with no transition. A failure says what to do.">
+      <Sub title="TransferProgress" about="One file's progress, with a cancel button and a clear error.">
         <div className="grid gap-3 sm:grid-cols-2">
           {transfers.map((t) => <TransferProgress key={t.id} transfer={t} onCancel={(x) => toast.show({ title: `Stopped ${x.name}` })} />)}
         </div>

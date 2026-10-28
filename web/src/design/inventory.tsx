@@ -13,11 +13,11 @@ export function InventorySection() {
     <Section
       id="inventory"
       title="The inventory"
-      lede="What the product cannot exist without, what will make it pleasant, and what is deliberately not being built. The third list is the one that does the work: without it a design system grows a component every time somebody wants one, and then it is a catalogue rather than a set of decisions."
+      lede="What is built, what is planned, and what is deliberately left out."
     >
       <Sub
-        title={`Tier 1 — ${TIER_1.length} components`}
-        about="Each names a real export, and a script fails the build if it stops resolving. An inventory nothing checks is a document that goes stale the first time somebody renames something."
+        title={`Tier 1: ${TIER_1.length} components`}
+        about="Each one is a real component, and the build fails if it disappears."
       >
         {/* Its own scroller. Three columns of prose have a min-content width
             the page cannot go under, and without this the *page* scrolled
@@ -49,8 +49,8 @@ export function InventorySection() {
 
       <div className="grid gap-8 lg:grid-cols-2">
         <Sub
-          title={`Tier 2 — ${TIER_2.length} coming`}
-          about="Not built, and not missing. Each is written down with the screen that will ask for it first, so it arrives with a use rather than on spec."
+          title={`Tier 2: ${TIER_2.length} coming`}
+          about="Planned, each with the screen that will need it first."
         >
           <ul className="flex flex-col divide-y divide-border">
             {TIER_2.map((e) => (
@@ -69,8 +69,8 @@ export function InventorySection() {
         </Sub>
 
         <Sub
-          title={`Not building — ${NOT_BUILDING.length}`}
-          about="Every entry is a decision with the reason attached, so the next argument about it starts from the argument that was already had."
+          title={`Not building: ${NOT_BUILDING.length}`}
+          about="Left out on purpose, with the reason."
         >
           <ul className="flex flex-col divide-y divide-border">
             {NOT_BUILDING.map((e) => (

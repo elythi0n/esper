@@ -126,9 +126,9 @@ const ASK_IS_LATE_MS = 4_000;
  * the host's own judgement alone.
  */
 const PROFILES: readonly { label: string; profile: number; sharpness: number }[] = [
-  { label: "Reading and typing — sharp", profile: 1, sharpness: 1 },
+  { label: "Sharp, for reading and typing", profile: 1, sharpness: 1 },
   { label: "Balanced", profile: 0, sharpness: 0 },
-  { label: "Video and motion — smooth", profile: 2, sharpness: 3 },
+  { label: "Smooth, for video and motion", profile: 2, sharpness: 3 },
 ];
 
 /**
@@ -544,7 +544,7 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
         {stands !== "settled" && (
           <span role="status" data-asking="" className="shrink-0 text-xs text-text-3">
             {stands === "kept"
-              ? "The host kept the screen it had"
+              ? "The other device kept the same screen"
               : `Asking for ${picture.screens.find((s) => s.id === asked)?.name ?? "another screen"}`}
           </span>
         )}
@@ -578,7 +578,7 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
           </Popover>
         )}
         {narrowed && (
-          <Tooltip label="The link could not carry what the host was sending, so this session asked for less">
+          <Tooltip label="The connection was too slow, so this session lowered the quality">
             <span
               role="status"
               data-narrowed=""
@@ -644,7 +644,7 @@ export function SessionView({ fingerprint, name }: { fingerprint: string; name: 
               {captured ? <MousePointerBan aria-hidden size={16} /> : <MousePointer2 aria-hidden size={16} />}
             </Button>
           </Tooltip>
-          <Tooltip label={`${FIT_NAMES[fit]} — change how the picture fits`}>
+          <Tooltip label={`Picture fit: ${FIT_NAMES[fit].toLowerCase()}. Click to change.`}>
             <Button
               variant="ghost"
               size="sm"

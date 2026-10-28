@@ -56,11 +56,11 @@ export function SessionSection() {
     <Section
       id="session"
       title="The session layer"
-      lede="A theme, not a set of exceptions. data-session on the root re-declares the dark values, caps every duration at --dur-fast, zeroes the video surface's transition and parks the chrome above everything else. Switch the theme above: the box below does not change."
+      lede="Inside a session everything is dark, quick and out of the way. Change the theme above: this box stays the same."
     >
       <Sub
         title="The picture"
-        about="Where the remote screen is drawn: the engine's own encoded frames over a loopback socket, decoded by the window's own VideoDecoder and painted on a canvas. No WebRTC and no new crates — the measurement that settled it found 151 frames a second at 1920×1080 with every frame drawn, on software rendering. Here there is no session, so it shows the other half of its job: the command that starts one, with this window's socket already in it."
+        about="Where the remote screen is drawn, decoded in the window itself."
       >
         <div className="relative h-[14rem] overflow-hidden rounded-lg border border-border" data-session="">
           {/* Not drivable: a specimen that took the keyboard would be a
@@ -69,7 +69,7 @@ export function SessionSection() {
         </div>
       </Sub>
 
-      <Sub title="Live" about="Auto-hiding chrome, the HUD, the presence indicator, and a video surface that swaps frames. The chrome retracts after --session-chrome-hide and comes back at the top edge or on focus, so every control on it has a keyboard path.">
+      <Sub title="Live" about="Controls that hide while you work and come back at the top edge or on focus.">
         <SessionRoot ref={sessionRef} className="h-[28rem] rounded-lg border border-border">
           <VideoSurface>
             {reconnect === "live" ? (
@@ -97,7 +97,7 @@ export function SessionSection() {
         </SessionRoot>
         <span ref={outerProbe} aria-hidden className="absolute bg-surface-1 text-text opacity-0" />
         <Demo className="justify-between">
-          <span className="text-sm text-text-2">Reconnect states its state — no pulse, no spinner, no breathing.</span>
+          <span className="text-sm text-text-2">The reconnect notice says what is happening in words. No pulse, no spinner.</span>
           <div className="flex gap-2">
             {(["live", "reconnecting", "lost"] as const).map((s) => (
               <Button key={s} size="sm" variant={reconnect === s ? "primary" : "secondary"} onClick={() => setReconnect(s)}>{s}</Button>
@@ -106,7 +106,7 @@ export function SessionSection() {
         </Demo>
       </Sub>
 
-      <Sub title="The same utilities, different answers" about="Measured from the browser, outside and inside the session root above, right now. A component inside a session is the same component as outside — it reads the same tokens and gets different answers.">
+      <Sub title="The same utilities, different answers" about="The same tokens, measured outside and inside a session.">
         <table className="w-full border-collapse text-sm">
           <thead className="text-left text-xs text-text-3">
             <tr className="h-[var(--row-h)]"><th className="pr-4 font-medium">Utility or token</th><th className="pr-4 font-medium">Outside</th><th className="font-medium">Inside a session</th></tr>
@@ -133,7 +133,7 @@ export function SessionSection() {
         </table>
       </Sub>
 
-      <Sub title="The presence indicator's contract" about="The host-side badge that says this screen is being watched gets rules, not styling. These are read from presence.contract.ts; scripts/check-presence.mjs holds presence.css to them and the engine's own indicator carries the same numbers.">
+      <Sub title="The presence indicator's contract" about="The badge that tells the host their screen is being watched follows fixed rules, not styling.">
         <Demo className="items-stretch">
           <div className="relative grid h-24 min-w-48 flex-1 place-items-center rounded-sm bg-video [contain:paint]"><Presence /></div>
           <div className="relative grid h-24 min-w-48 flex-1 place-items-center rounded-sm bg-surface-2 [contain:paint]"><Presence /></div>
@@ -145,7 +145,7 @@ export function SessionSection() {
           <li className="flex justify-between border-b border-border py-1.5"><span className="text-text-2">Fill</span><span className="font-mono text-xs">{presence.fill}</span></li>
           <li className="flex justify-between border-b border-border py-1.5"><span className="text-text-2">Contrast against video</span><span className="font-mono text-xs">≥ {presence.minContrastAgainstVideo}:1 over {presence.videoWorstCases.length} worst cases</span></li>
           <li className="flex justify-between border-b border-border py-1.5"><span className="text-text-2">Themeable</span><span className="font-mono text-xs">{String(presence.themeable)}</span></li>
-          <li className="flex justify-between border-b border-border py-1.5"><span className="text-text-2">Animated</span><span className="font-mono text-xs">{String(presence.animated)} — even with reduced motion off</span></li>
+          <li className="flex justify-between border-b border-border py-1.5"><span className="text-text-2">Animated</span><span className="font-mono text-xs">{String(presence.animated)}, even with reduced motion off</span></li>
           <li className="flex justify-between border-b border-border py-1.5"><span className="text-text-2">Opacity</span><span className="font-mono text-xs">{presence.opacity}</span></li>
           <li className="flex justify-between border-b border-border py-1.5"><span className="text-text-2">Position</span><span className="font-mono text-xs">{presence.position}, top trailing corner</span></li>
         </ul>

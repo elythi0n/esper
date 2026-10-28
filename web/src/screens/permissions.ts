@@ -52,14 +52,14 @@ export function stepsFor(platform: Platform, what: "capture" | "input", availabl
       ? [
           {
             what,
-            todo: "Allow Esper to record the screen, then start it again. macOS only asks once, and until it is allowed a session shows an empty desktop.",
+            todo: "Allow Esper to record the screen, then restart Esper. Until you do, sessions show an empty desktop.",
             where: "System Settings → Privacy & Security → Screen Recording",
           },
         ]
       : [
           {
             what,
-            todo: "Allow Esper to control the computer. Without it a session can be watched and not driven.",
+            todo: "Allow Esper to control this computer. Without it, the other device can watch but not use the mouse or keyboard.",
             where: "System Settings → Privacy & Security → Accessibility",
           },
         ];
@@ -67,8 +67,8 @@ export function stepsFor(platform: Platform, what: "capture" | "input", availabl
 
   if (os === "windows") {
     return what === "capture"
-      ? [{ what, todo: "Esper captures through Desktop Duplication, which needs a display adapter and a signed-in session. A machine with no monitor attached has neither." }]
-      : [{ what, todo: "Run Esper as administrator to drive windows that are themselves elevated. Windows refuses input from a program with less privilege than the window it is sent to." }];
+      ? [{ what, todo: "Attach a monitor and sign in to Windows. Esper can't capture the screen without both." }]
+      : [{ what, todo: "Run Esper as administrator to control apps that run as administrator. Windows blocks input to them otherwise." }];
   }
 
   if (os === "linux" && display === "wayland") {
@@ -76,14 +76,14 @@ export function stepsFor(platform: Platform, what: "capture" | "input", availabl
       ? [
           {
             what,
-            todo: "Install xdg-desktop-portal and the backend for your desktop, and make sure both are running. Wayland has no way for a program to read the screen without one.",
+            todo: "Install xdg-desktop-portal and the portal for your desktop, and make sure both are running. Wayland needs them to share the screen.",
           },
-          { what, todo: "The first session asks you which screen to share. That question comes from the desktop, not from Esper, and a session cannot start until it is answered." },
+          { what, todo: "Your desktop asks which screen to share when the first session starts. The session waits until you answer." },
         ]
       : [
           {
             what,
-            todo: "Give this account access to /dev/uinput, usually by joining the input group and logging in again. Wayland compositors accept injected input through the kernel rather than from another program.",
+            todo: "Give this account access to /dev/uinput, usually by joining the input group and logging in again.",
           },
         ];
   }
@@ -94,22 +94,22 @@ export function stepsFor(platform: Platform, what: "capture" | "input", availabl
         what,
         todo:
           what === "capture"
-            ? "This machine has no display. Esper can host a screen only where there is one — a server reached over SSH has none, and a session would show a test pattern."
-            : "This machine has no display, so there is nothing to inject input into.",
+            ? "This machine has no display, so there is no screen to share. A session would show a test pattern."
+            : "This machine has no display, so there is nothing to send input to.",
       },
     ];
   }
 
   if (os === "linux") {
     return what === "capture"
-      ? [{ what, todo: "Esper reads the screen through the X server. Check that this process was started with the session's DISPLAY — a service started before you logged in usually was not." }]
-      : [{ what, todo: "Esper injects input through the X server's XTEST extension. Check that it is enabled and that this process has the session's DISPLAY." }];
+      ? [{ what, todo: "Esper reads the screen through the X server. Make sure Esper was started with your session's DISPLAY. A service started before you logged in usually isn't." }]
+      : [{ what, todo: "Esper sends input through the X server's XTEST extension. Make sure it is turned on and Esper has your session's DISPLAY." }];
   }
 
   return [
     {
       what,
-      todo: "Esper cannot say what to do on this machine, because it does not know what kind it is. Run `esper doctor` and read what it says it tried.",
+      todo: "Esper doesn't know what kind of machine this is. Run `esper doctor` to see what it tried.",
     },
   ];
 }

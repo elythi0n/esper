@@ -43,29 +43,31 @@ export function DesignPage() {
     <TooltipProvider>
       <Toaster>
         <div className="mx-auto flex w-full max-w-[var(--breakpoint-xl)] gap-10 px-6 pb-24 pt-8 lg:px-10">
-          <nav aria-label="Sections" className="sticky top-8 hidden h-fit w-44 shrink-0 flex-col gap-1 lg:flex">
+          <nav aria-label="Sections" className="design-nav sticky top-8 hidden h-fit w-52 shrink-0 flex-col gap-0.5 lg:flex">
             <Button asChild variant="ghost" size="sm" className="mb-4 -ml-2 justify-start">
               <a href="#/"><ArrowLeft aria-hidden size={14} /> Esper</a>
             </Button>
             {nav.map((n) => (
-              <a key={n.id} href={`#/design/${n.id}`} onClick={(e) => { e.preventDefault(); document.getElementById(n.id)?.scrollIntoView(); }} className="rounded-sm px-2 py-1 text-sm text-text-2 hover:bg-surface-1 hover:text-text">
+              <a key={n.id} href={`#/design/${n.id}`} onClick={(e) => { e.preventDefault(); document.getElementById(n.id)?.scrollIntoView(); }} className="design-nav-link rounded-md px-2.5 py-1.5 text-sm text-text-2 transition-[background-color,color] duration-[var(--dur-fast)] hover:bg-text/5 hover:text-text">
                 {n.label}
               </a>
             ))}
           </nav>
 
-          <main className="flex min-w-0 flex-1 flex-col gap-12">
+          <main className="design-sections flex min-w-0 flex-1 flex-col gap-16">
             <header className="flex flex-col gap-6">
               <div className="flex flex-col gap-3">
-                <Eyebrow>Esper · design system · the gate</Eyebrow>
-                <h1 className="font-display text-3xl font-medium sm:text-[56px] sm:leading-[1.02] sm:tracking-[-0.035em]">
-                  <span className="bg-[linear-gradient(to_bottom,var(--color-text)_35%,var(--color-text-3)_100%)] bg-clip-text text-transparent">Design</span>
+                <span className="inline-flex w-fit items-center rounded-lg border border-border bg-text/[0.04] px-3 py-1.5 font-mono text-xs uppercase tracking-[0.18em] text-text-2">
+                  Esper · Design system
+                </span>
+                <h1 className="design-title mt-3 font-display text-3xl font-medium sm:text-[64px] sm:leading-[1.02] sm:tracking-[-0.035em]">
+                  Design
                 </h1>
-                <p className="max-w-[var(--measure)] text-base text-text-2">
-                  Every token and every component, in all three themes, with motion on and off. Nothing in the product is built until this page is complete and signed off — and because it is a route in the same bundle, what it shows is what ships.
+                <p className="max-w-[var(--measure)] text-lg text-text-2">
+                  Every token and component Esper is built from, in each theme, with motion on and off. It uses the same code as the app, so what you see here is what ships.
                 </p>
               </div>
-              <div className="flex flex-wrap items-center gap-x-8 gap-y-3 rounded-md border border-border bg-surface-1 p-4">
+              <div className="flex flex-wrap items-center gap-x-8 gap-y-3 rounded-xl border border-border bg-surface-1 p-5">
                 <div className="flex flex-col gap-1.5">
                   <Eyebrow>Theme</Eyebrow>
                   <ThemeToggle />

@@ -83,7 +83,7 @@ export function ShortcutSheet({
   const groups = ["Getting around", "This window", "Sessions"] as const;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title="Keyboard" description="Everything this window binds.">
+      <DialogContent title="Keyboard shortcuts" description="Every shortcut in this window.">
         <div className="flex flex-col gap-5">
           {groups.map((group) => {
             const rows = shortcuts.filter((s) => s.group === group);

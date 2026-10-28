@@ -23,12 +23,16 @@ export const THEMES: ReadonlyArray<{ id: Theme; label: string; about: string }> 
   {
     id: "auto",
     label: "Auto",
-    about:
-      "The default: high contrast if the desktop asked for it, and dark otherwise. It deliberately does **not** follow `prefers-color-scheme` — that query reports light on every machine whose owner expressed no preference, so following it would turn the product light for almost everybody who never asked, which is mistaking a default for a decision. Contrast is different: somebody who set it asked their operating system for it everywhere.",
+    /*
+      Not `prefers-color-scheme`: that reports light for everybody who never
+      chose, which would turn the product light for almost everyone. A desktop
+      set to high contrast is a real choice, so that one is followed.
+    */
+    about: "Dark, or high contrast if your desktop asks for it.",
   },
-  { id: "dark", label: "Dark", about: "The primary theme, and the session's theme whatever is chosen here." },
-  { id: "light", label: "Light", about: "Ink on bone. Surfaces separate upward." },
-  { id: "hc", label: "High contrast", about: "AAA text, a 3px focus ring, strong borders everywhere, no tints." },
+  { id: "dark", label: "Dark", about: "The main theme. Sessions always use it." },
+  { id: "light", label: "Light", about: "Dark ink on warm paper." },
+  { id: "hc", label: "High contrast", about: "Stronger text, borders and focus rings, and no tints." },
 ];
 
 export { THEME_KEY, MOTION_KEY } from "./first-paint";

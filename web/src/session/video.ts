@@ -161,11 +161,11 @@ export const IDLE: ViewerState = {
  */
 async function refusal(response: Response): Promise<string> {
   if (response.status === 404 || response.status === 501) {
-    return "A session's pictures go to the Esper window. A browser tab has no socket for them.";
+    return "Sessions only show in the Esper app, not in a browser tab.";
   }
   const said = (await response.text().catch(() => "")).trim();
   if (said && said.length <= 200 && !said.includes("<")) return said;
-  return `This window could not start the picture (${response.status}).`;
+  return `Could not start the session picture (${response.status}).`;
 }
 
 /** The first pause before trying the picture again, in milliseconds. */

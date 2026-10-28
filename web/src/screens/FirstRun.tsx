@@ -68,13 +68,13 @@ export function FirstRun({
       <div className="flex max-w-md flex-col items-center gap-4">
         <p className="text-center text-base text-text-2">
           {refused
-            ? `Another Esper is answering${at ? ` on ${at}` : ""} and it does not take this window's token.`
-            : "Nothing is answering on this machine."}
+            ? `Another copy of Esper is running${at ? ` on ${at}` : ""} and won't accept this window.`
+            : "Esper isn't running on this machine. Start it with this command."}
         </p>
         {refused ? (
           <p className="text-center text-sm text-text-3">
-            It was started from a different <code className="font-mono">ESPER_HOME</code>. Stop it, or open this window
-            with the same one.
+            It uses a different <code className="font-mono">ESPER_HOME</code>. Stop it, or open this window with the
+            same <code className="font-mono">ESPER_HOME</code>.
           </p>
         ) : (
           <code className="rounded-sm border border-border bg-surface-1 px-4 py-2 font-mono text-lg text-text">
@@ -84,7 +84,7 @@ export function FirstRun({
       </div>
 
       <div className="flex flex-col items-center gap-3">
-        <Key>{tries === 0 ? "Looking" : `Looking · ${tries}`}</Key>
+        <Key>{tries === 0 ? "Checking" : `Checking · ${tries}`}</Key>
         <Button size="sm" disabled={!watch} onClick={() => watch && window.location.reload()}>
           Try now
         </Button>

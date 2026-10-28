@@ -57,13 +57,17 @@ export function EmptyState({ icon: Icon, title, children, action, className, ...
       className={cn("flex flex-1 flex-col items-center justify-center gap-5 py-20 text-center", className)}
       {...props}
     >
+      {/* The mark sits in the tile a device row's icon sits in, so an empty list looks like the list it will be. */}
       {Icon && (
-        <span aria-hidden className="text-text-3/50">
-          <Icon size={28} strokeWidth={1} />
+        <span
+          aria-hidden
+          className="flex size-14 items-center justify-center rounded-xl border border-border bg-text/[0.04] text-text-3"
+        >
+          <Icon size={22} strokeWidth={1.5} />
         </span>
       )}
       <div className="flex max-w-[var(--measure-short)] flex-col gap-1.5">
-        {title && <p className="text-base font-medium text-text">{title}</p>}
+        {title && <p className="font-display text-lg font-medium text-text">{title}</p>}
         {children && <p className="text-sm text-text-2">{children}</p>}
       </div>
       {action}

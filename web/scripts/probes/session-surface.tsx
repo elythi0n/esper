@@ -309,7 +309,7 @@ const report = (r: unknown) =>
     const queueText = () => {
       const panel = [...document.querySelectorAll('[role="menu"]')]
         .map((el) => (el.textContent ?? "").replace(/\s+/g, " ").trim())
-        .find((t) => t.includes("still moving") || t.includes("did not finish") || t.includes("arrived"));
+        .find((t) => t.includes("still sending") || t.includes("did not finish") || t.includes("arrived"));
       return panel ?? "";
     };
     // A pointer, not a click: the panel hangs from the menu primitive, which

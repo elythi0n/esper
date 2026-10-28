@@ -5,7 +5,7 @@ import { cn } from "@/lib/cn";
 export type Tone = "neutral" | "ok" | "warn" | "danger" | "info" | "signal";
 
 const tones: Record<Tone, string> = {
-  neutral: "bg-surface-2 text-text-2 border-border",
+  neutral: "bg-text/5 text-text-2 border-border",
   ok: "bg-ok-soft text-ok border-ok/0 [border-width:var(--soft-border-width)] [border-color:currentColor]",
   warn: "bg-warn-soft text-warn [border-width:var(--soft-border-width)] [border-color:currentColor]",
   danger: "bg-danger-soft text-danger [border-width:var(--soft-border-width)] [border-color:currentColor]",
@@ -24,7 +24,7 @@ export function Badge({ tone = "neutral", className, ...props }: BadgeProps) {
   return (
     <span
       className={cn(
-        "inline-flex h-5 items-center gap-1 rounded-sm border px-1.5 text-xs",
+        "inline-flex h-5 items-center gap-1 rounded-full border px-2 text-xs",
         tones[tone],
         className,
       )}
@@ -74,14 +74,14 @@ export function TierBadge({ tier, degraded = false, className, ...props }: TierB
   return (
     <span className={cn("inline-flex items-center gap-2", className)} {...props}>
       <Badge tone={tier === "relayed" ? "signal" : "neutral"}>
-        <Icon aria-hidden size={12} strokeWidth={2} />
+        <Icon aria-hidden size={12} strokeWidth={1.75} />
         {tierWord[tier]}
       </Badge>
       {degraded && (
         // Relayed outranks degraded for the signal — one signal per view — so
         // this is text-level warn and never a second fill.
         <span className="inline-flex items-center gap-1 text-xs text-warn">
-          <TriangleAlert aria-hidden size={12} strokeWidth={2} />
+          <TriangleAlert aria-hidden size={12} strokeWidth={1.75} />
           Degraded
         </span>
       )}

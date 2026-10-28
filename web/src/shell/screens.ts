@@ -1,4 +1,4 @@
-import { Activity, Monitor, MonitorPlay, Send, Settings, SwatchBook, UserPlus } from "lucide-react";
+import { Handshake, History, MonitorSmartphone, Palette, ScreenShare, Settings2, TicketPlus } from "lucide-react";
 import type { NavGroup } from "./AppShell";
 
 /**
@@ -13,23 +13,23 @@ import type { NavGroup } from "./AppShell";
 export const SCREENS: readonly NavGroup[] = [
   {
     items: [
-      { id: "devices", label: "Devices", icon: Monitor, compact: true },
-      { id: "sessions", label: "Sessions", icon: MonitorPlay, compact: true },
+      { id: "devices", label: "Devices", icon: MonitorSmartphone, compact: true },
+      { id: "sessions", label: "Sessions", icon: ScreenShare, compact: true },
     ],
   },
   {
     label: "Connect",
     items: [
-      { id: "pair", label: "Pair", icon: UserPlus, compact: true },
-      { id: "invite", label: "Invite", icon: Send },
+      { id: "pair", label: "Pair", icon: Handshake, compact: true },
+      { id: "invite", label: "Invite", icon: TicketPlus },
     ],
   },
   {
     label: "This machine",
     items: [
-      { id: "activity", label: "Activity", icon: Activity },
-      { id: "settings", label: "Settings", icon: Settings, compact: true },
-      { id: "design", label: "Design", icon: SwatchBook },
+      { id: "activity", label: "Activity", icon: History },
+      { id: "settings", label: "Settings", icon: Settings2, compact: true },
+      { id: "design", label: "Design", icon: Palette },
     ],
   },
 ];

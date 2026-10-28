@@ -1,8 +1,9 @@
-import { PanelLeft, Search, type LucideIcon } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen, Search, type LucideIcon } from "lucide-react";
 import {
   useCallback,
   useState,
   type HTMLAttributes,
+  type ReactElement,
   type ReactNode,
   type UIEvent,
 } from "react";
@@ -60,7 +61,7 @@ export function NavItem({
       onClick={() => onSelect(entry.id)}
     >
       <span className="navitem-icon">
-        <Icon aria-hidden size={17} strokeWidth={1.75} />
+        <Icon aria-hidden size={18} strokeWidth={1.6} />
       </span>
       <span className="navitem-label">{entry.label}</span>
       {entry.busy && <span className="navitem-dot" aria-label="Active" role="img" />}
@@ -68,12 +69,21 @@ export function NavItem({
   );
   // Collapsed, the label is gone and the icon owes one. Every icon has a
   // text label somewhere; on a rail that somewhere is a tooltip.
-  return collapsed ? (
-    <Tooltip label={entry.label} side="right">
+  return (
+    <RailTip collapsed={collapsed} label={entry.label}>
       {button}
+    </RailTip>
+  );
+}
+
+/** On the rail, where labels are gone, a control's name moves into a tooltip beside it. */
+function RailTip({ collapsed, label, children }: { collapsed: boolean; label: string; children: ReactElement }) {
+  return collapsed ? (
+    <Tooltip label={label} side="right">
+      {children}
     </Tooltip>
   ) : (
-    button
+    children
   );
 }
 
@@ -88,6 +98,8 @@ export interface SidebarProps {
   /** Shown in the foot, beside the collapse control. */
   version?: string | undefined;
   foot?: ReactNode;
+  /** Opens the command palette. The sidebar's search is the palette, not a second search. */
+  onSearch?: (() => void) | undefined;
 }
 
 export function Sidebar({
@@ -99,19 +111,28 @@ export function Sidebar({
   onCollapsedChange,
   version,
   foot,
+  onSearch,
 }: SidebarProps) {
   return (
     <div
       className="sidebar"
       data-collapsed={collapsed}
       // Collapsed, the empty rail is itself the target that opens it back up.
-      onClick={collapsed ? () => onCollapsedChange(false) : undefined}
+      // Only the empty part: a press on a screen's icon goes to that screen
+      // and leaves the rail as it was.
+      onClick={
+        collapsed
+          ? (e) => {
+              if (!(e.target as Element).closest("button, a, [role='button']")) onCollapsedChange(false);
+            }
+          : undefined
+      }
     >
       <div className="sidebar-brand">
         {wordmark && <Wordmark className="sidebar-wordmark" show={!collapsed} />}
         <button
           type="button"
-          className="sidebar-collapse inline-flex size-6 items-center justify-center rounded-sm text-text-3 transition-colors duration-[var(--dur-fast)] hover:text-text"
+          className="sidebar-collapse size-7 items-center justify-center rounded-md text-text-3 transition-colors duration-[var(--dur-fast)] hover:bg-text/5 hover:text-text"
           data-tap-min=""
           aria-label={collapsed ? "Expand the sidebar" : "Collapse the sidebar"}
           aria-pressed={collapsed}
@@ -120,9 +141,33 @@ export function Sidebar({
             onCollapsedChange(!collapsed);
           }}
         >
-          <PanelLeft aria-hidden size={16} strokeWidth={1.75} />
+          {/* The icon says what a press will do: fold the sidebar away, or open it out. */}
+          {collapsed ? (
+            <PanelLeftOpen aria-hidden size={17} strokeWidth={1.6} />
+          ) : (
+            <PanelLeftClose aria-hidden size={17} strokeWidth={1.6} />
+          )}
         </button>
       </div>
+
+      {onSearch && (
+        <RailTip collapsed={collapsed} label="Search">
+          <button
+            type="button"
+            className="sidebar-search"
+            aria-label="Search, or jump to a screen"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSearch();
+            }}
+          >
+            <Search aria-hidden size={collapsed ? 18 : 15} strokeWidth={collapsed ? 1.6 : 1.75} />
+            {!collapsed && <span className="sidebar-search-label">Search</span>}
+            {/* A key cap does not fit a rail, and the icon already says search. */}
+            {!collapsed && <Kbd keys="⌘K" className="sidebar-search-kbd" />}
+          </button>
+        </RailTip>
+      )}
 
       <nav className="sidebar-nav" aria-label="Screens">
         {groups.map((g, i) => (
@@ -269,6 +314,7 @@ export interface AppShellProps {
   children: ReactNode;
   version?: string | undefined;
   sidebarFoot?: ReactNode;
+  onSearch?: (() => void) | undefined;
   status?: ReactNode;
   /** A condition of the machine, banded across the top of everything. */
   alarm?: ReactNode;
@@ -286,6 +332,7 @@ export function AppShell({
   children,
   version,
   sidebarFoot,
+  onSearch,
   status,
   alarm,
   collapsed,
@@ -308,6 +355,7 @@ export function AppShell({
           onCollapsedChange={setCollapsed}
           version={version}
           foot={sidebarFoot}
+          onSearch={onSearch}
         />
         <div className="shell-main">
           {children}

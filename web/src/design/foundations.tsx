@@ -25,7 +25,7 @@ const sizingRows = [
 const layerRows = [
   { token: "--z-base" }, { token: "--z-sticky" }, { token: "--z-dropdown" }, { token: "--z-overlay" },
   { token: "--z-modal" }, { token: "--z-popover", note: "Above the modal: a select inside a dialog is the common case" },
-  { token: "--z-toast" }, { token: "--z-session-chrome", note: "A session is interrupted by nothing" }, { token: "--z-session-hud" },
+  { token: "--z-toast" }, { token: "--z-session-chrome", note: "Nothing covers a session" }, { token: "--z-session-hud" },
 ];
 
 const breakpointRows = [
@@ -76,9 +76,9 @@ export function Foundations() {
     <Section
       id="foundations"
       title="Foundations"
-      lede="Three layers: primitives nobody outside the token files may touch, semantics named for their role, and the components that use them. Every value on this page is read from the document as it is right now — switch the theme above and the numbers change with it."
+      lede="Raw values, named roles, and the components that use them. Change the theme above and every value updates."
     >
-      <Sub title="Surfaces" about="Three planes that separate by lightness first and a hairline second. Video sits behind everything and is never themed.">
+      <Sub title="Surfaces" about="Three surfaces, lightest on top. Video sits behind everything.">
         <Demo className="items-stretch">
           <Swatch token="--color-surface-0" className="bg-surface-0" note="The canvas" value={v["--color-surface-0"]} />
           <Swatch token="--color-surface-1" className="bg-surface-1" note="Cards, raised" value={v["--color-surface-1"]} />
@@ -87,7 +87,7 @@ export function Foundations() {
         </Demo>
       </Sub>
 
-      <Sub title="Text" about="Three levels and one for the disabled. The accent is the text colour: a primary button is an inverse fill, and nothing on a view is coloured to draw the eye.">
+      <Sub title="Text" about="Three levels of text and one for disabled. Nothing is coloured just to draw the eye.">
         <Demo className="flex-col items-stretch gap-2">
           {(["text", "text-2", "text-3", "text-disabled"] as const).map((t) => (
             <div key={t} className="flex items-baseline justify-between gap-4 border-b border-border pb-2 last:border-0">
@@ -105,7 +105,7 @@ export function Foundations() {
         </Demo>
       </Sub>
 
-      <Sub title="Borders, focus, selection" about="Two borders with two jobs. The hairline separates planes and is decorative; the strong border is how a control is found and is held to 3:1 on every surface by the contrast gate.">
+      <Sub title="Borders, focus, selection" about="A faint hairline between areas, and a stronger border around controls.">
         <Demo className="items-stretch">
           <div className="flex min-w-36 flex-1 flex-col gap-2">
             <div className="h-14 rounded-sm border border-border bg-surface-1" />
@@ -132,7 +132,7 @@ export function Foundations() {
         </Demo>
       </Sub>
 
-      <Sub title="Tones" about="Each tone is a fill with an -fg partner for text on it, and a soft tint with the tone's own text on it. In high contrast the tints go and a border takes their place.">
+      <Sub title="Tones" about="Each tone comes as a solid fill and as a soft tint.">
         <Demo className="items-stretch">
           {(Object.keys(toneClasses) as Tone[]).map((t) => (
             <div key={t} className="flex min-w-40 flex-1 flex-col gap-2">
@@ -147,7 +147,7 @@ export function Foundations() {
         </Demo>
       </Sub>
 
-      <Sub title="The signal" about="One element per view, a fill or an indicator, never running text. Relayed sessions wear it — bytes crossing a machine that is not an endpoint is the one thing a person is entitled to notice without looking.">
+      <Sub title="The signal" about="Amber, used once per view. Relayed sessions wear it.">
         <Demo>
           <span className="inline-flex h-5 items-center rounded-sm bg-signal px-1.5 text-xs font-medium text-signal-fg">Relayed</span>
           <span aria-hidden className="size-2 rounded-full bg-signal" />
@@ -156,7 +156,7 @@ export function Foundations() {
         </Demo>
       </Sub>
 
-      <Sub title="Type" about="Size, leading and tracking travel together: the utility applies all three, so a size is never used alone. Inter for the interface, JetBrains Mono for anything a person may copy, compare or read as a number, Space Grotesk for headings — the same three faces as the homepage.">
+      <Sub title="Type" about="Inter for the interface, JetBrains Mono for anything copied or compared, Space Grotesk for headings. The same faces as esper.st.">
         <Demo className="flex-col items-stretch gap-0 p-0">
           {typeScale.map((t) => (
             <div key={t.cls} className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 border-b border-border px-5 py-3 last:border-0">
@@ -176,13 +176,13 @@ export function Foundations() {
           </div>
         </Demo>
         <Demo className="items-baseline gap-8">
-          <span className="font-sans text-lg">Inter — the interface <TokenName>--font-sans</TokenName></span>
-          <span className="font-mono text-lg">JetBrains Mono — 3a9f c1e2 <TokenName>--font-mono</TokenName></span>
-          <span className="font-display text-lg font-medium tracking-[-0.02em]">Space Grotesk — the headings <TokenName>--font-display</TokenName></span>
+          <span className="font-sans text-lg">Inter: the interface <TokenName>--font-sans</TokenName></span>
+          <span className="font-mono text-lg">JetBrains Mono: 3a9f c1e2 <TokenName>--font-mono</TokenName></span>
+          <span className="font-display text-lg font-medium tracking-[-0.02em]">Space Grotesk: the headings <TokenName>--font-display</TokenName></span>
         </Demo>
       </Sub>
 
-      <Sub title="Space" about="A 4px rhythm. p-1 is 4px, gap-4 is 16px. Nothing is placed by a number the scale does not have.">
+      <Sub title="Space" about="Everything sits on a 4px grid.">
         <Demo className="items-end gap-4">
           {spaces.map((s) => (
             <div key={s} className="flex flex-col items-center gap-1">
@@ -195,22 +195,21 @@ export function Foundations() {
 
       <Sub
         title="Measure"
-        about="How wide text is allowed to be, which is a different question from how wide the page is. Past roughly 75 characters the eye loses the line it was on, so running text is capped in characters of its own size and a centred sentence is capped shorter — a long centred line has no fixed left edge to return to. The two paragraphs below are the same text at the two tokens."
+        about="Running text stops at a readable width. Centred text stops sooner."
       >
         <Demo className="flex-col items-stretch gap-5">
           <div className="flex flex-col gap-1.5">
             <TokenName>--measure ({v["--measure"]})</TokenName>
             <p className="max-w-[var(--measure)] text-sm text-text-2">
-              A device is called what its owner called it, and by its fingerprint where it has been
-              forgotten. The name arrives at the handshake, so a machine that has been renamed says so
-              itself and this window does not have to be told twice.
+              A device shows the name its owner gave it, or its fingerprint once it has been forgotten.
+              The name comes from the device itself, so when a device is renamed, this window updates
+              on its own.
             </p>
           </div>
           <div className="flex flex-col items-center gap-1.5 text-center">
             <TokenName>--measure-short ({v["--measure-short"]})</TokenName>
             <p className="max-w-[var(--measure-short)] text-sm text-text-2">
-              A device is called what its owner called it, and by its fingerprint where it has been
-              forgotten.
+              A device shows the name its owner gave it, or its fingerprint once forgotten.
             </p>
           </div>
         </Demo>
@@ -228,7 +227,7 @@ export function Foundations() {
             ))}
           </Demo>
         </Sub>
-        <Sub title="Elevation" about="Four steps, reached for before either border. In high contrast a shadow is not a separation the theme can rely on, so they become rings.">
+        <Sub title="Elevation" about="Four levels of depth. High contrast turns them into outlines.">
           <Demo className="items-end gap-6 py-8">
             {shadowTokens.map((s) => (
               <div key={s} className="flex flex-col items-center gap-2">
@@ -241,13 +240,13 @@ export function Foundations() {
       </div>
 
       <div className="grid gap-8 lg:grid-cols-3">
-        <Sub title="Sizing" about="Dense on purpose. A control drawn smaller than 44px gets a larger hit area, never a smaller one.">
+        <Sub title="Sizing" about="Compact controls, with a tap area of at least 44px.">
           <TokenTable rows={sizingRows} values={v} />
         </Sub>
-        <Sub title="Layers" about="Ad-hoc z-index is banned by the discipline lint. If two things fight, one is on the wrong layer.">
+        <Sub title="Layers" about="A fixed set of layers, so nothing fights to be on top.">
           <TokenTable rows={layerRows} values={v} />
         </Sub>
-        <Sub title="Breakpoints" about="The only place these numbers are written. A media query at any other width fails the lint.">
+        <Sub title="Breakpoints" about="The four widths the layout changes at.">
           <TokenTable rows={breakpointRows} values={v} />
         </Sub>
       </div>

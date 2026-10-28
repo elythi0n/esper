@@ -23,7 +23,7 @@ import { cn } from "@/lib/cn";
 export function EngineTrouble({ why }: { why: string }) {
   return (
     <Popover
-      label="Why the engine is not running"
+      label="Why Esper is not running"
       side="top"
       align="start"
       trigger={
@@ -35,14 +35,14 @@ export function EngineTrouble({ why }: { why: string }) {
             "transition-colors duration-[var(--dur-fast)] hover:text-text data-[state=open]:text-text",
           )}
         >
-          engine not running
+          Esper not running
         </button>
       }
     >
       <div className="flex flex-col gap-2">
-        <p className="text-sm text-text">The engine did not answer.</p>
+        <p className="text-sm text-text">Esper's background service is not responding.</p>
         <p className="text-xs leading-relaxed text-text-2">
-          Nothing can be captured, encoded or sent until it does. What it said is below.
+          No session can start until it does. Its last message is below.
         </p>
         <p className="break-words font-mono text-xs leading-relaxed text-text-3">{why}</p>
       </div>
@@ -82,10 +82,10 @@ export function StreamTrouble({ why }: { why: string }) {
       }
     >
       <div className="flex flex-col gap-2">
-        <p className="text-sm text-text">This window is not being told when things happen.</p>
+        <p className="text-sm text-text">This window has stopped updating live.</p>
         <p className="text-xs leading-relaxed text-text-2">
-          What is on screen is what it last asked for, not what is happening now. It keeps trying,
-          and every screen still answers when you open it.
+          What you see may be out of date. It keeps trying to reconnect, and each screen refreshes
+          when you open it.
         </p>
         <p className="break-words font-mono text-xs leading-relaxed text-text-3">{why}</p>
       </div>
@@ -132,7 +132,7 @@ export function StatusStrip() {
       would be the most expensive thing on the screen.
     */
     const why = error?.message?.trim();
-    if (!why) return <span className="text-warn">engine not running</span>;
+    if (!why) return <span className="text-warn">Esper not running</span>;
     return <EngineTrouble why={why} />;
   }
 
@@ -142,21 +142,21 @@ export function StatusStrip() {
       ok: data.capture.available,
       detail: data.capture.detail,
       tried: triedFor(data.capture),
-      what: "How this machine reads its own screen. Without it there is nothing to send.",
+      what: "How this machine reads its own screen. Without it, there is nothing to share.",
     },
     {
       label: "encode",
       ok: data.encoder.available,
       detail: data.encoder.detail,
       tried: triedFor(data.encoder),
-      what: "What turns those pixels into something a link will carry.",
+      what: "How this machine compresses the screen so it can be sent.",
     },
     {
       label: "input",
       ok: data.input.available,
       detail: data.input.detail,
       tried: triedFor(data.input),
-      what: "Whether a paired device can type and point here, or only watch.",
+      what: "Whether a paired device can use the mouse and keyboard here, or only watch.",
     },
   ];
   return (
@@ -225,7 +225,7 @@ export function StatusStrip() {
           <span className="text-text-3">engine</span> {data.engine}
         </span>
       ) : (
-        <Lamp state="warn" title={`This window is ${__ESPER_VERSION__} and the engine it is talking to is ${data.engine}.`}>
+        <Lamp state="warn" title={`This window is version ${__ESPER_VERSION__}, but Esper's background service is version ${data.engine}.`}>
           <span className="font-mono">
             <span className="text-text-3">engine</span> {data.engine}
             <span className="text-text-3"> · window</span> {__ESPER_VERSION__}

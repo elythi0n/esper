@@ -232,7 +232,7 @@ export async function* readViewerStream(
         const head = take(9);
         const magic = new TextDecoder("latin1").decode(head.subarray(0, 8));
         if (magic !== MAGIC) {
-          throw new StreamError("this is not a video stream — its first bytes name something else");
+          throw new StreamError("this is not a video stream: its first bytes name something else");
         }
         if (head[8] !== STREAM_VERSION) {
           throw new StreamError(`a stream at version ${head[8]}, and this window reads ${STREAM_VERSION}`);

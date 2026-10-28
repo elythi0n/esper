@@ -63,83 +63,83 @@ export const ORDINARY_ENDINGS: readonly number[] = [1, 2, 3, 4, 5, 6];
 export const ADVICE: Readonly<Record<number, Advice>> = {
   // ── Ordinary endings ──────────────────────────────────────────────────
   1: { title: "The session was closed.", tone: "info" },
-  2: { title: "The session ran for as long as it was asked to.", tone: "info" },
-  3: { title: "That machine is shutting down. Connect again when it is back.", tone: "info" },
-  4: { title: "A newer session with that machine replaced this one.", tone: "info" },
+  2: { title: "The session reached its time limit and ended.", tone: "info" },
+  3: { title: "The other device is shutting down. Connect again when it is back.", tone: "info" },
+  4: { title: "A newer session with the other device replaced this one.", tone: "info" },
   5: {
-    title: "That machine stopped answering — a lid closed, or a network gone. It will be reachable again when it is back.",
+    title: "The other device stopped responding, perhaps because it went to sleep or lost its network. Connect again when it is back.",
     tone: "info",
   },
   6: {
-    title: "Somebody at that machine ended the session. The pairing is intact, so you can connect again.",
+    title: "Someone at the other device ended the session. You are still paired, so you can connect again.",
     tone: "info",
   },
 
   // ── 1xx, the two builds cannot talk ───────────────────────────────────
-  100: { title: "Update Esper on one of the two machines — they speak different protocol versions.", tone: "danger" },
-  101: { title: "One machine sent something the other could not read. Update both; if it keeps happening, report it.", tone: "danger" },
-  102: { title: "One machine sent more in one piece than the other will accept. Update both.", tone: "danger" },
-  103: { title: "That machine sent something this build does not know. Update the older of the two.", tone: "danger" },
+  100: { title: "The two devices run versions of Esper that can't talk to each other. Update Esper on both.", tone: "danger" },
+  101: { title: "One device sent data the other could not read. Update Esper on both, and report it if it happens again.", tone: "danger" },
+  102: { title: "One device sent more data at once than the other accepts. Update Esper on both.", tone: "danger" },
+  103: { title: "The other device sent something this version doesn't understand. Update the older one.", tone: "danger" },
 
   // ── 2xx, who the other machine is ─────────────────────────────────────
-  200: { title: "This device is not paired with that machine. Pair it first.", tone: "warn" },
+  200: { title: "This device is not paired with the other one. Pair them first.", tone: "warn" },
   201: {
     // **Never "pair again".** A key that changed is what a replaced machine
     // looks like, and it is also what somebody standing in the middle looks
     // like. The only safe next step is to check the fingerprint with a person
     // who is there.
     title:
-      "That machine is presenting a different key from the one you paired with. Check its fingerprint with somebody who is there before pairing again — a changed key is also what an impersonation looks like.",
+      "The other device's key has changed since you paired. Check its fingerprint words with someone who is there before you pair again. A changed key can mean someone is impersonating it.",
     tone: "danger",
   },
-  202: { title: "The pairing code did not match. Read it again from the other machine.", tone: "warn" },
+  202: { title: "The pairing code did not match. Read it again from the other device.", tone: "warn" },
   203: { title: "The pairing code has expired. Ask for a new one.", tone: "warn" },
-  204: { title: "Too many pairing attempts from here. Wait a little before trying again.", tone: "warn" },
+  204: { title: "Too many pairing attempts from this device. Wait a little, then try again.", tone: "warn" },
 
   // ── 3xx, what this device may do ──────────────────────────────────────
-  300: { title: "That machine has not granted this device permission for that. Ask at the host.", tone: "warn" },
-  301: { title: "This device's access to that machine was taken away. It has to be granted again there.", tone: "warn" },
+  300: { title: "This device doesn't have permission to do that. Ask someone at the other device to grant it.", tone: "warn" },
+  301: { title: "This device's access was removed. Someone at the other device has to grant it again.", tone: "warn" },
   302: {
-    title: "This device may connect unattended only during set hours, and it is outside them. Somebody at that machine can widen them, or be there to allow it.",
+    title: "This device can only connect without asking during set hours, and it is outside them now. Someone at the other device can change the hours or let you in.",
     tone: "warn",
   },
-  303: { title: "That machine is not accepting sessions. Somebody there has to turn the host on.", tone: "warn" },
-  304: { title: "Nobody at the host allowed the session. Ask them, or have them grant unattended access.", tone: "warn" },
-  305: { title: "Somebody at that machine declined the session. Asking again reaches the same person.", tone: "warn" },
+  303: { title: "The other device is not accepting sessions. Someone there has to turn on screen sharing.", tone: "warn" },
+  304: { title: "Nobody at the other device allowed the session. Ask them, or ask them to allow access without asking.", tone: "warn" },
+  305: { title: "Someone at the other device declined the session. Asking again reaches the same person.", tone: "warn" },
   306: {
-    title: "Nobody is at that machine to allow this, and this device may not connect unattended. Ask for the unattended permission there.",
+    title: "Nobody is at the other device to allow this, and this device can't connect without asking. Ask for the unattended permission there.",
     tone: "warn",
   },
   307: {
-    title: "The screen at that machine is locked, and it does not admit unattended devices while it is. Somebody has to unlock it.",
+    title: "The other device's screen is locked, so it won't accept a connection without asking. Someone has to unlock it.",
     tone: "warn",
   },
   308: {
-    title: "This session has asked for more as often as it may. Open a new session, or have the permission granted at the host.",
+    title: "This session has asked for more permissions too many times. Start a new session, or have the permission granted on the other device.",
     tone: "warn",
   },
-  309: { title: "That machine does not let a session ask for more. The permission has to be granted there first.", tone: "warn" },
+  309: { title: "The other device doesn't let a session ask for more permissions. The permission has to be granted there first.", tone: "warn" },
 
   // ── 4xx, what that machine can do right now ───────────────────────────
-  400: { title: "The two machines have no video codec in common. Update the older of the two.", tone: "warn" },
-  401: { title: "That machine has no way to capture its screen. Running esper doctor there says what is missing.", tone: "warn" },
-  402: { title: "That machine has no display to capture. It may be headless, or nobody is logged in.", tone: "warn" },
+  400: { title: "The two devices have no video format in common. Update Esper on the older one.", tone: "warn" },
+  401: { title: "The other device can't capture its screen. Run esper doctor there to see what is missing.", tone: "warn" },
+  402: { title: "The other device has no screen to share. It may have no display, or nobody is logged in.", tone: "warn" },
   403: {
-    title: "That machine cannot send keys or pointer moves, so a session there can watch and not drive. Running esper doctor there says why.",
+    title: "The other device can't receive keyboard or mouse input, so you can only watch. Run esper doctor there to see why.",
     tone: "warn",
   },
-  404: { title: "The host could not show that it is being watched, so it stopped. Check its display.", tone: "warn" },
-  405: { title: "That machine has no way to lock its own screen. A screen locker has to be installed there.", tone: "warn" },
-  406: { title: "That machine is already in a session. Try again when it is free.", tone: "info" },
+  404: { title: "The other device couldn't show that it is being watched, so the session stopped. Check its display.", tone: "warn" },
+  405: { title: "The other device can't lock its own screen. Install a screen locker there.", tone: "warn" },
+  406: { title: "The other device is already in a session. Try again when it is free.", tone: "info" },
 
   // ── 5xx, the link between them ────────────────────────────────────────
   500: {
-    title: "Nothing could reach that machine: not this network, not an overlay, and not a broker. Check that it is on and reachable.",
+    title: "Could not reach the other device on this network, a private network like Tailscale, or a broker. Check that it is on and online.",
     tone: "warn",
   },
-  501: { title: "The broker is at capacity. Try again, or run one of your own.", tone: "warn" },
-  502: { title: "The connection changed networks and could not be carried over. Connecting again starts a fresh one.", tone: "warn" },
-  503: { title: "The session was closed because nothing happened for a while. That is a setting on the host.", tone: "info" },
+  501: { title: "The broker is full. Try again later, or run your own.", tone: "warn" },
+  502: { title: "The connection switched networks and dropped. Connect again to start a new one.", tone: "warn" },
+  503: { title: "The session closed after a period of inactivity. You can change this in the other device's settings.", tone: "info" },
 };
 
 /**
@@ -155,17 +155,17 @@ function byRange(code: number): Advice {
     case 0:
       return { title: "The session ended.", tone: "info" };
     case 1:
-      return { title: "The two machines could not agree on how to talk. Update both.", tone: "danger" };
+      return { title: "The two devices could not connect because their versions differ. Update Esper on both.", tone: "danger" };
     case 2:
-      return { title: "This device is not paired with that machine. Pair it first.", tone: "warn" };
+      return { title: "This device is not paired with the other one. Pair them first.", tone: "warn" };
     case 3:
-      return { title: "This device is not allowed to do that. Ask for the permission at the host.", tone: "warn" };
+      return { title: "This device doesn't have permission to do that. Ask someone at the other device to grant it.", tone: "warn" };
     case 4:
-      return { title: "That machine cannot do this right now. Its own words are below.", tone: "info" };
+      return { title: "The other device can't do this right now. Its message is below.", tone: "info" };
     case 5:
-      return { title: "The connection was lost. Esper reconnects if the machine comes back.", tone: "warn" };
+      return { title: "The connection was lost. Esper reconnects if the other device comes back.", tone: "warn" };
     default:
-      return { title: "That machine reported something this build has no sentence for. The code is below.", tone: "info" };
+      return { title: "The other device reported a problem this version doesn't recognise. The code is below.", tone: "info" };
   }
 }
 

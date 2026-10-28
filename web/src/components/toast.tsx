@@ -111,7 +111,7 @@ export function Toaster({ children }: { children: ReactNode }) {
           key={t.id}
           onOpenChange={(open) => !open && setItems((all) => all.filter((x) => x.id !== t.id))}
           className={cn(
-            "relative grid w-[22rem] gap-1 overflow-hidden rounded-md border border-border bg-surface-2 p-3 pl-4 text-sm shadow-[var(--shadow-2)]",
+            "relative grid w-[22rem] gap-1 overflow-hidden rounded-lg border border-border bg-surface-2 p-3 pl-4 text-sm shadow-[var(--shadow-2)]",
             "before:absolute before:inset-y-0 before:left-0 before:w-1",
             toneBar[t.tone ?? "info"],
             "data-[state=open]:animate-[arrive-in_var(--dur-base)_var(--ease-out)]",

@@ -132,9 +132,11 @@
   --spacing: var(--px-1);
 
   /* ── Radius ────────────────────────────────────────────────────────── */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
+  /* The site's corners: soft enough to feel made, never round enough to feel toy. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
   --radius-full: 9999px;
 
   /*
@@ -177,7 +179,7 @@
     body and the status strip all use, so their content sits on one line.
   */
   --sidebar-w: 208px;
-  --sidebar-rail-w: 48px;
+  --sidebar-rail-w: 56px;
   --footbar-h: 28px;
   --page-gutter: 20px;
   /*
@@ -256,11 +258,12 @@
     --sem-surface-2: var(--n-2);
 
     --sem-text: var(--bone);
-    --sem-text-2: var(--n-7);
-    --sem-text-3: var(--n-6);
+    --sem-text-2: var(--dim);
+    --sem-text-3: var(--faint);
     --sem-text-disabled: var(--n-5);
 
-    --sem-border: var(--n-3);
+    /* Bone at 9%: a hairline that reads the same on every surface it crosses. */
+    --sem-border: color-mix(in oklch, var(--bone) 9%, transparent);
     --sem-border-strong: var(--n-5);
 
     --sem-focus: var(--focus-on-dark);
@@ -288,8 +291,9 @@
     --sem-signal-fg: var(--n-0);
 
     --sem-shadow-1: 0 1px 2px oklch(0 0 0 / 0.5);
-    --sem-shadow-2: 0 4px 12px oklch(0 0 0 / 0.5);
-    --sem-shadow-3: 0 12px 32px oklch(0 0 0 / 0.55);
+    --sem-shadow-2: 0 12px 32px -8px oklch(0 0 0 / 0.6);
+    /* The site's panel shadow: long, low and dark, so a panel floats. */
+    --sem-shadow-3: 0 28px 64px -24px oklch(0 0 0 / 0.85);
 
     /*
       Where soft fills also get a border. Zero here; high contrast sets it,

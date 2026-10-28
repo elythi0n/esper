@@ -85,7 +85,7 @@ export function CommandPalette({ open, onOpenChange, commands, placeholder = "Ty
           onCloseAutoFocus={returning.onCloseAutoFocus}
           aria-describedby={undefined}
           className={cn(
-            "fixed left-1/2 top-[18vh] z-[var(--z-modal)] w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 overflow-hidden rounded-lg border border-border bg-surface-2 shadow-[var(--shadow-3)] outline-none",
+            "fixed left-1/2 top-[18vh] z-[var(--z-modal)] w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 overflow-hidden rounded-xl border border-border bg-surface-1 shadow-[var(--shadow-3)] outline-none",
             "data-[state=open]:animate-[overlay-in_var(--dur-base)_var(--ease-out)] data-[state=closed]:animate-[overlay-out_var(--dur-fast)_var(--ease)]",
           )}
         >

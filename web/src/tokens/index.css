@@ -114,6 +114,15 @@
     scrollbar-color: var(--color-border-strong) transparent;
   }
 
+  /*
+    One icon weight, esper.st's. Lucide draws at 2 unless told otherwise, which
+    reads heavy beside 13px text; the strokes set on purpose (1, 1.5, 3) keep
+    their own.
+  */
+  svg.lucide[stroke-width="2"] {
+    stroke-width: 1.75;
+  }
+
   code, kbd, pre, samp {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;

@@ -74,7 +74,9 @@ export function CopyField({ label, value, mono = true, wrap = false, className }
           className={cn(
             "min-w-0 flex-1 select-text text-sm text-text",
             mono && "font-mono text-xs leading-relaxed",
-            wrap ? "break-all" : "truncate",
+            // Breaks between words where there are words, and inside a long link only
+            // where it must: "tomato" split as "t / omato" is a word nobody can read aloud.
+            wrap ? "[overflow-wrap:anywhere]" : "truncate",
           )}
         >
           {value}
@@ -98,7 +100,7 @@ export function CopyField({ label, value, mono = true, wrap = false, className }
       </div>
       {refused && (
         <p className="text-xs text-text-3">
-          This window may not use the clipboard. The value above is selectable.
+          This window can't use the clipboard. Select the text above and copy it yourself.
         </p>
       )}
     </div>
