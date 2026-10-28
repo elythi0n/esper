@@ -217,20 +217,20 @@ pub static SETTINGS: &[Setting] = &[
         key: "device.name",
         kind: Kind::Text,
         default: Value::Text(Cow::Borrowed("")),
-        about: "What to call this machine to the other end. Empty means its hostname.",
+        about: "The name other devices see for this machine. Leave it empty to use its hostname.",
     },
     Setting {
         key: "host.listen",
         kind: Kind::Address,
         default: Value::Text(Cow::Borrowed("0.0.0.0:7645")),
-        about: "Where the host listens.",
+        about: "The address and port this machine listens on for connections.",
     },
     Setting {
         key: "host.backend",
         kind: Kind::Choice(BACKENDS),
         default: Value::Text(Cow::Borrowed("auto")),
-        about: "Which capture backend to use. `auto` falls back and says which it chose; \
-                naming one is a refusal to fall back.",
+        about: "How this machine captures its screen. `auto` picks one that works; choosing a \
+                specific one uses only that.",
     },
     Setting {
         key: "host.synthetic_monitors",
@@ -241,9 +241,8 @@ pub static SETTINGS: &[Setting] = &[
         // what size they are. It exists because developing or testing a
         // multi-monitor viewer otherwise needs multi-monitor hardware.
         default: Value::Whole(1),
-        about: "How many screens the synthetic backend pretends to have. Each is half the \
-                size of the one before, so a switch between them is visible. Only applies \
-                when the synthetic backend is in use.",
+        about: "How many test screens the synthetic backend draws, each half the size of the one \
+                before. Only used with the synthetic backend.",
     },
     Setting {
         key: "host.synthetic_motion",
@@ -255,9 +254,9 @@ pub static SETTINGS: &[Setting] = &[
         // is the other end -- every pixel different every frame -- for looking
         // at what the encoder does when a link cannot keep up.
         default: Value::Text(Cow::Borrowed("screen")),
-        about: "What the synthetic backend's screen is doing: `screen` has a counter and a \
-                moving box, `still` is a screen nobody is touching, `video` is every pixel \
-                changing every frame. Only applies when the synthetic backend is in use.",
+        about: "What the synthetic test screen shows: `screen` is a counter and a moving box, \
+                `still` never changes, `video` changes every pixel every frame. Only used with the \
+                synthetic backend.",
     },
     Setting {
         key: "host.lock_after_session",
@@ -271,16 +270,15 @@ pub static SETTINGS: &[Setting] = &[
         // already knows which of those happened, so the default needs no
         // configuring to be right in both cases.
         default: Value::Text(Cow::Borrowed("unattended")),
-        about: "Lock this machine when a session ends: `unattended` locks only when nobody \
-                here was asked to allow it, `always` locks whatever happened, `never` does \
-                not. One device can be set apart from the rest with `lock-after`. The panic \
-                key always locks, whatever this says.",
+        about: "Whether to lock this machine when a session ends. `unattended` locks only when the \
+                session started without asking anyone here, `always` always locks, `never` never \
+                does. Pressing Ctrl+Alt+Shift+Escape ends a session and always locks.",
     },
     Setting {
         key: "host.monitor",
         kind: Kind::WholeOrNone { least: 0, most: 64 },
         default: Value::Nothing,
-        about: "Which monitor to send. None means the primary one.",
+        about: "Which monitor to share. None means the main one.",
     },
     Setting {
         key: "host.fps",
@@ -289,13 +287,14 @@ pub static SETTINGS: &[Setting] = &[
             most: 240,
         },
         default: Value::Whole(30),
-        about: "The most frames a second to send.",
+        about: "The most frames per second to send.",
     },
     Setting {
         key: "host.budget",
         kind: Kind::Cores,
         default: Value::Fraction(1.0),
-        about: "How much CPU the encoder may use, in cores.",
+        about: "How much processor power video encoding may use. 1 is one processor core; most \
+                machines have 4 or more.",
     },
     Setting {
         key: "host.max_resolution",
@@ -304,7 +303,8 @@ pub static SETTINGS: &[Setting] = &[
             most: 8192,
         },
         default: Value::Whole(1440),
-        about: "The longest edge to send, in pixels. None sends the screen's own size.",
+        about: "The longest side of the picture to send, in pixels. None sends the screen at its \
+                own size.",
     },
     Setting {
         key: "host.privacy_screen",
@@ -320,8 +320,8 @@ pub static SETTINGS: &[Setting] = &[
         // session ends, when the panic key is pressed, and — by a second
         // process that outlives this one — if the host dies while it is on.
         default: Value::Flag(false),
-        about: "Blank this machine's own screens while a session is running. The session keeps \
-                its picture; somebody walking past this machine sees nothing.",
+        about: "Turn this machine's own screens dark during a session. The other end still sees \
+                everything; someone walking past here sees nothing.",
     },
     Setting {
         key: "host.lock_local_input",
@@ -353,11 +353,10 @@ pub static SETTINGS: &[Setting] = &[
         // into; it is not a trade to make on their behalf, which is why this
         // is off by default.
         default: Value::Flag(false),
-        about: "Take this machine's own keyboard and pointer out of the picture while a \
-                session runs, so somebody at it cannot type into one. Remote input keeps \
-                working, and a keeper puts the devices back if this host dies. The panic \
-                key goes with them: nothing typed at this machine can end a session while \
-                this is on.",
+        about: "Block this machine's own keyboard and mouse during a session, so nobody here can \
+                type into it. Remote control still works, and they come back as soon as the \
+                session ends or Esper stops. While this is on, Ctrl+Alt+Shift+Escape here cannot \
+                end the session.",
     },
     Setting {
         key: "host.plain_background",
@@ -380,10 +379,8 @@ pub static SETTINGS: &[Setting] = &[
         // *published* its background pixmap — a background nothing can put
         // back is one this may not take away.
         default: Value::Flag(false),
-        about: "Make this machine's desktop background plain while a session runs, which \
-                makes the first picture and every keyframe smaller. Only where the desktop \
-                published a background that can be put back; the wallpaper returns when the \
-                session ends.",
+        about: "Replace this machine's wallpaper with a plain colour during a session, which makes \
+                the picture smaller to send. Your wallpaper comes back when the session ends.",
     },
     Setting {
         key: "host.allow_asking",
@@ -405,8 +402,8 @@ pub static SETTINGS: &[Setting] = &[
         // — and the far end is told it is a standing no rather than a refusal
         // worth retrying.
         default: Value::Flag(true),
-        about: "Let a session that is already open ask somebody at this machine to allow it \
-                one more thing. The answer lasts for that session only and is never saved.",
+        about: "Let an open session ask someone at this machine for a permission it does not have, \
+                such as control or file transfer. The answer lasts only for that session.",
     },
     Setting {
         key: "host.serve_without_indicator",
@@ -424,8 +421,9 @@ pub static SETTINGS: &[Setting] = &[
         // that person having no product. Turning it on is a decision with a
         // name, which is the point.
         default: Value::Flag(false),
-        about: "Serve sessions even when this machine cannot show that it is being watched. \
-                Off refuses to serve on a display where the indicator cannot be confirmed.",
+        about: "Allow sessions even when this machine cannot show its 'being viewed' badge. Off \
+                refuses sessions on a display where the badge cannot be shown, so nobody is \
+                watched without knowing.",
     },
     Setting {
         key: "policy.deny_when_locked",
@@ -447,9 +445,9 @@ pub static SETTINGS: &[Setting] = &[
         // the morning. See `esper-presence`'s `locked` module for the three
         // probes and what each of them knows.
         default: Value::Flag(false),
-        about: "Refuse unattended devices while the screen at this machine is locked. Where \
-                the lock state cannot be established it counts as locked, and the host says \
-                so when it starts.",
+        about: "Refuse devices that are allowed to connect without asking while this machine's \
+                screen is locked. If Esper cannot tell whether it is locked, it treats it as \
+                locked and says so.",
     },
     Setting {
         key: "consent.answer_within",
@@ -469,8 +467,8 @@ pub static SETTINGS: &[Setting] = &[
         // refusal with extra steps, and the person who set it to one second
         // would not have meant that.
         default: Value::Whole(45),
-        about: "How many seconds somebody at the host has to answer a connection prompt \
-                before it is refused. Between 5 and 300.",
+        about: "How many seconds someone here has to answer a connection request before it is \
+                refused. Between 5 and 300.",
     },
     Setting {
         key: "host.pace_to_measured",
@@ -484,8 +482,8 @@ pub static SETTINGS: &[Setting] = &[
         // be able to take it out of the picture in one line rather than by
         // rebuilding.
         default: Value::Flag(true),
-        about: "Pace this machine's video at the rate the viewer measures the link at, rather \
-                than at whatever the congestion window allows. Off falls back to plain Cubic.",
+        about: "Send video at the speed the viewer reports it can receive, which keeps the picture \
+                smooth on slow networks. Off sends as fast as the network accepts.",
     },
     Setting {
         key: "session.buffer",
@@ -517,18 +515,16 @@ pub static SETTINGS: &[Setting] = &[
         // setting, no plumbing, no caller. A promise a product does not keep
         // is worse than a feature it does not have.
         default: Value::Nothing,
-        about: "How long this viewer waits for the rest of a frame, in milliseconds. `none` \
-                — or `auto`, which means the same — derives it from the framerate and widens \
-                it to what the link has shown, which is right almost always. A number pins \
-                it: shorter means less latency and more torn frames, longer the opposite.",
+        about: "How long the picture waits for a frame that is still arriving, in milliseconds, \
+                when you view another machine. `auto` works it out for you and is almost always \
+                right. A smaller number feels quicker but may show half-drawn frames.",
     },
     Setting {
         key: "session.idle_timeout",
         kind: Kind::Time,
         default: Value::Nothing,
-        about: "End a terminal session after this long with no input and no output. \
-                None is off, which is the default because a build that prints nothing \
-                for an hour is working, not idle.",
+        about: "End a terminal session after this long with nothing typed and nothing printed. \
+                None never ends it, because a quiet terminal may still be working.",
     },
     Setting {
         key: "audit.retain",
@@ -553,9 +549,8 @@ pub static SETTINGS: &[Setting] = &[
         // check that set the value explicitly and watched the default case do
         // nothing.
         default: Value::Whole(90 * 86_400),
-        about: "How long to keep the session trail. Older entries are deleted when the \
-                host starts and once a day while it runs. `none` keeps everything, which on \
-                a machine that can be lost is a decision rather than a default.",
+        about: "How long to keep the activity log. Older entries are deleted when Esper starts and \
+                once a day after. `none` keeps everything.",
     },
     Setting {
         key: "audit.max_size",
@@ -569,9 +564,8 @@ pub static SETTINGS: &[Setting] = &[
         // time would let it. The oldest entries go first, which is the same
         // rule the age applies, so the two cannot disagree about what to keep.
         default: Value::Whole(64),
-        about: "Largest the session trail may grow, in megabytes. The oldest entries \
-                are deleted to stay inside it. `none` is no ceiling, which leaves the age \
-                above as the only limit.",
+        about: "The largest the activity log may grow, in megabytes. The oldest entries are \
+                deleted to stay under it. `none` means no limit.",
     },
     Setting {
         key: "forward.allow",
@@ -584,9 +578,9 @@ pub static SETTINGS: &[Setting] = &[
         // parser knows about text, and what a forwarding target looks like
         // belongs with the code that dials one.
         default: Value::Text(Cow::Borrowed("")),
-        about: "Targets this machine will forward to, as host:port entries separated by \
-                commas — [::1]:5432 for an IPv6 literal, db.internal:* for any port. \
-                Empty means this machine's own loopback and nothing else.",
+        about: "Which services on or near this machine a paired device may connect to through port \
+                forwarding, as host:port entries separated by commas, such as db.internal:5432 or \
+                db.internal:* for any port. Empty means only services on this machine itself.",
     },
     Setting {
         key: "forward.max_connections",
@@ -612,8 +606,8 @@ pub static SETTINGS: &[Setting] = &[
         // a device holds: the permission says who may, and this says whether
         // this machine does at all.
         default: Value::Flag(false),
-        about: "Serve file transfer at all. Off by default: the per-device permissions say \
-                who may move files, and this says whether this machine does it.",
+        about: "Allow file transfer on this machine. Off by default; each device's permissions \
+                still decide who may send files.",
     },
     Setting {
         key: "files.root",
@@ -623,8 +617,8 @@ pub static SETTINGS: &[Setting] = &[
         // so what this points at is the whole of what a file permission
         // reaches. Empty means the default below, worked out where paths are.
         default: Value::Text(Cow::Borrowed("")),
-        about: "The directory file transfers happen inside. Everything a peer can name is \
-                relative to it and nothing can leave it. Empty means ~/Esper.",
+        about: "The folder file transfers use. Devices can only reach files inside it. Empty means \
+                ~/Esper.",
     },
     Setting {
         key: "files.max_bytes",
@@ -638,8 +632,8 @@ pub static SETTINGS: &[Setting] = &[
         // transfer is refused before the first byte if it will not fit. A
         // figure here is for a machine whose owner wants a smaller one.
         default: Value::Nothing,
-        about: "The largest single file this machine will send or accept, in bytes. \
-                `none` means whatever fits on the disk.",
+        about: "The largest file this machine will send or receive, in bytes. `none` means no \
+                limit.",
     },
     Setting {
         key: "network.port_mapping",
@@ -652,9 +646,9 @@ pub static SETTINGS: &[Setting] = &[
         // from whoever a broker introduced, which is a decision about somebody
         // else's network as much as their machine.
         default: Value::Flag(false),
-        about: "Ask this network's router to forward the host's port, so peers can reach it \
-                directly instead of through a broker. Off by default: it opens a hole in the \
-                firewall for as long as the host runs.",
+        about: "Ask your router to open a port for this machine, so other devices can connect \
+                directly over the internet. Off by default, because it opens a hole in your \
+                firewall while Esper runs.",
     },
     Setting {
         key: "discovery.mdns",
@@ -664,7 +658,7 @@ pub static SETTINGS: &[Setting] = &[
         // operator's own house, and it buys the best thing about the product
         // on a home network: you open it and your machines are there.
         default: Value::Flag(true),
-        about: "Announce this machine on the local network, and look for others.",
+        about: "Let devices on this network find this machine, and find them.",
     },
     Setting {
         key: "discovery.mdns_interfaces",
@@ -673,9 +667,8 @@ pub static SETTINGS: &[Setting] = &[
         // Empty is not "none": it is "work it out", which on a machine with
         // one route to the LAN is the same answer anybody would give.
         default: Value::Text(Cow::Borrowed("")),
-        about: "Interfaces to announce this machine on, separated by commas. Empty means \
-                every ordinary local network — not loopback, not a tunnel, and not a \
-                container bridge.",
+        about: "Which network interfaces to be found on, separated by commas. Empty means every \
+                normal local network, but not loopback, VPNs or container networks.",
     },
     Setting {
         key: "connectivity.overlay_interfaces",
@@ -685,9 +678,8 @@ pub static SETTINGS: &[Setting] = &[
         // it is not costs a wasted dial, and there is no setting that can turn
         // a public path into one Esper trusts more.
         default: Value::Text(Cow::Borrowed("")),
-        about: "Interfaces to treat as overlay networks even if their names are not \
-                recognised, separated by commas. Empty means autodetect: wg*, tailscale*, \
-                tun*, utun*, zt* and nebula*.",
+        about: "Extra network interfaces to treat as private networks like Tailscale or WireGuard, \
+                separated by commas. Empty finds the common ones automatically.",
     },
     Setting {
         key: "broker.address",
@@ -697,13 +689,16 @@ pub static SETTINGS: &[Setting] = &[
         // the broker tiers do not exist, and that is the product working
         // correctly rather than a gap.
         default: Value::Nothing,
-        about: "A broker you run, for when nothing direct works. There is no default.",
+        about: "The address of a broker: a small server you run so devices on different networks \
+                can find each other. Only needed for invitations and devices you cannot reach \
+                directly.",
     },
     Setting {
         key: "broker.key",
         kind: Kind::Key,
         default: Value::Nothing,
-        about: "That broker's key, pinned. `esper-broker serve` prints it.",
+        about: "The broker's key, which it prints when it starts. Esper refuses a broker whose key \
+                does not match.",
     },
 ];
 

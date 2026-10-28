@@ -76,17 +76,12 @@ a product with a settings screen that does not work.
 */
 //nolint:gochecknoglobals // a considered list, held to the engine's by a test
 var hostOnly = map[string]string{
-	"host.serve_without_indicator": "it is what makes being watched visible, and turning it off " +
-		"means a session with no warning to whoever is in front of the screen",
-	"audit.retain": "it decides how long the record of what happened is kept, and shortening it " +
-		"deletes evidence",
-	"audit.max_size": "it decides when the record starts dropping its oldest lines, and lowering " +
-		"it deletes evidence",
-	"files.root": "it decides which directory a paired device with `files_out` can read, and " +
-		"widening it grants reach that nobody granted",
-	"forward.allow": "it decides which ports a paired device may reach through this machine, and " +
-		"widening it grants reach that nobody granted",
-	"broker.key": "it is a credential, and a credential is typed where the person is",
+	"host.serve_without_indicator": "turning it on would let someone watch this screen with no visible warning",
+	"audit.retain":                 "shortening it deletes the record of past sessions",
+	"audit.max_size":               "lowering it deletes the record of past sessions",
+	"files.root":                   "it decides which folder paired devices can read",
+	"forward.allow":                "it decides which services paired devices can reach through this machine",
+	"broker.key":                   "it is a secret, so it is typed at the machine it protects",
 }
 
 // HostOnly says whether this setting may only be changed at the machine, and
